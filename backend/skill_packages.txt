@@ -26,3 +26,10 @@ pyautogui
 opencv-python
 pygetwindow
 pynput
+
+# Outlook 自動化節點依賴（Windows-only；V5 新增，sandbox 不裝）
+pywinauto
+comtypes
+python-pptx
+jinja2
+markdown

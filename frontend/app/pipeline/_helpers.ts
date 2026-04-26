@@ -36,6 +36,11 @@ export interface StepData extends Record<string, unknown> {
   vvSource?: 'prev_output' | 'current_screen'
   vvPrompt?: string
   vvSearchRegion?: number[]              // [left, top, width, height]，空陣列 = 看整個螢幕
+  // Outlook 自動化節點（outlook_automation）
+  outlookAutomation?: boolean            // optional — Outlook 自動化步驟
+  outlookTemplate?: string               // 選單模板 ID（空字串 = 自由輸入需求）
+  outlookFreeText?: string               // 自由輸入需求（template 為空時用）
+  outlookParams?: Record<string, unknown> // 模板參數（subject/sender/since/until/to ...）
   timeout: number
   retry: number
   index: number
@@ -171,16 +176,52 @@ export interface VisualValidationData extends Record<string, unknown> {
   errorMsg: string
 }
 
+/** Outlook 自動化節點：透過 pywin32 + Outlook COM 處理寄信 / 收信 / 行事曆 / 附件 */
+export interface OutlookData extends Record<string, unknown> {
+  name: string
+  // 選單模板 ID（前端選了哪個模板；空字串 = 自由輸入需求模式）
+  // 例：daily_todo / search_summary / send_mail / send_with_attachment
+  //    download_attachments / calendar_list / create_meeting / 等
+  template: string
+  // 自由輸入：模板沒勾時，使用者直接打字描述需求（agent 限定 win32 工具集）
+  freeText: string
+  // 模板參數：依模板而定的鍵值對（subject / sender / since / until / to / folder ...）
+  params: Record<string, unknown>
+  // 輸出檔路徑（可選；整理結果如 xlsx / md 報告會寫到這）
+  outputPath: string
+  retry: number
+  index: number
+  status: 'idle' | 'running' | 'success' | 'failed'
+  errorMsg: string
+}
+
 export type ScriptNode = Node<StepData>
 export type SkillNode = Node<SkillData>
 export type AiValidationNode = Node<AiValidationData>
 export type HumanConfirmNode = Node<HumanConfirmData>
 export type ComputerUseNode = Node<ComputerUseData>
 export type VisualValidationNode = Node<VisualValidationData>
-export type AppNode = Node<StepData | AiValidationData | SkillData | HumanConfirmData | ComputerUseData | VisualValidationData>
+export type OutlookNode = Node<OutlookData>
+export type AppNode = Node<StepData | AiValidationData | SkillData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData>
 
 export function newAiValidationData(index = 0): AiValidationData {
   return { expectText: '', targetPath: '', skillMode: false, index }
+}
+
+let _outlookCounter = 0
+export function newOutlookData(index = 0): OutlookData {
+  _outlookCounter++
+  return {
+    name: `Outlook 自動化 ${_outlookCounter}`,
+    template: '',
+    freeText: '',
+    params: {},
+    outputPath: '',
+    retry: 0,
+    index,
+    status: 'idle',
+    errorMsg: '',
+  }
 }
 
 let _visualValidationCounter = 0
@@ -321,6 +362,24 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           status: 'idle' as const,
           errorMsg: '',
         } as VisualValidationData,
+      }
+    }
+    if (s.outlookAutomation) {
+      return {
+        id: `step-${i}`,
+        type: 'outlookAutomation' as const,
+        position: { x: i * 320, y: 160 },
+        data: {
+          name: s.name,
+          template: s.outlookTemplate || '',
+          freeText: s.outlookFreeText || '',
+          params: (s.outlookParams as Record<string, unknown>) || {},
+          outputPath: s.outputPath,
+          retry: s.retry,
+          index: i,
+          status: 'idle' as const,
+          errorMsg: '',
+        } as OutlookData,
       }
     }
     if (s.humanConfirm) {
@@ -499,6 +558,25 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         errorMsg: d.errorMsg,
       } as StepData
     }
+    if (n.type === 'outlookAutomation') {
+      const d = n.data as OutlookData
+      return {
+        name: d.name,
+        batch: d.freeText || '',          // batch 欄位塞自由輸入；agent 跑時會優先看 outlookTemplate
+        workingDir: '',
+        outputPath: d.outputPath,
+        expect: '',
+        outlookAutomation: true,
+        outlookTemplate: d.template,
+        outlookFreeText: d.freeText,
+        outlookParams: d.params,
+        timeout: 600,                      // Outlook COM 互動可能慢，給寬一點
+        retry: d.retry,
+        index: i,
+        status: d.status,
+        errorMsg: d.errorMsg,
+      } as StepData
+    }
     if (n.type === 'humanConfirmation') {
       const d = n.data as HumanConfirmData
       return {
@@ -596,6 +674,30 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         lines.push(`    vv_search_region: [${s.vvSearchRegion.join(', ')}]`)
       }
       if (s.timeout && s.timeout !== 120) lines.push(`    timeout: ${s.timeout}`)
+      continue
+    }
+    if (s.outlookAutomation) {
+      lines.push(`    outlook_automation: true`)
+      if (s.outlookTemplate) lines.push(`    outlook_template: ${s.outlookTemplate}`)
+      const ft = s.outlookFreeText || ''
+      if (ft) {
+        if (ft.includes('\n') || ft.length > 80) {
+          lines.push(`    batch: |`)
+          for (const dl of ft.split('\n')) lines.push(`      ${dl}`)
+        } else {
+          lines.push(`    batch: "${ft.replace(/"/g, '\\"')}"`)
+        }
+      }
+      // outlook_params：序列化成 JSON 一行 — 最簡單也保守
+      if (s.outlookParams && Object.keys(s.outlookParams).length > 0) {
+        lines.push(`    outlook_params: ${JSON.stringify(s.outlookParams)}`)
+      }
+      if (s.outputPath) {
+        lines.push(`    output:`)
+        lines.push(`      path: ${s.outputPath}`)
+      }
+      if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
+      if (s.retry && s.retry !== 0) lines.push(`    retry: ${s.retry}`)
       continue
     }
     if (s.computerUse) {

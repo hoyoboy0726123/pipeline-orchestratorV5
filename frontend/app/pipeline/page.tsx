@@ -23,19 +23,22 @@ import AiValidationNodeComponent   from './_aiValidationNode'
 import HumanConfirmNodeComponent   from './_humanConfirmNode'
 import ComputerUseNodeComponent    from './_computerUseNode'
 import VisualValidationNodeComponent from './_visualValidationNode'
+import OutlookNodeComponent        from './_outlookNode'
 import ScriptConfigPanel           from './_scriptPanel'
 import SkillConfigPanel            from './_skillPanel'
 import AiValidationPanel           from './_aiValidationPanel'
 import HumanConfirmPanel           from './_humanConfirmPanel'
 import ComputerUsePanel            from './_computerUsePanel'
 import VisualValidationPanel       from './_visualValidationPanel'
+import OutlookPanel                from './_outlookPanel'
 import Sidebar                from './_sidebar'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
-  type ComputerUseData, type VisualValidationData,
+  type ComputerUseData, type VisualValidationData, type OutlookData,
   type ScriptNode, type SkillNode, type HumanConfirmNode, type ComputerUseNode, type VisualValidationNode,
+  type OutlookNode,
   newStepData, newSkillData, newAiValidationData, newHumanConfirmData, newComputerUseData,
-  newVisualValidationData,
+  newVisualValidationData, newOutlookData,
   stepsToFlow, flowToSteps, stepsToYaml, parseYaml,
 } from './_helpers'
 import { useWorkflowStore } from './_store'
@@ -56,6 +59,7 @@ const nodeTypes = {
   humanConfirmation: HumanConfirmNodeComponent,
   computerUse: ComputerUseNodeComponent,
   visualValidation: VisualValidationNodeComponent,
+  outlookAutomation: OutlookNodeComponent,
 }
 
 // Edge 類型：全部用 InsertableEdge — hover 出 + / 🗑️ 按鈕（n8n 風格）
@@ -521,6 +525,7 @@ export default function PipelinePage() {
     if (n.type === 'skillStep') return '#8b5cf6'
     if (n.type === 'humanConfirmation') return '#10b981'
     if (n.type === 'computerUse') return '#9333ea'
+    if (n.type === 'outlookAutomation') return '#0078d4'
     return '#3b82f6'
   }, [])
 
@@ -611,6 +616,17 @@ export default function PipelinePage() {
     setSelectedId(id)
   }, [nodes, setNodes])
 
+  // ── Add Outlook 自動化節點 ─────────────────────────────────────────────
+  const addOutlook = useCallback(() => {
+    const id = `outlook-${Date.now()}`
+    const data = newOutlookData(nodes.length)
+    const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
+    const x = lastNode ? lastNode.position.x + 320 : 100
+    const y = lastNode ? lastNode.position.y : 160
+    setNodes(ns => [...ns, { id, type: 'outlookAutomation', position: { x, y }, data }])
+    setSelectedId(id)
+  }, [nodes, setNodes])
+
   // ── Edge 上的 ➕ 按鈕：在指定 edge 中間插入新節點 ──────────────────────────
   // _insertableEdge.tsx dispatch 'pipeline-insert-node-on-edge' CustomEvent
   // detail = { edgeId, source, target, nodeType, labelX, labelY }
@@ -631,6 +647,7 @@ export default function PipelinePage() {
         case 'humanConfirmation':  data = newHumanConfirmData(0); break
         case 'computerUse':        data = newComputerUseData(0); break
         case 'visualValidation':   data = newVisualValidationData(0); break
+        case 'outlookAutomation':  data = newOutlookData(0); break
         default: return
       }
       setNodes(ns => [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }])
@@ -738,7 +755,7 @@ export default function PipelinePage() {
 
   // ── Run pipeline ──────────────────────────────────────────────────────────
   const handleRunClick = async () => {
-    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation')
+    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation')
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
     const steps = flowToSteps(nodes, edges)
     // 空步驟檢查：排除有自己 schema 的節點類型（不靠 batch 跑的）
@@ -1163,7 +1180,7 @@ export default function PipelinePage() {
         ) : (
           <button
             onClick={handleRunClick}
-            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation').length === 0}
+            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation').length === 0}
             className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium shadow-sm"
           >
             <Play className="w-3.5 h-3.5" /> 執行
@@ -1247,6 +1264,13 @@ export default function PipelinePage() {
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-indigo-200 rounded-xl text-sm text-indigo-600 hover:border-indigo-400 hover:bg-indigo-50 shadow-sm transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" /> 視覺驗證
+              </button>
+              <button
+                onClick={addOutlook}
+                title="新增 Outlook 自動化節點（pywin32 + Outlook COM；只在 Windows host 跑）"
+                className="flex items-center gap-1.5 px-3 py-2 bg-white border border-sky-200 rounded-xl text-sm text-sky-700 hover:border-sky-400 hover:bg-sky-50 shadow-sm transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> Outlook
               </button>
             </div>
           </Panel>
@@ -1384,7 +1408,7 @@ export default function PipelinePage() {
         )}
 
         {/* Empty state */}
-        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation').length === 0 && <EmptyState onAdd={addScriptStep} />}
+        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation').length === 0 && <EmptyState onAdd={addScriptStep} />}
 
         {/* Node config panel */}
         {selectedNode && selectedNode.type === 'computerUse' ? (
@@ -1412,6 +1436,14 @@ export default function PipelinePage() {
         ) : selectedNode && selectedNode.type === 'visualValidation' ? (
           <VisualValidationPanel
             data={selectedNode.data as VisualValidationData}
+            onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
+            onClose={() => setSelectedId(null)}
+            onDelete={() => deleteStep(selectedNode.id)}
+          />
+        ) : selectedNode && selectedNode.type === 'outlookAutomation' ? (
+          <OutlookPanel
+            node={selectedNode as OutlookNode}
+            pipelineName={pipelineName}
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}

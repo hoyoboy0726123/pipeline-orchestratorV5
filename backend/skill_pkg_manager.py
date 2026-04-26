@@ -22,6 +22,23 @@ _SANDBOX_REQ_FILE = Path(__file__).parent.parent / "sandbox" / "requirements.txt
 _SANDBOX_CONTAINER = "pipeline-sandbox-v4"
 
 
+# ── Host-only 套件（裝沙盒容器會失敗，因為它們是 Windows-only） ────────
+# 這些套件 sandbox（Linux 容器）連 pip install 都不會成功，直接在 add_package_sandbox
+# 攔截並回友善訊息。Outlook 自動化節點需要這些，但只跑 host，所以 sandbox 不需要。
+HOST_ONLY_PACKAGES: frozenset[str] = frozenset({
+    "pywin32",        # win32com / win32api / pythoncom 等的母套件
+    "pywin32-ctypes", # 偶爾被當依賴拉進來
+    "pywinauto",      # UI Automation
+    "comtypes",       # 補位 COM interface
+    # 注意：python-docx / python-pptx / pandas / openpyxl 不在這 — 它們跨平台
+})
+
+
+def is_host_only(pkg_name: str) -> bool:
+    """套件是否只能裝 host venv（裝 sandbox 會失敗）。"""
+    return _base_name(pkg_name).lower() in HOST_ONLY_PACKAGES
+
+
 def _resolve_target(target: str) -> str:
     """把 'auto' 解析成實際的 'host' 或 'sandbox'（讀 settings）。"""
     t = (target or "auto").strip().lower()
@@ -407,6 +424,11 @@ def add_package_sandbox(pkg_name: str) -> tuple[bool, str]:
     pkg_name = pkg_name.strip()
     if not pkg_name:
         return False, "套件名稱不能為空"
+    # Host-only 套件（pywin32 等）裝 Linux 容器會失敗 — 提早攔下、給清楚訊息
+    if is_host_only(pkg_name):
+        return False, (f"❌ {pkg_name} 是 Windows-only 套件，無法裝到 Linux 沙盒容器。"
+                       f"請切換到 host 模式（Settings → 沙盒模式 → host）後再裝；"
+                       f"或這個套件本來就是給 Outlook 自動化節點用，sandbox 用不到。")
     declared = _read_sandbox_packages()
     base = _base_name(pkg_name)
     for p in declared:

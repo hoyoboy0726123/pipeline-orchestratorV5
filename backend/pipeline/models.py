@@ -188,6 +188,15 @@ class PipelineStep(BaseModel):
                                        # （早期值 prev_output_file / rendered_preview 仍受相容處理）
     vv_prompt: str = ""                # 描述「應該看到什麼」的判斷條件（必填）
     vv_search_region: list[int] = []   # current_screen 用：[left, top, width, height] 絕對桌面座標
+    # ── Outlook 自動化節點（outlook_automation）──────────────────────
+    # 獨立節點類型：透過 pywin32 + Outlook COM 處理寄信 / 收信 / 行事曆 / 附件等。
+    # 強制 host 執行（sandbox 沒 pywin32 + 沒 Outlook profile），由 runner 路由處理。
+    # Agent 限定使用 win32_helpers + 允許清單套件（見 win32_agent_config.py）。
+    outlook_automation: bool = False   # True = Outlook 自動化節點
+    outlook_template: str = ""         # 選單模板 ID（前端選了哪個模板；空字串 = 自由輸入）
+                                       # 例：daily_todo / search_summary / send_mail / calendar_list ...
+    outlook_params: dict = {}          # 模板參數（subject、sender、since、until、to、folder 等
+                                       # 由前端依模板填入，後端組進 prompt 給 agent）
 
 
 class PipelineConfig(BaseModel):
