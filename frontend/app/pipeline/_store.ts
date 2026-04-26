@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { Edge } from '@xyflow/react'
-import type { AppNode } from './_helpers'
+import type { AppNode, SkillData } from './_helpers'
 import {
   listWorkflows, createWorkflowApi, updateWorkflowApi, deleteWorkflowApi,
   type WorkflowData,
@@ -22,23 +22,25 @@ function migrateNodes(nodes: AppNode[]): AppNode[] {
     if (n.type === 'pipelineStep') {
       const d = n.data as Record<string, any>
       if (d.skillMode) {
+        const skillData: SkillData = {
+          name: d.name ?? '',
+          taskDescription: d.batch ?? '',
+          workingDir: d.workingDir ?? '',
+          outputPath: d.outputPath ?? '',
+          expectedOutput: d.expect ?? '',
+          readonly: d.readonly ?? false,
+          skill: d.skill ?? '',
+          askMode: d.askMode ?? false,
+          timeout: d.timeout ?? 300,
+          retry: d.retry ?? 0,
+          index: d.index ?? 0,
+          status: 'idle',
+          errorMsg: '',
+        }
         return {
           ...n,
           type: 'skillStep' as const,
-          data: {
-            name: d.name ?? '',
-            taskDescription: d.batch ?? '',
-            workingDir: d.workingDir ?? '',
-            outputPath: d.outputPath ?? '',
-            expectedOutput: d.expect ?? '',
-            readonly: d.readonly ?? false,
-            skill: d.skill ?? '',
-            timeout: d.timeout ?? 300,
-            retry: d.retry ?? 0,
-            index: d.index ?? 0,
-            status: 'idle' as const,
-            errorMsg: '',
-          },
+          data: skillData,
         }
       }
       return { ...n, type: 'scriptStep' as const }
