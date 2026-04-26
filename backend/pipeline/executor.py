@@ -2055,3 +2055,332 @@ async def execute_step_with_skill(
             stdout="\n".join(all_stdout),
             stderr=f"Skill 執行異常：{e}",
         )
+
+
+# ── Outlook 自動化節點專屬 agent ──────────────────────────────────────────────
+# 跟 skill 模式類似（LLM 寫 code、解析 tool calls、迴圈），但有以下差異：
+#   1. 強制 host 執行（pywin32 在 sandbox / Linux 容器跑不了）
+#   2. AST allowlist 檢查（每次 run_python 前用 win32_agent_config.check_imports 過濾）
+#   3. 系統提示限定 win32_helpers + 允許的套件，做不到的需求要 agent 直接 done(success=false)
+#   4. 不接 recipe 快取（Outlook 環境每次狀態不同 — 收件匣會新增/刪信，沒辦法穩定 replay）
+#   5. 較簡單的 tool 集（run_python / done / ask_user，不要 web_search / view_image）
+
+OUTLOOK_AGENT_MAX_ITERATIONS = 12
+OUTLOOK_AGENT_REQUEST_INTERVAL = 2.0
+
+
+_OUTLOOK_SYSTEM_PROMPT = """你是 Outlook 自動化專家。透過 pywin32 + Outlook COM 處理寄信、收信、行事曆、附件等需求。
+
+## 環境限制（嚴格）
+
+你只能使用以下套件：
+- **win32_helpers.outlook**：本專案 wrapper（最推薦，用這個就好）
+- **win32com.client / pywintypes / pythoncom**：原始 COM（罕見場景才用）
+- **pandas / numpy / openpyxl**：資料整理 / 寫 xlsx
+- **python-docx / python-pptx**：產生 docx / pptx 報告
+- **bs4 / jinja2 / markdown**：HTML / 模板 / md 渲染
+- **PIL（Pillow）**：圖片處理
+- **標準庫**：re / datetime / pathlib / json / csv / html / email 等
+
+**禁止 import**：requests / httpx / urllib / selenium / playwright / subprocess / smtplib / imaplib / sklearn / torch 等。
+做不到的需求（例如要連 Web API、操作 Slack、Teams、瀏覽器）→ 直接 `done(success=false, error="此需求需要 X，不在 Outlook 自動化節點範圍。建議使用一般 Skill 節點。")`。
+
+## 推薦的 win32_helpers.outlook API
+
+```python
+# 讀信（回 DataFrame）
+search_mail(*, subject=None, sender=None, body_keyword=None,
+            since=None, until=None, folder="inbox",
+            unread_only=False, has_attachment=None,
+            exact_match=False, limit=500) -> pd.DataFrame
+# 欄位：entry_id / received / sender_name / sender_email / subject /
+#       body_preview / body_text / has_attachments / attachment_names /
+#       is_unread / importance / folder_name
+
+get_mail_by_id(entry_id) -> dict          # 單封信完整資料（含 body_html）
+download_attachments(*, entry_ids, out_dir, name_template="...") -> list[Path]
+
+# 寄信
+send_mail(*, to, subject, body, body_format="html",
+          cc=None, bcc=None, attachments=None,
+          importance=1, save_to_drafts=False) -> str  # EntryID
+reply_mail(*, entry_id, body, body_format="html", reply_all=False) -> str
+forward_mail(*, entry_id, to, body="", body_format="html") -> str
+
+# 行事曆
+calendar_list(*, since=None, until=None, folder="calendar",
+              include_recurring=True, limit=200) -> pd.DataFrame
+create_meeting(*, subject, start, end, location="", body="",
+               required_attendees=None, optional_attendees=None,
+               reminder_minutes=15, send_invitation=True) -> str
+```
+
+## 工具
+
+每次 reply 只能呼叫**一個**工具。格式嚴格如下，不可加 markdown code fence：
+
+```
+<tool>run_python</tool>
+<input>
+import pandas as pd
+from win32_helpers.outlook import search_mail
+df = search_mail(subject="報告", since="2026-04-25")
+print(df.head())
+</input>
+```
+
+或 `<tool>done</tool><input>{"success": true, "summary": "..."}</input>`。
+
+也可以呼叫 `<tool>ask_user</tool>` 問使用者（極少用，例如「找到 50 封信，要不要全部處理？」）。
+
+## 規則
+
+1. 寫 Python 程式碼前先思考一下整體流程（不要一次寫太短的 read_csv 然後再 print）
+2. 整理結果如果指定了 output_path，**一定要把結果存到那個路徑**（xlsx / md / json 等格式由情境決定）
+3. 出錯後不要直接 done(success=true)！先用 run_python 修錯、確認 stdout 沒有 traceback 才 done
+4. 永遠不要寫 fake stdout（不要在 <input> 後面寫『Successfully sent.』『DataFrame: ...』之類字串）— 真實結果系統會回給你
+5. 如果使用者描述太模糊、缺關鍵資訊（例如要寄給誰、日期區間），用 ask_user 問；不要瞎猜亂寄信"""
+
+
+def _build_outlook_prompt(
+    *,
+    template: str,
+    template_params: dict,
+    free_text: str,
+    output_path: Optional[str],
+    prev_outputs: Optional[list],
+) -> str:
+    """根據 template / params / 自由輸入文字組出給 LLM 的 user prompt。"""
+    parts: list[str] = []
+
+    if template:
+        parts.append(f"## 任務模板：{template}")
+        parts.append("使用者透過選單選了這個模板，需求參數如下：")
+        if template_params:
+            for k, v in template_params.items():
+                if v == "" or v is None or (isinstance(v, list) and not v):
+                    continue
+                parts.append(f"  - **{k}**：{v}")
+        else:
+            parts.append("  （未填參數，請依模板預設行為執行）")
+    elif free_text:
+        parts.append("## 自由輸入需求")
+        parts.append(free_text)
+    else:
+        parts.append("## 任務未明確設定")
+        parts.append("使用者既沒選模板也沒打字。請呼叫 done(success=false, error=...) "
+                     "回報需要更明確的指示。")
+
+    if output_path:
+        parts.append("")
+        parts.append(f"## 輸出檔案路徑")
+        parts.append(f"請把整理 / 摘要結果寫到：`{output_path}`")
+        parts.append("（父資料夾已建好。格式請依模板需求或內容性質決定 xlsx / md / json / pdf。）")
+
+    if prev_outputs:
+        parts.append("")
+        parts.append("## 前一步驟的輸出檔案（可讀取）")
+        for o in prev_outputs:
+            p = o.get("path", "")
+            schema = o.get("schema", "")
+            parts.append(f"  - `{p}`" + (f"：{schema}" if schema else ""))
+
+    parts.append("")
+    parts.append("請開始執行。完成後呼叫 done(success=true, summary='...')。")
+    return "\n".join(parts)
+
+
+async def execute_step_with_outlook(
+    *,
+    template: str,
+    template_params: dict,
+    free_text: str,
+    timeout: int,
+    logger: logging.Logger,
+    step_name: str,
+    output_path: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    prev_outputs: Optional[list] = None,
+    run_id: str = "",
+    ask_mode: bool = False,
+) -> ExecResult:
+    """Outlook 自動化節點專屬 agent loop。永遠跑 host（不上 sandbox）。"""
+    # 處理 output_path（同 skill 模式）
+    if output_path:
+        output_path = str(Path(output_path).expanduser())
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        _out = Path(output_path)
+        if _out.exists():
+            try:
+                _out.unlink()
+                logger.info(f"[{step_name}] 刪除舊輸出檔：{output_path}")
+            except Exception as e:
+                logger.warning(f"[{step_name}] 舊輸出檔刪除失敗（可能被開啟中）：{e}")
+    if working_dir:
+        Path(working_dir).mkdir(parents=True, exist_ok=True)
+
+    # AST gate
+    backend_dir = str(Path(__file__).resolve().parent.parent)
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    from pipeline.win32_agent_config import check_imports, format_errors_for_agent
+
+    # LLM
+    from llm_factory import build_llm, invoke_with_streaming
+    from langchain_core.messages import HumanMessage, SystemMessage
+    llm = build_llm()
+
+    user_prompt = _build_outlook_prompt(
+        template=template,
+        template_params=template_params or {},
+        free_text=free_text,
+        output_path=output_path,
+        prev_outputs=prev_outputs,
+    )
+    logger.info(f"[{step_name}] Outlook agent 啟動，template={template or '(自由輸入)'}")
+    logger.debug(f"[{step_name}] user prompt:\n{user_prompt}")
+
+    messages = [SystemMessage(content=_OUTLOOK_SYSTEM_PROMPT), HumanMessage(content=user_prompt)]
+    all_stdout: list[str] = []
+    last_run_python_ok: Optional[bool] = None
+    import time as _time
+    start_time = _time.time()
+
+    try:
+        for iteration in range(OUTLOOK_AGENT_MAX_ITERATIONS):
+            logger.info(f"[{step_name}] Outlook 迭代 {iteration + 1}/{OUTLOOK_AGENT_MAX_ITERATIONS}")
+            if _time.time() - start_time > timeout:
+                logger.warning(f"[{step_name}] Outlook agent 整體 timeout（{timeout}s）達到")
+                return ExecResult(
+                    exit_code=-2, stdout="\n".join(all_stdout),
+                    stderr=f"Outlook agent timeout（{timeout}s）",
+                )
+
+            if iteration > 0:
+                await asyncio.sleep(OUTLOOK_AGENT_REQUEST_INTERVAL)
+
+            reply = (await invoke_with_streaming(
+                llm, messages, label=step_name, timeout=180.0, logger=logger,
+            )).strip()
+            logger.debug(f"[{step_name}] LLM 回覆：{reply[:1500]}")
+
+            tool_calls = _parse_skill_tool_calls(reply)
+            if not tool_calls:
+                messages.append(HumanMessage(content=reply))
+                messages.append(HumanMessage(content="請使用 <tool>run_python</tool> 或 <tool>done</tool> 工具。"))
+                continue
+
+            call = tool_calls[0]
+            tool_name = call["tool"]
+            tool_input = call["input"]
+            logger.info(f"[{step_name}] tool={tool_name}, input_len={len(tool_input)}")
+
+            if tool_name == "done":
+                try:
+                    data = json.loads(tool_input)
+                    success = bool(data.get("success", False))
+                    summary = data.get("summary", data.get("error", ""))
+
+                    # 守門：宣稱成功但最近 run_python 失敗 → 拒絕
+                    if success and last_run_python_ok is False:
+                        logger.warning(f"[{step_name}] 在 run_python 失敗後送 done(success=true)，拒絕")
+                        messages.append(HumanMessage(content=reply))
+                        messages.append(HumanMessage(content=
+                            "[系統] 拒絕 done：上一次 run_python 失敗。先修錯再 done。"))
+                        continue
+                    # 守門：宣稱成功但 output 檔不存在
+                    if success and output_path and not Path(output_path).exists():
+                        logger.warning(f"[{step_name}] done 宣稱成功但 {output_path} 不存在，拒絕")
+                        messages.append(HumanMessage(content=reply))
+                        messages.append(HumanMessage(content=
+                            f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在。請用 run_python 實際寫入後再 done。"))
+                        continue
+
+                    all_stdout.append(f"[Outlook 完成] {summary}")
+                    logger.info(f"[{step_name}] {'成功' if success else '失敗'}：{summary}")
+                    return ExecResult(
+                        exit_code=0 if success else 1,
+                        stdout="\n".join(all_stdout),
+                        stderr="" if success else summary,
+                    )
+                except json.JSONDecodeError:
+                    messages.append(HumanMessage(content=reply))
+                    messages.append(HumanMessage(content=
+                        '[系統] done 的 input 不是合法 JSON。格式：{"success": true/false, "summary": "..."}'))
+                    continue
+
+            if tool_name == "run_python":
+                # AST 檢查 — disallowed import 直接擋
+                try:
+                    errs = check_imports(tool_input)
+                except SyntaxError as e:
+                    messages.append(HumanMessage(content=reply))
+                    messages.append(HumanMessage(content=f"[系統] 你提交的 Python 有語法錯誤：{e}"))
+                    last_run_python_ok = False
+                    continue
+                if errs:
+                    err_msg = format_errors_for_agent(errs)
+                    logger.warning(f"[{step_name}] 偵測到 disallowed imports：{[e.module for e in errs]}")
+                    messages.append(HumanMessage(content=reply))
+                    messages.append(HumanMessage(content=err_msg))
+                    last_run_python_ok = False
+                    continue
+
+                # 執行（強制 host）
+                tool_result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda ti=tool_input, lg=logger: _execute_skill_tool(
+                        "run_python", ti, cwd=working_dir, run_id=run_id,
+                        logger=lg, force_host=True,
+                    ),
+                )
+                logger.debug(f"[{step_name}] 執行結果：{tool_result[:1500]}")
+                all_stdout.append(f"[run_python] {tool_result}")
+                last_run_python_ok = "[exit code:" not in tool_result
+                messages.append(HumanMessage(content=reply))
+                messages.append(HumanMessage(content=f"[工具結果 — run_python]\n{tool_result}"))
+                continue
+
+            if tool_name == "ask_user":
+                try:
+                    aq = json.loads(tool_input)
+                    question = aq.get("question", "")
+                    options = aq.get("options", [])
+                    context = aq.get("context", "")
+                except Exception:
+                    question, options, context = tool_input, [], ""
+                answer = await _wait_for_ask_user(
+                    run_id, question, options, context, logger, step_name,
+                )
+                all_stdout.append(f"[ask_user] {question} → {answer}")
+                messages.append(HumanMessage(content=reply))
+                messages.append(HumanMessage(content=f"[ask_user 答案] {answer}"))
+                continue
+
+            # 不支援的工具
+            messages.append(HumanMessage(content=reply))
+            messages.append(HumanMessage(content=
+                f"[系統] 工具 {tool_name} 不在 Outlook 節點允許清單。可用：run_python / done / ask_user。"))
+
+        # 達到迭代上限
+        logger.warning(f"[{step_name}] Outlook agent 達迭代上限 {OUTLOOK_AGENT_MAX_ITERATIONS}")
+        return ExecResult(
+            exit_code=-2, stdout="\n".join(all_stdout),
+            stderr=f"Outlook agent 在 {OUTLOOK_AGENT_MAX_ITERATIONS} 次內未完成",
+        )
+
+    except Exception as e:
+        _err_str = str(e)
+        is_quota = ("429" in _err_str or "RESOURCE_EXHAUSTED" in _err_str
+                    or "quota" in _err_str.lower() or "rate limit" in _err_str.lower())
+        if is_quota:
+            logger.error(f"[{step_name}] Outlook agent LLM 配額：{_err_str[:200]}")
+            return ExecResult(
+                exit_code=-429, stdout="\n".join(all_stdout),
+                stderr=f"LLM provider 配額用盡或速率受限（429）：{_err_str}",
+            )
+        logger.error(f"[{step_name}] Outlook agent 例外：{e}", exc_info=True)
+        return ExecResult(
+            exit_code=-3, stdout="\n".join(all_stdout),
+            stderr=f"Outlook agent 例外：{e}",
+        )

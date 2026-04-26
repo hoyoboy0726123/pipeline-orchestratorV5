@@ -25,7 +25,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from .models import PipelineConfig
 from .store import PipelineRun, StepResult, get_store
 from .logger import create_run_logger, resume_run_logger
-from .executor import execute_step, execute_step_with_skill
+from .executor import execute_step, execute_step_with_skill, execute_step_with_outlook
 from .validator import validate_step, validate_step_with_skill, ValidationResult
 
 
@@ -969,6 +969,22 @@ async def run_pipeline(
                     stdout=_cu_result.stdout,
                     stderr=_cu_result.stderr,
                 )
+            elif step.outlook_automation:
+                # Outlook 自動化節點：永遠跑 host（pywin32），跳過 sandbox / recipe 路徑
+                _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                exec_result = await execute_step_with_outlook(
+                    template=step.outlook_template,
+                    template_params=step.outlook_params or {},
+                    free_text=step.batch,
+                    timeout=step.timeout,
+                    logger=logger,
+                    step_name=step.name,
+                    output_path=_resolved_out,
+                    working_dir=wd,
+                    prev_outputs=completed_outputs if completed_outputs else None,
+                    run_id=run.run_id,
+                    ask_mode=step.ask_mode,
+                )
             elif step.skill_mode:
                 # recipe key 使用「索引:名稱」避免同名步驟互相覆蓋
                 recipe_step_key = f"{step_num}:{step.name}"
@@ -1014,6 +1030,20 @@ async def run_pipeline(
                     status="rate_limited",
                     reason=(exec_result.stderr or "LLM 配額用盡或速率受限（429）"),
                     suggestion="等配額重置或在 Settings 切換 provider（Groq / OpenRouter / Ollama 本地）",
+                )
+            # outlook_automation 節點：agent 自己回 done(success) 就決定成敗了，不需 LLM 驗證
+            elif step.outlook_automation:
+                _status = "ok" if exec_result.exit_code == 0 else "failed"
+                # 從 stdout 抽 [Outlook 完成] 那行給使用者看
+                _summary = ""
+                for _ln in (exec_result.stdout or "").splitlines():
+                    if "[Outlook 完成]" in _ln:
+                        _summary = _ln.split("[Outlook 完成]", 1)[1].strip()
+                        break
+                val = ValidationResult(
+                    status=_status,
+                    reason=_summary or ("Outlook 任務成功" if _status == "ok" else (exec_result.stderr or "Outlook 任務失敗")),
+                    suggestion=exec_result.stderr if _status == "failed" else "",
                 )
             # visual_validation 節點：節點自己就是 VLM 判斷，不需要再跑一次 LLM 驗證
             elif step.visual_validation:
