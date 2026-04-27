@@ -273,7 +273,8 @@ def _h_download_attachments(*, params: dict, output_path: Path,
 
 
 def _h_send_mail(*, params: dict, output_path: Path,
-                 prev_outputs: Optional[list], step_name: str) -> str:
+                 prev_outputs: Optional[list], step_name: str,
+                 logger_obj: Optional[logging.Logger] = None) -> str:
     """寄信給指定收件人。"""
     from .win32_helpers.outlook import send_mail
 
@@ -344,7 +345,8 @@ def _h_send_with_attachment(*, params: dict, output_path: Path,
 
 
 def _h_bulk_send(*, params: dict, output_path: Path,
-                 prev_outputs: Optional[list], step_name: str) -> str:
+                 prev_outputs: Optional[list], step_name: str,
+                 logger_obj: Optional[logging.Logger] = None) -> str:
     """從 csv/xlsx 收件清單群發，主旨/本文支援 {欄位名} 變數。"""
     from .win32_helpers.outlook import send_mail
 
