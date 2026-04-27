@@ -1,6 +1,8 @@
 'use client'
 import { useState } from 'react'
-import { X, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react'
+import { X, AlertTriangle, Loader2 } from 'lucide-react'
+import { toast } from 'sonner'
+import { testOutlookConnection } from '@/lib/api'
 import type { OutlookData, OutlookNode } from './_helpers'
 
 const COMPATIBILITY_DISMISS_KEY = 'outlook-compat-warning-dismissed-v1'
@@ -190,10 +192,31 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
     if (typeof window === 'undefined') return false
     return localStorage.getItem(COMPATIBILITY_DISMISS_KEY) === '1'
   })
-  const [warnExpanded, setWarnExpanded] = useState(false)
   const dismissWarn = () => {
     try { localStorage.setItem(COMPATIBILITY_DISMISS_KEY, '1') } catch {/* ignore */}
     setWarnDismissed(true)
+  }
+
+  // 連線測試 — 直接打 backend /outlook/test-connection 看 inbox 有幾封
+  const [testing, setTesting] = useState(false)
+  const runConnectionTest = async () => {
+    if (testing) return
+    setTesting(true)
+    try {
+      const res = await testOutlookConnection()
+      if (res.ok && res.inbox_count && res.inbox_count > 0) {
+        toast.success(res.diagnosis, { duration: 8000 })
+      } else if (res.ok) {
+        // COM 通了但 inbox = 0
+        toast.warning(res.diagnosis, { duration: 12000 })
+      } else {
+        toast.error(res.diagnosis + (res.error ? `\n\n錯誤：${res.error}` : ''), { duration: 12000 })
+      }
+    } catch (e) {
+      toast.error(`測試失敗：${(e as Error).message}`, { duration: 8000 })
+    } finally {
+      setTesting(false)
+    }
   }
 
   const setParam = (key: string, value: unknown) => {
@@ -275,34 +298,23 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
                 <p className="text-xs font-semibold text-amber-900">⚠ 開始前請先確認 Outlook 版本</p>
                 <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
                   本節點透過 <code className="font-mono bg-amber-100 px-1 rounded">pywin32 + Outlook COM</code> 操作，
-                  <b>只支援傳統 Outlook（Classic Outlook，桌面版 Office 2016/2019/2021/365）</b>，
-                  不支援以下幾種：
+                  <b>只支援傳統 Outlook（Classic Outlook）</b>，不支援新版 Outlook for Windows、Outlook 網頁版、Outlook 行動版。
+                  按下方按鈕測試你的環境是否可用。
                 </p>
-                <ul className="text-[11px] text-amber-800 mt-1 ml-4 list-disc space-y-0.5">
-                  <li><b>新版 Outlook for Windows</b>（藍色介面那個 — Microsoft 2024 後主推）</li>
-                  <li><b>Outlook on the Web</b>（瀏覽器版 outlook.office.com）</li>
-                  <li><b>Outlook 行動版</b>（手機 / iPad）</li>
-                </ul>
-                <p className="text-[11px] text-amber-800 mt-2 leading-relaxed">
-                  若你日常用新版 Outlook，需要先在<b>傳統 Outlook 加上同一個帳號</b>
-                  （兩個版本可並存）。<button onClick={() => setWarnExpanded(v => !v)}
-                    className="text-amber-900 underline ml-0.5">查看設定步驟 {warnExpanded ? '▲' : '▼'}</button>
-                </p>
-                {warnExpanded && (
-                  <ol className="text-[11px] text-amber-800 mt-2 ml-4 list-decimal space-y-1 leading-relaxed bg-amber-100/50 p-2 rounded">
-                    <li>開「<b>控制台</b>」→ 搜尋「郵件」→ 點「郵件 (Microsoft Outlook)」</li>
-                    <li>「<b>顯示設定檔</b>」→「<b>新增</b>」（或編輯既有設定檔）</li>
-                    <li>用 Exchange / O365 / IMAP 帳號登入</li>
-                    <li>開啟「<b>傳統 Outlook</b>」（不是新版那個）→ 等同步完成、確認看得到信件</li>
-                    <li>把傳統 Outlook 開著、回來 V5 跑這個節點</li>
-                  </ol>
-                )}
               </div>
             </div>
-            <div className="flex justify-end gap-2 pt-1">
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={runConnectionTest}
+                disabled={testing}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors"
+              >
+                {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : <span>🧪</span>}
+                {testing ? '測試中…' : '測試 Outlook 連線'}
+              </button>
               <button
                 onClick={dismissWarn}
-                className="text-[11px] px-2 py-0.5 rounded text-amber-700 hover:bg-amber-200 transition-colors"
+                className="text-[11px] text-amber-700 hover:bg-amber-200 px-2 py-0.5 rounded transition-colors"
               >
                 我知道了，不再顯示
               </button>
@@ -311,12 +323,19 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
         ) : (
           <div className="px-2 py-1.5 rounded-lg bg-gray-50 border border-gray-200 flex items-center gap-2">
             <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
-            <span className="text-[11px] text-gray-500 flex-1">需要傳統 Outlook（非新版 / 非 Web）</span>
+            <span className="text-[11px] text-gray-500 flex-1">只支援 Classic Outlook</span>
             <button
-              onClick={() => { setWarnDismissed(false); setWarnExpanded(true) }}
-              className="text-[11px] text-blue-600 hover:underline shrink-0"
+              onClick={runConnectionTest}
+              disabled={testing}
+              className="text-[11px] text-blue-600 hover:underline disabled:opacity-50 shrink-0"
             >
-              查看
+              {testing ? '測試中…' : '🧪 測試連線'}
+            </button>
+            <button
+              onClick={() => setWarnDismissed(false)}
+              className="text-[11px] text-gray-400 hover:underline shrink-0"
+            >
+              詳情
             </button>
           </div>
         )}

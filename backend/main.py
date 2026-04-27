@@ -1709,3 +1709,75 @@ def _run_to_dict(r):
         "awaiting_message": getattr(r, 'awaiting_message', '') or '',
         "awaiting_suggestion": getattr(r, 'awaiting_suggestion', '') or '',
     }
+
+
+# ── Outlook 連線測試 ──────────────────────────────────────────────────────────
+
+
+@app.get("/outlook/test-connection")
+async def test_outlook_connection():
+    """測試 Classic Outlook COM 是否可用 + 預設資料夾的信件數。
+
+    回傳：
+        ok               是否能連 COM
+        version          Outlook.Application.Version（成功才有）
+        inbox_count      收件匣 Items.Count（0 通常代表 profile 沒設好或用了新版 Outlook）
+        sent_count       寄件備份信件數
+        drafts_count     草稿信件數
+        diagnosis        中文診斷結論（給 UI 直接顯示）
+        error            COM 失敗時的原始錯誤訊息（成功時為空）
+    """
+    import platform
+    if platform.system() != "Windows":
+        return {
+            "ok": False,
+            "diagnosis": "後端不在 Windows 上 — Outlook COM 只能在 Windows host 跑",
+            "error": "non-Windows platform",
+        }
+
+    try:
+        import win32com.client  # type: ignore[import-not-found]
+        import pythoncom  # type: ignore[import-not-found]
+    except Exception as e:
+        return {
+            "ok": False,
+            "diagnosis": "pywin32 未安裝 — 後端需要 pywin32 才能呼叫 Outlook COM",
+            "error": f"{e.__class__.__name__}: {e}",
+        }
+
+    try:
+        pythoncom.CoInitialize()
+        app = win32com.client.Dispatch("Outlook.Application")
+        version = str(app.Version)
+        ns = app.GetNamespace("MAPI")
+        inbox_count = int(ns.GetDefaultFolder(6).Items.Count)
+        sent_count = int(ns.GetDefaultFolder(5).Items.Count)
+        drafts_count = int(ns.GetDefaultFolder(16).Items.Count)
+    except Exception as e:
+        return {
+            "ok": False,
+            "diagnosis": ("無法連線到 Classic Outlook COM。最常見原因：你日常用的是「新版 Outlook for Windows」"
+                          "（不支援 COM）→ 請開啟 Classic Outlook 並確認 profile 已設定。"),
+            "error": f"{e.__class__.__name__}: {e}",
+        }
+
+    # 連得上但 inbox 是 0 → 大機率是 profile 設定錯（用新版 Outlook 但 Classic 帳號沒設）
+    if inbox_count == 0:
+        diagnosis = (f"COM 連線成功（Outlook {version}），但收件匣是 0 封。"
+                     f"通常代表：你用的是新版 Outlook 而 Classic Outlook 的 profile 是空的。"
+                     f"請開「控制台 → 郵件 → 顯示設定檔 → 新增」加上你的帳號，"
+                     f"並開啟 Classic Outlook 確認看得到信件。")
+    else:
+        diagnosis = (f"✓ Classic Outlook 連線正常（版本 {version}）。"
+                     f"收件匣有 {inbox_count} 封信、寄件備份 {sent_count} 封、草稿 {drafts_count} 封。"
+                     f"Outlook 自動化節點可以正常使用。")
+
+    return {
+        "ok": True,
+        "version": version,
+        "inbox_count": inbox_count,
+        "sent_count": sent_count,
+        "drafts_count": drafts_count,
+        "diagnosis": diagnosis,
+        "error": "",
+    }

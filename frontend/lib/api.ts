@@ -906,3 +906,26 @@ export async function listAssetFiles(dir: string): Promise<{ dir: string; files:
 export function assetImageUrl(dir: string, name: string): string {
   return `${BASE}/computer-use/assets/image?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`
 }
+
+// ── Outlook 自動化節點：連線測試 ────────────────────────────────────────
+export interface OutlookConnectionTest {
+  ok: boolean
+  version?: string
+  inbox_count?: number
+  sent_count?: number
+  drafts_count?: number
+  diagnosis: string
+  error: string
+}
+
+export async function testOutlookConnection(): Promise<OutlookConnectionTest> {
+  const res = await fetch(`${BASE}/outlook/test-connection`)
+  if (!res.ok) {
+    return {
+      ok: false,
+      diagnosis: `後端連線失敗（${res.status}）— 請確認 V5 backend (uvicorn) 正在運行`,
+      error: `HTTP ${res.status}`,
+    }
+  }
+  return res.json()
+}
