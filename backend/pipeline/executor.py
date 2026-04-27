@@ -2201,15 +2201,33 @@ def _build_outlook_prompt(
         parts.append("")
         parts.append(f"## 輸出檔案路徑")
         parts.append(f"請把整理 / 摘要結果寫到：`{output_path}`")
-        parts.append("（父資料夾已建好。格式請依模板需求或內容性質決定 xlsx / md / json / pdf。）")
-        if prefetched_data:
+        # 從副檔名告訴 LLM 該怎麼寫
+        _suffix = Path(output_path).suffix.lower()
+        if _suffix == ".md":
+            parts.append("**副檔名 .md → 寫 markdown 純文字**：用 `Path(...).write_text(report_str, encoding='utf-8')`")
+        elif _suffix == ".docx":
+            parts.append("**副檔名 .docx → 用 python-docx 寫 Word 檔**：")
+            parts.append("```python")
+            parts.append("from docx import Document")
+            parts.append("doc = Document()")
+            parts.append("doc.add_heading('標題', 0)")
+            parts.append("doc.add_paragraph('摘要內容...')")
+            parts.append(f"doc.save(r'{output_path}')")
+            parts.append("```")
+        elif _suffix == ".xlsx":
+            parts.append("**副檔名 .xlsx → 用 openpyxl 或 pandas.to_excel 寫 Excel 檔**")
+        elif _suffix == ".pdf":
+            parts.append("**副檔名 .pdf**：先寫 docx 再用 docx2pdf 轉、或用 reportlab")
+        elif _suffix == ".json":
+            parts.append("**副檔名 .json → 用 json.dump 寫結構化資料**")
+        else:
+            parts.append("（父資料夾已建好。請依副檔名決定寫法 — md / docx / xlsx / json 等）")
+        if prefetched_data and _suffix == ".md":
             parts.append("典型寫法（資料已備齊、不用再抓）：")
             parts.append("```python")
             parts.append("from pathlib import Path")
-            parts.append("# 你直接把整理好的 markdown 報告字串組起來")
             parts.append("report = '''# 標題\\n\\n（你的摘要內容）\\n'''")
             parts.append(f"Path(r'{output_path}').write_text(report, encoding='utf-8')")
-            parts.append("print(f'已寫入 {{len(report)}} 字到 output')")
             parts.append("```")
 
     if prev_outputs:
@@ -2250,6 +2268,20 @@ async def execute_step_with_outlook(
     # 處理 output_path（兩條路徑共用）
     if output_path:
         output_path = str(Path(output_path).expanduser())
+        # 若 template_params 帶 output_format，把路徑副檔名同步調整
+        # 例：runner default 給 .md 但使用者選 docx → 改成 .docx
+        # 這樣 LLM / direct handler 都直接拿到正確副檔名的路徑、不用自己判斷
+        _fmt = (template_params or {}).get("output_format") or ""
+        _fmt = str(_fmt).strip().lower().lstrip(".")
+        _ext_map = {"md": ".md", "markdown": ".md", "xlsx": ".xlsx", "excel": ".xlsx",
+                    "txt": ".txt", "docx": ".docx", "word": ".docx",
+                    "pdf": ".pdf", "json": ".json", "csv": ".csv"}
+        if _fmt in _ext_map:
+            desired = _ext_map[_fmt]
+            if not output_path.lower().endswith(desired):
+                old = output_path
+                output_path = str(Path(output_path).with_suffix(desired))
+                logger.info(f"[{step_name}] 依 output_format={_fmt} 調整 output_path：{old} → {output_path}")
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         _out = Path(output_path)
         if _out.exists():

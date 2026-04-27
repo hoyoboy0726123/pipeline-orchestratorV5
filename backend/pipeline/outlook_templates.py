@@ -399,10 +399,31 @@ def _h_calendar_list(*, params: dict, output_path: Path,
         "start": "開始", "end": "結束", "subject": "主旨", "location": "地點",
         "organizer": "主辦人", "is_recurring": "週期性",
     }
-    header = (f"# 會議清單\n\n時間範圍：{since} ~ {until}，共 {n} 個會議")
+    # 0 筆時順便診斷一下行事曆資料夾本身有沒有東西，給使用者更明確的提示
+    diagnosis = ""
+    if n == 0:
+        try:
+            from .win32_helpers._common import _get_namespace, OL_FOLDER_CALENDAR
+            ns = _get_namespace()
+            cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
+            cal_total = int(cal.Items.Count)
+            if cal_total == 0:
+                diagnosis = ("\n\n⚠ Classic Outlook 的行事曆是空的。"
+                             "通常代表你日常用「新版 Outlook」、Classic 沒同步行事曆。"
+                             "請先在新版 Outlook 點「說明 → 前往傳統 Outlook」切回，"
+                             "等行事曆同步好再來執行。")
+            else:
+                diagnosis = (f"\n\n（行事曆本身有 {cal_total} 個項目，但時間範圍 "
+                             f"{since} ~ {until} 內沒有命中。試試擴大時間範圍。）")
+        except Exception:
+            pass
+    header = (f"# 會議清單\n\n時間範圍：{since} ~ {until}，共 {n} 個會議{diagnosis}")
     actual_path = _df_to_format(df, fmt, output_path,
                                  columns=columns, rename=rename, header=header)
-    return f"calendar_list 完成：{n} 個會議、輸出 {fmt}、檔案：{actual_path}"
+    summary = f"calendar_list 完成：{n} 個會議、輸出 {fmt}、檔案：{actual_path}"
+    if n == 0 and "Classic" in diagnosis:
+        summary += " | ⚠ Classic Outlook 行事曆是空的（你可能用新版 Outlook、未同步）"
+    return summary
 
 
 def _h_create_meeting(*, params: dict, output_path: Path,

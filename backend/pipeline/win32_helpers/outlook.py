@@ -396,17 +396,29 @@ def send_mail(
             raise FileNotFoundError(f"附件不存在：{p}")
         mail.Attachments.Add(str(p))
 
+    # 重點：mail.Send() 會把 COM 物件從 Outbox 移到 Sent Items，原本的 reference 立即失效。
+    # 任何 .Send() 之後存取 mail.To / mail.EntryID 等屬性都會噴
+    # com_error: '項目已經移動或刪除'。所以要在 Send 前把所有要用的屬性存到 local var。
+    to_str = str(mail.To)[:60] if mail.To else ""
+    subj_preview = subject[:40] if subject else ""
+
     if save_to_drafts:
         mail.Save()
-        logger.info(f"send_mail: 草稿已存（subject={subject[:40]}）")
-        return mail.EntryID
-    mail.Send()
-    logger.info(f"send_mail: 已送出（to={mail.To[:60]}, subject={subject[:40]}）")
-    # 寄出後 EntryID 會變（從 Outbox 移到 Sent Items），這裡盡量回最新值
+        try:
+            eid = mail.EntryID
+        except Exception:
+            eid = ""
+        logger.info(f"send_mail: 草稿已存（subject={subj_preview}）")
+        return eid
+
+    # 在 Send 前先抓 EntryID（送出後立刻會失效）
     try:
-        return mail.EntryID
+        eid_before = mail.EntryID
     except Exception:
-        return ""
+        eid_before = ""
+    mail.Send()
+    logger.info(f"send_mail: 已送出（to={to_str}, subject={subj_preview}）")
+    return eid_before
 
 
 def _join_recipients(r: Union[str, list[str]]) -> str:
@@ -450,12 +462,15 @@ def reply_mail(
         if not p.is_file():
             raise FileNotFoundError(f"附件不存在：{p}")
         reply.Attachments.Add(str(p))
-    reply.Send()
-    logger.info(f"reply_mail: 已回覆（reply_all={reply_all}, source_subject={item.Subject[:40]}）")
+    # Send 前先抓屬性 — Send 後物件立即失效（'項目已經移動或刪除'）
+    src_subj = (item.Subject or "")[:40]
     try:
-        return reply.EntryID
+        eid_before = reply.EntryID
     except Exception:
-        return ""
+        eid_before = ""
+    reply.Send()
+    logger.info(f"reply_mail: 已回覆（reply_all={reply_all}, source_subject={src_subj}）")
+    return eid_before
 
 
 def forward_mail(
@@ -482,12 +497,16 @@ def forward_mail(
         if not p.is_file():
             raise FileNotFoundError(f"附件不存在：{p}")
         fwd.Attachments.Add(str(p))
-    fwd.Send()
-    logger.info(f"forward_mail: 已轉寄（to={fwd.To[:60]}, source_subject={item.Subject[:40]}）")
+    # Send 前抓屬性
+    to_str = str(fwd.To)[:60] if fwd.To else ""
+    src_subj = (item.Subject or "")[:40]
     try:
-        return fwd.EntryID
+        eid_before = fwd.EntryID
     except Exception:
-        return ""
+        eid_before = ""
+    fwd.Send()
+    logger.info(f"forward_mail: 已轉寄（to={to_str}, source_subject={src_subj}）")
+    return eid_before
 
 
 # ── 行事曆 ────────────────────────────────────────────────────────────
