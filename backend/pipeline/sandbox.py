@@ -1,6 +1,6 @@
 """
 Skill 沙盒執行層（V3）：把 LLM 生成的 Python / Shell 送進 WSL 內的 Docker
-容器 `pipeline-sandbox-v4` 執行，隔離 Windows host。
+容器 `pipeline-sandbox-v5` 執行，隔離 Windows host。
 
 此模組只負責：
   1. 狀態檢查 — WSL / Docker / 容器 是否就緒
@@ -30,7 +30,7 @@ from typing import Callable, Optional
 log = logging.getLogger(__name__)
 
 # ── 常數 ───────────────────────────────────────────────────────────
-CONTAINER_NAME = "pipeline-sandbox-v4"
+CONTAINER_NAME = "pipeline-sandbox-v5"
 SANDBOX_TOOL_TIMEOUT = 60  # 秒；對齊 executor.SKILL_TOOL_TIMEOUT
 
 # Docker CLI 呼叫習慣：優先嘗試 plain `docker`（使用者已 `usermod -aG docker` + 重啟 WSL），
@@ -216,7 +216,7 @@ def check_status(force_refresh: bool = False) -> dict:
     elif not container_exists:
         hint = "請跑 sandbox/setup_sandbox.bat 建立容器"
     elif not container_running:
-        hint = "容器已停止 — backend 會嘗試自動啟動，或手動 `wsl sudo docker start pipeline-sandbox-v4`"
+        hint = "容器已停止 — backend 會嘗試自動啟動，或手動 `wsl sudo docker start pipeline-sandbox-v5`"
 
     data = {
         "wsl_ok": wsl_ok,
@@ -277,7 +277,7 @@ class SandboxResult:
 
 
 def _docker_exec_cmd(workdir_wsl: Optional[str], runner: list[str]) -> list[str]:
-    """組 `wsl <docker_prefix> exec [-w ...] pipeline-sandbox-v4 <runner...>`"""
+    """組 `wsl <docker_prefix> exec [-w ...] pipeline-sandbox-v5 <runner...>`"""
     docker_prefix = _detect_docker_prefix()
     cmd = ["wsl", "-e", *docker_prefix, "exec"]
     if workdir_wsl:

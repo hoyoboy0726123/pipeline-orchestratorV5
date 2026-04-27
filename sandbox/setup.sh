@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Pipeline Orchestrator V4 — WSL 內的沙盒安裝腳本
+# Pipeline Orchestrator V5 — WSL 內的沙盒安裝腳本
 #
 # 由 setup_sandbox.bat 從 Windows 呼叫進來，在 WSL Ubuntu 內執行。
 # 做三件事：
 #   1. 如果沒有 Docker Engine 就裝
 #   2. build 沙盒映像檔（如果尚未存在）
-#   3. 啟動長駐容器 pipeline-sandbox-v4（bind mount 專案根目錄）
+#   3. 啟動長駐容器 pipeline-sandbox-v5（bind mount 專案根目錄）
 #
-# 之後 backend 會透過 `wsl docker exec pipeline-sandbox-v4 ...` 執行 skill 程式碼。
+# 之後 backend 會透過 `wsl docker exec pipeline-sandbox-v5 ...` 執行 skill 程式碼。
 #
 # 用法：
 #   setup.sh <project_dir_in_wsl>              # 一般安裝（跳過已存在的 image / container）
@@ -25,7 +25,7 @@ for arg in "${@:2}"; do
 done
 if [[ -z "$PROJECT_DIR" ]]; then
     echo "用法：$0 <project_dir_in_wsl> [--rebuild]"
-    echo "範例：$0 /mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV4"
+    echo "範例：$0 /mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV5"
     echo "改了 Dockerfile / requirements.txt 要重裝：$0 ... --rebuild"
     exit 1
 fi
@@ -34,11 +34,11 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
     exit 1
 fi
 
-CONTAINER="pipeline-sandbox-v4"
+CONTAINER="pipeline-sandbox-v5"
 IMAGE="pipeline-sandbox:latest"   # 跟 V3 image tag 共用，container name 才差異化
 
 echo "══════════════════════════════════════════════════════"
-echo "Pipeline Orchestrator V4 — 沙盒安裝"
+echo "Pipeline Orchestrator V5 — 沙盒安裝"
 echo "══════════════════════════════════════════════════════"
 echo "專案目錄：$PROJECT_DIR"
 echo ""
@@ -66,7 +66,8 @@ else
 fi
 
 # ── 2. 啟動 Docker daemon（WSL 內 systemd 未預設啟動時需手動）
-if ! sudo service docker status &>/dev/null; then
+# `docker info` 已通過代表 daemon 在跑、跳過後續 sudo service 檢查（避免卡 sudo 密碼）
+if [[ "$DOCKER" == "sudo docker" ]] && ! sudo -n service docker status &>/dev/null; then
     echo "==> 啟動 Docker daemon..."
     sudo service docker start
 fi

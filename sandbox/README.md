@@ -13,11 +13,11 @@ V2 的 skill 節點把 LLM 生的 code 直接以 `subprocess.Popen` 在 Windows 
 ```
 Windows host
   └─ FastAPI backend (8001)
-        └─ wsl docker exec pipeline-sandbox-v4 python /tmp/xxx.py
+        └─ wsl docker exec pipeline-sandbox-v5 python /tmp/xxx.py
               │
               └→ WSL2 Ubuntu
                    └─ Docker Engine
-                        └─ pipeline-sandbox-v4 容器（長駐）
+                        └─ pipeline-sandbox-v5 容器（長駐）
                              - Python 3.13
                              - 預裝：pandas / openpyxl / numpy / matplotlib / opencv-headless
                                / python-pptx / pdfplumber / newspaper3k / cloudscraper / feedparser
@@ -46,7 +46,7 @@ setup_sandbox.bat --rebuild
 ```
 
 這會：
-1. 強制移除舊 container `pipeline-sandbox-v4` 與 image `pipeline-sandbox:latest`
+1. 強制移除舊 container `pipeline-sandbox-v5` 與 image `pipeline-sandbox:latest`
 2. 從 Dockerfile 重新 build（`--no-cache`，確保新套件真的裝進去）
 3. 重新啟動容器（沿用原本的 bind mount 策略）
 
@@ -63,7 +63,7 @@ setup_sandbox.bat --rebuild
 
 **不用手動做任何事**。V3 backend 啟動時會：
 1. 檢查 WSL 能跑 `wsl docker ps`
-2. 檢查 `pipeline-sandbox-v4` 容器是否在跑，若沒在跑會試著 `docker start`
+2. 檢查 `pipeline-sandbox-v5` 容器是否在跑，若沒在跑會試著 `docker start`
 3. 前端 Settings 頁會顯示沙盒狀態（綠燈=就緒、紅燈=有問題）
 
 如果沙盒壞掉或關閉，skill 會 fallback 到舊的 host subprocess 模式（有 warning log）。
@@ -77,18 +77,18 @@ setup_sandbox.bat --rebuild
 wsl
 
 # 看容器狀態
-sudo docker ps -a | grep pipeline-sandbox-v4
+sudo docker ps -a | grep pipeline-sandbox-v5
 
 # 手動啟動/停止/重啟
-sudo docker start pipeline-sandbox-v4
-sudo docker stop pipeline-sandbox-v4
-sudo docker restart pipeline-sandbox-v4
+sudo docker start pipeline-sandbox-v5
+sudo docker stop pipeline-sandbox-v5
+sudo docker restart pipeline-sandbox-v5
 
 # 進容器看看
-sudo docker exec -it pipeline-sandbox-v4 bash
+sudo docker exec -it pipeline-sandbox-v5 bash
 
 # 加新 Python 套件（臨時）
-sudo docker exec pipeline-sandbox-v4 pip install <package>
+sudo docker exec pipeline-sandbox-v5 pip install <package>
 
 # 修改 requirements.txt 後永久加：從 Windows 跑
 #   setup_sandbox.bat --rebuild
@@ -128,7 +128,7 @@ Dockerfile 已經把 pip install 拆成多層（Tier 1 核心 / Tier 2 HTTP / Ti
 → WSL 記憶體不夠。先套上面的 `.wslconfig`、`wsl --shutdown`、清空舊快取：
 ```
 wsl sudo docker builder prune -af
-wsl sudo docker rm -f pipeline-sandbox-v4
+wsl sudo docker rm -f pipeline-sandbox-v5
 ```
 然後再跑一次 `setup_sandbox.bat`。
 
@@ -142,7 +142,7 @@ Dockerfile 本來就把 pip install 拆成多個 RUN 分層安裝，每層獨立
 → WSL 重啟：`wsl --shutdown` 然後重開 WSL。若仍然不行，手動 `sudo docker ps` 可繞過。
 
 **容器啟動失敗說 port 已使用**
-→ 容器不需要對外開 port（純內部 exec），若真撞到可能是舊容器殘留：`sudo docker rm -f pipeline-sandbox-v4`。
+→ 容器不需要對外開 port（純內部 exec），若真撞到可能是舊容器殘留：`sudo docker rm -f pipeline-sandbox-v5`。
 
 **Build 很久**
 → 第一次 build 會從 Docker Hub 拉 python:3.13-slim 基底映像（~150MB）再 pip install，首次約 3-5 分鐘，之後 cache 會快很多。
