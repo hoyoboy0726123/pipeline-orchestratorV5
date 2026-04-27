@@ -175,7 +175,8 @@ def _to_dt(s: Any) -> Optional[datetime]:
 
 
 def _h_daily_todo(*, params: dict, output_path: Path,
-                  prev_outputs: Optional[list], step_name: str) -> str:
+                  prev_outputs: Optional[list], step_name: str,
+                  logger_obj: Optional[logging.Logger] = None) -> str:
     """整理符合條件信件 → 待辦清單。
 
     回傳 stdout（給 runner 顯示），同時把整理結果寫到 output_path。
@@ -196,9 +197,10 @@ def _h_daily_todo(*, params: dict, output_path: Path,
         since=since, until=until,
         unread_only=unread_only, exact_match=exact,
         limit=500,
+        logger=logger_obj,
     )
     n = len(df)
-    logger.info(f"[{step_name}] daily_todo 命中 {n} 封信，寫到 {output_path}")
+    (logger_obj or logger).info(f"[{step_name}] daily_todo 命中 {n} 封信，寫到 {output_path}")
 
     # 友善的中文欄名 + 只取常用欄位
     columns = ["received", "sender_name", "subject", "is_unread", "has_attachments"]
@@ -225,7 +227,8 @@ def _h_daily_todo(*, params: dict, output_path: Path,
 
 
 def _h_download_attachments(*, params: dict, output_path: Path,
-                             prev_outputs: Optional[list], step_name: str) -> str:
+                             prev_outputs: Optional[list], step_name: str,
+                  logger_obj: Optional[logging.Logger] = None) -> str:
     """批次下載符合條件信件的附件。"""
     from .win32_helpers.outlook import search_mail, download_attachments
 
@@ -241,6 +244,7 @@ def _h_download_attachments(*, params: dict, output_path: Path,
         until=_to_dt(params.get("until")),
         has_attachment=True,  # 強制有附件才有意義
         limit=500,
+        logger=logger_obj,
     )
     if df.empty:
         output_path.write_text(f"# 附件下載報告\n\n找不到符合條件的有附件信件。", encoding="utf-8")
@@ -305,7 +309,8 @@ def _h_send_mail(*, params: dict, output_path: Path,
 
 
 def _h_send_with_attachment(*, params: dict, output_path: Path,
-                             prev_outputs: Optional[list], step_name: str) -> str:
+                             prev_outputs: Optional[list], step_name: str,
+                  logger_obj: Optional[logging.Logger] = None) -> str:
     """把上一步輸出當附件寄出（常見：xlsx 報告 → 主管）。"""
     from .win32_helpers.outlook import send_mail
 
@@ -384,7 +389,8 @@ def _h_bulk_send(*, params: dict, output_path: Path,
 
 
 def _h_calendar_list(*, params: dict, output_path: Path,
-                      prev_outputs: Optional[list], step_name: str) -> str:
+                      prev_outputs: Optional[list], step_name: str,
+                  logger_obj: Optional[logging.Logger] = None) -> str:
     """列出某時間範圍的會議。"""
     from .win32_helpers.outlook import calendar_list
 
@@ -392,7 +398,8 @@ def _h_calendar_list(*, params: dict, output_path: Path,
     until = _to_dt(params.get("until")) or (datetime.now() + timedelta(days=30))
     fmt = (params.get("output_format") or "md").lower()
 
-    df = calendar_list(since=since, until=until, include_recurring=True, limit=200)
+    df = calendar_list(since=since, until=until, include_recurring=True, limit=200,
+                       logger=logger_obj)
     n = len(df)
     columns = ["start", "end", "subject", "location", "organizer", "is_recurring"]
     rename = {
@@ -427,7 +434,8 @@ def _h_calendar_list(*, params: dict, output_path: Path,
 
 
 def _h_create_meeting(*, params: dict, output_path: Path,
-                      prev_outputs: Optional[list], step_name: str) -> str:
+                      prev_outputs: Optional[list], step_name: str,
+                  logger_obj: Optional[logging.Logger] = None) -> str:
     """新增會議邀請。"""
     from .win32_helpers.outlook import create_meeting
 
@@ -492,7 +500,8 @@ def is_direct_template(template: str) -> bool:
 # 異 crash 卡住。LLM 只需要做語意理解（摘要、分類、結論）就好。
 
 
-def _prefetch_search_summary(params: dict, prev_outputs: Optional[list]) -> tuple[bool, str, str]:
+def _prefetch_search_summary(params: dict, prev_outputs: Optional[list],
+                              logger_obj: Optional[logging.Logger] = None) -> tuple[bool, str, str]:
     """search_summary 模板的預抓資料。
 
     回傳 (ok, prefetched_markdown, error_msg)。
@@ -517,15 +526,19 @@ def _prefetch_search_summary(params: dict, prev_outputs: Optional[list]) -> tupl
     try:
         if search_in == "subject":
             df = search_mail(subject=keywords, folder=folder,
-                             since=since, until=until, limit=200)
+                             since=since, until=until, limit=200,
+                             logger=logger_obj)
         elif search_in == "body":
             df = search_mail(body_keyword=keywords, folder=folder,
-                             since=since, until=until, limit=200)
+                             since=since, until=until, limit=200,
+                             logger=logger_obj)
         else:  # both
             df_subj = search_mail(subject=keywords, folder=folder,
-                                  since=since, until=until, limit=200)
+                                  since=since, until=until, limit=200,
+                                  logger=logger_obj)
             df_body = search_mail(body_keyword=keywords, folder=folder,
-                                  since=since, until=until, limit=200)
+                                  since=since, until=until, limit=200,
+                                  logger=logger_obj)
             df = pd.concat([df_subj, df_body], ignore_index=True)
             if not df.empty:
                 df = df.drop_duplicates(subset=["entry_id"]).reset_index(drop=True)
@@ -581,7 +594,7 @@ def run_prefetch(*, template: str, params: dict,
         return (False, "", f"未註冊的 prefetch 模板：{template}")
     log = logger_obj or logger
     try:
-        ok, md, err = handler(params or {}, prev_outputs)
+        ok, md, err = handler(params or {}, prev_outputs, logger_obj=log)
         if ok:
             log.info(f"[prefetch/{template}] OK：{len(md)} 字資料已預抓")
         else:
@@ -617,6 +630,7 @@ def run_direct_template(*, template: str, params: dict, output_path: str,
             output_path=out_path,
             prev_outputs=prev_outputs,
             step_name=step_name,
+            logger_obj=log,
         )
         log.info(f"[{step_name}] direct/{template} OK：{summary}")
         return (True, summary)

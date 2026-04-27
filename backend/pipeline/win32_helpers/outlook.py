@@ -43,7 +43,7 @@ from ._common import (
     _resolve_folder,
 )
 
-logger = logging.getLogger("pipeline.win32_helpers.outlook")
+_module_logger = logging.getLogger("pipeline.win32_helpers.outlook")
 
 
 # ── 型別別名 ──────────────────────────────────────────────────────────
@@ -111,6 +111,8 @@ def search_mail(
     has_attachment: Optional[bool] = None,
     exact_match: bool = False,
     limit: int = 500,
+    logger: Optional[logging.Logger] = None,
+    progress_every: int = 500,
 ) -> pd.DataFrame:
     """搜尋信件。回傳 DataFrame，欄位：
 
@@ -142,6 +144,7 @@ def search_mail(
         Restrict 對 Exchange 帳號有時很慢、語法又怪（DASL URI），
         我們直接 Python 端 filter 反而簡單可控。對 < 5000 筆的資料夾速度足夠。
     """
+    log = logger or _module_logger
     _ensure_windows()
     ns = _get_namespace()
     fld = _resolve_folder(ns, folder)
@@ -153,13 +156,29 @@ def search_mail(
     since_dt = _to_datetime(since)
     until_dt = _to_datetime(until)
 
+    # 大資料夾（10000+ 封）會跑很久，預先告訴使用者開始掃了
+    try:
+        total_in_folder = int(items.Count)
+    except Exception:
+        total_in_folder = -1
+    log.info(f"search_mail: 開始掃 {folder_name}（資料夾共 {total_in_folder if total_in_folder >= 0 else '?'} 封）"
+             f"、條件 since={since_dt}, until={until_dt}, limit={limit}")
+    import time as _time
+    _t_start = _time.time()
+
     rows = []
     count_scanned = 0
     for item in items:
         count_scanned += 1
         if count_scanned > 10000:  # 硬上限，防止資料夾爆量
-            logger.warning(f"搜尋掃過 10000 封信仍未滿足 limit={limit}，提早結束")
+            log.warning(f"search_mail: 掃過 10000 封信仍未滿足 limit={limit}，提早結束")
             break
+
+        # 進度回報：每 progress_every 封顯示一次（讓使用者知道沒當機）
+        if progress_every > 0 and count_scanned % progress_every == 0:
+            elapsed = _time.time() - _t_start
+            log.info(f"search_mail: 進度 {count_scanned} 封已掃，目前命中 {len(rows)} 封"
+                     f"（耗時 {elapsed:.1f}s）")
 
         # MailItem.Class = 43；行事曆 / 約會 / 工作要過濾掉
         try:
@@ -240,7 +259,8 @@ def search_mail(
             break
 
     df = pd.DataFrame(rows)
-    logger.info(f"search_mail: 從 {folder_name} 掃 {count_scanned} 封、命中 {len(df)} 封")
+    log.info(f"search_mail: 完成 — 從 {folder_name} 掃 {count_scanned} 封、命中 {len(df)} 封"
+             f"（總耗時 {_time.time() - _t_start:.1f}s）")
     return df
 
 
@@ -325,7 +345,7 @@ def download_attachments(
         try:
             item = ns.GetItemFromID(eid)
         except Exception as e:
-            logger.warning(f"download_attachments: EntryID {eid[:20]}... 找不到信件：{e}")
+            _module_logger.warning(f"download_attachments: EntryID {eid[:20]}... 找不到信件：{e}")
             continue
         if item.Attachments.Count == 0:
             continue
@@ -346,7 +366,7 @@ def download_attachments(
                 target = out / f"{stem}_{k}{suffix}"
             att.SaveAsFile(str(target.resolve()))
             saved.append(target)
-    logger.info(f"download_attachments: {len(saved)} 個附件存到 {out}")
+    _module_logger.info(f"download_attachments: {len(saved)} 個附件存到 {out}")
     return saved
 
 
@@ -408,7 +428,7 @@ def send_mail(
             eid = mail.EntryID
         except Exception:
             eid = ""
-        logger.info(f"send_mail: 草稿已存（subject={subj_preview}）")
+        _module_logger.info(f"send_mail: 草稿已存（subject={subj_preview}）")
         return eid
 
     # 在 Send 前先抓 EntryID（送出後立刻會失效）
@@ -417,7 +437,7 @@ def send_mail(
     except Exception:
         eid_before = ""
     mail.Send()
-    logger.info(f"send_mail: 已送出（to={to_str}, subject={subj_preview}）")
+    _module_logger.info(f"send_mail: 已送出（to={to_str}, subject={subj_preview}）")
     return eid_before
 
 
@@ -469,7 +489,7 @@ def reply_mail(
     except Exception:
         eid_before = ""
     reply.Send()
-    logger.info(f"reply_mail: 已回覆（reply_all={reply_all}, source_subject={src_subj}）")
+    _module_logger.info(f"reply_mail: 已回覆（reply_all={reply_all}, source_subject={src_subj}）")
     return eid_before
 
 
@@ -505,7 +525,7 @@ def forward_mail(
     except Exception:
         eid_before = ""
     fwd.Send()
-    logger.info(f"forward_mail: 已轉寄（to={to_str}, source_subject={src_subj}）")
+    _module_logger.info(f"forward_mail: 已轉寄（to={to_str}, source_subject={src_subj}）")
     return eid_before
 
 
@@ -519,6 +539,8 @@ def calendar_list(
     folder: str = "calendar",
     include_recurring: bool = True,
     limit: int = 200,
+    logger: Optional[logging.Logger] = None,
+    progress_every: int = 200,
 ) -> pd.DataFrame:
     """列出指定時間範圍的會議。回傳 DataFrame，欄位：
 
@@ -528,6 +550,7 @@ def calendar_list(
     `include_recurring=True` 時會展開所有 recurrence pattern 的實例
     （Outlook 預設不展開，要 IncludeRecurrences=True + 排序 by Start）。
     """
+    log = logger or _module_logger
     _ensure_windows()
     ns = _get_namespace()
     fld = _resolve_folder(ns, folder)
@@ -539,8 +562,22 @@ def calendar_list(
     since_dt = _to_datetime(since) or datetime.now() - timedelta(days=7)
     until_dt = _to_datetime(until) or datetime.now() + timedelta(days=30)
 
+    try:
+        cal_total = int(items.Count)
+    except Exception:
+        cal_total = -1
+    log.info(f"calendar_list: 開始掃 {fld.Name}（共 {cal_total if cal_total >= 0 else '?'} 項）"
+             f"、時間範圍 {since_dt} ~ {until_dt}")
+    import time as _time
+    _t_start = _time.time()
+
     rows = []
+    scanned = 0
     for item in items:
+        scanned += 1
+        if progress_every > 0 and scanned % progress_every == 0:
+            log.info(f"calendar_list: 進度 {scanned} 項已掃，命中 {len(rows)}"
+                     f"（耗時 {_time.time() - _t_start:.1f}s）")
         try:
             if item.Class != 26:  # AppointmentItem.Class = 26
                 continue
@@ -565,11 +602,12 @@ def calendar_list(
             if len(rows) >= limit:
                 break
         except Exception as e:
-            logger.debug(f"calendar_list: 跳過一個無法解析的項目：{e}")
+            log.debug(f"calendar_list: 跳過一個無法解析的項目：{e}")
             continue
 
     df = pd.DataFrame(rows)
-    logger.info(f"calendar_list: {since_dt}~{until_dt} 共 {len(df)} 個會議")
+    log.info(f"calendar_list: 完成 — {since_dt}~{until_dt} 共 {len(df)} 個會議"
+             f"（總耗時 {_time.time() - _t_start:.1f}s）")
     return df
 
 
@@ -617,7 +655,7 @@ def create_meeting(
     else:
         appt.Save()
 
-    logger.info(
+    _module_logger.info(
         f"create_meeting: {subject[:40]} @ {appt.Start} (邀請={send_invitation and has_attendees})"
     )
     try:
