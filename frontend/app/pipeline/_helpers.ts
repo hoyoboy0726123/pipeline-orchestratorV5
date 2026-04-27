@@ -464,7 +464,8 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
   const execNodes: AppNode[] = []
   for (const n of nodes) {
     if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation'
-        || n.type === 'computerUse' || n.type === 'visualValidation') {
+        || n.type === 'computerUse' || n.type === 'visualValidation'
+        || n.type === 'outlookAutomation') {
       execNodeIds.add(n.id)
       execNodes.push(n)
     }
