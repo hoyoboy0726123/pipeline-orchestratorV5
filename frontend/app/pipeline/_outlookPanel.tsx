@@ -26,6 +26,9 @@ type Template = {
   category: 'inbox' | 'send' | 'attach' | 'calendar'
   description: string
   params: ParamSpec[]
+  // execMode: 'direct' = 後端直接 call wrapper、不進 LLM（快、零 token、可預測）
+  //          'llm'    = 進 LLM agent loop（需要摘要 / 分析時才用）
+  execMode: 'direct' | 'llm'
 }
 
 const TEMPLATES: Template[] = [
@@ -34,6 +37,7 @@ const TEMPLATES: Template[] = [
     id: 'daily_todo',
     label: '🗒 整理符合條件信件 → 待辦清單',
     category: 'inbox',
+    execMode: 'direct',
     description: '掃指定資料夾的信，按條件過濾，結果整理成 markdown / xlsx 待辦清單',
     params: [
       { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / Inbox/Projects', hint: '預設 inbox' },
@@ -51,6 +55,7 @@ const TEMPLATES: Template[] = [
     id: 'search_summary',
     label: '🔍 指定關鍵字撈相關信件 → 摘要報告',
     category: 'inbox',
+    execMode: 'llm',
     description: '用 LLM 摘要符合條件的信件群、產出報告',
     params: [
       { key: 'keywords', label: '關鍵字（多個用逗號 = OR 邏輯）', type: 'text', placeholder: '客戶投訴, 退費' },
@@ -69,6 +74,7 @@ const TEMPLATES: Template[] = [
     id: 'unanswered',
     label: '❓ 未回覆超過 N 天的信',
     category: 'inbox',
+    execMode: 'llm',
     description: '找出收件匣中我還沒回過、且收件超過指定天數的信',
     params: [
       { key: 'days', label: '超過幾天未回', type: 'number', placeholder: '3' },
@@ -80,6 +86,7 @@ const TEMPLATES: Template[] = [
     id: 'send_mail',
     label: '✉ 寄信給指定收件人',
     category: 'send',
+    execMode: 'direct',
     description: '直接寄一封信',
     params: [
       { key: 'to', label: 'To（多個用逗號）', type: 'text', placeholder: 'a@x.com, b@x.com' },
@@ -98,6 +105,7 @@ const TEMPLATES: Template[] = [
     id: 'send_with_attachment',
     label: '📤 把上一步輸出當附件寄出',
     category: 'send',
+    execMode: 'direct',
     description: '常用情境：前一步整理產出 xlsx → 直接寄給主管',
     params: [
       { key: 'to', label: 'To', type: 'text' },
@@ -109,6 +117,7 @@ const TEMPLATES: Template[] = [
     id: 'bulk_send',
     label: '📨 從 csv/xlsx 收件清單群發',
     category: 'send',
+    execMode: 'direct',
     description: '收件清單一筆一封，主旨/本文可帶 {欄位名} 變數',
     params: [
       { key: 'recipient_file', label: '收件清單檔', type: 'text', placeholder: 'recipients.csv' },
@@ -121,6 +130,7 @@ const TEMPLATES: Template[] = [
     id: 'download_attachments',
     label: '📎 批次下載符合條件信件的附件',
     category: 'attach',
+    execMode: 'direct',
     description: '把搜到的信件附件全部存到資料夾，可自訂檔名規則',
     params: [
       { key: 'subject', label: '主旨關鍵字', type: 'text' },
@@ -138,6 +148,7 @@ const TEMPLATES: Template[] = [
     id: 'calendar_list',
     label: '📅 列出某時間範圍的會議',
     category: 'calendar',
+    execMode: 'direct',
     description: '回傳 DataFrame：主旨 / 起訖 / 地點 / 與會者 / 是否定期',
     params: [
       { key: 'since', label: '從', type: 'datetime-local' },
@@ -150,6 +161,7 @@ const TEMPLATES: Template[] = [
     id: 'create_meeting',
     label: '🆕 新增會議邀請',
     category: 'calendar',
+    execMode: 'direct',
     description: '建立會議並（可選）發送邀請給與會者',
     params: [
       { key: 'subject', label: '主旨', type: 'text' },
@@ -348,84 +360,147 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
           <input value={data.name} onChange={e => onUpdate({ name: e.target.value })} className={`${inputCls} font-mono`} />
         </div>
 
-        {/* 模式區：模板 vs 自由輸入 */}
-        <div className="p-3 rounded-lg border border-blue-200 bg-blue-50/50 space-y-2">
-          <p className="text-xs text-blue-900 font-medium">執行模式：選一個模板，或直接寫自由輸入需求</p>
-          <p className="text-[11px] text-blue-700/80 leading-relaxed">
-            模板 = 固定 prompt + 你填參數，agent 跑得最穩。
-            自由輸入 = 你描述需求，agent 自己決定怎麼用 win32 工具。
-            兩者擇一即可（選了模板就會清掉自由輸入）。
+        {/* 模式說明 */}
+        <div className="p-3 rounded-lg border border-blue-200 bg-blue-50/50 space-y-1.5">
+          <p className="text-xs text-blue-900 font-medium">執行路徑分兩種，各有適用情境：</p>
+          <p className="text-[11px] text-blue-800/90 leading-relaxed">
+            <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-1.5 align-middle" />
+            <b>🚀 直接執行</b>：不進 LLM、後端直接呼叫 Outlook API，快、零 token、結果可預測
+          </p>
+          <p className="text-[11px] text-blue-800/90 leading-relaxed">
+            <span className="inline-block w-2 h-2 rounded-full bg-purple-500 mr-1.5 align-middle" />
+            <b>🤖 AI 處理</b>：進 LLM agent loop，會花 token、可能多輪 retry，適合需要摘要 / 分析的情境
           </p>
         </div>
 
-        {/* 模板選單 */}
+        {/* ── 🚀 直接執行區（無需 LLM）──────────────────────────── */}
         <div>
           <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">選單模板</label>
-            {data.template && (
-              <button onClick={clearTemplate} className="text-xs text-blue-600 hover:underline">清除模板</button>
+            <label className="text-xs font-semibold text-emerald-700 uppercase tracking-wide flex items-center gap-1">
+              🚀 直接執行（無需 LLM）
+            </label>
+            {data.template && TEMPLATES.find(t => t.id === data.template)?.execMode === 'direct' && (
+              <button onClick={clearTemplate} className="text-xs text-blue-600 hover:underline">清除選擇</button>
             )}
           </div>
-          {(['inbox', 'send', 'attach', 'calendar'] as const).map(cat => (
-            <div key={cat} className="mb-3">
-              <p className="text-[11px] font-semibold text-gray-500 mb-1">{CATEGORY_LABEL[cat]}</p>
-              <div className="space-y-1">
-                {TEMPLATES.filter(t => t.category === cat).map(t => {
-                  const isSelected = data.template === t.id
-                  return (
-                    <div key={t.id} className="space-y-0">
-                      <button
-                        onClick={() => selectTemplate(t.id)}
-                        className={`w-full text-left px-2.5 py-1.5 text-xs border transition-colors ${
-                          isSelected
-                            ? 'bg-blue-500 text-white border-blue-500 rounded-t-lg'
-                            : 'bg-white text-gray-700 border-gray-200 hover:border-blue-300 rounded-lg'
-                        }`}
-                        title={t.description}
-                      >
-                        {t.label}
-                      </button>
-                      {/* 參數區直接接在被選中的模板按鈕下面，視覺上是「同一塊」 */}
-                      {isSelected && (
-                        <div className="px-3 py-3 rounded-b-lg border border-t-0 border-blue-500 bg-blue-50/30 space-y-3">
-                          <p className="text-[11px] text-gray-600 leading-relaxed">{t.description}</p>
-                          {t.params.map(p => (
-                            <div key={p.key}>
-                              {p.type !== 'bool' && (
-                                <label className="text-xs text-gray-600 block mb-1">{p.label}</label>
-                              )}
-                              {renderParam(p)}
-                              {p.hint && <p className="text-[10px] text-gray-400 mt-0.5">{p.hint}</p>}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
+          {(['inbox', 'send', 'attach', 'calendar'] as const).map(cat => {
+            const directInCat = TEMPLATES.filter(t => t.category === cat && t.execMode === 'direct')
+            if (directInCat.length === 0) return null
+            return (
+              <div key={cat} className="mb-3">
+                <p className="text-[11px] font-semibold text-gray-500 mb-1">{CATEGORY_LABEL[cat]}</p>
+                <div className="space-y-1">
+                  {directInCat.map(t => {
+                    const isSelected = data.template === t.id
+                    return (
+                      <div key={t.id} className="space-y-0">
+                        <button
+                          onClick={() => selectTemplate(t.id)}
+                          className={`w-full text-left px-2.5 py-1.5 text-xs border transition-colors ${
+                            isSelected
+                              ? 'bg-emerald-500 text-white border-emerald-500 rounded-t-lg'
+                              : 'bg-white text-gray-700 border-gray-200 hover:border-emerald-300 rounded-lg'
+                          }`}
+                          title={t.description}
+                        >
+                          {t.label}
+                        </button>
+                        {isSelected && (
+                          <div className="px-3 py-3 rounded-b-lg border border-t-0 border-emerald-500 bg-emerald-50/30 space-y-3">
+                            <p className="text-[11px] text-gray-600 leading-relaxed">{t.description}</p>
+                            {t.params.map(p => (
+                              <div key={p.key}>
+                                {p.type !== 'bool' && (
+                                  <label className="text-xs text-gray-600 block mb-1">{p.label}</label>
+                                )}
+                                {renderParam(p)}
+                                {p.hint && <p className="text-[10px] text-gray-400 mt-0.5">{p.hint}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
 
-        {/* 自由輸入區（沒選模板時顯示） */}
-        {!data.template && (
-          <div>
-            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
-              自由輸入需求（agent 限定使用 pywin32 + Outlook COM）
+        {/* ── 🤖 AI 處理區（LLM 模板 + 自由輸入）─────────────────── */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-xs font-semibold text-purple-700 uppercase tracking-wide flex items-center gap-1">
+              🤖 AI 處理（需要 LLM、會花 token）
             </label>
+            {data.template && TEMPLATES.find(t => t.id === data.template)?.execMode === 'llm' && (
+              <button onClick={clearTemplate} className="text-xs text-blue-600 hover:underline">清除選擇</button>
+            )}
+          </div>
+          {(['inbox', 'send', 'attach', 'calendar'] as const).map(cat => {
+            const llmInCat = TEMPLATES.filter(t => t.category === cat && t.execMode === 'llm')
+            if (llmInCat.length === 0) return null
+            return (
+              <div key={cat} className="mb-3">
+                <p className="text-[11px] font-semibold text-gray-500 mb-1">{CATEGORY_LABEL[cat]}</p>
+                <div className="space-y-1">
+                  {llmInCat.map(t => {
+                    const isSelected = data.template === t.id
+                    return (
+                      <div key={t.id} className="space-y-0">
+                        <button
+                          onClick={() => selectTemplate(t.id)}
+                          className={`w-full text-left px-2.5 py-1.5 text-xs border transition-colors ${
+                            isSelected
+                              ? 'bg-purple-500 text-white border-purple-500 rounded-t-lg'
+                              : 'bg-white text-gray-700 border-gray-200 hover:border-purple-300 rounded-lg'
+                          }`}
+                          title={t.description}
+                        >
+                          {t.label}
+                        </button>
+                        {isSelected && (
+                          <div className="px-3 py-3 rounded-b-lg border border-t-0 border-purple-500 bg-purple-50/30 space-y-3">
+                            <p className="text-[11px] text-gray-600 leading-relaxed">{t.description}</p>
+                            {t.params.map(p => (
+                              <div key={p.key}>
+                                {p.type !== 'bool' && (
+                                  <label className="text-xs text-gray-600 block mb-1">{p.label}</label>
+                                )}
+                                {renderParam(p)}
+                                {p.hint && <p className="text-[10px] text-gray-400 mt-0.5">{p.hint}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+
+          {/* 自由輸入：屬於 AI 處理區的最後一塊 */}
+          <div className="mb-3">
+            <p className="text-[11px] font-semibold text-gray-500 mb-1">✏️ 自由輸入需求</p>
+            <p className="text-[10px] text-gray-500 mb-1.5 leading-relaxed">
+              不在上面選單裡的需求，直接打字描述。agent 限定使用 pywin32 + Outlook COM；做不到會回報無法執行、不會 fallback 到其他工具。
+            </p>
             <textarea
-              className={`${inputCls} font-mono`}
-              rows={5}
+              className={`${inputCls} font-mono ${data.template ? 'opacity-50' : ''}`}
+              rows={4}
               placeholder="範例：把昨天到今天主旨含『發票』的信件附件全部存到 D:/invoices，並寄一封摘要給 a@x.com"
               value={data.freeText}
+              disabled={!!data.template}
               onChange={e => onUpdate({ freeText: e.target.value })}
             />
-            <p className="text-[10px] text-gray-400 mt-1 leading-relaxed">
-              做不到的需求（例如要連 Web API、操作 Slack）agent 會直接停下來回報「無法做到」，不會 fallback 到其他工具。
-            </p>
+            {data.template && (
+              <p className="text-[10px] text-gray-400 mt-1">已選模板「{TEMPLATES.find(t => t.id === data.template)?.label}」，自由輸入暫時不啟用。</p>
+            )}
           </div>
-        )}
+        </div>
 
         {/* 輸出檔（可選） */}
         <div>

@@ -210,9 +210,20 @@ def search_mail(
                 except Exception:
                     pass
 
+        # received：強制轉 UTC 後脫 tz（naive datetime），避免 pywintypes 的不正規 tzinfo
+        # 在 pandas 內部 _localize_tso 觸發 'NoneType has no total_seconds' crash。
+        # 這樣 DataFrame 在後續 iterrows / to_markdown / astype 都不會炸。
+        try:
+            _received_pd = pd.Timestamp(received)
+            if _received_pd.tz is not None:
+                _received_pd = _received_pd.tz_convert("UTC").tz_localize(None)
+        except Exception:
+            # 任何轉 fail 就退到原始 datetime（無 tz）
+            _received_pd = pd.Timestamp(received.replace(tzinfo=None) if hasattr(received, 'replace') else received)
+
         rows.append({
             "entry_id": item.EntryID,
-            "received": pd.Timestamp(received),
+            "received": _received_pd,
             "sender_name": sender_name,
             "sender_email": sender_email,
             "subject": item_subject,

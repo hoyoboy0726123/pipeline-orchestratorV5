@@ -33,3 +33,4 @@ comtypes
 python-pptx
 jinja2
 markdown
+tabulate

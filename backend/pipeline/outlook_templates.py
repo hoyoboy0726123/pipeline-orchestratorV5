@@ -1,0 +1,492 @@
+"""
+Outlook 自動化節點：確定性模板 handlers（不走 LLM）。
+
+每個 handler 對應一個前端模板 ID。直接呼叫 win32_helpers.outlook 的 wrapper、
+把結果寫到 output_path。完全跳過 LLM agent loop —— 快、可預測、沒 token 成本。
+
+哪些模板適合在這？
+  - 「mechanical」操作：查詢→格式化→存檔；寄信→存檔；下載附件→存檔
+  - 不需要文字摘要 / 智能分類 / 結構推論的
+
+哪些模板需要 LLM（不放這、留在 execute_step_with_outlook 的 agent loop）？
+  - search_summary（要 LLM 寫摘要）
+  - unanswered（要綜合判斷「我有沒有回過」、暫時太複雜）
+  - 任何「自由輸入需求」
+
+使用：runner.py 看到 step.outlook_automation 且 template 在 DIRECT_HANDLERS 裡時，
+直接 call handler，不進 LLM。
+"""
+from __future__ import annotations
+
+import csv
+import json
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Optional
+
+# 注意：這些 import 只在 host venv 跑得起來；runner 已經保證 outlook node 走 host
+import pandas as pd  # noqa: E402
+
+from .models import StepOutput  # noqa: E402
+
+# win32_helpers 內部 import 才會帶 pywin32（只在 Windows 上跑）
+# 這個 module 是後端的一部分、只會被 Windows host 載入，不會被 sandbox 載入
+
+logger = logging.getLogger("pipeline.outlook_templates")
+
+
+class OutlookTemplateError(RuntimeError):
+    """Direct handler 執行失敗，含使用者可看的中文訊息。"""
+
+
+# ── 共用 helper ──────────────────────────────────────────────────────
+
+
+def _split_emails(s: Any) -> Optional[list[str]]:
+    """字串 'a@x.com, b@x.com' → list；空值回 None。"""
+    if not s:
+        return None
+    if isinstance(s, list):
+        return [str(x).strip() for x in s if str(x).strip()]
+    parts = [p.strip() for p in str(s).replace(";", ",").split(",")]
+    parts = [p for p in parts if p]
+    return parts or None
+
+
+def _split_keywords(s: Any) -> Optional[list[str]]:
+    """主旨 / 寄件人 / 關鍵字的多值字串解析（支援 ',' 跟 '，'）。"""
+    if not s:
+        return None
+    if isinstance(s, list):
+        return [str(x).strip() for x in s if str(x).strip()]
+    parts = [p.strip() for p in str(s).replace("，", ",").split(",")]
+    parts = [p for p in parts if p]
+    return parts or None
+
+
+def _resolve_prev_output(prev_outputs: Optional[list]) -> Optional[str]:
+    """從 prev_outputs 拿最近一個有 path 的；給 send_with_attachment 用。"""
+    if not prev_outputs:
+        return None
+    for o in reversed(prev_outputs):
+        p = o.get("path") if isinstance(o, dict) else None
+        if p:
+            return str(p)
+    return None
+
+
+def _substitute_prev_in_attachments(att: Any, prev_outputs: Optional[list]) -> list[str]:
+    """把使用者填的附件清單裡的 {prev_output} placeholder 換成實際路徑。
+
+    輸入支援：list / 多行字串 / 單一字串 / None
+    """
+    if not att:
+        return []
+    if isinstance(att, str):
+        items = [line.strip() for line in att.replace("\r\n", "\n").split("\n") if line.strip()]
+    elif isinstance(att, list):
+        items = [str(x).strip() for x in att if str(x).strip()]
+    else:
+        items = [str(att).strip()]
+    prev = _resolve_prev_output(prev_outputs) or ""
+    out = []
+    for it in items:
+        if "{prev_output}" in it:
+            if not prev:
+                raise OutlookTemplateError("附件含 {prev_output} 但前一步驟沒有可用的輸出檔")
+            it = it.replace("{prev_output}", prev)
+        out.append(it)
+    return out
+
+
+def _df_to_format(df: pd.DataFrame, fmt: str, output_path: Path, *,
+                   columns: Optional[list[str]] = None,
+                   rename: Optional[dict[str, str]] = None,
+                   header: str = "") -> None:
+    """把 DataFrame 依使用者要的格式寫到 output_path。
+    fmt: md / xlsx / txt（其他值預設走 md）
+    columns: 只保留這些欄位（None = 全部）
+    rename: 欄名改中文 {"received": "收件時間", ...}
+    header: 寫到檔案最上方的標題段（md / txt 適用，xlsx 忽略）"""
+    if columns:
+        df = df[[c for c in columns if c in df.columns]].copy()
+    if rename:
+        df = df.rename(columns=rename)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fmt = (fmt or "md").lower()
+
+    if fmt == "xlsx":
+        df.to_excel(str(output_path), index=False, engine="openpyxl")
+        return
+
+    if fmt == "txt":
+        lines = []
+        if header:
+            lines.append(header)
+            lines.append("")
+        for _, row in df.astype(str).iterrows():
+            for col in df.columns:
+                lines.append(f"{col}: {row[col]}")
+            lines.append("-" * 60)
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+        return
+
+    # 預設 md
+    lines = []
+    if header:
+        lines.append(header)
+        lines.append("")
+    if df.empty:
+        lines.append("_（沒有符合條件的項目）_")
+    else:
+        # 手動構 markdown table 避免依賴 tabulate；同時 astype(str) 避開 pandas 的 tz crash
+        df_str = df.astype(str).replace({"NaT": "", "nan": "", "None": ""})
+        cols = list(df_str.columns)
+        lines.append("| " + " | ".join(cols) + " |")
+        lines.append("|" + "|".join(["---"] * len(cols)) + "|")
+        for _, row in df_str.iterrows():
+            vals = [str(row[c]).replace("\n", " ").replace("\r", " ").replace("|", "\\|")
+                    for c in cols]
+            lines.append("| " + " | ".join(vals) + " |")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _to_dt(s: Any) -> Optional[datetime]:
+    """str / datetime / None → datetime；空回 None。"""
+    if not s:
+        return None
+    if isinstance(s, datetime):
+        return s
+    return pd.to_datetime(s).to_pydatetime()
+
+
+# ── Handler 定義（每個對應一個前端 template ID）──────────────────────
+
+
+def _h_daily_todo(*, params: dict, output_path: Path,
+                  prev_outputs: Optional[list], step_name: str) -> str:
+    """整理符合條件信件 → 待辦清單。
+
+    回傳 stdout（給 runner 顯示），同時把整理結果寫到 output_path。
+    """
+    from .win32_helpers.outlook import search_mail
+
+    folder = (params.get("folder") or "inbox").strip() or "inbox"
+    subject = _split_keywords(params.get("subject"))
+    sender = _split_keywords(params.get("sender"))
+    exact = bool(params.get("exact_match"))
+    since = _to_dt(params.get("since"))
+    until = _to_dt(params.get("until"))
+    unread_only = bool(params.get("unread_only"))
+    fmt = (params.get("output_format") or "md").lower()
+
+    df = search_mail(
+        folder=folder, subject=subject, sender=sender,
+        since=since, until=until,
+        unread_only=unread_only, exact_match=exact,
+        limit=500,
+    )
+    n = len(df)
+    logger.info(f"[{step_name}] daily_todo 命中 {n} 封信，寫到 {output_path}")
+
+    # 友善的中文欄名 + 只取常用欄位
+    columns = ["received", "sender_name", "subject", "is_unread", "has_attachments"]
+    rename = {
+        "received": "收件時間", "sender_name": "寄件人", "subject": "主旨",
+        "is_unread": "未讀", "has_attachments": "有附件",
+    }
+    header_parts = [
+        f"# 待辦清單 — {step_name}",
+        f"資料夾：`{folder}`，命中 {n} 封信",
+    ]
+    if subject:
+        header_parts.append(f"主旨關鍵字：{', '.join(subject)}（{'精確' if exact else '模糊'}比對）")
+    if sender:
+        header_parts.append(f"寄件人：{', '.join(sender)}")
+    if since or until:
+        header_parts.append(f"日期：{since or '∞'} ~ {until or '現在'}")
+    if unread_only:
+        header_parts.append("僅未讀")
+
+    _df_to_format(df, fmt, output_path,
+                  columns=columns, rename=rename, header="\n".join(header_parts))
+    return f"daily_todo 完成：命中 {n} 封信、輸出格式 {fmt}、檔案：{output_path}"
+
+
+def _h_download_attachments(*, params: dict, output_path: Path,
+                             prev_outputs: Optional[list], step_name: str) -> str:
+    """批次下載符合條件信件的附件。"""
+    from .win32_helpers.outlook import search_mail, download_attachments
+
+    out_dir = (params.get("out_dir") or "").strip()
+    if not out_dir:
+        raise OutlookTemplateError("download_attachments 需要填「目標資料夾 (out_dir)」")
+    out_dir_path = Path(out_dir).expanduser()
+
+    df = search_mail(
+        subject=_split_keywords(params.get("subject")),
+        sender=_split_keywords(params.get("sender")),
+        since=_to_dt(params.get("since")),
+        until=_to_dt(params.get("until")),
+        has_attachment=True,  # 強制有附件才有意義
+        limit=500,
+    )
+    if df.empty:
+        output_path.write_text(f"# 附件下載報告\n\n找不到符合條件的有附件信件。", encoding="utf-8")
+        return "download_attachments 完成：0 封信件、未下載任何附件"
+
+    name_tpl = (params.get("name_template")
+                or "{date}_{sender}_{filename}").strip()
+    saved = download_attachments(
+        entry_ids=df["entry_id"].tolist(),
+        out_dir=str(out_dir_path),
+        name_template=name_tpl,
+    )
+
+    lines = [
+        f"# 附件下載報告",
+        f"來源信件：{len(df)} 封",
+        f"下載附件：{len(saved)} 個",
+        f"目標資料夾：`{out_dir_path}`",
+        "",
+        "## 已下載清單",
+    ]
+    for p in saved:
+        lines.append(f"- `{Path(p).name}`")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"download_attachments 完成：{len(saved)} 個附件已存到 {out_dir_path}"
+
+
+def _h_send_mail(*, params: dict, output_path: Path,
+                 prev_outputs: Optional[list], step_name: str) -> str:
+    """寄信給指定收件人。"""
+    from .win32_helpers.outlook import send_mail
+
+    to = _split_emails(params.get("to"))
+    if not to:
+        raise OutlookTemplateError("send_mail 缺收件人 (to)")
+    cc = _split_emails(params.get("cc"))
+    bcc = _split_emails(params.get("bcc"))
+    subject = (params.get("subject") or "").strip() or "(無主旨)"
+    body = params.get("body") or ""
+    body_format = (params.get("body_format") or "html").lower()
+    attachments = _substitute_prev_in_attachments(params.get("attachments"), prev_outputs)
+    save_to_drafts = bool(params.get("save_to_drafts"))
+
+    eid = send_mail(
+        to=to, cc=cc, bcc=bcc,
+        subject=subject, body=body, body_format=body_format,
+        attachments=attachments, save_to_drafts=save_to_drafts,
+    )
+
+    action = "存草稿" if save_to_drafts else "已送出"
+    lines = [
+        f"# 寄信報告 — {action}",
+        f"收件人：{', '.join(to)}",
+        f"主旨：{subject}",
+        f"附件：{len(attachments)} 個" if attachments else "附件：無",
+        f"EntryID：`{eid}`",
+    ]
+    if cc:
+        lines.insert(2, f"副本：{', '.join(cc)}")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"send_mail {action}：to={to}, subject={subject[:40]}"
+
+
+def _h_send_with_attachment(*, params: dict, output_path: Path,
+                             prev_outputs: Optional[list], step_name: str) -> str:
+    """把上一步輸出當附件寄出（常見：xlsx 報告 → 主管）。"""
+    from .win32_helpers.outlook import send_mail
+
+    to = _split_emails(params.get("to"))
+    if not to:
+        raise OutlookTemplateError("send_with_attachment 缺收件人 (to)")
+    subject = (params.get("subject") or "").strip() or "(無主旨)"
+    body = params.get("body") or ""
+
+    prev = _resolve_prev_output(prev_outputs)
+    if not prev:
+        raise OutlookTemplateError(
+            "send_with_attachment 需要前一個步驟的輸出檔，但本工作流沒有上一個有 output 的步驟"
+        )
+    if not Path(prev).exists():
+        raise OutlookTemplateError(f"前一步驟的輸出檔不存在：{prev}")
+
+    eid = send_mail(
+        to=to, subject=subject, body=body, body_format="html",
+        attachments=[prev],
+    )
+    lines = [
+        f"# 寄信報告（附前一步輸出）",
+        f"收件人：{', '.join(to)}",
+        f"主旨：{subject}",
+        f"附件：`{Path(prev).name}`（{prev}）",
+        f"EntryID：`{eid}`",
+    ]
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"send_with_attachment 已送出：to={to}, attachment={Path(prev).name}"
+
+
+def _h_bulk_send(*, params: dict, output_path: Path,
+                 prev_outputs: Optional[list], step_name: str) -> str:
+    """從 csv/xlsx 收件清單群發，主旨/本文支援 {欄位名} 變數。"""
+    from .win32_helpers.outlook import send_mail
+
+    rec_file = (params.get("recipient_file") or "").strip()
+    if not rec_file:
+        raise OutlookTemplateError("bulk_send 缺收件清單檔案 (recipient_file)")
+    rec_path = Path(rec_file).expanduser()
+    if not rec_path.exists():
+        raise OutlookTemplateError(f"收件清單檔不存在：{rec_path}")
+
+    if rec_path.suffix.lower() in (".csv",):
+        df = pd.read_csv(rec_path)
+    elif rec_path.suffix.lower() in (".xlsx", ".xls"):
+        df = pd.read_excel(rec_path)
+    else:
+        raise OutlookTemplateError(f"不支援的收件清單格式：{rec_path.suffix}（請用 csv 或 xlsx）")
+
+    if "email" not in df.columns and "Email" not in df.columns:
+        raise OutlookTemplateError("收件清單必須有 'email' 欄位")
+    email_col = "email" if "email" in df.columns else "Email"
+
+    subject_tpl = params.get("subject_template") or "(無主旨)"
+    body_tpl = params.get("body_template") or ""
+
+    sent_log = []
+    for _, row in df.iterrows():
+        try:
+            ctx = {k: ("" if pd.isna(v) else str(v)) for k, v in row.items()}
+            subj = subject_tpl.format(**ctx)
+            body = body_tpl.format(**ctx)
+            send_mail(to=ctx[email_col], subject=subj, body=body, body_format="html")
+            sent_log.append({"email": ctx[email_col], "status": "ok", "error": ""})
+        except Exception as e:
+            sent_log.append({"email": str(row.get(email_col, "?")), "status": "fail", "error": str(e)})
+
+    df_log = pd.DataFrame(sent_log)
+    success = (df_log["status"] == "ok").sum()
+    fail = len(df_log) - success
+    header = (f"# Bulk Send 報告\n\n總計 {len(df_log)} 筆，成功 {success}、失敗 {fail}")
+    _df_to_format(df_log, "md", output_path, header=header)
+    return f"bulk_send 完成：成功 {success}、失敗 {fail}（共 {len(df_log)} 筆）"
+
+
+def _h_calendar_list(*, params: dict, output_path: Path,
+                      prev_outputs: Optional[list], step_name: str) -> str:
+    """列出某時間範圍的會議。"""
+    from .win32_helpers.outlook import calendar_list
+
+    since = _to_dt(params.get("since")) or (datetime.now() - timedelta(days=7))
+    until = _to_dt(params.get("until")) or (datetime.now() + timedelta(days=30))
+    fmt = (params.get("output_format") or "md").lower()
+
+    df = calendar_list(since=since, until=until, include_recurring=True, limit=200)
+    n = len(df)
+    columns = ["start", "end", "subject", "location", "organizer", "is_recurring"]
+    rename = {
+        "start": "開始", "end": "結束", "subject": "主旨", "location": "地點",
+        "organizer": "主辦人", "is_recurring": "週期性",
+    }
+    header = (f"# 會議清單\n\n時間範圍：{since} ~ {until}，共 {n} 個會議")
+    _df_to_format(df, fmt, output_path,
+                  columns=columns, rename=rename, header=header)
+    return f"calendar_list 完成：{n} 個會議、輸出 {fmt}、檔案：{output_path}"
+
+
+def _h_create_meeting(*, params: dict, output_path: Path,
+                      prev_outputs: Optional[list], step_name: str) -> str:
+    """新增會議邀請。"""
+    from .win32_helpers.outlook import create_meeting
+
+    subject = (params.get("subject") or "").strip()
+    if not subject:
+        raise OutlookTemplateError("create_meeting 缺主旨 (subject)")
+    start = _to_dt(params.get("start"))
+    end = _to_dt(params.get("end"))
+    if not start or not end:
+        raise OutlookTemplateError("create_meeting 缺開始 / 結束時間")
+    location = params.get("location") or ""
+    body = params.get("body") or ""
+    required = _split_emails(params.get("required_attendees"))
+    optional = _split_emails(params.get("optional_attendees"))
+    reminder = int(params.get("reminder_minutes") or 15)
+    send_invitation = bool(params.get("send_invitation", True))
+
+    eid = create_meeting(
+        subject=subject, start=start, end=end,
+        location=location, body=body,
+        required_attendees=required, optional_attendees=optional,
+        reminder_minutes=reminder, send_invitation=send_invitation,
+    )
+    action = "已寄出邀請" if (send_invitation and (required or optional)) else "已存到行事曆"
+    lines = [
+        f"# 會議邀請建立報告 — {action}",
+        f"主旨：{subject}",
+        f"時間：{start} ~ {end}",
+        f"地點：{location or '(未填)'}",
+        f"必要與會者：{', '.join(required) if required else '(無)'}",
+        f"選擇性與會者：{', '.join(optional) if optional else '(無)'}",
+        f"提醒：{reminder} 分鐘前",
+        f"EntryID：`{eid}`",
+    ]
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"create_meeting {action}：{subject} @ {start}"
+
+
+# ── 註冊表 ───────────────────────────────────────────────────────────
+
+
+# template_id → handler；只有在這裡的 template 才走 direct path、不進 LLM
+DIRECT_HANDLERS = {
+    "daily_todo": _h_daily_todo,
+    "download_attachments": _h_download_attachments,
+    "send_mail": _h_send_mail,
+    "send_with_attachment": _h_send_with_attachment,
+    "bulk_send": _h_bulk_send,
+    "calendar_list": _h_calendar_list,
+    "create_meeting": _h_create_meeting,
+}
+
+
+def is_direct_template(template: str) -> bool:
+    return template in DIRECT_HANDLERS
+
+
+def run_direct_template(*, template: str, params: dict, output_path: str,
+                        prev_outputs: Optional[list], step_name: str,
+                        logger_obj: Optional[logging.Logger] = None) -> tuple[bool, str]:
+    """執行 direct 模板，回傳 (success, summary)。
+
+    success=False 時 summary 是錯誤訊息（給使用者看的中文）。
+    summary 也會包含輸出檔路徑等資訊。
+    """
+    handler = DIRECT_HANDLERS.get(template)
+    if handler is None:
+        return (False, f"未註冊的 direct 模板：{template}")
+
+    log = logger_obj or logger
+    out_path = Path(output_path).expanduser() if output_path else None
+    if not out_path:
+        return (False, "direct 模板需要 output_path（runner 應該已自動 default）")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        summary = handler(
+            params=params or {},
+            output_path=out_path,
+            prev_outputs=prev_outputs,
+            step_name=step_name,
+        )
+        log.info(f"[{step_name}] direct/{template} OK：{summary}")
+        return (True, summary)
+    except OutlookTemplateError as e:
+        msg = f"模板「{template}」執行失敗：{e}"
+        log.warning(f"[{step_name}] {msg}")
+        return (False, msg)
+    except Exception as e:
+        msg = f"模板「{template}」遇到非預期錯誤：{e.__class__.__name__}: {e}"
+        log.error(f"[{step_name}] {msg}", exc_info=True)
+        return (False, msg)

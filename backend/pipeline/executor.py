@@ -2206,8 +2206,15 @@ async def execute_step_with_outlook(
     run_id: str = "",
     ask_mode: bool = False,
 ) -> ExecResult:
-    """Outlook 自動化節點專屬 agent loop。永遠跑 host（不上 sandbox）。"""
-    # 處理 output_path（同 skill 模式）
+    """Outlook 自動化節點。
+
+    執行路徑分流：
+      A. Direct path（template 在 outlook_templates.DIRECT_HANDLERS 裡）→ 不走 LLM、
+         直接呼叫對應 handler（快、確定性、零 token 成本）
+      B. LLM path（template 不在 direct 清單 / 為空 / 自由輸入）→ 進 agent loop、
+         讓 LLM 寫 code 處理（吃 token、可能多輪 retry）
+    """
+    # 處理 output_path（兩條路徑共用）
     if output_path:
         output_path = str(Path(output_path).expanduser())
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -2221,6 +2228,25 @@ async def execute_step_with_outlook(
     if working_dir:
         Path(working_dir).mkdir(parents=True, exist_ok=True)
 
+    # ── 路徑 A：Direct template handler（不需 LLM）────────────────────
+    from pipeline.outlook_templates import is_direct_template, run_direct_template
+    if template and is_direct_template(template):
+        logger.info(f"[{step_name}] 走 direct 模板路徑：{template}（不進 LLM）")
+        ok, summary = run_direct_template(
+            template=template,
+            params=template_params or {},
+            output_path=output_path or "",
+            prev_outputs=prev_outputs,
+            step_name=step_name,
+            logger_obj=logger,
+        )
+        return ExecResult(
+            exit_code=0 if ok else 1,
+            stdout=f"[Outlook 完成] {summary}" if ok else "",
+            stderr="" if ok else summary,
+        )
+
+    # ── 路徑 B：LLM agent loop（自由輸入 / 需要摘要的模板）─────────────
     # AST gate
     backend_dir = str(Path(__file__).resolve().parent.parent)
     if backend_dir not in sys.path:
