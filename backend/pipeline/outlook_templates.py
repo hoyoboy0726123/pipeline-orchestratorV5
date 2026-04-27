@@ -455,6 +455,114 @@ def is_direct_template(template: str) -> bool:
     return template in DIRECT_HANDLERS
 
 
+# ── LLM prefetch handlers ────────────────────────────────────────────
+# 給「需要 LLM 摘要 / 分析」的模板用。後端先把資料抓好（呼叫 win32_helpers），
+# 把結果以 markdown 字串塞進 LLM prompt，LLM 只負責讀字串、整理成報告。
+# 比讓 LLM 從零寫 search_mail() 程式碼穩定多了 — 不會因為 timezone / 套件 / pandas 怪
+# 異 crash 卡住。LLM 只需要做語意理解（摘要、分類、結論）就好。
+
+
+def _prefetch_search_summary(params: dict, prev_outputs: Optional[list]) -> tuple[bool, str, str]:
+    """search_summary 模板的預抓資料。
+
+    回傳 (ok, prefetched_markdown, error_msg)。
+      ok=True  → prefetched_markdown 含信件內容，LLM 只摘要
+      ok=False → LLM 自己想辦法抓（fallback path）
+    """
+    from .win32_helpers.outlook import search_mail
+
+    raw_keywords = params.get("keywords") or ""
+    if not raw_keywords.strip():
+        return (False, "", "缺『關鍵字』參數，無法預抓")
+
+    keywords = _split_keywords(raw_keywords)
+    if not keywords:
+        return (False, "", "關鍵字解析後為空")
+
+    search_in = (params.get("search_in") or "subject").strip().lower()
+    folder = (params.get("folder") or "inbox").strip() or "inbox"
+    since = _to_dt(params.get("since"))
+    until = _to_dt(params.get("until"))
+
+    try:
+        if search_in == "subject":
+            df = search_mail(subject=keywords, folder=folder,
+                             since=since, until=until, limit=200)
+        elif search_in == "body":
+            df = search_mail(body_keyword=keywords, folder=folder,
+                             since=since, until=until, limit=200)
+        else:  # both
+            df_subj = search_mail(subject=keywords, folder=folder,
+                                  since=since, until=until, limit=200)
+            df_body = search_mail(body_keyword=keywords, folder=folder,
+                                  since=since, until=until, limit=200)
+            df = pd.concat([df_subj, df_body], ignore_index=True)
+            if not df.empty:
+                df = df.drop_duplicates(subset=["entry_id"]).reset_index(drop=True)
+    except Exception as e:
+        return (False, "", f"search_mail 失敗：{e.__class__.__name__}: {e}")
+
+    if df.empty:
+        return (True, f"（在資料夾 `{folder}` 內、條件「{', '.join(keywords)}」搜尋範圍 `{search_in}`，無符合的信件）", "")
+
+    # 把信件內容組成 LLM 友善的 markdown
+    lines = [f"## 共找到 {len(df)} 封符合條件的信件\n"]
+    df_str = df.astype(str).replace({"NaT": "", "nan": "", "None": ""})
+    for i, row in df_str.iterrows():
+        lines.append(f"### 信件 #{i + 1}：{row['subject']}")
+        lines.append(f"- **寄件人**：{row['sender_name']} <{row['sender_email']}>")
+        lines.append(f"- **收件時間**：{row['received']}")
+        if row.get("has_attachments") == "True":
+            lines.append(f"- **附件**：{row.get('attachment_names', '')}")
+        body = row.get("body_text", "")
+        # body 截短 — 太長 LLM 也讀不完，1500 字夠摘要
+        if len(body) > 1500:
+            body = body[:1500] + f"\n\n…（本文截斷，原長 {len(body)} 字）"
+        lines.append(f"- **本文**：")
+        lines.append("```")
+        lines.append(body.replace("`", "'"))  # 避免 ` 跟外層 code fence 衝突
+        lines.append("```")
+        lines.append("")
+    return (True, "\n".join(lines), "")
+
+
+# template_id → prefetch handler；LLM 模板可以選擇性註冊一個 prefetch
+LLM_PREFETCH_HANDLERS = {
+    "search_summary": _prefetch_search_summary,
+    # "unanswered": _prefetch_unanswered,  # Phase 2 — 邏輯較複雜（要交叉比對寄件備份）
+}
+
+
+def has_prefetch(template: str) -> bool:
+    return template in LLM_PREFETCH_HANDLERS
+
+
+def run_prefetch(*, template: str, params: dict,
+                 prev_outputs: Optional[list],
+                 logger_obj: Optional[logging.Logger] = None) -> tuple[bool, str, str]:
+    """執行 LLM 模板的預抓資料。
+
+    回傳 (ok, prefetched_markdown, error_msg)：
+      - ok=True：prefetched_markdown 是給 LLM prompt 用的資料字串
+      - ok=False：error_msg 是失敗原因，caller 應 fallback 到 LLM 自己寫 code
+    """
+    handler = LLM_PREFETCH_HANDLERS.get(template)
+    if handler is None:
+        return (False, "", f"未註冊的 prefetch 模板：{template}")
+    log = logger_obj or logger
+    try:
+        ok, md, err = handler(params or {}, prev_outputs)
+        if ok:
+            log.info(f"[prefetch/{template}] OK：{len(md)} 字資料已預抓")
+        else:
+            log.warning(f"[prefetch/{template}] failed：{err}")
+        return (ok, md, err)
+    except Exception as e:
+        msg = f"prefetch 例外：{e.__class__.__name__}: {e}"
+        log.error(f"[prefetch/{template}] {msg}", exc_info=True)
+        return (False, "", msg)
+
+
 def run_direct_template(*, template: str, params: dict, output_path: str,
                         prev_outputs: Optional[list], step_name: str,
                         logger_obj: Optional[logging.Logger] = None) -> tuple[bool, str]:

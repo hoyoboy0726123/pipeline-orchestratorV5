@@ -2151,8 +2151,13 @@ def _build_outlook_prompt(
     free_text: str,
     output_path: Optional[str],
     prev_outputs: Optional[list],
+    prefetched_data: str = "",
+    prefetch_error: str = "",
 ) -> str:
-    """根據 template / params / 自由輸入文字組出給 LLM 的 user prompt。"""
+    """根據 template / params / 自由輸入文字組出給 LLM 的 user prompt。
+
+    若 prefetched_data 有值，prompt 會明確告訴 LLM「資料已預抓」並把它嵌進來，
+    LLM 的工作就只剩「整理 + 寫檔」。"""
     parts: list[str] = []
 
     if template:
@@ -2173,11 +2178,39 @@ def _build_outlook_prompt(
         parts.append("使用者既沒選模板也沒打字。請呼叫 done(success=false, error=...) "
                      "回報需要更明確的指示。")
 
+    # 預抓資料區塊 — 若後端已預抓成功，LLM 不應再呼叫 search_mail
+    if prefetched_data:
+        parts.append("")
+        parts.append("## 已預抓的資料（後端已從 Outlook 抓好）")
+        parts.append("**這段是真實 Outlook 內容，已經完成抓取。你不需要也不應該重新呼叫 "
+                     "search_mail/calendar_list 等函式抓資料。**")
+        parts.append("你的工作：根據下方資料 + 模板參數，整理成適合的格式（通常是 markdown）"
+                     "寫到 output_path。")
+        parts.append("")
+        parts.append("---")
+        parts.append(prefetched_data)
+        parts.append("---")
+    elif prefetch_error:
+        # prefetch 失敗了 → 告訴 LLM 自己想辦法
+        parts.append("")
+        parts.append(f"## 注意：預抓資料失敗（{prefetch_error}）")
+        parts.append("後端嘗試自動抓資料但失敗了。請你自己用 win32_helpers / pywin32 "
+                     "嘗試把資料抓出來、處理。")
+
     if output_path:
         parts.append("")
         parts.append(f"## 輸出檔案路徑")
         parts.append(f"請把整理 / 摘要結果寫到：`{output_path}`")
         parts.append("（父資料夾已建好。格式請依模板需求或內容性質決定 xlsx / md / json / pdf。）")
+        if prefetched_data:
+            parts.append("典型寫法（資料已備齊、不用再抓）：")
+            parts.append("```python")
+            parts.append("from pathlib import Path")
+            parts.append("# 你直接把整理好的 markdown 報告字串組起來")
+            parts.append("report = '''# 標題\\n\\n（你的摘要內容）\\n'''")
+            parts.append(f"Path(r'{output_path}').write_text(report, encoding='utf-8')")
+            parts.append("print(f'已寫入 {{len(report)}} 字到 output')")
+            parts.append("```")
 
     if prev_outputs:
         parts.append("")
@@ -2256,6 +2289,24 @@ async def execute_step_with_outlook(
     # 給下方 run_python 的 sys.path 注入用 — agent code 跑在 subprocess、不繼承我們這邊的 sys.path
     _backend_dir_for_outlook = backend_dir
 
+    # 預抓資料（mid-path）：若 template 有 prefetch handler，後端先把資料抓好給 LLM。
+    # LLM 的工作從「寫 search_mail 程式碼 + 摘要」變成「讀資料 + 摘要」 — 大幅縮短迭代、
+    # 避開 LLM 寫 search_mail 程式碼可能踩的 timezone / pandas / 套件坑。
+    prefetched_data = ""
+    prefetch_error = ""
+    from pipeline.outlook_templates import has_prefetch, run_prefetch
+    if template and has_prefetch(template):
+        ok_pf, md_pf, err_pf = run_prefetch(
+            template=template, params=template_params or {},
+            prev_outputs=prev_outputs, logger_obj=logger,
+        )
+        if ok_pf:
+            prefetched_data = md_pf
+            logger.info(f"[{step_name}] ✓ 預抓資料完成（{len(md_pf)} 字），LLM 只需摘要")
+        else:
+            prefetch_error = err_pf
+            logger.warning(f"[{step_name}] ⚠ 預抓失敗：{err_pf}（LLM 將自己抓）")
+
     # LLM
     from llm_factory import build_llm, invoke_with_streaming
     from langchain_core.messages import HumanMessage, SystemMessage
@@ -2267,8 +2318,11 @@ async def execute_step_with_outlook(
         free_text=free_text,
         output_path=output_path,
         prev_outputs=prev_outputs,
+        prefetched_data=prefetched_data,
+        prefetch_error=prefetch_error,
     )
-    logger.info(f"[{step_name}] Outlook agent 啟動，template={template or '(自由輸入)'}")
+    logger.info(f"[{step_name}] Outlook agent 啟動，template={template or '(自由輸入)'}"
+                + ("（資料已預抓）" if prefetched_data else ""))
     logger.debug(f"[{step_name}] user prompt:\n{user_prompt}")
 
     messages = [SystemMessage(content=_OUTLOOK_SYSTEM_PROMPT), HumanMessage(content=user_prompt)]
