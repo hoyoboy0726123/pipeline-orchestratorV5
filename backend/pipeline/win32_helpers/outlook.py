@@ -53,16 +53,28 @@ StrOrList = Union[str, list[str], None]
 
 # ── Helper：日期 / 過濾條件正規化 ────────────────────────────────────
 def _to_datetime(d: DateLike) -> Optional[datetime]:
-    """各種日期輸入 → datetime；None 回 None。"""
+    """各種日期輸入 → timezone-aware datetime（用本地時區）；None 回 None。
+
+    Outlook COM 的 ReceivedTime 屬性是 pywintypes.datetime，**永遠帶 tzinfo**（本地時區）。
+    所以這邊回的也必須是 timezone-aware，否則跟 received 比較會 TypeError：
+      can't compare offset-naive and offset-aware datetimes
+
+    處理：使用者通常傳 naive datetime（"2026-04-27" / datetime.now()）→ 我們補上本地時區。
+    使用者主動帶 tz 的就尊重原值。"""
     if d is None:
         return None
     if isinstance(d, datetime):
-        return d
-    if isinstance(d, pd.Timestamp):
-        return d.to_pydatetime()
-    if isinstance(d, str):
-        return pd.to_datetime(d).to_pydatetime()
-    raise TypeError(f"不認識的日期型別：{type(d).__name__}")
+        out = d
+    elif isinstance(d, pd.Timestamp):
+        out = d.to_pydatetime()
+    elif isinstance(d, str):
+        out = pd.to_datetime(d).to_pydatetime()
+    else:
+        raise TypeError(f"不認識的日期型別：{type(d).__name__}")
+    # 補上 tzinfo（本地時區）讓比較不炸 — datetime.now().astimezone() 會帶當前本地 tz
+    if out.tzinfo is None:
+        out = out.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return out
 
 
 def _match(text: str, pattern: Optional[str], exact: bool) -> bool:

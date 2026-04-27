@@ -184,7 +184,6 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
   const data = node.data
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 bg-white'
 
-  const currentTemplate = TEMPLATES.find(t => t.id === data.template) || null
 
   // 相容性警告：只支援傳統 Outlook（New Outlook for Windows / Web 不支援 COM）
   // 使用者讀過、按「我知道了」後存到 localStorage 不再顯示，但摘要列永遠保留
@@ -371,40 +370,43 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
             <div key={cat} className="mb-3">
               <p className="text-[11px] font-semibold text-gray-500 mb-1">{CATEGORY_LABEL[cat]}</p>
               <div className="space-y-1">
-                {TEMPLATES.filter(t => t.category === cat).map(t => (
-                  <button key={t.id}
-                    onClick={() => selectTemplate(t.id)}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs border transition-colors ${
-                      data.template === t.id
-                        ? 'bg-blue-500 text-white border-blue-500'
-                        : 'bg-white text-gray-700 border-gray-200 hover:border-blue-300'
-                    }`}
-                    title={t.description}
-                  >
-                    {t.label}
-                  </button>
-                ))}
+                {TEMPLATES.filter(t => t.category === cat).map(t => {
+                  const isSelected = data.template === t.id
+                  return (
+                    <div key={t.id} className="space-y-0">
+                      <button
+                        onClick={() => selectTemplate(t.id)}
+                        className={`w-full text-left px-2.5 py-1.5 text-xs border transition-colors ${
+                          isSelected
+                            ? 'bg-blue-500 text-white border-blue-500 rounded-t-lg'
+                            : 'bg-white text-gray-700 border-gray-200 hover:border-blue-300 rounded-lg'
+                        }`}
+                        title={t.description}
+                      >
+                        {t.label}
+                      </button>
+                      {/* 參數區直接接在被選中的模板按鈕下面，視覺上是「同一塊」 */}
+                      {isSelected && (
+                        <div className="px-3 py-3 rounded-b-lg border border-t-0 border-blue-500 bg-blue-50/30 space-y-3">
+                          <p className="text-[11px] text-gray-600 leading-relaxed">{t.description}</p>
+                          {t.params.map(p => (
+                            <div key={p.key}>
+                              {p.type !== 'bool' && (
+                                <label className="text-xs text-gray-600 block mb-1">{p.label}</label>
+                              )}
+                              {renderParam(p)}
+                              {p.hint && <p className="text-[10px] text-gray-400 mt-0.5">{p.hint}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           ))}
         </div>
-
-        {/* 模板參數區 */}
-        {currentTemplate && (
-          <div className="p-3 rounded-lg border border-gray-200 bg-gray-50/50 space-y-3">
-            <p className="text-xs font-semibold text-gray-700">{currentTemplate.label} — 參數</p>
-            <p className="text-[11px] text-gray-500">{currentTemplate.description}</p>
-            {currentTemplate.params.map(p => (
-              <div key={p.key}>
-                {p.type !== 'bool' && (
-                  <label className="text-xs text-gray-600 block mb-1">{p.label}</label>
-                )}
-                {renderParam(p)}
-                {p.hint && <p className="text-[10px] text-gray-400 mt-0.5">{p.hint}</p>}
-              </div>
-            ))}
-          </div>
-        )}
 
         {/* 自由輸入區（沒選模板時顯示） */}
         {!data.template && (

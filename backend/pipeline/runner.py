@@ -971,7 +971,16 @@ async def run_pipeline(
                 )
             elif step.outlook_automation:
                 # Outlook 自動化節點：永遠跑 host（pywin32），跳過 sandbox / recipe 路徑
-                _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                if step.output and step.output.path:
+                    _resolved_out = str(_resolve_path(step.output.path))
+                else:
+                    # 使用者沒設 outputPath → 自動 default 到 ai_output/<workflow>/<step>_result.md
+                    # 這樣自由輸入需求（例如「整理今天的信件做摘要」）不會只 print 到 stdout
+                    # 後消失，整理成果一定會落地成檔，使用者開資料夾就看得到。
+                    import re as _re
+                    _safe_step = _re.sub(r"[^\w一-鿿_-]", "_", step.name).strip("_") or "result"
+                    _resolved_out = str(_resolve_path(f"ai_output/{config.name}/{_safe_step}_result.md"))
+                    logger.info(f"[{step.name}] 自動 default outputPath → {_resolved_out}")
                 exec_result = await execute_step_with_outlook(
                     template=step.outlook_template,
                     template_params=step.outlook_params or {},
