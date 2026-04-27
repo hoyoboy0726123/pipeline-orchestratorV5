@@ -1757,7 +1757,8 @@ async def test_outlook_connection():
         return {
             "ok": False,
             "diagnosis": ("無法連線到 Classic Outlook COM。最常見原因：你日常用的是「新版 Outlook for Windows」"
-                          "（不支援 COM）→ 請開啟 Classic Outlook 並確認 profile 已設定。"),
+                          "（不支援 COM）。切換方式：在新版 Outlook 點上方「說明」分頁，"
+                          "右邊最後一個按鈕「前往傳統 Outlook」即可切回。"),
             "error": f"{e.__class__.__name__}: {e}",
         }
 
@@ -1765,8 +1766,8 @@ async def test_outlook_connection():
     if inbox_count == 0:
         diagnosis = (f"COM 連線成功（Outlook {version}），但收件匣是 0 封。"
                      f"通常代表：你用的是新版 Outlook 而 Classic Outlook 的 profile 是空的。"
-                     f"請開「控制台 → 郵件 → 顯示設定檔 → 新增」加上你的帳號，"
-                     f"並開啟 Classic Outlook 確認看得到信件。")
+                     f"最快解法：在新版 Outlook 點「說明」分頁 → 右邊最後一個按鈕「前往傳統 Outlook」"
+                     f"切回傳統版（保留同帳號），再回來重測。")
     else:
         diagnosis = (f"✓ Classic Outlook 連線正常（版本 {version}）。"
                      f"收件匣有 {inbox_count} 封信、寄件備份 {sent_count} 封、草稿 {drafts_count} 封。"

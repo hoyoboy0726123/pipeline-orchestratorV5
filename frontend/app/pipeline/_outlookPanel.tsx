@@ -299,8 +299,11 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
                 <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
                   本節點透過 <code className="font-mono bg-amber-100 px-1 rounded">pywin32 + Outlook COM</code> 操作，
                   <b>只支援傳統 Outlook（Classic Outlook）</b>，不支援新版 Outlook for Windows、Outlook 網頁版、Outlook 行動版。
-                  按下方按鈕測試你的環境是否可用。
                 </p>
+                <p className="text-[11px] text-amber-900 mt-1.5 leading-relaxed bg-amber-100/60 px-2 py-1 rounded">
+                  💡 若你用的是新版 Outlook：點上方「<b>說明</b>」分頁 → 右邊最後一個按鈕「<b>前往傳統 Outlook</b>」即可切回（保留同個帳號）。
+                </p>
+                <p className="text-[11px] text-amber-800 mt-1.5 leading-relaxed">按下方按鈕測試你的環境是否可用。</p>
               </div>
             </div>
             <div className="flex items-center gap-2 pt-1">
