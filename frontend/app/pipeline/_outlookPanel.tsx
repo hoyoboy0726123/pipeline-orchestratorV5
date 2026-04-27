@@ -1,6 +1,9 @@
 'use client'
-import { X } from 'lucide-react'
+import { useState } from 'react'
+import { X, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react'
 import type { OutlookData, OutlookNode } from './_helpers'
+
+const COMPATIBILITY_DISMISS_KEY = 'outlook-compat-warning-dismissed-v1'
 
 const NODE_COLOR = '#0078d4'
 
@@ -181,6 +184,18 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
 
   const currentTemplate = TEMPLATES.find(t => t.id === data.template) || null
 
+  // 相容性警告：只支援傳統 Outlook（New Outlook for Windows / Web 不支援 COM）
+  // 使用者讀過、按「我知道了」後存到 localStorage 不再顯示，但摘要列永遠保留
+  const [warnDismissed, setWarnDismissed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem(COMPATIBILITY_DISMISS_KEY) === '1'
+  })
+  const [warnExpanded, setWarnExpanded] = useState(false)
+  const dismissWarn = () => {
+    try { localStorage.setItem(COMPATIBILITY_DISMISS_KEY, '1') } catch {/* ignore */}
+    setWarnDismissed(true)
+  }
+
   const setParam = (key: string, value: unknown) => {
     onUpdate({ params: { ...data.params, [key]: value } })
   }
@@ -251,6 +266,61 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* ── 相容性警告：只支援 Classic Outlook ────────────────────── */}
+        {!warnDismissed ? (
+          <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-amber-900">⚠ 開始前請先確認 Outlook 版本</p>
+                <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
+                  本節點透過 <code className="font-mono bg-amber-100 px-1 rounded">pywin32 + Outlook COM</code> 操作，
+                  <b>只支援傳統 Outlook（Classic Outlook，桌面版 Office 2016/2019/2021/365）</b>，
+                  不支援以下幾種：
+                </p>
+                <ul className="text-[11px] text-amber-800 mt-1 ml-4 list-disc space-y-0.5">
+                  <li><b>新版 Outlook for Windows</b>（藍色介面那個 — Microsoft 2024 後主推）</li>
+                  <li><b>Outlook on the Web</b>（瀏覽器版 outlook.office.com）</li>
+                  <li><b>Outlook 行動版</b>（手機 / iPad）</li>
+                </ul>
+                <p className="text-[11px] text-amber-800 mt-2 leading-relaxed">
+                  若你日常用新版 Outlook，需要先在<b>傳統 Outlook 加上同一個帳號</b>
+                  （兩個版本可並存）。<button onClick={() => setWarnExpanded(v => !v)}
+                    className="text-amber-900 underline ml-0.5">查看設定步驟 {warnExpanded ? '▲' : '▼'}</button>
+                </p>
+                {warnExpanded && (
+                  <ol className="text-[11px] text-amber-800 mt-2 ml-4 list-decimal space-y-1 leading-relaxed bg-amber-100/50 p-2 rounded">
+                    <li>開「<b>控制台</b>」→ 搜尋「郵件」→ 點「郵件 (Microsoft Outlook)」</li>
+                    <li>「<b>顯示設定檔</b>」→「<b>新增</b>」（或編輯既有設定檔）</li>
+                    <li>用 Exchange / O365 / IMAP 帳號登入</li>
+                    <li>開啟「<b>傳統 Outlook</b>」（不是新版那個）→ 等同步完成、確認看得到信件</li>
+                    <li>把傳統 Outlook 開著、回來 V5 跑這個節點</li>
+                  </ol>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={dismissWarn}
+                className="text-[11px] px-2 py-0.5 rounded text-amber-700 hover:bg-amber-200 transition-colors"
+              >
+                我知道了，不再顯示
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="px-2 py-1.5 rounded-lg bg-gray-50 border border-gray-200 flex items-center gap-2">
+            <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+            <span className="text-[11px] text-gray-500 flex-1">需要傳統 Outlook（非新版 / 非 Web）</span>
+            <button
+              onClick={() => { setWarnDismissed(false); setWarnExpanded(true) }}
+              className="text-[11px] text-blue-600 hover:underline shrink-0"
+            >
+              查看
+            </button>
+          </div>
+        )}
+
         {/* Name */}
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">節點名稱</label>
