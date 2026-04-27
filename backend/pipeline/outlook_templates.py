@@ -103,23 +103,31 @@ def _substitute_prev_in_attachments(att: Any, prev_outputs: Optional[list]) -> l
 def _df_to_format(df: pd.DataFrame, fmt: str, output_path: Path, *,
                    columns: Optional[list[str]] = None,
                    rename: Optional[dict[str, str]] = None,
-                   header: str = "") -> None:
+                   header: str = "") -> Path:
     """把 DataFrame 依使用者要的格式寫到 output_path。
     fmt: md / xlsx / txt（其他值預設走 md）
     columns: 只保留這些欄位（None = 全部）
     rename: 欄名改中文 {"received": "收件時間", ...}
-    header: 寫到檔案最上方的標題段（md / txt 適用，xlsx 忽略）"""
+    header: 寫到檔案最上方的標題段（md / txt 適用，xlsx 忽略）
+
+    回傳實際寫入的 Path（可能跟入參不同 — 若 fmt 跟原副檔名不匹配會自動調整）。"""
     if columns:
         df = df[[c for c in columns if c in df.columns]].copy()
     if rename:
         df = df.rename(columns=rename)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fmt = (fmt or "md").lower()
+    # 副檔名跟 fmt 不一致時自動調整 — runner 預先 default 路徑（通常是 .md）但
+    # 使用者選了 xlsx → 若不調整會 ValueError "Invalid extension for engine"
+    expected_suffix = {"xlsx": ".xlsx", "txt": ".txt", "md": ".md"}.get(fmt, ".md")
+    if output_path.suffix.lower() != expected_suffix:
+        output_path = output_path.with_suffix(expected_suffix)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt == "xlsx":
         df.to_excel(str(output_path), index=False, engine="openpyxl")
-        return
+        return output_path
 
     if fmt == "txt":
         lines = []
@@ -131,7 +139,7 @@ def _df_to_format(df: pd.DataFrame, fmt: str, output_path: Path, *,
                 lines.append(f"{col}: {row[col]}")
             lines.append("-" * 60)
         output_path.write_text("\n".join(lines), encoding="utf-8")
-        return
+        return output_path
 
     # 預設 md
     lines = []
@@ -151,6 +159,7 @@ def _df_to_format(df: pd.DataFrame, fmt: str, output_path: Path, *,
                     for c in cols]
             lines.append("| " + " | ".join(vals) + " |")
     output_path.write_text("\n".join(lines), encoding="utf-8")
+    return output_path
 
 
 def _to_dt(s: Any) -> Optional[datetime]:
@@ -210,9 +219,9 @@ def _h_daily_todo(*, params: dict, output_path: Path,
     if unread_only:
         header_parts.append("僅未讀")
 
-    _df_to_format(df, fmt, output_path,
-                  columns=columns, rename=rename, header="\n".join(header_parts))
-    return f"daily_todo 完成：命中 {n} 封信、輸出格式 {fmt}、檔案：{output_path}"
+    actual_path = _df_to_format(df, fmt, output_path,
+                                 columns=columns, rename=rename, header="\n".join(header_parts))
+    return f"daily_todo 完成：命中 {n} 封信、輸出格式 {fmt}、檔案：{actual_path}"
 
 
 def _h_download_attachments(*, params: dict, output_path: Path,
@@ -391,9 +400,9 @@ def _h_calendar_list(*, params: dict, output_path: Path,
         "organizer": "主辦人", "is_recurring": "週期性",
     }
     header = (f"# 會議清單\n\n時間範圍：{since} ~ {until}，共 {n} 個會議")
-    _df_to_format(df, fmt, output_path,
-                  columns=columns, rename=rename, header=header)
-    return f"calendar_list 完成：{n} 個會議、輸出 {fmt}、檔案：{output_path}"
+    actual_path = _df_to_format(df, fmt, output_path,
+                                 columns=columns, rename=rename, header=header)
+    return f"calendar_list 完成：{n} 個會議、輸出 {fmt}、檔案：{actual_path}"
 
 
 def _h_create_meeting(*, params: dict, output_path: Path,
