@@ -759,9 +759,9 @@ export default function PipelinePage() {
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
     const steps = flowToSteps(nodes, edges)
     // 空步驟檢查：排除有自己 schema 的節點類型（不靠 batch 跑的）
-    //   computer_use / human_confirm / visual_validation 都不需要 batch，自有檢查
+    //   computer_use / human_confirm / visual_validation / outlook_automation 都不需要 batch，自有檢查
     const emptyStep = steps.find(s =>
-      !s.batch?.trim() && !s.humanConfirm && !s.computerUse && !s.visualValidation
+      !s.batch?.trim() && !s.humanConfirm && !s.computerUse && !s.visualValidation && !s.outlookAutomation
     )
     if (emptyStep) {
       toast.error(`步驟「${emptyStep.name}」尚未設定${emptyStep.skillMode ? '任務描述' : '執行指令'}，請點擊該步驟方塊填入`)
@@ -777,6 +777,14 @@ export default function PipelinePage() {
     const emptyVv = steps.find(s => s.visualValidation && !s.vvPrompt?.trim())
     if (emptyVv) {
       toast.error(`視覺驗證節點「${emptyVv.name}」尚未填判斷條件（vv_prompt），請點開節點填入`)
+      return
+    }
+    // outlook_automation 節點：要嘛選了模板、要嘛有自由輸入文字，兩者皆無就提示
+    const emptyOu = steps.find(s => s.outlookAutomation
+      && !s.outlookTemplate?.trim()
+      && !s.batch?.trim())
+    if (emptyOu) {
+      toast.error(`Outlook 自動化節點「${emptyOu.name}」尚未選模板、也沒打字描述需求，請點開節點選一個模板或在自由輸入區寫`)
       return
     }
     // 查詢 recipe 狀態，然後顯示選擇 dialog
