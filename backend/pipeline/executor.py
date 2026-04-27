@@ -2085,7 +2085,9 @@ _OUTLOOK_SYSTEM_PROMPT = """你是 Outlook 自動化專家。透過 pywin32 + Ou
 **禁止 import**：requests / httpx / urllib / selenium / playwright / subprocess / smtplib / imaplib / sklearn / torch 等。
 做不到的需求（例如要連 Web API、操作 Slack、Teams、瀏覽器）→ 直接 `done(success=false, error="此需求需要 X，不在 Outlook 自動化節點範圍。建議使用一般 Skill 節點。")`。
 
-## 推薦的 win32_helpers.outlook API
+## 推薦的 wrapper API（import 路徑：`from pipeline.win32_helpers.outlook import ...`）
+
+注意：本節點的 sys.path 會自動注入 backend dir，所以你直接 `from pipeline.win32_helpers.outlook import search_mail` 就能 import。**不要寫 `from win32_helpers.outlook import ...`**（少了 `pipeline.` 前綴會 ModuleNotFoundError）。
 
 ```python
 # 讀信（回 DataFrame）
@@ -2225,6 +2227,9 @@ async def execute_step_with_outlook(
         sys.path.insert(0, backend_dir)
     from pipeline.win32_agent_config import check_imports, format_errors_for_agent
 
+    # 給下方 run_python 的 sys.path 注入用 — agent code 跑在 subprocess、不繼承我們這邊的 sys.path
+    _backend_dir_for_outlook = backend_dir
+
     # LLM
     from llm_factory import build_llm, invoke_with_streaming
     from langchain_core.messages import HumanMessage, SystemMessage
@@ -2327,9 +2332,17 @@ async def execute_step_with_outlook(
                     continue
 
                 # 執行（強制 host）
+                # 注入 sys.path 讓 subprocess 找得到 backend dir 裡的 win32_helpers / pipeline 套件
+                # （_skill_run_python 寫到 Windows temp 目錄後 spawn subprocess，預設 sys.path
+                # 沒有 backend dir → import win32_helpers / from pipeline.X 會 ModuleNotFoundError）
+                _injected_code = (
+                    f"import sys\n"
+                    f"sys.path.insert(0, r{repr(_backend_dir_for_outlook)})\n"
+                    + tool_input
+                )
                 tool_result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda ti=tool_input, lg=logger: _execute_skill_tool(
+                    lambda ti=_injected_code, lg=logger: _execute_skill_tool(
                         "run_python", ti, cwd=working_dir, run_id=run_id,
                         logger=lg, force_host=True,
                     ),
