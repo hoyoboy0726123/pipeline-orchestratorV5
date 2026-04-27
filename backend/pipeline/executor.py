@@ -2297,13 +2297,20 @@ async def execute_step_with_outlook(
     from pipeline.outlook_templates import is_direct_template, run_direct_template
     if template and is_direct_template(template):
         logger.info(f"[{step_name}] 走 direct 模板路徑：{template}（不進 LLM）")
-        ok, summary = run_direct_template(
-            template=template,
-            params=template_params or {},
-            output_path=output_path or "",
-            prev_outputs=prev_outputs,
-            step_name=step_name,
-            logger_obj=logger,
+        # 重要：run_direct_template 內部呼叫 search_mail / calendar_list 都是
+        # 同步阻塞 COM call，可能跑 4-5 分鐘。直接在 asyncio loop 跑會 block
+        # 整個 FastAPI、frontend 1.5s 的 log polling 全部排隊到 run 結束才回應，
+        # 看起來像「跑完才一次印出 log」。所以丟去 thread pool。
+        ok, summary = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: run_direct_template(
+                template=template,
+                params=template_params or {},
+                output_path=output_path or "",
+                prev_outputs=prev_outputs,
+                step_name=step_name,
+                logger_obj=logger,
+            ),
         )
         return ExecResult(
             exit_code=0 if ok else 1,
@@ -2328,9 +2335,14 @@ async def execute_step_with_outlook(
     prefetch_error = ""
     from pipeline.outlook_templates import has_prefetch, run_prefetch
     if template and has_prefetch(template):
-        ok_pf, md_pf, err_pf = run_prefetch(
-            template=template, params=template_params or {},
-            prev_outputs=prev_outputs, logger_obj=logger,
+        # 同 direct path：run_prefetch 是同步 COM call，丟 thread pool 避免 block event loop。
+        # 期間 frontend 的 log polling 才能即時收到 search_mail 的進度訊息。
+        ok_pf, md_pf, err_pf = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: run_prefetch(
+                template=template, params=template_params or {},
+                prev_outputs=prev_outputs, logger_obj=logger,
+            ),
         )
         if ok_pf:
             prefetched_data = md_pf
