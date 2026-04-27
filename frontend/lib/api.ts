@@ -5,12 +5,12 @@ const BASE = '/api/backend'
 /**
  * 長時間請求（如 LLM chat）專用的後端 URL：繞過 Next.js dev 的 rewrite proxy
  * 原因：Next.js rewrite 走 http-proxy，預設 socket timeout ~30s，超時就回 500
- * 只在瀏覽器端且後端在 localhost 時啟用；後端已配置 CORS 允許 3002
+ * 只在瀏覽器端且後端在 localhost 時啟用；後端已配置 CORS 允許前端 origin
  */
 const DIRECT_BASE = (() => {
   if (typeof window === 'undefined') return BASE
   const { hostname } = window.location
-  if (hostname === 'localhost' || hostname === '127.0.0.1') return 'http://localhost:8003'
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return 'http://localhost:8004'
   return BASE
 })()
 
