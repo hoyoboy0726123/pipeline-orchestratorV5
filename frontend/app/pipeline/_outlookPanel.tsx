@@ -60,7 +60,7 @@ type ParamSpec = {
 type Template = {
   id: string
   label: string
-  category: 'inbox' | 'send' | 'attach'
+  category: 'inbox' | 'send' | 'attach' | 'manage'
   description: string
   params: ParamSpec[]
   // execMode: 'direct' = 後端直接 call wrapper、不進 LLM（快、零 token、可預測）
@@ -186,12 +186,70 @@ const TEMPLATES: Template[] = [
         hint: '可用變數：{date} {sender} {subject} {filename}' },
     ],
   },
+  // E. 信件管理（批次 move / mark / flag）
+  {
+    id: 'bulk_move',
+    label: '📂 批次搬信到指定資料夾',
+    category: 'manage',
+    execMode: 'direct',
+    description: '搜出符合條件的信件、批次搬到目標資料夾',
+    params: [
+      { key: 'folder', label: '來源資料夾', type: 'text', placeholder: 'inbox', hint: '預設 inbox' },
+      { key: 'subject', label: '主旨關鍵字（可選）', type: 'text' },
+      { key: 'sender', label: '寄件人（可選）', type: 'text' },
+      { key: 'since', label: '從（可選）', type: 'datetime-local' },
+      { key: 'until', label: '到（可選）', type: 'datetime-local' },
+      { key: 'target_folder', label: '目標資料夾', type: 'text',
+        placeholder: 'Inbox/Projects/2026',
+        hint: '可寫別名（inbox / 收件匣）或路徑（Inbox/Projects/2026）' },
+      { key: 'limit', label: '最多處理幾封', type: 'number', placeholder: '500' },
+    ],
+  },
+  {
+    id: 'bulk_mark_read',
+    label: '✅ 批次標已讀／未讀',
+    category: 'manage',
+    execMode: 'direct',
+    description: '搜出符合條件的信件、批次設為已讀或未讀',
+    params: [
+      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox' },
+      { key: 'subject', label: '主旨關鍵字（可選）', type: 'text' },
+      { key: 'sender', label: '寄件人（可選）', type: 'text' },
+      { key: 'since', label: '從（可選）', type: 'datetime-local' },
+      { key: 'until', label: '到（可選）', type: 'datetime-local' },
+      { key: 'state', label: '目標狀態', type: 'select',
+        options: [{ value: 'read', label: '標已讀' }, { value: 'unread', label: '標未讀' }] },
+      { key: 'limit', label: '最多處理幾封', type: 'number', placeholder: '500' },
+    ],
+  },
+  {
+    id: 'bulk_set_flag',
+    label: '🚩 批次設旗標 / 標完成 / 清除',
+    category: 'manage',
+    execMode: 'direct',
+    description: '搜出符合條件的信件、批次加追蹤旗標、標完成或清除',
+    params: [
+      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox' },
+      { key: 'subject', label: '主旨關鍵字（可選）', type: 'text' },
+      { key: 'sender', label: '寄件人（可選）', type: 'text' },
+      { key: 'since', label: '從（可選）', type: 'datetime-local' },
+      { key: 'until', label: '到（可選）', type: 'datetime-local' },
+      { key: 'flag', label: '旗標', type: 'select',
+        options: [
+          { value: 'follow_up', label: '🚩 追蹤（紅旗）' },
+          { value: 'complete', label: '✓ 已完成' },
+          { value: 'clear', label: '清除旗標' },
+        ] },
+      { key: 'limit', label: '最多處理幾封', type: 'number', placeholder: '500' },
+    ],
+  },
 ]
 
 const CATEGORY_LABEL: Record<Template['category'], string> = {
   inbox: '📥 收信整理',
   send: '📤 寄信',
   attach: '📎 附件',
+  manage: '🗂 信件管理',
 }
 
 interface Props {

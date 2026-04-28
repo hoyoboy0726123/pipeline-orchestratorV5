@@ -21,7 +21,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -440,6 +440,134 @@ def _h_bulk_send(*, params: dict, output_path: Path,
     return f"bulk_send 完成：成功 {success}、失敗 {fail}（共 {len(df_log)} 筆）"
 
 
+# ── Phase 2：批次管理操作 ───────────────────────────────────────────
+
+
+def _search_for_bulk(params: dict, *, default_folder: str = "inbox",
+                     logger_obj: Optional[logging.Logger] = None) -> "pd.DataFrame":
+    """三個 bulk_* 模板共用的搜尋邏輯：依 subject/sender/folder/since/until 找信。"""
+    from .win32_helpers.outlook import search_mail
+    df = search_mail(
+        subject=_split_keywords(params.get("subject")),
+        sender=_split_keywords(params.get("sender")),
+        folder=(params.get("folder") or default_folder).strip() or default_folder,
+        since=_to_dt(params.get("since")),
+        until=_to_dt(params.get("until")),
+        limit=int(params.get("limit") or 500),
+        logger=logger_obj,
+    )
+    return df
+
+
+def _h_bulk_move(*, params: dict, output_path: Path,
+                 prev_outputs: Optional[list], step_name: str,
+                 logger_obj: Optional[logging.Logger] = None) -> str:
+    """搜尋符合條件的信件、批次搬到目標資料夾。"""
+    from .win32_helpers.outlook import move_mail
+
+    target = (params.get("target_folder") or "").strip()
+    if not target:
+        raise OutlookTemplateError("bulk_move 缺『目標資料夾 (target_folder)』")
+
+    df = _search_for_bulk(params, logger_obj=logger_obj)
+    if df.empty:
+        output_path.write_text("# 批次搬信報告\n\n找不到符合條件的信件。", encoding="utf-8")
+        return "bulk_move 完成：0 封信件可搬"
+
+    moved, failed = 0, []
+    for eid in df["entry_id"].tolist():
+        try:
+            move_mail(entry_id=eid, target_folder=target)
+            moved += 1
+        except Exception as e:
+            failed.append((eid, str(e)[:100]))
+
+    lines = [
+        f"# 批次搬信報告",
+        f"條件命中：{len(df)} 封",
+        f"成功搬移：{moved} 封 → `{target}`",
+        f"失敗：{len(failed)} 封",
+    ]
+    if failed:
+        lines.append("\n## 失敗清單")
+        for eid, err in failed[:20]:
+            lines.append(f"- `{eid[:30]}...`：{err}")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"bulk_move 完成：搬 {moved} 封到 `{target}`，失敗 {len(failed)} 封"
+
+
+def _h_bulk_mark_read(*, params: dict, output_path: Path,
+                      prev_outputs: Optional[list], step_name: str,
+                      logger_obj: Optional[logging.Logger] = None) -> str:
+    """搜尋符合條件的信件、批次標已讀／未讀。"""
+    from .win32_helpers.outlook import mark_read
+
+    state = (params.get("state") or "read").strip().lower()
+    unread_flag = state in ("unread", "未讀")
+    state_desc = "未讀" if unread_flag else "已讀"
+
+    df = _search_for_bulk(params, logger_obj=logger_obj)
+    if df.empty:
+        output_path.write_text("# 批次標記報告\n\n找不到符合條件的信件。", encoding="utf-8")
+        return "bulk_mark_read 完成：0 封信件可標"
+
+    ok, failed = 0, []
+    for eid in df["entry_id"].tolist():
+        try:
+            mark_read(entry_id=eid, unread=unread_flag)
+            ok += 1
+        except Exception as e:
+            failed.append((eid, str(e)[:100]))
+
+    lines = [
+        f"# 批次標記{state_desc}報告",
+        f"條件命中：{len(df)} 封",
+        f"成功標記：{ok} 封",
+        f"失敗：{len(failed)} 封",
+    ]
+    if failed:
+        lines.append("\n## 失敗清單")
+        for eid, err in failed[:20]:
+            lines.append(f"- `{eid[:30]}...`：{err}")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"bulk_mark_read 完成：標 {state_desc} {ok} 封，失敗 {len(failed)} 封"
+
+
+def _h_bulk_set_flag(*, params: dict, output_path: Path,
+                     prev_outputs: Optional[list], step_name: str,
+                     logger_obj: Optional[logging.Logger] = None) -> str:
+    """搜尋符合條件的信件、批次設定旗標。"""
+    from .win32_helpers.outlook import set_flag
+
+    flag = (params.get("flag") or "follow_up").strip()
+
+    df = _search_for_bulk(params, logger_obj=logger_obj)
+    if df.empty:
+        output_path.write_text("# 批次旗標報告\n\n找不到符合條件的信件。", encoding="utf-8")
+        return "bulk_set_flag 完成：0 封信件可設旗標"
+
+    ok, failed = 0, []
+    for eid in df["entry_id"].tolist():
+        try:
+            set_flag(entry_id=eid, flag=flag)
+            ok += 1
+        except Exception as e:
+            failed.append((eid, str(e)[:100]))
+
+    lines = [
+        f"# 批次旗標報告（{flag}）",
+        f"條件命中：{len(df)} 封",
+        f"成功設定：{ok} 封",
+        f"失敗：{len(failed)} 封",
+    ]
+    if failed:
+        lines.append("\n## 失敗清單")
+        for eid, err in failed[:20]:
+            lines.append(f"- `{eid[:30]}...`：{err}")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return f"bulk_set_flag 完成：設旗標 {ok} 封（{flag}），失敗 {len(failed)} 封"
+
+
 # ── 註冊表 ───────────────────────────────────────────────────────────
 
 
@@ -450,6 +578,9 @@ DIRECT_HANDLERS = {
     "send_mail": _h_send_mail,
     "send_with_attachment": _h_send_with_attachment,
     "bulk_send": _h_bulk_send,
+    "bulk_move": _h_bulk_move,
+    "bulk_mark_read": _h_bulk_mark_read,
+    "bulk_set_flag": _h_bulk_set_flag,
 }
 
 
@@ -533,10 +664,103 @@ def _prefetch_search_summary(params: dict, prev_outputs: Optional[list],
     return (True, "\n".join(lines), "")
 
 
+def _prefetch_unanswered(params: dict, prev_outputs: Optional[list],
+                          logger_obj: Optional[logging.Logger] = None) -> tuple[bool, str, str]:
+    """unanswered 模板的預抓資料：找出收件匣中我還沒回過的信。
+
+    邏輯：
+      1. 抓收件匣內 N 天前到 X 天前之間的信（received 在 [until-N, until]）
+      2. 抓寄件備份內過去 (N + grace) 天的信（涵蓋我可能晚一點才回）
+      3. 兩邊都用 ConversationID 比對；inbox 中 conv_id 沒在 sent.conv_ids 裡 = 未回
+
+    回傳 (ok, prefetched_markdown, error_msg)。
+    """
+    from .win32_helpers.outlook import search_mail
+
+    days = params.get("days")
+    try:
+        days = int(days) if days not in (None, "") else 3
+    except Exception:
+        return (False, "", f"days 必須是整數，收到 {days!r}")
+    if days < 0:
+        return (False, "", "days 不能是負數")
+
+    sender_filter = _split_keywords(params.get("sender_filter")) or None
+    log = logger_obj or logger
+
+    # 時間範圍：找 N 天前以上、但不超過 90 天前的信（避免一次抓太多）
+    until = datetime.now() - timedelta(days=days)
+    since = datetime.now() - timedelta(days=90)
+
+    log.info(f"[unanswered] 搜尋收件匣 {since.date()} ~ {until.date()}（>= {days} 天前未回）")
+    try:
+        df_inbox = search_mail(
+            folder="inbox",
+            sender=sender_filter,
+            since=since, until=until,
+            limit=500,
+            logger=log,
+        )
+    except Exception as e:
+        return (False, "", f"search_mail(inbox) 失敗：{e.__class__.__name__}: {e}")
+
+    if df_inbox.empty:
+        return (True, f"（過去 90 天內、超過 {days} 天前的收件匣信件為空）", "")
+
+    # 寄件備份：拉寬一點抓，涵蓋「晚回」的情況
+    log.info(f"[unanswered] 搜尋寄件備份（抓到 ConversationID 比對）")
+    try:
+        df_sent = search_mail(
+            folder="sent",
+            since=since, until=datetime.now(),
+            limit=2000,
+            logger=log,
+        )
+    except Exception as e:
+        log.warning(f"[unanswered] 寄件備份抓取失敗、改全部視為未回：{e}")
+        df_sent = pd.DataFrame()
+
+    sent_conv_ids: set[str] = set()
+    if not df_sent.empty and "conversation_id" in df_sent.columns:
+        sent_conv_ids = {str(c) for c in df_sent["conversation_id"].tolist() if c}
+
+    if "conversation_id" not in df_inbox.columns:
+        return (False, "", "search_mail 沒回 conversation_id 欄位（可能是舊版 helper，請更新）")
+
+    df_unanswered = df_inbox[
+        ~df_inbox["conversation_id"].astype(str).isin(sent_conv_ids)
+    ].reset_index(drop=True)
+
+    if df_unanswered.empty:
+        return (True, f"（過去 90 天內、超過 {days} 天前的收件匣信件全都已回覆，無未回信件）", "")
+
+    # 組 markdown 給 LLM
+    lines = [f"## 共找到 {len(df_unanswered)} 封超過 {days} 天前還沒回的信"]
+    if sender_filter:
+        lines.append(f"\n（已套用寄件人過濾：{', '.join(sender_filter)}）")
+    lines.append("")
+    df_str = df_unanswered.astype(str).replace({"NaT": "", "nan": "", "None": ""})
+    for i, row in df_str.iterrows():
+        lines.append(f"### 信件 #{i + 1}：{row['subject']}")
+        lines.append(f"- **寄件人**：{row['sender_name']} <{row['sender_email']}>")
+        lines.append(f"- **收件時間**：{row['received']}")
+        if row.get("has_attachments") == "True":
+            lines.append(f"- **附件**：{row.get('attachment_names', '')}")
+        body = row.get("body_text", "")
+        if len(body) > 1500:
+            body = body[:1500] + f"\n\n…（本文截斷，原長 {len(body)} 字）"
+        lines.append(f"- **本文**：")
+        lines.append("```")
+        lines.append(body.replace("`", "'"))
+        lines.append("```")
+        lines.append("")
+    return (True, "\n".join(lines), "")
+
+
 # template_id → prefetch handler；LLM 模板可以選擇性註冊一個 prefetch
 LLM_PREFETCH_HANDLERS = {
     "search_summary": _prefetch_search_summary,
-    # "unanswered": _prefetch_unanswered,  # Phase 2 — 邏輯較複雜（要交叉比對寄件備份）
+    "unanswered": _prefetch_unanswered,
 }
 
 

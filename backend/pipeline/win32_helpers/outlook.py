@@ -240,8 +240,15 @@ def search_mail(
             # 任何轉 fail 就退到原始 datetime（無 tz）
             _received_pd = pd.Timestamp(received.replace(tzinfo=None) if hasattr(received, 'replace') else received)
 
+        # ConversationID：同一個 thread 的信會共用，給 unanswered prefetch 比對用
+        try:
+            conv_id = str(item.ConversationID or "")
+        except Exception:
+            conv_id = ""
+
         rows.append({
             "entry_id": item.EntryID,
+            "conversation_id": conv_id,
             "received": _received_pd,
             "sender_name": sender_name,
             "sender_email": sender_email,
@@ -681,22 +688,80 @@ def create_meeting(
         return ""
 
 
-# ── 預留給 Phase 2 的 stubs（先佔位、不實作） ────────────────────────
+# ── Phase 2：信件分類 / 標記 ─────────────────────────────────────────
+
+
+# Outlook FlagStatus enum
+_OL_NO_FLAG = 0
+_OL_FLAG_COMPLETE = 1
+_OL_FLAG_MARKED = 2
+
+_FLAG_ALIASES = {
+    # follow_up = 標記追蹤（紅旗）
+    "follow_up": _OL_FLAG_MARKED, "marked": _OL_FLAG_MARKED, "flag": _OL_FLAG_MARKED,
+    "追蹤": _OL_FLAG_MARKED, "旗標": _OL_FLAG_MARKED,
+    # complete = 已完成（打勾）
+    "complete": _OL_FLAG_COMPLETE, "done": _OL_FLAG_COMPLETE,
+    "完成": _OL_FLAG_COMPLETE,
+    # clear = 清除旗標
+    "clear": _OL_NO_FLAG, "none": _OL_NO_FLAG, "off": _OL_NO_FLAG,
+    "清除": _OL_NO_FLAG, "取消": _OL_NO_FLAG,
+}
 
 
 def move_mail(*, entry_id: str, target_folder: str) -> None:
-    """[Phase 2 待實作] 把信移到目標資料夾。"""
-    raise NotImplementedError("move_mail Phase 2 才實作")
+    """把指定信件移到目標資料夾。
+
+    Args:
+        entry_id:       信件 EntryID
+        target_folder:  資料夾別名（"inbox"/"收件匣"）、路徑（"Inbox/Projects"）或
+                        預設資料夾 magic number。
+    """
+    _ensure_windows()
+    ns = _get_namespace()
+    item = ns.GetItemFromID(entry_id)
+    folder = _resolve_folder(ns, target_folder)
+    item.Move(folder)
+    _module_logger.info(f"move_mail: {entry_id[:20]}... → {target_folder}")
 
 
 def mark_read(*, entry_id: str, unread: bool = False) -> None:
-    """[Phase 2 待實作] 標已讀 / 未讀。"""
-    raise NotImplementedError("mark_read Phase 2 才實作")
+    """標已讀 / 未讀。
+
+    Args:
+        entry_id:  信件 EntryID
+        unread:    True = 標未讀；False（預設） = 標已讀
+    """
+    _ensure_windows()
+    ns = _get_namespace()
+    item = ns.GetItemFromID(entry_id)
+    item.UnRead = bool(unread)
+    item.Save()
+    state = "未讀" if unread else "已讀"
+    _module_logger.info(f"mark_read: {entry_id[:20]}... → {state}")
 
 
 def set_flag(*, entry_id: str, flag: Optional[str] = "follow_up") -> None:
-    """[Phase 2 待實作] 加旗標 / 取消旗標。"""
-    raise NotImplementedError("set_flag Phase 2 才實作")
+    """加 / 改 / 取消信件旗標。
+
+    Args:
+        entry_id:  信件 EntryID
+        flag:      'follow_up' / 'marked' / '追蹤' / '旗標' → 標記追蹤
+                   'complete' / 'done' / '完成'          → 已完成
+                   'clear' / 'none' / '取消' / None / '' → 清除旗標
+    """
+    _ensure_windows()
+    key = (flag or "clear").strip().lower()
+    if key not in _FLAG_ALIASES:
+        valid = sorted({k for k in _FLAG_ALIASES if not any('一' <= c <= '鿿' for c in k)})
+        raise ValueError(f"未知的 flag 值：{flag!r}。支援：{', '.join(valid)}（或對應中文）")
+    status = _FLAG_ALIASES[key]
+    ns = _get_namespace()
+    item = ns.GetItemFromID(entry_id)
+    item.FlagStatus = status
+    item.Save()
+    desc = {0: "清除旗標", 1: "已完成", 2: "追蹤"}.get(status, str(status))
+    _module_logger.info(f"set_flag: {entry_id[:20]}... → {desc}")
 
 
 __all__ = [
@@ -706,8 +771,8 @@ __all__ = [
     "search_mail", "get_mail_by_id", "download_attachments",
     # 信件寫
     "send_mail", "reply_mail", "forward_mail",
+    # 信件分類 / 標記
+    "move_mail", "mark_read", "set_flag",
     # 行事曆
     "calendar_list", "create_meeting",
-    # Phase 2 stubs
-    "move_mail", "mark_read", "set_flag",
 ]
