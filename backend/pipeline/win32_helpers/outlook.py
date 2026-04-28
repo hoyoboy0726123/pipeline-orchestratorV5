@@ -321,6 +321,7 @@ def download_attachments(
     out_dir: Union[str, Path],
     name_template: str = "{date}_{sender}_{filename}",
     overwrite: bool = False,
+    extensions: Optional[list[str]] = None,
 ) -> list[Path]:
     """把指定信件的附件全部下載到 out_dir。
 
@@ -333,12 +334,21 @@ def download_attachments(
                           {subject}  主旨（清過）
                           {filename} 附件原檔名
         overwrite:      True=同名覆蓋；False=自動加 _1 / _2 後綴
+        extensions:     副檔名白名單（不分大小寫，可帶或不帶 '.'）。
+                          None 或空 list = 不過濾、抓全部
+                          ['pdf', '.xlsx'] = 只抓 .pdf 跟 .xlsx
 
     回傳：實際存下的 Path 清單。
     """
     _ensure_windows()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # 副檔名白名單正規化成 set('.pdf', '.xlsx', ...)
+    ext_filter: Optional[set[str]] = None
+    if extensions:
+        ext_filter = {('.' + e.strip().lstrip('.').lower()) for e in extensions if e and str(e).strip()}
+        if not ext_filter:
+            ext_filter = None
     ns = _get_namespace()
     saved: list[Path] = []
     for eid in entry_ids:
@@ -354,6 +364,10 @@ def download_attachments(
         date_str = pd.Timestamp(item.ReceivedTime).strftime("%Y%m%d")
         for i in range(1, item.Attachments.Count + 1):
             att = item.Attachments.Item(i)
+            if ext_filter is not None:
+                this_ext = Path(att.FileName).suffix.lower()
+                if this_ext not in ext_filter:
+                    continue
             target_name = name_template.format(
                 date=date_str, sender=sender, subject=subject, filename=att.FileName,
             )
@@ -366,7 +380,10 @@ def download_attachments(
                 target = out / f"{stem}_{k}{suffix}"
             att.SaveAsFile(str(target.resolve()))
             saved.append(target)
-    _module_logger.info(f"download_attachments: {len(saved)} 個附件存到 {out}")
+    if ext_filter:
+        _module_logger.info(f"download_attachments: {len(saved)} 個附件存到 {out}（過濾 {sorted(ext_filter)}）")
+    else:
+        _module_logger.info(f"download_attachments: {len(saved)} 個附件存到 {out}")
     return saved
 
 

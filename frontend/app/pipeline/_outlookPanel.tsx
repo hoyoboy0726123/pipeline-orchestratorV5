@@ -1,9 +1,46 @@
 'use client'
-import { useState } from 'react'
-import { X, AlertTriangle, Loader2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { X, AlertTriangle, Loader2, Check } from 'lucide-react'
 import { toast } from 'sonner'
 import { testOutlookConnection } from '@/lib/api'
 import type { OutlookData, OutlookNode } from './_helpers'
+
+// 帶「確定」按鈕的日期/時間欄位：onChange 只寫 draft，按確定才 commit 到 params
+// 避免使用者在 picker 裡選一半就被當前值覆蓋（用戶反映需要明確確認）
+function DateTimeField({ value, type, onCommit }: {
+  value: string
+  type: 'date' | 'datetime-local'
+  onCommit: (v: string) => void
+}) {
+  const [draft, setDraft] = useState(value || '')
+  // 外部值變動（譬如切模板後重置）時同步 draft
+  useEffect(() => { setDraft(value || '') }, [value])
+  const dirty = draft !== (value || '')
+  return (
+    <div className="flex gap-1.5 items-center">
+      <input
+        className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400/20 bg-white"
+        type={type}
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+      />
+      <button
+        type="button"
+        onClick={() => onCommit(draft)}
+        disabled={!dirty}
+        title={dirty ? '套用此日期' : '已套用'}
+        className={`shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors ${
+          dirty
+            ? 'bg-sky-500 hover:bg-sky-600 text-white'
+            : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+        }`}
+      >
+        <Check className="w-3.5 h-3.5" />
+        {dirty ? '確定' : '已套用'}
+      </button>
+    </div>
+  )
+}
 
 const COMPATIBILITY_DISMISS_KEY = 'outlook-compat-warning-dismissed-v1'
 
@@ -23,7 +60,7 @@ type ParamSpec = {
 type Template = {
   id: string
   label: string
-  category: 'inbox' | 'send' | 'attach' | 'calendar'
+  category: 'inbox' | 'send' | 'attach'
   description: string
   params: ParamSpec[]
   // execMode: 'direct' = 後端直接 call wrapper、不進 LLM（快、零 token、可預測）
@@ -141,41 +178,12 @@ const TEMPLATES: Template[] = [
       { key: 'since', label: '從', type: 'datetime-local' },
       { key: 'until', label: '到', type: 'datetime-local' },
       { key: 'out_dir', label: '目標資料夾', type: 'text', placeholder: 'D:/downloads/...' },
+      { key: 'extensions', label: '檔案類型（留空=全部）', type: 'text',
+        placeholder: 'pdf, xlsx, zip',
+        hint: '逗號分隔副檔名（可帶或不帶 .，不分大小寫）；留空抓所有附件' },
       { key: 'name_template', label: '檔名範本', type: 'text',
         placeholder: '{date}_{sender}_{filename}',
         hint: '可用變數：{date} {sender} {subject} {filename}' },
-    ],
-  },
-  // D. 行事曆
-  {
-    id: 'calendar_list',
-    label: '📅 列出某時間範圍的會議',
-    category: 'calendar',
-    execMode: 'direct',
-    description: '回傳 DataFrame：主旨 / 起訖 / 地點 / 與會者 / 是否定期',
-    params: [
-      { key: 'since', label: '從', type: 'datetime-local' },
-      { key: 'until', label: '到', type: 'datetime-local' },
-      { key: 'output_format', label: '輸出格式', type: 'select',
-        options: [{ value: 'md', label: 'Markdown 條列' }, { value: 'xlsx', label: 'Excel 表' }] },
-    ],
-  },
-  {
-    id: 'create_meeting',
-    label: '🆕 新增會議邀請',
-    category: 'calendar',
-    execMode: 'direct',
-    description: '建立會議並（可選）發送邀請給與會者',
-    params: [
-      { key: 'subject', label: '主旨', type: 'text' },
-      { key: 'start', label: '開始時間', type: 'datetime-local' },
-      { key: 'end', label: '結束時間', type: 'datetime-local' },
-      { key: 'location', label: '地點', type: 'text', placeholder: '會議室 / Zoom 連結' },
-      { key: 'required_attendees', label: '必要與會者', type: 'text', placeholder: 'a@x.com, b@x.com' },
-      { key: 'optional_attendees', label: '選擇性與會者', type: 'text' },
-      { key: 'reminder_minutes', label: '提醒（分鐘）', type: 'number', placeholder: '15' },
-      { key: 'body', label: '會議說明', type: 'textarea' },
-      { key: 'send_invitation', label: '自動寄出邀請', type: 'bool' },
     ],
   },
 ]
@@ -184,7 +192,6 @@ const CATEGORY_LABEL: Record<Template['category'], string> = {
   inbox: '📥 收信整理',
   send: '📤 寄信',
   attach: '📎 附件',
-  calendar: '📅 行事曆',
 }
 
 interface Props {
@@ -272,6 +279,15 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
           <input type="checkbox" checked={!!v} onChange={e => setParam(p.key, e.target.checked)} />
           <span>{p.label}</span>
         </label>
+      )
+    }
+    if (p.type === 'date' || p.type === 'datetime-local') {
+      return (
+        <DateTimeField
+          value={(v as string) || ''}
+          type={p.type}
+          onCommit={(val) => setParam(p.key, val)}
+        />
       )
     }
     return (

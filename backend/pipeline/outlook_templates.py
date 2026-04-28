@@ -21,7 +21,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -271,14 +271,25 @@ def _h_download_attachments(*, params: dict, output_path: Path,
 
     name_tpl = (params.get("name_template")
                 or "{date}_{sender}_{filename}").strip()
+    # 副檔名過濾：CSV 格式 'pdf, .xlsx, zip'；空字串或 None = 全抓
+    raw_ext = (params.get("extensions") or "").strip()
+    ext_list: Optional[list[str]] = None
+    if raw_ext:
+        ext_list = [
+            e.strip() for e in raw_ext.replace("，", ",").split(",")
+            if e and e.strip()
+        ] or None
+
     saved = download_attachments(
         entry_ids=df["entry_id"].tolist(),
         out_dir=str(out_dir_path),
         name_template=name_tpl,
+        extensions=ext_list,
     )
 
+    filter_desc = f"（過濾：{', '.join(ext_list)}）" if ext_list else ""
     lines = [
-        f"# 附件下載報告",
+        f"# 附件下載報告{filter_desc}",
         f"來源信件：{len(df)} 封",
         f"下載附件：{len(saved)} 個",
         f"目標資料夾：`{out_dir_path}`",
@@ -288,7 +299,7 @@ def _h_download_attachments(*, params: dict, output_path: Path,
     for p in saved:
         lines.append(f"- `{Path(p).name}`")
     output_path.write_text("\n".join(lines), encoding="utf-8")
-    return f"download_attachments 完成：{len(saved)} 個附件已存到 {out_dir_path}"
+    return f"download_attachments 完成：{len(saved)} 個附件已存到 {out_dir_path}{filter_desc}"
 
 
 def _h_send_mail(*, params: dict, output_path: Path,
@@ -429,92 +440,6 @@ def _h_bulk_send(*, params: dict, output_path: Path,
     return f"bulk_send 完成：成功 {success}、失敗 {fail}（共 {len(df_log)} 筆）"
 
 
-def _h_calendar_list(*, params: dict, output_path: Path,
-                      prev_outputs: Optional[list], step_name: str,
-                  logger_obj: Optional[logging.Logger] = None) -> str:
-    """列出某時間範圍的會議。"""
-    from .win32_helpers.outlook import calendar_list
-
-    since = _to_dt(params.get("since")) or (datetime.now() - timedelta(days=7))
-    until = _to_dt(params.get("until")) or (datetime.now() + timedelta(days=30))
-    fmt = (params.get("output_format") or "md").lower()
-
-    df = calendar_list(since=since, until=until, include_recurring=True, limit=200,
-                       logger=logger_obj)
-    n = len(df)
-    columns = ["start", "end", "subject", "location", "organizer", "is_recurring"]
-    rename = {
-        "start": "開始", "end": "結束", "subject": "主旨", "location": "地點",
-        "organizer": "主辦人", "is_recurring": "週期性",
-    }
-    # 0 筆時順便診斷一下行事曆資料夾本身有沒有東西，給使用者更明確的提示
-    diagnosis = ""
-    if n == 0:
-        try:
-            from .win32_helpers._common import _get_namespace, OL_FOLDER_CALENDAR
-            ns = _get_namespace()
-            cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
-            cal_total = int(cal.Items.Count)
-            if cal_total == 0:
-                diagnosis = ("\n\n⚠ Classic Outlook 的行事曆是空的。"
-                             "通常代表你日常用「新版 Outlook」、Classic 沒同步行事曆。"
-                             "請先在新版 Outlook 點「說明 → 前往傳統 Outlook」切回，"
-                             "等行事曆同步好再來執行。")
-            else:
-                diagnosis = (f"\n\n（行事曆本身有 {cal_total} 個項目，但時間範圍 "
-                             f"{since} ~ {until} 內沒有命中。試試擴大時間範圍。）")
-        except Exception:
-            pass
-    header = (f"# 會議清單\n\n時間範圍：{since} ~ {until}，共 {n} 個會議{diagnosis}")
-    actual_path = _df_to_format(df, fmt, output_path,
-                                 columns=columns, rename=rename, header=header)
-    summary = f"calendar_list 完成：{n} 個會議、輸出 {fmt}、檔案：{actual_path}"
-    if n == 0 and "Classic" in diagnosis:
-        summary += " | ⚠ Classic Outlook 行事曆是空的（你可能用新版 Outlook、未同步）"
-    return summary
-
-
-def _h_create_meeting(*, params: dict, output_path: Path,
-                      prev_outputs: Optional[list], step_name: str,
-                  logger_obj: Optional[logging.Logger] = None) -> str:
-    """新增會議邀請。"""
-    from .win32_helpers.outlook import create_meeting
-
-    subject = (params.get("subject") or "").strip()
-    if not subject:
-        raise OutlookTemplateError("create_meeting 缺主旨 (subject)")
-    start = _to_dt(params.get("start"))
-    end = _to_dt(params.get("end"))
-    if not start or not end:
-        raise OutlookTemplateError("create_meeting 缺開始 / 結束時間")
-    location = params.get("location") or ""
-    body = params.get("body") or ""
-    required = _split_emails(params.get("required_attendees"))
-    optional = _split_emails(params.get("optional_attendees"))
-    reminder = int(params.get("reminder_minutes") or 15)
-    send_invitation = bool(params.get("send_invitation", True))
-
-    eid = create_meeting(
-        subject=subject, start=start, end=end,
-        location=location, body=body,
-        required_attendees=required, optional_attendees=optional,
-        reminder_minutes=reminder, send_invitation=send_invitation,
-    )
-    action = "已寄出邀請" if (send_invitation and (required or optional)) else "已存到行事曆"
-    lines = [
-        f"# 會議邀請建立報告 — {action}",
-        f"主旨：{subject}",
-        f"時間：{start} ~ {end}",
-        f"地點：{location or '(未填)'}",
-        f"必要與會者：{', '.join(required) if required else '(無)'}",
-        f"選擇性與會者：{', '.join(optional) if optional else '(無)'}",
-        f"提醒：{reminder} 分鐘前",
-        f"EntryID：`{eid}`",
-    ]
-    output_path.write_text("\n".join(lines), encoding="utf-8")
-    return f"create_meeting {action}：{subject} @ {start}"
-
-
 # ── 註冊表 ───────────────────────────────────────────────────────────
 
 
@@ -525,8 +450,6 @@ DIRECT_HANDLERS = {
     "send_mail": _h_send_mail,
     "send_with_attachment": _h_send_with_attachment,
     "bulk_send": _h_bulk_send,
-    "calendar_list": _h_calendar_list,
-    "create_meeting": _h_create_meeting,
 }
 
 
