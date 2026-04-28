@@ -460,7 +460,7 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
               <button onClick={clearTemplate} className="text-xs text-blue-600 hover:underline">清除選擇</button>
             )}
           </div>
-          {(['inbox', 'send', 'attach', 'calendar'] as const).map(cat => {
+          {(['inbox', 'send', 'attach', 'manage'] as const).map(cat => {
             const directInCat = TEMPLATES.filter(t => t.category === cat && t.execMode === 'direct')
             if (directInCat.length === 0) return null
             return (
@@ -515,7 +515,7 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
               <button onClick={clearTemplate} className="text-xs text-blue-600 hover:underline">清除選擇</button>
             )}
           </div>
-          {(['inbox', 'send', 'attach', 'calendar'] as const).map(cat => {
+          {(['inbox', 'send', 'attach', 'manage'] as const).map(cat => {
             const llmInCat = TEMPLATES.filter(t => t.category === cat && t.execMode === 'llm')
             if (llmInCat.length === 0) return null
             return (
