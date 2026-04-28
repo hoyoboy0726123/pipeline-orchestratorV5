@@ -65,14 +65,32 @@ def _split_keywords(s: Any) -> Optional[list[str]]:
     return parts or None
 
 
+# 專案根目錄 (backend/pipeline/outlook_templates.py 的上三層)。
+# 跟 runner.py 同邏輯：YAML / canvas 寫的相對路徑都以這個為基準。
+_PROJ_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_user_path(p: str) -> Path:
+    """使用者填的路徑解析成絕對路徑：
+    - `~/xxx` 展開到家目錄
+    - 絕對路徑直接用
+    - 相對路徑 → 以**專案根目錄**為基準
+    跟 runner.py:_resolve_path 對齊，避免 outlook 模板看到 prev_outputs 裡的
+    相對路徑（如 ai_output/xxx/file.xlsx）以為要從 backend cwd 找而拿不到。"""
+    pp = Path(p).expanduser()
+    if not pp.is_absolute():
+        pp = _PROJ_ROOT / pp
+    return pp
+
+
 def _resolve_prev_output(prev_outputs: Optional[list]) -> Optional[str]:
-    """從 prev_outputs 拿最近一個有 path 的；給 send_with_attachment 用。"""
+    """從 prev_outputs 拿最近一個有 path 的；解析成絕對路徑。"""
     if not prev_outputs:
         return None
     for o in reversed(prev_outputs):
         p = o.get("path") if isinstance(o, dict) else None
         if p:
-            return str(p)
+            return str(_resolve_user_path(str(p)))
     return None
 
 
@@ -96,7 +114,8 @@ def _substitute_prev_in_attachments(att: Any, prev_outputs: Optional[list]) -> l
             if not prev:
                 raise OutlookTemplateError("附件含 {prev_output} 但前一步驟沒有可用的輸出檔")
             it = it.replace("{prev_output}", prev)
-        out.append(it)
+        # 相對路徑解析到專案根，避免從 backend cwd 找不到
+        out.append(str(_resolve_user_path(it)))
     return out
 
 
@@ -312,7 +331,10 @@ def _h_send_mail(*, params: dict, output_path: Path,
 def _h_send_with_attachment(*, params: dict, output_path: Path,
                              prev_outputs: Optional[list], step_name: str,
                   logger_obj: Optional[logging.Logger] = None) -> str:
-    """把上一步輸出當附件寄出（常見：xlsx 報告 → 主管）。"""
+    """寄信附檔。預設用上一步輸出；attachment_path 有填則優先用該路徑。
+
+    attachment_path 也支援 `{prev_output}` placeholder。
+    """
     from .win32_helpers.outlook import send_mail
 
     to = _split_emails(params.get("to"))
@@ -321,27 +343,44 @@ def _h_send_with_attachment(*, params: dict, output_path: Path,
     subject = (params.get("subject") or "").strip() or "(無主旨)"
     body = params.get("body") or ""
 
-    prev = _resolve_prev_output(prev_outputs)
-    if not prev:
-        raise OutlookTemplateError(
-            "send_with_attachment 需要前一個步驟的輸出檔，但本工作流沒有上一個有 output 的步驟"
-        )
-    if not Path(prev).exists():
-        raise OutlookTemplateError(f"前一步驟的輸出檔不存在：{prev}")
+    # 1. 優先：使用者自填的 attachment_path
+    custom_path = (params.get("attachment_path") or "").strip()
+    if custom_path:
+        if "{prev_output}" in custom_path:
+            prev = _resolve_prev_output(prev_outputs) or ""
+            if not prev:
+                raise OutlookTemplateError(
+                    "attachment_path 含 {prev_output} 但前一步驟沒有可用的輸出檔"
+                )
+            custom_path = custom_path.replace("{prev_output}", prev)
+        attachment = _resolve_user_path(custom_path)
+        source_desc = "自訂路徑"
+    else:
+        # 2. fallback：上一步輸出檔
+        prev = _resolve_prev_output(prev_outputs)
+        if not prev:
+            raise OutlookTemplateError(
+                "send_with_attachment 需要附件 — 請填 attachment_path、或讓前一步有 output"
+            )
+        attachment = Path(prev)
+        source_desc = "上一步輸出"
+
+    if not attachment.exists():
+        raise OutlookTemplateError(f"附件不存在（{source_desc}）：{attachment}")
 
     eid = send_mail(
         to=to, subject=subject, body=body, body_format="html",
-        attachments=[prev],
+        attachments=[str(attachment)],
     )
     lines = [
-        f"# 寄信報告（附前一步輸出）",
+        f"# 寄信報告（附 {source_desc}）",
         f"收件人：{', '.join(to)}",
         f"主旨：{subject}",
-        f"附件：`{Path(prev).name}`（{prev}）",
+        f"附件：`{attachment.name}`（{attachment}）",
         f"EntryID：`{eid}`",
     ]
     output_path.write_text("\n".join(lines), encoding="utf-8")
-    return f"send_with_attachment 已送出：to={to}, attachment={Path(prev).name}"
+    return f"send_with_attachment 已送出：to={to}, attachment={attachment.name}"
 
 
 def _h_bulk_send(*, params: dict, output_path: Path,

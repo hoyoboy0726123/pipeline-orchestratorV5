@@ -103,14 +103,17 @@ const TEMPLATES: Template[] = [
   },
   {
     id: 'send_with_attachment',
-    label: '📤 把上一步輸出當附件寄出',
+    label: '📤 把上一步輸出（或指定檔案）當附件寄出',
     category: 'send',
     execMode: 'direct',
-    description: '常用情境：前一步整理產出 xlsx → 直接寄給主管',
+    description: '常用情境：前一步整理產出 xlsx → 直接寄給主管。也可以填路徑寄任何檔案',
     params: [
       { key: 'to', label: 'To', type: 'text' },
       { key: 'subject', label: '主旨', type: 'text' },
       { key: 'body', label: '本文（簡短說明）', type: 'textarea' },
+      { key: 'attachment_path', label: '附件路徑（留空 = 上一步輸出）', type: 'text',
+        placeholder: '留空自動用上一步；或填路徑（支援 {prev_output}）',
+        hint: '相對路徑以專案根為基準；可填 {prev_output} 接前一步輸出檔' },
     ],
   },
   {
