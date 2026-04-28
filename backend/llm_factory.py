@@ -100,6 +100,14 @@ async def invoke_with_streaming(
     reasoning_len = 0
     chunk_count = 0
 
+    # 立刻 log 一行起手式，避免 LLM 第一個 token 延遲到 15s 後才 log，看起來像當機
+    # 對 Outlook prefetch 大量資料 / Skill agent 大 prompt 等場景特別有用
+    try:
+        input_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
+        log.info(f"[{label}] 🤖 LLM 開始處理（input {input_chars:,} 字）…")
+    except Exception:
+        log.info(f"[{label}] 🤖 LLM 開始處理…")
+
     async def _stream():
         nonlocal last_log, reasoning_len, chunk_count
         async for chunk in llm.astream(messages):

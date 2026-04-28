@@ -40,6 +40,35 @@ class OutlookTemplateError(RuntimeError):
     """Direct handler 執行失敗，含使用者可看的中文訊息。"""
 
 
+def _translate_com_error(e: Exception) -> str:
+    """把 pywin32 / Outlook COM 例外翻譯成使用者看得懂的中文。
+
+    其他 Exception 原樣返回 'ClassName: str(e)'。
+    """
+    msg = str(e)
+    cls = e.__class__.__name__
+    msg_low = msg.lower()
+
+    # HRESULT 對應 — 用字串比對 .find，因為 com_error 的 args[0] 是整數但 str 化後在訊息裡
+    if "-2147352570" in msg or "unknown name" in msg_low:
+        return ("Outlook COM 不認得這個欄位／方法 — 通常是新版 Outlook 跟 Classic Outlook "
+                "API 差異。請在新版 Outlook 點「說明 → 前往傳統 Outlook」切回 Classic 後再試。")
+    if "-2147023174" in msg or "rpc_s_server_unavailable" in msg_low:
+        return "Outlook 程序意外結束或沒回應。請打開 Outlook 桌面版、確認登入後再跑此步驟。"
+    if "-2147024891" in msg or "access is denied" in msg_low or "存取被拒" in msg:
+        return ("Outlook 拒絕存取 — 通常是企業 GPO 或防毒擋了 COM 自動化。"
+                "請聯繫 IT 確認沒設「禁止 COM 自動化」、或先停防毒重試。")
+    if "-2147217406" in msg or "no such item" in msg_low:
+        return "找不到指定的信件（EntryID 可能失效 — 信件已被移動／刪除，或 Outlook 重啟過）。"
+    if "0x80070005" in msg or "permission" in msg_low:
+        return "權限不足。檢查目前的 Windows 使用者跟 Outlook profile 是同一個。"
+    if "no profile" in msg_low or "未設定" in msg or "MAPI" in msg:
+        return ("Outlook profile 沒設好或沒登入。請打開 Outlook 走完第一次設定，"
+                "確認可正常收信後再回來執行此步驟。")
+    # 不認識的就原樣回，但保留 class name 方便偵錯
+    return f"{cls}: {msg}"
+
+
 # ── 共用 helper ──────────────────────────────────────────────────────
 
 
@@ -789,7 +818,7 @@ def run_prefetch(*, template: str, params: dict,
             log.warning(f"[prefetch/{template}] failed：{err}")
         return (ok, md, err)
     except Exception as e:
-        msg = f"prefetch 例外：{e.__class__.__name__}: {e}"
+        msg = f"prefetch 例外：{_translate_com_error(e)}"
         log.error(f"[prefetch/{template}] {msg}", exc_info=True)
         return (False, "", msg)
 
@@ -827,6 +856,7 @@ def run_direct_template(*, template: str, params: dict, output_path: str,
         log.warning(f"[{step_name}] {msg}")
         return (False, msg)
     except Exception as e:
-        msg = f"模板「{template}」遇到非預期錯誤：{e.__class__.__name__}: {e}"
+        friendly = _translate_com_error(e)
+        msg = f"模板「{template}」執行失敗：{friendly}"
         log.error(f"[{step_name}] {msg}", exc_info=True)
         return (False, msg)
