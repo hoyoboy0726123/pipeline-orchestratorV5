@@ -181,7 +181,7 @@ export interface OutlookData extends Record<string, unknown> {
   name: string
   // 選單模板 ID（前端選了哪個模板；空字串 = 自由輸入需求模式）
   // 例：daily_todo / search_summary / send_mail / send_with_attachment
-  //    download_attachments / calendar_list / create_meeting / 等
+  //    download_attachments / 等
   template: string
   // 自由輸入：模板沒勾時，使用者直接打字描述需求（agent 限定 win32 工具集）
   freeText: string
@@ -190,6 +190,9 @@ export interface OutlookData extends Record<string, unknown> {
   // 輸出檔路徑（可選；整理結果如 xlsx / md 報告會寫到這）
   outputPath: string
   retry: number
+  // 整個步驟的執行上限（秒）。Outlook COM 對巨型收信夾 search_mail 可能跑 4-5 分鐘，
+  // 預設 600 秒；30k+ 信箱建議 1800-3600。
+  timeout: number
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -218,6 +221,7 @@ export function newOutlookData(index = 0): OutlookData {
     params: {},
     outputPath: '',
     retry: 0,
+    timeout: 600,
     index,
     status: 'idle',
     errorMsg: '',
@@ -571,7 +575,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         outlookTemplate: d.template,
         outlookFreeText: d.freeText,
         outlookParams: d.params,
-        timeout: 600,                      // Outlook COM 互動可能慢，給寬一點
+        timeout: typeof d.timeout === 'number' && d.timeout > 0 ? d.timeout : 600,
         retry: d.retry,
         index: i,
         status: d.status,

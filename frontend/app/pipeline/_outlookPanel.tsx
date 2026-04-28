@@ -600,6 +600,19 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
             onChange={e => onUpdate({ retry: Number(e.target.value) || 0 })}
           />
         </div>
+
+        {/* Timeout（秒）*/}
+        <div>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">執行上限（秒）</label>
+          <input type="number" min={60} max={7200} step={60}
+            className={inputCls}
+            value={typeof data.timeout === 'number' ? data.timeout : 600}
+            onChange={e => onUpdate({ timeout: Number(e.target.value) || 600 })}
+          />
+          <p className="text-[10px] text-gray-400 mt-0.5">
+            Outlook COM 對巨型收信夾 search_mail 可能跑 4-5 分鐘；30k+ 信箱建議 1800-3600
+          </p>
+        </div>
       </div>
     </div>
   )
