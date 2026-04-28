@@ -139,6 +139,29 @@ _pending_hints: dict[int, str] = {}
 _pending_answers: dict[int, str] = {}
 
 
+def _i_still_hold_lock() -> bool:
+    """檢查 lock file 裡的 pid 是不是自己。
+
+    防護一個之前實際踩到的 race：
+      - V4 backend 持續 polling 24h，但中途 V5 重啟、_pid_alive(V4) 偶發
+        誤回 False（Windows OpenProcess 對長 uptime 程序有時會這樣）
+      - V5 重新接管 lock，自己也開始 poll
+      - V4 不知道自己已被接管，兩邊一起 poll → Telegram 回 409 Conflict
+
+    解法：polling loop 每個 iteration 檢一次，若 lock 已不是自己 → 退出
+    polling，把 token 讓給接管者。
+    """
+    path = _lock_path()
+    try:
+        if not path.exists():
+            return False
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        return int(meta.get("pid", 0) or 0) == os.getpid()
+    except Exception:
+        # 讀不到當作還持有，避免 lock 暫時不可讀就退出
+        return True
+
+
 async def _poll_loop():
     """長輪詢 Telegram updates，處理 callback_query 和文字訊息"""
     from telegram import Bot
@@ -149,6 +172,15 @@ async def _poll_loop():
     _current_token = ""
 
     while True:
+        # 每個 iteration 檢 lock 還是不是自己；不是的話退出
+        # （另一實例已接管 polling 的話，本實例該停手）
+        if not _i_still_hold_lock():
+            logger.warning(
+                "Telegram polling lock 已被另一實例接管，本實例退出 polling"
+                " 避免兩邊一起 poll 同 token 造成 409 Conflict。"
+            )
+            return
+
         try:
             from settings import get_settings
             s = get_settings()
