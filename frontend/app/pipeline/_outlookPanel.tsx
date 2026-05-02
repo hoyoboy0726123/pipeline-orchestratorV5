@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X, AlertTriangle, Loader2, Check } from 'lucide-react'
 import { toast } from 'sonner'
 import { testOutlookConnection } from '@/lib/api'
@@ -264,6 +264,42 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
   const data = node.data
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 bg-white'
 
+  // ── UX：點選模板後自動把該模板按鈕捲到面板頂端，下方完整呈現參數欄位 ────
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const templateBtnRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
+  useEffect(() => {
+    if (!data.template) return
+    const btn = templateBtnRefs.current.get(data.template)
+    const container = scrollContainerRef.current
+    if (!btn || !container) return
+    // 等 expand 區塊渲染完成再算位移，避免捲完又被新 layout 推開
+    const id = window.setTimeout(() => {
+      const containerTop = container.getBoundingClientRect().top
+      const btnTop = btn.getBoundingClientRect().top
+      const delta = btnTop - containerTop
+      container.scrollBy({ top: delta, behavior: 'smooth' })
+    }, 60)
+    return () => window.clearTimeout(id)
+  }, [data.template])
+
+  // ── UX：跨模板殘留偵測 ─────────────────────────────────────────────
+  // 切到新模板時不立即清舊 params/freeText，等使用者點到新模板輸入欄位才彈確認
+  // 使用者已經辛苦填過內容、不該被默默清掉；但若選新模板後完全沒互動就走人，
+  // 下次重開 panel 也是乾淨狀態（component 重建、staleFrom 自然 reset）
+  const [staleFrom, setStaleFrom] = useState<{ id: string; label: string } | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const handleParamInteract = () => {
+    if (staleFrom) setConfirmOpen(true)
+  }
+  const onConfirmClear = () => {
+    onUpdate({ params: {}, freeText: '' })
+    setStaleFrom(null)
+    setConfirmOpen(false)
+  }
+  const onConfirmKeep = () => {
+    setStaleFrom(null)  // 不再彈
+    setConfirmOpen(false)
+  }
 
   // 相容性警告：只支援傳統 Outlook（New Outlook for Windows / Web 不支援 COM）
   // 使用者讀過、按「我知道了」後存到 localStorage 不再顯示，但摘要列永遠保留
@@ -302,13 +338,30 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
     onUpdate({ params: { ...data.params, [key]: value } })
   }
 
-  // 點選模板：清掉舊參數、清掉自由輸入（避免兩個來源混淆）
-  const selectTemplate = (id: string) => {
-    onUpdate({ template: id, params: {}, freeText: '' })
+  // 點選模板：保留舊 params/freeText，等使用者點到輸入欄位才彈確認是否清除
+  // （直接清會誤刪辛苦填的內容；改成延後確認讓使用者有反悔機會）
+  const selectTemplate = (newId: string) => {
+    const oldId = data.template
+    if (oldId && oldId !== newId) {
+      const oldTpl = TEMPLATES.find(t => t.id === oldId)
+      const hasResidual = !!data.freeText || Object.values(data.params || {}).some(
+        v => v !== '' && v !== false && v !== null && v !== undefined
+            && !(Array.isArray(v) && v.length === 0)
+      )
+      if (oldTpl && hasResidual) {
+        setStaleFrom({ id: oldId, label: oldTpl.label })
+      } else {
+        setStaleFrom(null)
+      }
+    } else if (!newId) {
+      setStaleFrom(null)
+    }
+    onUpdate({ template: newId })
   }
 
   const clearTemplate = () => {
-    onUpdate({ template: '', params: {} })
+    onUpdate({ template: '', params: {}, freeText: '' })
+    setStaleFrom(null)
   }
 
   const renderParam = (p: ParamSpec) => {
@@ -376,7 +429,7 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors"><X className="w-4 h-4" /></button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {/* ── 相容性警告：只支援 Classic Outlook ────────────────────── */}
         {!warnDismissed ? (
           <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 space-y-2">
@@ -472,6 +525,7 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
                     return (
                       <div key={t.id} className="space-y-0">
                         <button
+                          ref={el => { if (el) templateBtnRefs.current.set(t.id, el) }}
                           onClick={() => selectTemplate(t.id)}
                           className={`w-full text-left px-2.5 py-1.5 text-xs border transition-colors ${
                             isSelected
@@ -483,7 +537,10 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
                           {t.label}
                         </button>
                         {isSelected && (
-                          <div className="px-3 py-3 rounded-b-lg border border-t-0 border-emerald-500 bg-emerald-50/30 space-y-3">
+                          <div
+                            onClickCapture={handleParamInteract}
+                            className="px-3 py-3 rounded-b-lg border border-t-0 border-emerald-500 bg-emerald-50/30 space-y-3"
+                          >
                             <p className="text-[11px] text-gray-600 leading-relaxed">{t.description}</p>
                             {t.params.map(p => (
                               <div key={p.key}>
@@ -527,6 +584,7 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
                     return (
                       <div key={t.id} className="space-y-0">
                         <button
+                          ref={el => { if (el) templateBtnRefs.current.set(t.id, el) }}
                           onClick={() => selectTemplate(t.id)}
                           className={`w-full text-left px-2.5 py-1.5 text-xs border transition-colors ${
                             isSelected
@@ -538,7 +596,10 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
                           {t.label}
                         </button>
                         {isSelected && (
-                          <div className="px-3 py-3 rounded-b-lg border border-t-0 border-purple-500 bg-purple-50/30 space-y-3">
+                          <div
+                            onClickCapture={handleParamInteract}
+                            className="px-3 py-3 rounded-b-lg border border-t-0 border-purple-500 bg-purple-50/30 space-y-3"
+                          >
                             <p className="text-[11px] text-gray-600 leading-relaxed">{t.description}</p>
                             {t.params.map(p => (
                               <div key={p.key}>
@@ -614,6 +675,41 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
           </p>
         </div>
       </div>
+
+      {/* ── 跨模板殘留確認 modal ─────────────────────────────────────
+        切到新模板時不直接清舊內容；使用者點到任一輸入欄位才彈這個 modal 問。
+        無論清或保留，都把 staleFrom 設 null（同一次切換只彈一次、不再煩）。
+      */}
+      {confirmOpen && staleFrom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-[380px] bg-white rounded-xl shadow-2xl p-5 space-y-3" role="dialog" aria-modal="true">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-semibold text-gray-800">是否清除之前的設定？</h3>
+                <p className="text-xs text-gray-600 leading-relaxed mt-1.5">
+                  你之前選過「<b className="text-gray-800">{staleFrom.label}</b>」並填了內容。
+                  繼續編輯前要把舊資料清掉嗎？
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end pt-1">
+              <button
+                onClick={onConfirmKeep}
+                className="px-3 py-1.5 text-xs rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 font-medium"
+              >
+                保留繼續編輯
+              </button>
+              <button
+                onClick={onConfirmClear}
+                className="px-3 py-1.5 text-xs rounded-lg bg-rose-500 hover:bg-rose-600 text-white font-medium"
+              >
+                清除舊資料
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -48,14 +48,40 @@ RUN pip install --no-cache-dir python-pptx pdfplumber
 # fake_useragent：隨機 User-Agent 避免網站封 bot（比自己寫 UA 表簡單）
 RUN pip install --no-cache-dir newspaper3k cloudscraper feedparser lxml_html_clean fake_useragent
 
+# ── Tier 5b：通用網頁爬蟲（V5 新增 web_crawler 節點用）─────────────
+# Crawl4AI = LLM-optimized 爬蟲：Playwright + Chromium + stealth + markdown 直出
+# trafilatura：Tier 2（FlareSolverr）回 HTML 後做 markdown 轉換用的高品質 extractor
+# html2text：trafilatura 失敗時的最終 fallback；輕量、保結構
+# 這層大概 200MB Python 套件 + 後面 chromium browser 約 250MB
+RUN pip install --no-cache-dir crawl4ai trafilatura html2text
+
+# Playwright Chromium browser（headless），含必要 system libs（libnss / libatk / fonts 等）
+# `--with-deps` 會自動 apt-get install 缺的 .so，免我們在 Dockerfile 自己列一堆 lib*
+# Chromium 大約 ~170MB；連 deps ~300MB（值得，全在這層獨立 commit）
+RUN python -m playwright install --with-deps chromium
+
+# ── Tier 5c：影片下載（YouTube / Vimeo / Bilibili 等 1700+ 站，V5 web_crawler 影片模式用）──
+# yt-dlp：業界標準影片抓取工具（解 HLS / DASH / 簽名 URL / 多 audio 軌 mux）
+# ffmpeg：yt-dlp 把分離的 video / audio stream 合成 mp4 必備；也用於字幕格式轉換
+# ffmpeg apt 包約 ~80MB；yt-dlp pip 包小（~10MB）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir yt-dlp
+
 # ── Tier 6：Node.js runtime + pptxgenjs（JS 版 PPT 產生器）──
 # debian 12 預設 nodejs 是 v18，對 pptxgenjs 3.x 足夠用
 # 把 node + pptxgenjs 放在這，這樣 LLM agent 收到 `.agents/skills/pptx` skill 時能直接 `require('pptxgenjs')`
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs npm \
     && rm -rf /var/lib/apt/lists/*
-RUN npm install -g pptxgenjs \
+RUN npm install -g pptxgenjs docx \
     && npm cache clean --force
+
+# 讓任何 cwd 下的 node 進程都能 require('pptxgenjs') / require('docx')；
+# 否則 LLM 在 working_dir 跑 node script、require 找不到 globals → 自己 npm install
+# 把 node_modules 8.9 MB 殘檔倒進工作流輸出資料夾（user 報過坑）
+ENV NODE_PATH=/usr/local/lib/node_modules
 
 WORKDIR /project
 

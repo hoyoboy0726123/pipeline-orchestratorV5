@@ -686,26 +686,28 @@ async def get_available_skills():
 
 @app.get("/skills/{skill_name}/dependencies")
 async def scan_skill_deps(skill_name: str):
-    """掃描指定 skill 的 Python / Node.js 依賴。"""
+    """掃描指定 skill 的 Python / Node.js 依賴。
+    pip 已安裝列表跟著當前 sandbox 模式走（host venv 或 sandbox container）；
+    之前寫死 `list_packages()` 永遠看 host、切到容器模式時所有容器套件都顯示「未安裝」。
+    """
     from skill_scanner import scan_skill_dependencies
     result = scan_skill_dependencies(skill_name)
     if not result.get("found"):
         raise HTTPException(status_code=404, detail=f"找不到 skill：{skill_name}")
     # 加上目前已安裝的 pip 套件，前端可對照
-    # list_packages() 回傳 list[dict]，每個 dict 有 {name, installed, version}
-    import re as _re
-    from skill_pkg_manager import list_packages
+    # 走 skill_pkg_manager 的 normalize_pkg_name — 整個 backend 唯一的正規化函式，
+    # 之前這裡有自己一份只做 .lower() 的弱化版、會把 `lxml_html_clean` 跟
+    # `lxml-html-clean` 視為不同套件、UI 顯示「未安裝」是假警報
+    from skill_pkg_manager import list_packages_by_target, normalize_pkg_name
 
-    def _base_name(pkg: str) -> str:
-        # 去掉版本指定與 extras：`markitdown[pptx]>=1.0` → `markitdown`
-        return _re.split(r"[<>=!~\[]", pkg)[0].strip().lower()
-
-    # 兩邊都 normalize 成 base name 再比對
-    installed_bases = {_base_name(p["name"]) for p in list_packages() if p.get("installed")}
+    # 用 target=auto 自動跟著 settings.skill_sandbox_mode（host 或 sandbox）走
+    pkg_resp = list_packages_by_target("auto")
+    pkg_list = pkg_resp.get("packages") or []
+    installed_bases = {normalize_pkg_name(p["name"]) for p in pkg_list if p.get("installed")}
     suggested = result["python"]["suggested_pip"]
 
-    result["python"]["installed"] = sorted(s for s in suggested if _base_name(s) in installed_bases)
-    result["python"]["missing"] = [s for s in suggested if _base_name(s) not in installed_bases]
+    result["python"]["installed"] = sorted(s for s in suggested if normalize_pkg_name(s) in installed_bases)
+    result["python"]["missing"] = [s for s in suggested if normalize_pkg_name(s) not in installed_bases]
 
     # npm 套件也做已安裝對比（跑 `npm list -g`）
     from skill_scanner import list_global_npm_packages
@@ -830,13 +832,29 @@ class SandboxModeRequest(BaseModel):
 
 @app.put("/settings/sandbox")
 async def put_sandbox_mode(req: SandboxModeRequest):
-    """切換沙盒模式。切到 wsl_docker 時順便回傳目前健康狀態。"""
+    """切換沙盒模式。切到 wsl_docker 時順便回傳目前健康狀態。
+    切換時 invalidate 三個快取（host pip / sandbox pip / npm globals），
+    讓前端下次 refetch 拿到正確 mode 的資料、不要顯示前一個 mode 的殘留。
+    """
     from settings import set_skill_sandbox_mode
     from pipeline import sandbox as _sandbox
     try:
         updated = set_skill_sandbox_mode(req.mode)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # 清快取：mode 變了之後、所有「跟 mode 連動」的查詢都該重抓
+    try:
+        from skill_pkg_manager import _invalidate_pip_cache, _invalidate_sandbox_pip_cache
+        _invalidate_pip_cache()
+        _invalidate_sandbox_pip_cache()
+    except Exception:
+        pass
+    try:
+        from skill_scanner import _NPM_CACHE
+        _NPM_CACHE["ts"] = 0.0
+        _NPM_CACHE["data"] = set()
+    except Exception:
+        pass
     status = _sandbox.check_status(force_refresh=True)
     return {"mode": updated.get("skill_sandbox_mode", "host"), **status}
 
@@ -1371,14 +1389,91 @@ async def delete_pipeline_schedule(task_id: str):
 
 
 # ── Pipeline YAML Chat Assistant ─────────────────────────────
-_PIPELINE_SYSTEM_BASE = """你是 Pipeline YAML 設定助手。使用者會用自然語言描述他想自動化的工作流程，你要產生正確可執行的 YAML。
+_PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用自然語言描述需求，你引導他釐清細節後產出可執行的 YAML。
 
-## 三種節點類型
+# 對話流程（很重要 — 不要跳階段直接吐 YAML）
 
-本系統支援三種節點，依情境選用：
+## 1. Discovery — 先判定要不要進（很重要！）
 
-### 1. 腳本節點（script）
-使用者已有寫好的腳本或指令 → `batch` 填指令字串。
+**收到需求第一件事：做兩維度檢查、不要直接問問題**：
+- **維度 A 資料源**：使用者有給「URL / 檔案路徑 / 腳本 / Outlook 信件」嗎？
+- **維度 B 動作**：使用者有說要做什麼（抓 / 摘要 / 統計 / 寄信 / 轉檔 / 驗證）嗎？
+
+### 規則（嚴格遵守）
+
+| 兩維度狀態 | 行為 |
+|---|---|
+| 兩個都有 | **直接跳 Plan**（不進 Discovery） |
+| 缺一個 | 只反問**缺失的那個**（不要兩個都問） |
+| 兩個都缺 | 反問「想做什麼？」一題就好 |
+
+### ❌ 不要做的事（先前測試過度反問了）
+
+**不要追問可推論預設的事**：
+- ❌ 「結果輸出到哪？」 → 預設 `ai_output/<workflow>/...`，省略由系統推
+- ❌ 「要不要人工確認？」 → 使用者沒提就不要主動加
+- ❌ 「要存檔還是寄信？」 → 使用者沒提就只存檔（預設）
+- ❌ 「結果格式要 markdown 還是 PDF？」 → 用合理推測（爬網站 → markdown）
+
+**不要連環問「為了讓設定更精準」式的細節**。Plan 末尾可以加「還要調整 X 嗎？」一句、不要連續兩三題追問。
+
+### ✅ 正例
+
+| 使用者輸入 | 正確行為 |
+|---|---|
+| 「幫我做一個自動化」 | 兩維度都缺 → 問「要做什麼？」 |
+| 「抓 https://hn.com 摘要前 10 條」 | 兩維度有 → 直接 Plan |
+| 「下載 https://yt.com/x 影片做摘要」 | 兩維度有 → 直接 Plan，明說『影片爬蟲（wc_mode: video）』 |
+| 「跑我的 stage1.py」 | 缺 B → 問「跑完要做什麼？」 |
+| 「檢查 raw.xlsx 數字異常但不要動原檔」 | 兩維度有 → 直接 Plan，明說『skill 加 readonly: true』 |
+| 「腳本產儀表板，跑完看畫面對不對」 | 兩維度有 → 直接 Plan，明說『視覺驗證節點』 |
+
+## 2. Plan — 純文字提案（不貼 YAML）
+資訊充足後，**先用條列式描述步驟**讓使用者點頭，例如：
+
+> 我這樣安排：
+> 1. **網頁爬蟲**：抓 https://www.pttweb.cc/bbs/Stock 列表頁
+> 2. **AI 技能**：抽前 10 篇連結各自展開，摘要寫到 daily.md
+> 3. **人工確認**：Telegram 上看摘要、OK 才續跑
+> 4. **Outlook 寄信**：把 daily.md 當附件寄給 boss@x.com
+>
+> 這樣 OK 嗎？或哪一步要調整？
+
+## 3. Confirm
+使用者點頭 → 進 Emit。使用者推翻 → 回 Discovery 再問。
+
+## 4. Emit — 才產 YAML
+**必須**含 `YAML_READY` 標記。
+
+### Emit 前完整性檢查清單（強制做、不要跳過）
+
+產 YAML 前先逐項檢查、缺東西不要 emit、退回 Discovery 再問：
+
+1. **使用者明確給的資訊（email、人名、檔案路徑、URL、數字、日期）必須字面寫進 YAML**，不可用 placeholder（不要 `boss@x.com`、要用使用者真的給的 `wilson_bai@asus.com`）
+2. **每個節點的必要欄位都要齊全**（看下方表）：
+
+| 節點 | 必要欄位 | 易漏項 |
+|---|---|---|
+| `outlook_automation` | `outlook_template` + `outlook_params`（含 to/subject/body 等該模板的必要 keys） | ❗ 最常漏：`outlook_params` 整段沒寫 |
+| `web_crawler` (web) | `wc_url` 或 `wc_urls` | wc_url 留空 |
+| `web_crawler` (video) | `wc_video_url` | video URL 漏填 |
+| `human_confirm` | （無嚴格必要欄位、`message` 建議填） | 都可省略 |
+| `skill` | `skill_mode: true` + `batch`（任務描述） | batch 寫太短 LLM 看不懂 |
+| `script` | `batch`（指令） | — |
+| `visual_validation` | `visual_validation: true` + `vv_prompt` | vv_prompt 必填 |
+
+3. **特別針對 `outlook_automation`：使用者給的 email 必填到 `outlook_params.to`**。沒有 email 不要產 YAML、回去問。
+4. **`outlook_params` 一律用 inline JSON 一行寫**（不要多行 YAML 格式 — 前端解析器只認 inline JSON）：
+   - ✅ 正確：`outlook_params: {"to":"wilson@x.com","subject":"日報","body":"請查收"}`
+   - ❌ 錯誤：`outlook_params:` 換行後 `  to: wilson@x.com` `  subject: ...`（多行格式會被前端解析器丟掉）
+5. **路徑用相對 `ai_output/<workflow>/...`**，不可絕對路徑、不可 `~/`
+
+---
+
+# 七種節點類型（節點全集）
+
+## 1. 腳本節點（script）
+**使用者說**：「我的 xxx.py 腳本」「執行 xxx 指令」「跑這個批次檔」
 ```yaml
 - name: 抓資料
   batch: python ~/scripts/fetch.py --date=today
@@ -1386,120 +1481,264 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline YAML 設定助手。使用者會用�
   retry: 2
 ```
 
-### 2. AI 技能節點（skill）
-使用者沒有腳本，想請 AI 自動撰寫 Python 程式碼來完成任務 → `batch` 填自然語言任務描述，加 `skill_mode: true`。
-（以下範例 pipeline name 假設為 `monthly_report`，實際請套用本次工作流的 name）
+## 2. AI 技能節點（skill）
+**使用者說**：「幫我抓 / 摘要 / 處理 / 算」+ **沒現成腳本** → LLM 自動寫 Python
 ```yaml
-- name: 分析並匯出報告
+- name: 摘要報告
   skill_mode: true
   batch: |
-    讀取 ai_output/monthly_report/raw.csv，依「部門」分組計算月均營收，
-    產出長條圖 + 摘要表格，存成 Excel。
+    讀 ai_output/news/raw.md，摘成 10 條重點，輸出 daily.md
   timeout: 600
   retry: 1
   output:
-    path: ai_output/monthly_report/report.xlsx
+    path: ai_output/news/daily.md
     ai_validation: true
-    description: "Excel 含長條圖與部門別摘要表"
+    description: "10 條中文重點，每條一行"
 ```
 
-#### 2a. AI 技能節點掛載 Agent Skill（進階）
-若使用者提及已安裝的 skill（例如 pptx、browser-automation），加 `skill: <name>` 把 SKILL.md 與子腳本注入 LLM prompt，顯著提升該任務的正確率。
-```yaml
-- name: 產出簡報
-  skill_mode: true
-  skill: pptx
-  batch: 把 ai_output/monthly_report/report.xlsx 的每個分頁轉成 PPT 簡報
-  timeout: 900
-  output:
-    path: ai_output/monthly_report/report.pptx
-```
+**進階設定**（依需要才加）：
+- `skill: <name>` — 掛載已安裝的 Agent Skill（如 `skill: pptx` / `skill: docx`），把 SKILL.md 注入 prompt 提升正確率
+- `readonly: true` — 只讀不寫，適合做深度資料驗證
+- `ask_mode: true` — LLM 遇不確定時主動問使用者
 
-### 3. 人工確認節點（human_confirm）
-Pipeline 暫停等待人工確認，可透過 Telegram 或網頁 UI 回應。常用於審核關鍵輸出後再續跑。
+## 3. 人工確認節點（human_confirm）
+**使用者說**：「審核」「確認」「給我看一下再繼續」「需要我點頭」
 ```yaml
-- name: 審核報告
+- name: 審核摘要
   human_confirm: true
-  message: 請確認上一步產出的報表內容是否正確
-  notify_telegram: true            # 預設 true
-  screenshot: false                # true 則 Telegram 會多一個「📸 截圖」按鈕
-  timeout: 3600                    # 等待秒數（預設 1 小時）
+  message: 請確認上一步產出的摘要是否正確
+  notify_telegram: true        # 預設 true
+  send_prev_output: true       # 把上一步的輸出檔自動傳到 TG（手機可下載）
+  preview_prev_output: false   # true 時把檔案 render 成 PNG 一併傳
+  screenshot: false            # true 時 TG 多一個「📸 截圖」按鈕
+  timeout: 3600
 ```
 
-## 判斷節點類型的原則
-
-- 使用者說「抓網站 / 生成檔案 / 處理資料」但**沒提現成腳本** → **skill 節點**
-- 使用者說「我的 xxx.py 腳本」「執行 xxx 指令」 → **script 節點**
-- 使用者說「要人工審核」「確認後再繼續」 → **human_confirm 節點**（通常放在兩個處理節點中間）
-- 使用者提到特定檔案格式處理（PPT、PDF、瀏覽器自動化）且該 skill 已安裝 → skill 節點**加掛 `skill:`**
-
-## 常見組合模式
-
-### 純 AI 自動化：
-```
-skill(抓資料) → skill(處理) → skill(產出)
-```
-
-### 需人工審核：
-```
-skill(抓資料) → human_confirm(審核) → skill(處理) → skill(產出)
-```
-
-### 驗證模式（唯讀檢查）：
-在某個 skill 節點加 `readonly: true` 代表「只能讀取、不能修改」，適合做深度資料驗證。
-
-## YAML 欄位規則（所有節點共用）
-
-- `name`：步驟名稱（中文 OK，盡量有意義）
-- `timeout`：秒數。script 建議 300、skill 建議 600、human_confirm 建議 3600
-- `retry`：失敗自動重試次數，skill 節點建議 1-2
-- `working_dir`：可選。若 skill 要寫檔到特定目錄可指定；省略則用預設
-- `output.path`：預期產出檔案路徑。**本系統的預設輸出目錄是專案根目錄下的 `ai_output/<pipeline name>/`**，請用**相對路徑**寫：
-  * 正確：`ai_output/daily_news/tech_news.csv`（假設 pipeline name 是 `daily_news`）
-  * 錯誤：`~/ai_output/daily_news/tech_news.csv`（會寫到使用者家目錄，跟系統預設位置不同）
-  * 錯誤：`C:\\Users\\xxx\\...` 或 `/Users/xxx/...`（絕不寫絕對路徑或平台特定路徑）
-  * 錯誤：`tech_news.csv`（少了工作流子資料夾，會和其他 pipeline 混在一起）
-- 後續步驟讀取前一步產出的檔案時，也要用**同一個相對路徑**（`ai_output/<pipeline name>/xxx`）
-- `output.ai_validation: true` + `output.description`：AI 會驗證產出是否符合描述
-- `readonly: true`：唯讀驗證模式（skill 節點專用）
-
-## 你的任務
-
-1. 資訊不足時用**繁體中文**反問，一次只問最關鍵的一個問題
-   - skill 節點：問任務目標、輸出檔案名/格式
-   - human_confirm 節點：通常不用問，看流程中是否有需要人工把關的點
-2. 資訊充足後輸出完整 YAML（**必須**包含 `YAML_READY` 標記）
-3. **先決定 pipeline 的 `name`**（英數底線，例如 `yahoo_news_to_excel`），所有 `output.path` 一律用**相對路徑** `ai_output/<這個 name>/檔名`，**不可省略中間的工作流子資料夾**，**不可加 `~/` 前綴**
-4. 後續步驟要讀取前一步檔案時，**用同一個相對路徑**（例如 step2 讀 step1 的 `ai_output/<name>/xxx`）
-5. 絕對不要寫 `~/`、`/Users/xxx/` 或 `C:\\Users\\xxx\\` 等任何絕對路徑
-
-## 回覆格式
-
-好的，我已經整理好 Pipeline 設定：
-
-YAML_READY
+## 4. 網頁爬蟲節點（web_crawler，wc_mode: web）
+**使用者說**：貼 URL「抓這頁」「爬」「擷取」
 ```yaml
-pipeline:
-  name: yahoo_news_to_excel
-  steps:
-    - name: 抓取並匯出
-      skill_mode: true
-      batch: |
-        到 Yahoo 新聞首頁抓 10 則頭條，
-        擷取標題、摘要、網址，輸出 Excel。
-      timeout: 600
-      retry: 2
-      output:
-        path: ai_output/yahoo_news_to_excel/yahoo_news.xlsx
-        ai_validation: true
-        description: "Excel 含 10 列、三欄：標題、摘要、網址"
+- name: 抓 Reddit 列表
+  web_crawler: true
+  wc_url: "https://www.reddit.com/r/ASUS/"
+  timeout: 90
 ```
+
+**多 URL** 用 `wc_urls: ["url1", "url2"]`，會輸出到資料夾、每 URL 一個檔。
+
+**SPA / 反爬注意事項**（要主動提醒使用者）：
+- Reddit / Twitter / X 等 SPA 站，內部已預設用 `domcontentloaded`（用 `networkidle` 會 timeout）
+- 登入站要填 `wc_cookies`；Cloudflare 站系統會自動 fallback FlareSolverr
+
+## 5. 影片爬蟲節點（web_crawler，wc_mode: video）
+**使用者說**：貼 YouTube / Vimeo / Bilibili 連結「下載」「抓影片」
+```yaml
+- name: 下載影片
+  web_crawler: true
+  wc_mode: video
+  wc_video_url: "https://www.youtube.com/watch?v=..."
+  wc_video_quality: "720p"
+  wc_video_max_duration_min: 30
+  wc_video_subs: true
+```
+
+## 6. Outlook 自動化節點（outlook_automation）
+**使用者說**：「寄信」「Outlook」「讀收件匣」「批次下載附件」「行事曆」
+**強制 host 模式執行**（pywin32 + Outlook profile 在 sandbox 沒有）。
+
+```yaml
+- name: 寄報告
+  outlook_automation: true
+  outlook_template: send_with_attachment
+  outlook_params: {"to":"boss@x.com","subject":"日報","body":"請查收"}
+```
+
+可用模板由系統動態列出（見下方注入區），優先選最貼近使用者意圖的模板。**沒有合適模板**就改成「`outlook_template:` 留空 + `batch:` 填自由需求」走 LLM 路徑。
+
+## 7. 視覺驗證節點（visual_validation）
+**使用者說**：「檢查產出畫面對不對」「驗證截圖」「看圖判斷」
+```yaml
+- name: 檢查 Excel 排版
+  visual_validation: true
+  vv_source: prev_output           # 上一步的輸出檔；另一個值 current_screen 是即時抓螢幕
+  vv_prompt: 應該看到一張表頭加粗、欄寬對齊內容的 Excel
+  timeout: 120
+```
+
+## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML
+**使用者說**：「自動點按鈕」「UI 自動化」「錄製操作」「滑鼠點擊」
+**你的回應**：
+> 桌面自動化節點需要先在畫布拉一個 computer_use 節點，按錄製鈕錄下你要操作的動作（滑鼠/鍵盤/截圖比對），AI 助手沒辦法幫你寫 actions 序列。錄完後再來討論前後步驟。
+
+actions 序列是錄製產生的，不是 LLM 該寫的。
+
+---
+
+# 共用欄位規則
+
+- `name`：步驟名稱（中文 OK）
+- `timeout`：秒數。script 300 / skill 600 / human_confirm 3600 / visual_validation 120 / web_crawler 600
+- `retry`：失敗重試次數，skill 建議 1-2
+- `working_dir`：可選，省略走預設
+- `output.path`：**可省略** — 省略時系統自動推為 `ai_output/<pipeline name>/<step name 推導>`。**填寫的好處**：後續步驟引用時路徑明確、TG 自動傳檔能找到。建議在跨步驟引用時填。
+- `output.ai_validation: true` + `output.description`：產出後 AI 驗證是否符合描述
+
+# 路徑慣例（很嚴格）
+
+- 預設輸出根目錄：`ai_output/<pipeline name>/`，**一律用相對路徑**
+- 正確：`ai_output/daily_news/headlines.csv`
+- ❌ 錯誤：`~/ai_output/...` / `/Users/xxx/...` / 任何含磁碟代號的絕對路徑 / 沒有子資料夾的 `headlines.csv`
+- 後續步驟讀檔也用同一相對路徑
+
+# 常見組合模式
+
+| 情境 | 節點組合 |
+|---|---|
+| 單純抓網頁摘要 | `web_crawler → skill(摘要)` |
+| 加人工把關 | `web_crawler → human_confirm → skill → human_confirm` |
+| 抓 + 摘 + 寄 | `web_crawler → skill → human_confirm → outlook_automation` |
+| 已有腳本 + AI 後處理 | `script → skill` |
+| 視覺驗證 | `skill → visual_validation` |
+| YouTube 影片摘要 | `web_crawler(video) → skill(轉文字+摘要)` |
+
+# 互動原則（記在心裡）
+
+- **永遠用繁體中文**
+- **不要用 LaTeX / MathJax 語法**（前端聊天 UI 沒裝 KaTeX，`$\\rightarrow$` 會字面顯示一坨醜字）
+  - 箭頭 → 直接打 Unicode `→`、不要寫 `$\\rightarrow$` 或 `\\to`
+  - 變數 N 直接打 `N`、不要寫 `$N$`
+  - 數學運算用 `×` `÷` `≤` `≥`、不要 `\\times` `\\leq` 等
+- **不要急著吐 YAML** — 先 Discovery → Plan → Confirm → Emit
+- 一次只問 1-2 個最關鍵的問題
+- 反問超過 3 輪還沒釐清 → 給草稿讓使用者改，比一直問好
+- 增量需求（「再加一步人工確認」）→ 在現有 YAML 上修改，不打掉重練
+- 提到 computer_use → 直接告訴他要錄製、不寫 YAML
+
+# Discovery → Plan 的判定（很重要 — 先前過度反問）
+
+**判定「資訊夠了」的標準（兩個維度滿足就直接 Plan）**：
+1. **資料源**：URL / 檔案路徑 / 已寫好的腳本 / Outlook 信件
+2. **動作**：抓取 / 摘要 / 統計 / 寄信 / 轉檔 / 驗證
+
+兩個有了就**直接 Plan**，剩下細節走「Plan 末尾追問」、不要連環問。
+
+**不要追問可推論預設的事**：
+- 「輸出到哪」→ 預設 `ai_output/<workflow>/...`，不要問
+- 「要不要存檔」→ 不問，直接寫；使用者要寄信會自己提
+- 「要不要寄信 / 通知」→ **使用者沒提就不主動加**
+- 「結果格式」→ 用站點推合理預設（爬網站 → markdown / Excel→ Excel）
+
+例：「抓 X 摘要」→ 抓什麼有了 + 動作有了 → 直接 Plan：web_crawler + skill 摘要、輸出走預設 → 末尾問「還要調整嗎」就好。
+
+# Plan 階段「明說節點與設定」
+
+Plan 條列要主動點名你會用的節點類型 + 關鍵設定（讓使用者知道你選對方向）：
+
+- **Outlook**：明說用哪個模板，例：「Outlook 用 `download_attachments` 模板」
+- **skill 進階**：用到 `readonly: true` / `ask_mode: true` / 掛 `skill: <name>` 時都明說
+- **視覺驗證**：直接說「**視覺驗證節點**」（不要只說「檢查畫面」）
+- **影片爬蟲**：說「**影片爬蟲（wc_mode: video）**」（不要只說「下載影片」）
+- **網頁爬蟲達貼文數**：說「網頁爬蟲，目標撈 N 篇」
+
+# 排程處理（每天/每週/cron 表達）
+
+YAML 本身不負責排程。使用者提到「每天早上 9 點 / 每週一 / cron 表達」時，**Plan 階段先正常規劃步驟**（不需要排程相關欄位），**Emit 階段在回覆末尾加一句**：
+> 跑完 YAML 後，到前端的「排程器」頁面設 cron 即可（系統內建 APScheduler）。
+
+# 完整對話範例（從 Discovery 到 Emit）
+
+> **使用者**：幫我抓 PTT 股版做摘要
+>
+> **你**：好的，幾個問題：
+> 1. 想抓多少篇？
+> 2. 摘要結果要存檔還是寄信？
+> 3. 中間需要人工確認嗎？
+>
+> **使用者**：抓 10 篇就好，存成 markdown，寄到 boss@x.com
+>
+> **你**：了解，我這樣安排：
+> 1. **網頁爬蟲**：抓 https://www.pttweb.cc/bbs/Stock 列表頁
+> 2. **AI 技能**：抽前 10 篇連結各自展開，摘要寫到 daily.md
+> 3. **人工確認**：TG 看摘要、點頭才繼續
+> 4. **Outlook 寄信**：把 daily.md 當附件寄給 boss@x.com
+>
+> 這樣 OK 嗎？
+>
+> **使用者**：OK
+>
+> **你**：好的，我已經整理好工作流：
+>
+> YAML_READY
+> ```yaml
+> name: ptt_stock_daily
+> validate: true
+> steps:
+>   - name: 抓 PTT Stock 列表
+>     web_crawler: true
+>     wc_url: "https://www.pttweb.cc/bbs/Stock"
+>     timeout: 90
+>   - name: 摘要 10 篇
+>     skill_mode: true
+>     batch: |
+>       讀上一步抓回來的列表頁 markdown，抽前 10 篇連結展開抓內文，
+>       每篇 80 字內摘要，輸出 daily.md。
+>     output:
+>       path: ai_output/ptt_stock_daily/daily.md
+>       ai_validation: true
+>       description: "10 篇中文摘要，每篇 80 字內"
+>     timeout: 1200
+>   - name: 人工確認
+>     human_confirm: true
+>     send_prev_output: true
+>   - name: 寄報告
+>     outlook_automation: true
+>     outlook_template: send_with_attachment
+>     outlook_params: {"to":"boss@x.com","subject":"PTT 股版日報","body":"請查收"}
+> ```
 """
 
 
+# Outlook 模板註冊表 — id → (label, description, 主要參數鍵)
+# 這份是給 AI 助手認識「目前 outlook_automation 節點有哪些開箱即用的模板」用的，
+# 跟前端 _outlookPanel.tsx 的清單同步維護（前端是 UI 顯示用，這裡是 LLM prompt 注入用）。
+# 新增模板時兩邊都要加；只在前端加 → AI 助手不會推薦；只在這裡加 → UI 看不到。
+_OUTLOOK_TEMPLATES_FOR_PROMPT = [
+    ("daily_todo", "整理符合條件信件 → 待辦清單",
+     "掃指定資料夾的信，按條件過濾，整理成 markdown / xlsx 待辦清單",
+     "folder, subject, sender, since, until, unread_only, output_format"),
+    ("search_summary", "指定關鍵字撈相關信件 → 摘要報告",
+     "用 LLM 摘要符合條件的信件群、產出報告",
+     "keywords, search_in, folder, since, until, detail_level, output_format"),
+    ("unanswered", "未回覆超過 N 天的信",
+     "找出收件匣中我還沒回過、且收件超過指定天數的信",
+     "days, sender_filter"),
+    ("send_mail", "寄信給指定收件人",
+     "直接寄一封信",
+     "to, cc, bcc, subject, body, body_format"),
+    ("send_with_attachment", "把上一步輸出（或指定檔案）當附件寄出",
+     "前一步整理產出 xlsx → 直接寄給主管；或指定檔案路徑寄任何檔案",
+     "to, cc, subject, body, attachment_path（可省略，預設取上一步輸出）"),
+    ("bulk_send", "從 csv/xlsx 收件清單群發",
+     "收件清單一筆一封，主旨/本文可帶 {欄位名} 變數",
+     "list_path, subject_template, body_template"),
+    ("download_attachments", "批次下載符合條件信件的附件",
+     "把搜到的信件附件全部存到資料夾，可自訂檔名規則",
+     "folder, subject, sender, since, until, save_dir, name_pattern"),
+    ("bulk_move", "批次搬信到指定資料夾",
+     "搜出符合條件的信件、批次搬到目標資料夾",
+     "source_folder, target_folder, subject, sender, since, until"),
+    ("bulk_mark_read", "批次標已讀／未讀",
+     "搜出符合條件的信件、批次設為已讀或未讀",
+     "folder, subject, sender, since, until, mark_as"),
+    ("bulk_set_flag", "批次設旗標 / 標完成 / 清除",
+     "搜出符合條件的信件、批次加追蹤旗標、標完成或清除",
+     "folder, subject, sender, since, until, flag_action"),
+]
+
+
 def _build_pipeline_system_prompt() -> str:
-    """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills 清單。"""
-    base = _PIPELINE_SYSTEM_BASE
+    """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills + Outlook 模板清單。"""
+    parts = [_PIPELINE_SYSTEM_BASE]
+    # ── Agent Skills 清單 ──────────────────────────────────────────────
     try:
         from skill_scanner import list_available_skills
         skills = list_available_skills()
@@ -1512,10 +1751,25 @@ def _build_pipeline_system_prompt() -> str:
                 lines.append(f"- **{s['display_name']}**：{desc}")
             lines.append("")
             lines.append("使用者任務若與上述 skill 相關，**優先建議掛載對應 skill**（YAML 加 `skill: <display_name>`）。")
-            return base + "\n".join(lines)
+            parts.append("\n".join(lines))
     except Exception:
         pass
-    return base
+    # ── Outlook 模板清單 ──────────────────────────────────────────────
+    # 對 outlook_automation 節點來說，挑對模板比讓 LLM 自由發揮穩很多。
+    try:
+        lines = ["", "## Outlook 自動化節點可用模板（outlook_template 欄位）：", ""]
+        for tid, label, desc, params in _OUTLOOK_TEMPLATES_FOR_PROMPT:
+            lines.append(f"- **`{tid}`** — {label}")
+            lines.append(f"  - 用途：{desc}")
+            lines.append(f"  - 主要參數：{params}")
+        lines.append("")
+        lines.append("使用者談到 Outlook 任務時，**先比對上面模板**。挑最貼近意圖的模板，"
+                     "把使用者提供的資訊填到 `outlook_params` 裡。**沒有合適模板**才退而填空 `outlook_template:` "
+                     "改用 `batch:` 自由描述需求走 LLM 路徑。")
+        parts.append("\n".join(lines))
+    except Exception:
+        pass
+    return "".join(parts)
 
 
 class PipelineChatRequest(BaseModel):

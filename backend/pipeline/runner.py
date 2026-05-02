@@ -25,7 +25,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from .models import PipelineConfig
 from .store import PipelineRun, StepResult, get_store
 from .logger import create_run_logger, resume_run_logger
-from .executor import execute_step, execute_step_with_skill, execute_step_with_outlook
+from .executor import execute_step, execute_step_with_skill, execute_step_with_outlook, execute_step_with_web_crawler
 from .validator import validate_step, validate_step_with_skill, ValidationResult
 
 
@@ -122,10 +122,14 @@ def _confirm_keyboard(run_id: str, screenshot: bool = False, allow_hint: bool = 
     top.append(InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"))
     rows = [
         top,
+        # 「📎 上一步輸出 / 📂 任一步輸出」永遠存在；點下去由 backend 判斷有沒有檔案、回應使用者
+        # 跟 send_prev_output 自動傳送無關（自動傳是抵達節點當下推一份；按鈕是隨時要重抓用）
+        [InlineKeyboardButton("📎 上一步輸出", callback_data=f"pipe_prev_output:{run_id}"),
+         InlineKeyboardButton("📂 任一步輸出", callback_data=f"pipe_select_step:{run_id}")],
         [InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}")],
     ]
     if screenshot:
-        rows[1].append(InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"))
+        rows[2].append(InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"))
     # HQ 預覽：B1 自動預覽只抽文字（docx/pptx 品質 40%），點此按鈕改用 LibreOffice
     # 轉 PDF → render，版式 ~80-90% 還原。要 5-10s，所以不自動跑；使用者按了才跑。
     if preview_enabled:
@@ -241,14 +245,16 @@ async def _tg_send(chat_id: int, text: str, reply_markup=None):
         return
     logger.info(f"[Telegram] 發送訊息到 chat_id={chat_id}（token={token[:15]}...）")
     try:
-        bot = Bot(token=token)
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
-        await bot.close()
+        # 用 async with 取代手動 bot.close() — 後者實際是 TG API 的 `close` method
+        # （TG 文件警告：前 10 分鐘必回 429、嚴格 rate-limit、不該在 bot code 呼叫）
+        # async with 走 shutdown() 路徑、只關 httpx 連線、不打 TG API
+        async with Bot(token=token) as bot:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
         logger.info(f"[Telegram] ✅ 發送成功")
     except Exception as e:
         logger.error(f"[Telegram] ❌ 發送失敗：{e}")
@@ -369,40 +375,364 @@ async def _tg_send_photos(chat_id: int, paths: list[str], caption_prefix: str = 
             logger.error(f"[Telegram]   ✗ 截圖 {i}/{total} 送出徹底失敗：{type(e2).__name__}: {e2}")
         return False
 
-    bot = None
     try:
-        bot = Bot(token=token)
-        total = len(paths)
-        for i, p in enumerate(paths, start=1):
-            cap = caption_prefix + (f"（螢幕 {i}/{total}）" if total > 1 else "")
-            send_path = _compress_for_tg(p)
-            # 送每張前檢查檔案有沒有正常產生（有時 take_screenshots 該路徑被清掉或空檔）
-            try:
-                sz = os.path.getsize(send_path)
-            except Exception as e:
-                logger.error(f"[Telegram]   截圖 {i}/{total} 檔案讀取失敗（{e}）→ 跳過")
-                continue
-            if sz <= 0:
-                logger.error(f"[Telegram]   截圖 {i}/{total} 檔案 0 bytes → 跳過")
-                continue
-            ok = await _send_one(bot, send_path, cap, i, total)
-            # 送成功 → 清掉磁碟（截圖 TG 上已經有，本地不留以免每跑一次就堆積 GB 級 PNG）
-            # 送失敗 → 保留讓使用者/開發者事後回看或手動重送
-            if ok:
-                for cleanup in {p, send_path}:  # set 去重：單螢幕沒壓縮時兩者同檔
-                    try:
-                        if os.path.exists(cleanup):
-                            os.unlink(cleanup)
-                    except Exception as _e:
-                        logger.warning(f"[Telegram]   清理截圖 {cleanup} 失敗：{_e}")
+        # 用 async with：避免手動 bot.close()（那是 TG API、嚴格 rate-limit）
+        async with Bot(token=token) as bot:
+            total = len(paths)
+            for i, p in enumerate(paths, start=1):
+                cap = caption_prefix + (f"（螢幕 {i}/{total}）" if total > 1 else "")
+                send_path = _compress_for_tg(p)
+                try:
+                    sz = os.path.getsize(send_path)
+                except Exception as e:
+                    logger.error(f"[Telegram]   截圖 {i}/{total} 檔案讀取失敗（{e}）→ 跳過")
+                    continue
+                if sz <= 0:
+                    logger.error(f"[Telegram]   截圖 {i}/{total} 檔案 0 bytes → 跳過")
+                    continue
+                ok = await _send_one(bot, send_path, cap, i, total)
+                if ok:
+                    for cleanup in {p, send_path}:
+                        try:
+                            if os.path.exists(cleanup):
+                                os.unlink(cleanup)
+                        except Exception as _e:
+                            logger.warning(f"[Telegram]   清理截圖 {cleanup} 失敗：{_e}")
     except Exception as e:
         logger.error(f"[Telegram] 截圖批次送出異常：{e}")
+
+
+# Telegram 文件大小上限（一般 bot；自架 local server 可放寬到 2GB）
+_TG_DOC_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _workflow_output_dir(workflow_name: str):
+    """回傳 ai_output/<workflow_name>/ 的絕對路徑（不存在也回，由呼叫端決定怎麼處理）。"""
+    from pathlib import Path as _P
+    if not workflow_name:
+        return None
+    proj_root = _P(__file__).parent.parent.parent.absolute()
+    return proj_root / "ai_output" / workflow_name
+
+
+# 用來判斷哪些檔案是「真正的步驟產出」、哪些是雜訊（log / preview / 內部 DB 檔）
+_OUTPUT_SKIP_PREFIXES = ("screenshot_",)
+_OUTPUT_SKIP_SUFFIXES = ("_preview.png", "_compressed.jpg", "_libre.pdf", "_unsupported.png")
+_OUTPUT_SKIP_EXTS = {".log"}
+_OUTPUT_SKIP_NAMES = ("pipeline_settings.json", "pipeline.db", "pipeline.db-shm", "pipeline.db-wal")
+
+
+def _is_output_candidate(path) -> bool:
+    """檔名是否該被視為「步驟可能產出的檔案」。過濾掉系統雜訊。"""
+    n = path.name
+    if n.startswith(_OUTPUT_SKIP_PREFIXES):
+        return False
+    if any(n.endswith(suf) for suf in _OUTPUT_SKIP_SUFFIXES):
+        return False
+    if path.suffix.lower() in _OUTPUT_SKIP_EXTS:
+        return False
+    if n in _OUTPUT_SKIP_NAMES:
+        return False
+    return True
+
+
+def _snapshot_workflow_dir(workflow_name: str) -> dict:
+    """掃 ai_output/<workflow_name>/ 取每個檔的 mtime（給步驟前後比對用）。
+    回 {str(absolute_path): mtime}。失敗回空 dict。"""
+    out: dict = {}
+    wf = _workflow_output_dir(workflow_name)
+    if not wf or not wf.exists() or not wf.is_dir():
+        return out
+    try:
+        for f in wf.rglob("*"):
+            if f.is_file() and _is_output_candidate(f):
+                try:
+                    out[str(f.absolute())] = f.stat().st_mtime
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return out
+
+
+def _diff_snapshot_pick_main(before: dict, workflow_name: str):
+    """比對 before（_snapshot_workflow_dir 結果）跟現在的狀態、找出本步驟新增/修改的檔，
+    挑「主要產出」回傳（絕對路徑字串），沒有變化回 None。
+
+    挑選邏輯：
+      1. 先看新增檔（before 沒有的） — 比修改現有檔更可能是「最終產出」
+      2. 都沒新增、看修改的（mtime 變新）
+      3. 多個候選時，偏好「報告類副檔名」（.docx/.pdf/.xlsx/.md/.csv/.html/.pptx/.json/.txt）
+         排在前面、再看 mtime 最新的
+    """
+    wf = _workflow_output_dir(workflow_name)
+    if not wf or not wf.exists():
+        return None
+    # 取現在快照
+    after = _snapshot_workflow_dir(workflow_name)
+
+    new_files = [p for p in after.keys() if p not in before]
+    modified = [p for p in after.keys() if p in before and after[p] > before[p]]
+    candidates = new_files if new_files else modified
+    if not candidates:
+        return None
+
+    from pathlib import Path as _P
+    # 報告類副檔名優先（排前面）
+    report_exts = {".docx", ".pdf", ".xlsx", ".xls", ".pptx", ".md", ".csv",
+                   ".html", ".htm", ".json", ".txt", ".png", ".jpg", ".jpeg"}
+
+    def sort_key(p_str: str):
+        p = _P(p_str)
+        is_report = 0 if p.suffix.lower() in report_exts else 1
+        # 用負 mtime 讓「最新」排前面
+        return (is_report, -after.get(p_str, 0))
+
+    candidates.sort(key=sort_key)
+    return candidates[0]
+
+
+def _latest_workflow_output_file(workflow_name: str):
+    """掃 ai_output/<workflow_name>/ 拿最新一個非雜訊檔（圖檔 / log / preview / 內部 db 檔過濾掉）。
+    給「skill 節點 / 沒明確 output.path」這種「實際有產檔但 step 沒記錄」的場景兜底。
+    """
+    from pathlib import Path as _P
+    if not workflow_name:
+        return None
+    proj_root = _P(__file__).parent.parent.parent.absolute()
+    wf_dir = proj_root / "ai_output" / workflow_name
+    if not wf_dir.exists() or not wf_dir.is_dir():
+        return None
+    skip_prefixes = ("screenshot_",)
+    skip_suffixes = ("_preview.png", "_compressed.jpg", "_libre.pdf", "_unsupported.png")
+    skip_exts = {".log"}
+    skip_names = ("pipeline_settings.json", "pipeline.db", "pipeline.db-shm", "pipeline.db-wal")
+    candidates = []
+    for f in wf_dir.iterdir():
+        if not f.is_file():
+            continue
+        n = f.name
+        if n.startswith(skip_prefixes):
+            continue
+        if any(n.endswith(suf) for suf in skip_suffixes):
+            continue
+        if f.suffix.lower() in skip_exts:
+            continue
+        if n in skip_names:
+            continue
+        candidates.append((f.stat().st_mtime, f))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def _step_default_output_path(step, workflow_name: str) -> Optional[str]:
+    """如果 step 沒明確設 output.path、回傳 runner 會自動 default 的路徑。
+    跟 runner.py 內 outlook_automation / web_crawler 的 default 邏輯保持一致。
+
+    沒 default 規則的節點類型（skill / script / human_confirm 等）回 None。
+    """
+    if not workflow_name:
+        return None
+    # 哪些節點類型有 default rule
+    has_default = bool(
+        getattr(step, "outlook_automation", False)
+        or getattr(step, "web_crawler", False)
+    )
+    if not has_default:
+        return None
+    import re as _re
+    safe_step = _re.sub(r"[^\w一-鿿_-]", "_", step.name).strip("_") or "result"
+    return f"ai_output/{workflow_name}/{safe_step}_result.md"
+
+
+def _resolve_step_output_for_tg(
+    step, *, workflow_name: str = "", logger=None, step_result=None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """檢查指定 step 的輸出檔、回傳能傳給 Telegram 的檔案資料。
+
+    解析優先順序：
+      1. step.output.path 明確設定 → 用它
+      2. 沒設、但節點類型有 default rule → 算出 default 路徑
+      3. default 路徑不存在但 parent 是 workflow 輸出資料夾、裡面有東西
+         → 多 URL 爬蟲常見、實際輸出在資料夾不是單檔；改用 parent dir
+      4. 都沒有 → None（呼叫端組「無輸出檔」訊息）
+
+    回傳 (file_path, display_name, error_msg)：
+      - 三者皆 None：完全沒輸出可傳
+      - file_path / display_name 給值、error_msg=None：可以傳
+      - error_msg 有值：能解析但有狀況（不存在 / 太大），傳給使用者看
+
+    資料夾：自動 zip 後給；zip 寫到系統 temp、呼叫端用完要 unlink。
+    """
+    from pathlib import Path as _P
+    import logging as _log
+
+    log_fn = (logger or _log.getLogger("pipeline")).warning
+
+    if not step:
+        return None, None, None
+
+    # ── Step 1：抓明確或 default 的目標路徑 ──────────────────────
+    target_str: Optional[str] = None
+    is_explicit = False
+    # 最高優先：StepResult.actual_output_path（runner 在執行時 snapshot diff 算出來的）
+    # 這個對「沒設 output.path 的 skill 節點」特別重要 — 不會跟其他步驟搶 latest 檔
+    actual_path = getattr(step_result, "actual_output_path", "") if step_result else ""
+    if actual_path:
+        target_str = actual_path
+        is_explicit = True  # 視為「指定路徑」、後面 multi-URL fallback 不要動它
+    elif getattr(step, "output", None) and step.output.path:
+        target_str = str(step.output.path)
+        is_explicit = True
+    else:
+        target_str = _step_default_output_path(step, workflow_name)
+
+    # Skill / Script 沒 actual_output_path、沒明確 output.path 也沒 default rule，
+    # 通常表示：(a) 該步沒實際寫檔（如純 stdout）；或 (b) 是舊 run（升級前沒記錄 actual_output_path）
+    # 對 (b) 兜底掃 workflow dir 最新檔（不完美但聊勝於無）
+    # human_confirm / visual_validation / computer_use 不寫檔、不適用。
+    if not target_str and workflow_name:
+        could_produce = bool(
+            getattr(step, "skill_mode", False)
+            or (not getattr(step, "human_confirm", False)
+                and not getattr(step, "visual_validation", False)
+                and not getattr(step, "computer_use", False)
+                and getattr(step, "batch", ""))  # script 節點：有 batch 表示會跑
+        )
+        if could_produce:
+            latest = _latest_workflow_output_file(workflow_name)
+            if latest:
+                target_str = str(latest)
+                if logger:
+                    logger.info(f"[_resolve_step_output_for_tg] step={step.name} 沒設 output、"
+                                f"fallback 到 workflow dir 最新檔：{latest.name}")
+
+    if not target_str:
+        return None, None, None
+
+    p = _P(target_str).expanduser()
+    if not p.is_absolute():
+        p = _P(__file__).parent.parent.parent.absolute() / p
+
+    if not p.exists():
+        # ── Step 2：default 路徑檔案不存在、看 parent dir 有沒有東西 ──
+        # 多 URL 爬蟲：default 路徑是 .md、實際輸出寫到 parent 資料夾（多檔 + index.json）
+        # 多 URL 模式判斷：step.web_crawler + wc_urls 有效項數 > 1
+        is_multi_wc = False
+        if getattr(step, "web_crawler", False):
+            wc_urls = getattr(step, "wc_urls", None) or []
+            valid = [u for u in wc_urls if u and u.strip() and not u.strip().startswith("#")]
+            is_multi_wc = len(valid) > 1
+        # 沒明確設 output.path、且是多 URL 爬蟲、且 parent 有東西 → 用 parent
+        if not is_explicit and is_multi_wc and p.parent.exists() and p.parent.is_dir():
+            non_chrome = [
+                f for f in p.parent.iterdir()
+                if f.is_file() and not f.name.startswith("screenshot_") and f.suffix.lower() not in {".log"}
+            ]
+            if non_chrome:
+                p = p.parent  # 用 workflow 輸出資料夾
+            else:
+                return None, None, f"輸出檔案不存在：{p}"
+        else:
+            return None, None, f"輸出檔案不存在：{p}"
+
+    if p.is_file():
+        size = p.stat().st_size
+        if size > _TG_DOC_MAX_BYTES:
+            return None, None, (f"檔案太大（{size/1024/1024:.1f} MB > 50 MB Telegram 上限）。"
+                                f"請去 host 取：{p}")
+        return str(p), p.name, None
+
+    if p.is_dir():
+        # 整個資料夾打包成 zip 送
+        import tempfile, zipfile
+        try:
+            tmp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False).name
+            with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in p.rglob("*"):
+                    if f.is_file():
+                        # 用 dir 自身為 root；解壓會看到原本資料夾結構
+                        zf.write(f, f.relative_to(p.parent))
+            zsize = _P(tmp_zip).stat().st_size
+            if zsize > _TG_DOC_MAX_BYTES:
+                try: os.unlink(tmp_zip)
+                except Exception: pass
+                return None, None, (f"資料夾打包後 {zsize/1024/1024:.1f} MB、超過 Telegram 上限。"
+                                    f"請去 host 取：{p}")
+            return tmp_zip, p.name + ".zip", None
+        except Exception as e:
+            log_fn(f"[_resolve_step_output_for_tg] zip 失敗：{e}")
+            return None, None, f"資料夾打包失敗：{e}"
+
+    return None, None, f"不認識的路徑類型：{p}"
+
+
+async def _send_step_output_to_tg(
+    chat_id: int, step, step_label: str = "", *,
+    workflow_name: str = "", logger=None, step_result=None,
+) -> tuple[bool, str]:
+    """把 step 的 output 檔案（或 zip 化的資料夾）送到指定 chat_id。
+    workflow_name 用來算 default output path（沒填 output.path 但節點類型有 default 時）。
+    step_result：StepResult 物件（含 actual_output_path）— 多步 skill 共用 workflow dir 時不會搶錯檔。
+    回傳 (ok, msg)：ok=True 時 msg 是 status 摘要；False 時 msg 是錯誤訊息（可直接給使用者）。
+    """
+    import logging as _log
+    import tempfile as _tf
+    log = logger or _log.getLogger("pipeline")
+    file_path, display, err = _resolve_step_output_for_tg(
+        step, workflow_name=workflow_name, logger=log, step_result=step_result,
+    )
+
+    if err:
+        return False, err
+    if not file_path:
+        return False, "上一步沒設輸出檔（output.path），且該節點類型沒有 default fallback"
+
+    # chat_id fallback：跟 _tg_send / _tg_send_photos 同邏輯。
+    # 之前 auto-send 會失敗的就是這裡 — chat_id 0 時沒退到 settings 拿
+    if not chat_id:
+        chat_id = _get_tg_chat_id()
+    token = _get_tg_token()
+    if not chat_id or not token:
+        return False, f"Telegram 設定不完整：chat_id={chat_id or '無'}, token={'有' if token else '無'}"
+
+    try:
+        # 用 async with：避免手動 bot.close()（那是 TG `close` API method、
+        # 文件寫前 10 分鐘必回 429、嚴格 rate-limit、不該在 bot code 呼叫）。
+        # 之前 user 報「每次手動點按鈕必出現速率限制警告」就是這個 bug。
+        async with Bot(token=token) as bot:
+            with open(file_path, "rb") as fp:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=fp,
+                    filename=display,
+                    caption=f"📎 {step_label or '上一步輸出'}：{display}" if step_label else None,
+                )
+        log.info(f"[Telegram] ✅ 已傳送 {display} 到 chat {chat_id}")
+        return True, f"已傳送：{display}"
+    except Exception as e:
+        # Telegram rate limit (flood control) → 翻譯成易懂訊息
+        es = str(e)
+        if "Flood control" in es or "RetryAfter" in es or "Too Many Requests" in es:
+            import re as _re
+            m = _re.search(r"(\d+)\s*seconds", es)
+            wait_s = int(m.group(1)) if m else 0
+            log.warning(f"[Telegram] FloodWait：{es}")
+            return False, (
+                f"Telegram 速率限制（短時間內傳太多訊息了）。"
+                f"{f'請等 {wait_s} 秒（約 {wait_s//60} 分 {wait_s%60} 秒）後再試。' if wait_s else '稍候幾分鐘再試。'}"
+            )
+        log.error(f"[Telegram] send_document 失敗：{e}")
+        return False, f"Telegram 傳送失敗：{e}"
     finally:
-        if bot is not None:
-            try:
-                await asyncio.wait_for(bot.close(), timeout=5)
-            except Exception:
-                pass
+        # _resolve_step_output_for_tg 對「資料夾」會 zip 到 system temp 下，這邊清掉
+        try:
+            if file_path.startswith(_tf.gettempdir()) and file_path.endswith(".zip"):
+                os.unlink(file_path)
+        except Exception:
+            pass
 
 
 def _find_prev_output_file(run, config) -> Optional[str]:
@@ -649,10 +979,10 @@ def _deterministic_validate(step, exec_result, logger) -> ValidationResult:
             except Exception:
                 pass
 
-    logger.info(f"[{step.name}] ⚡ Recipe 快速驗證通過（確定性檢查）")
+    logger.info(f"[{step.name}] ⚡ 確定性檢查通過")
     return ValidationResult(
         status="ok",
-        reason="Recipe 快速模式：exit code=0、輸出檔案存在且非空",
+        reason="exit code=0、輸出檔案存在且非空",
         suggestion="",
     )
 
@@ -726,10 +1056,22 @@ async def run_pipeline(
     # 恢復執行時，重建已完成步驟的輸出資訊（供後續步驟參考）
     if start_from_step > 0:
         from pathlib import Path as _Path
+        # 預先用 step_index 索引 step_results、給沒設 output.path 的步驟回填 actual_output_path
+        _sr_idx = {sr.step_index: sr for sr in run.step_results}
         for i in range(start_from_step):
             prev_step = config.steps[i] if i < len(config.steps) else None
-            if prev_step and not prev_step.human_confirm and prev_step.output and prev_step.output.path:
-                p = _Path(prev_step.output.path).expanduser()
+            if not prev_step or prev_step.human_confirm:
+                continue
+            # 優先：明確 output.path > 該步 StepResult.actual_output_path
+            _eff_path = ""
+            if prev_step.output and prev_step.output.path:
+                _eff_path = prev_step.output.path
+            else:
+                _sr = _sr_idx.get(i)
+                if _sr and getattr(_sr, "actual_output_path", ""):
+                    _eff_path = _sr.actual_output_path
+            if _eff_path:
+                p = _Path(_eff_path).expanduser()
                 out_info = {"path": str(p), "schema": ""}
                 try:
                     if p.suffix == ".csv" and p.exists():
@@ -763,6 +1105,11 @@ async def run_pipeline(
         step_num = run.current_step + 1
         total = len(config.steps)
         logger.info(f"══ 步驟 {step_num}/{total}：{step.name} ══")
+
+        # 步驟開始前 snapshot workflow 輸出資料夾（mtime 比對用）
+        # 步驟結束後 _diff_snapshot_pick_main 找新增/修改的檔，存進 StepResult.actual_output_path
+        # → TG「取任一步輸出」就能對應到該步真正寫的檔（不再讓多個 skill 步驟搶到「最新檔」）
+        _step_dir_snapshot_before = _snapshot_workflow_dir(config.name)
 
         # ── 人工確認節點：暫停等待確認 ──
         if step.human_confirm:
@@ -830,6 +1177,36 @@ async def run_pipeline(
                                _confirm_keyboard(run.run_id, screenshot=step.screenshot,
                                                  allow_hint=allow_hint,
                                                  preview_enabled=step.preview_prev_output))
+                # 自動傳上一步輸出檔：step.send_prev_output=True 時，立刻把上一步 output.path
+                # 的檔案（或資料夾打包成 zip）當 document 傳到 TG。手機上可直接點開 / 下載。
+                # 失敗（沒設輸出 / 檔案不存在 / 太大）也只 log warning、不擋人工確認流程。
+                if step.send_prev_output:
+                    try:
+                        # 找上一個非 human_confirm 步驟（連續多個 human_confirm 時往前跳過）
+                        _po_prev = run.current_step - 1
+                        while _po_prev >= 0 and config.steps[_po_prev].human_confirm:
+                            _po_prev -= 1
+                        if _po_prev >= 0:
+                            _po_step = config.steps[_po_prev]
+                            _po_result = next((sr for sr in run.step_results if sr.step_index == _po_prev), None)
+                            ok, msg = await _send_step_output_to_tg(
+                                run.telegram_chat_id, _po_step,
+                                step_label=f"步驟 {_po_prev+1}：{_po_step.name}",
+                                workflow_name=config.name,
+                                logger=logger,
+                                step_result=_po_result,
+                            )
+                            if ok:
+                                logger.info(f"[{step.name}] ✓ 自動傳上一步輸出：{msg}")
+                            else:
+                                # 不再廣播警告到 TG（noise）：按鈕「📎 上一步輸出」永遠存在，
+                                # 使用者要時自己點即可。失敗只 log 到 backend、debug 用。
+                                logger.warning(
+                                    f"[{step.name}] 自動傳上一步輸出未成功（不廣播到 TG）：{msg}"
+                                )
+                    except Exception as _e:
+                        logger.warning(f"[{step.name}] send_prev_output 例外：{_e}")
+
                 # 自動截圖：step.screenshot=True 時，發完決策訊息立刻截全螢幕附過去，
                 # 逐螢幕送（雙螢幕 → 2 張，方便 TG 上直接看到上一步結果不用再按按鈕）
                 if step.screenshot:
@@ -998,6 +1375,42 @@ async def run_pipeline(
                     run_id=run.run_id,
                     ask_mode=step.ask_mode,
                 )
+            elif step.web_crawler:
+                # 網頁爬蟲節點：永遠跑沙盒（Crawl4AI 在 pipeline-sandbox-v5 容器內）；
+                # CF fallback 走 host 端 FlareSolverr。不進 LLM、不進 recipe。
+                if step.output and step.output.path:
+                    _resolved_out = str(_resolve_path(step.output.path))
+                else:
+                    # 沒設 outputPath → default 到 ai_output/<workflow>/<step>_result.md
+                    import re as _re
+                    _safe_step = _re.sub(r"[^\w一-鿿_-]", "_", step.name).strip("_") or "result"
+                    _resolved_out = str(_resolve_path(f"ai_output/{config.name}/{_safe_step}_result.md"))
+                    logger.info(f"[{step.name}] 自動 default outputPath → {_resolved_out}")
+                # interactions 是 list[dict]，pydantic 帶 default_factory 會給空 list
+                exec_result = await execute_step_with_web_crawler(
+                    mode=step.wc_mode or "web",
+                    url=step.wc_url,
+                    urls=step.wc_urls or [],
+                    js_render=step.wc_js_render,
+                    wait_for_selector=step.wc_wait_for_selector,
+                    cloudflare_fallback=step.wc_cloudflare_fallback,
+                    cookies=step.wc_cookies,
+                    interactions=step.wc_interactions or [],
+                    download_assets=step.wc_download_assets,
+                    scroll_count=getattr(step, "wc_scroll_count", 0) or 0,
+                    target_post_count=getattr(step, "wc_target_post_count", 0) or 0,
+                    video_url=step.wc_video_url,
+                    video_quality=step.wc_video_quality,
+                    video_max_filesize_mb=step.wc_video_max_filesize_mb,
+                    video_max_duration_min=step.wc_video_max_duration_min,
+                    video_subs=step.wc_video_subs,
+                    video_subs_langs=step.wc_video_subs_langs,
+                    video_save_info_json=step.wc_video_save_info_json,
+                    output_path=_resolved_out,
+                    timeout=step.timeout,
+                    logger=logger,
+                    step_name=step.name,
+                )
             elif step.skill_mode:
                 # recipe key 使用「索引:名稱」避免同名步驟互相覆蓋
                 recipe_step_key = f"{step_num}:{step.name}"
@@ -1066,6 +1479,14 @@ async def run_pipeline(
                     reason=exec_result.stdout.replace("[visual_validation] ", "") or "視覺驗證",
                     suggestion=exec_result.stderr if _status == "failed" else "",
                 )
+            # web_crawler 節點：成敗已由 crawler tier 結果決定，不需 LLM 驗證
+            elif step.web_crawler:
+                _status = "ok" if exec_result.exit_code == 0 else "failed"
+                val = ValidationResult(
+                    status=_status,
+                    reason=exec_result.stdout.replace("[爬蟲完成] ", "") or "網頁爬取",
+                    suggestion=exec_result.stderr if _status == "failed" else "",
+                )
             # computer_use 節點：成敗已由 action 執行結果決定，不需 LLM 驗證
             elif step.computer_use:
                 _status = "ok" if exec_result.exit_code == 0 else "failed"
@@ -1091,8 +1512,9 @@ async def run_pipeline(
                     output_expect=step.output.get_expect() if step.output else None,
                     logger=logger,
                 )
-            elif config.validate:
-                # 完整 LLM 驗證
+            elif config.validate and has_expect:
+                # 使用者填了「預期輸出描述」→ 跑 LLM 驗證
+                # output.skill_mode=true 走深度（agent 主動跑工具驗證）；否則走快速 LLM 一次驗證
                 use_skill = step.output and step.output.skill_mode
                 validate_fn = validate_step_with_skill if use_skill else validate_step
                 val = await validate_fn(
@@ -1105,6 +1527,27 @@ async def run_pipeline(
                     output_expect=step.output.get_expect() if step.output else None,
                     logger=logger,
                 )
+            elif config.validate and not has_expect and step.skill_mode:
+                # Skill 節點沒填 expect → 仍走 LLM 淺驗證
+                # 理由：LLM 寫的程式碼容易 silent fail（exit_code=0 但結果語意錯，例如
+                # 「抓 10 篇」實際只抓到 3 篇），確定性檢查抓不到、需要外層 LLM 看內容把關。
+                # 跑 validate_step（淺、單次 LLM call ~5-15s），不走 skill 深度模式。
+                logger.info(f"[{step.name}] 🔍 Skill 節點預設驗證（沒填 expect、走淺 LLM 把關 silent fail）")
+                val = await validate_step(
+                    step_name=step.name,
+                    command=step.batch,
+                    exit_code=exec_result.exit_code,
+                    stdout=exec_result.stdout,
+                    stderr=exec_result.stderr,
+                    output_path=(str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None),
+                    output_expect=None,
+                    logger=logger,
+                )
+            elif config.validate and not has_expect:
+                # Script / 其他無 skill_mode 節點 + 沒填 expect → 只做確定性檢查
+                # 理由：script 是使用者自己寫的程式、自己負責正確性，外層 LLM 沒足夠上下文判斷
+                val = _deterministic_validate(step, exec_result, logger)
+                logger.info(f"[{step.name}] ⚡ Script 節點沒填預期輸出，只看 exit code + 檔案存在")
             else:
                 status = "ok" if exec_result.exit_code == 0 else "failed"
                 val = ValidationResult(
@@ -1113,6 +1556,26 @@ async def run_pipeline(
                     suggestion="" if status == "ok" else "請查看 log 取得詳細錯誤",
                 )
                 logger.info(f"[{step.name}] 驗證（僅 exit code）：{val.status}")
+
+            # ── 算這步真正寫到 workflow dir 的主要檔案 ─────────────────
+            # 優先順序：明確 output.path > snapshot diff > 空字串
+            # snapshot diff 對沒設 output.path 的 skill 步驟最關鍵 —
+            # 否則 TG「取任一步輸出」會多步搶同一個「workflow dir 最新檔」
+            actual_out = ""
+            try:
+                if step.output and step.output.path:
+                    p = _resolve_path(step.output.path)
+                    if p.exists() and p.is_file():
+                        actual_out = str(p.absolute())
+                # 多 URL 爬蟲輸出是資料夾（多檔 + index.json），單檔 diff 會挑錯。
+                # 跳過 — 走 _resolve_step_output_for_tg 既有的「parent dir fallback」邏輯
+                _is_multi_wc = bool(getattr(step, "web_crawler", False)) and len(
+                    [u for u in (getattr(step, "wc_urls", None) or []) if u and u.strip()]
+                ) > 1
+                if not actual_out and not _is_multi_wc:
+                    actual_out = _diff_snapshot_pick_main(_step_dir_snapshot_before, config.name) or ""
+            except Exception as _e:
+                logger.debug(f"[{step.name}] snapshot diff 失敗（略過）：{_e}")
 
             step_result = StepResult(
                 step_index=run.current_step,
@@ -1124,6 +1587,7 @@ async def run_pipeline(
                 validation_reason=val.reason,
                 validation_suggestion=val.suggestion,
                 retries_used=retries_used,
+                actual_output_path=actual_out,
             )
 
             # 更新或追加步驟結果
@@ -1154,11 +1618,18 @@ async def run_pipeline(
                 if hasattr(exec_result, 'pending_recipe') and exec_result.pending_recipe:
                     run.pending_recipes.append(exec_result.pending_recipe)
                 # 收集此步驟的輸出資訊供後續步驟參考
+                # 優先：明確 output.path > snapshot 算出來的 actual_output_path
+                # 後者讓沒設 output.path 的 skill 步驟也能被後續 outlook send_with_attachment 自動抓到正確檔
+                _eff_path = ""
                 if step.output and step.output.path:
-                    out_info = {"path": step.output.path, "schema": ""}
+                    _eff_path = step.output.path
+                elif actual_out:  # 上面 snapshot diff 算出來的
+                    _eff_path = actual_out
+                if _eff_path:
+                    out_info = {"path": _eff_path, "schema": ""}
                     try:
                         from pathlib import Path as _Path
-                        p = _Path(step.output.path)
+                        p = _Path(_eff_path)
                         if p.suffix == ".csv" and p.exists():
                             with open(p, "r") as f:
                                 header = f.readline().strip()

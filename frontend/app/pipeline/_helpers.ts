@@ -18,6 +18,7 @@ export interface StepData extends Record<string, unknown> {
   humanConfirmNotifyTelegram?: boolean  // optional — 是否 Telegram 通知
   humanConfirmScreenshot?: boolean     // optional — 是否自動截圖
   humanConfirmPreview?: boolean        // optional — 是否 render 上一步驟輸出檔案預覽
+  humanConfirmSendPrevOutput?: boolean // optional — 抵達節點時自動把上一步輸出檔當 document 傳到 TG
   // 桌面自動化節點（computer_use）
   computerUse?: boolean                  // optional — 桌面自動化步驟
   computerUseActions?: ComputerUseAction[]  // optional — 動作序列
@@ -41,6 +42,28 @@ export interface StepData extends Record<string, unknown> {
   outlookTemplate?: string               // 選單模板 ID（空字串 = 自由輸入需求）
   outlookFreeText?: string               // 自由輸入需求（template 為空時用）
   outlookParams?: Record<string, unknown> // 模板參數（subject/sender/since/until/to ...）
+  // 網頁爬蟲節點（web_crawler）
+  webCrawler?: boolean                   // optional — 網頁爬蟲步驟
+  wcMode?: 'web' | 'video'               // 模式：web=Crawl4AI / video=yt-dlp
+  wcUrl?: string                         // [web mode] 向後相容單 URL；wcUrls 為空時用這個
+  wcUrls?: string[]                      // [web mode] 多 URL 列表；非空時走多檔輸出
+  wcJsRender?: boolean                   // [web mode] 啟用 JS 渲染（SPA 必須開）
+  wcWaitForSelector?: string             // [web mode] 等指定 CSS selector 出現再抓
+  wcCloudflareFallback?: boolean         // [web mode] CF 偵測到時 fallback FlareSolverr
+  wcCookies?: string                     // 登入 cookies（多種格式可接，兩個模式共用）
+  wcInteractions?: WebCrawlerAction[]    // [web mode] JS 互動序列
+  wcDownloadAssets?: boolean             // [web mode] 把附件下載到 assets/
+  // 智慧滾動（取代寫死的「滾 2 次」）— 預設自動偵測 scrollHeight 不變才停
+  wcScrollCount?: number                 // [web mode] 0=自動 / >0=固定滾 N 次
+  wcTargetPostCount?: number             // [web mode] 0=不設目標 / >0=滾到至少 N 個貼文連結後停
+  // 影片模式
+  wcVideoUrl?: string                    // [video mode] YouTube/Vimeo/Bilibili URL
+  wcVideoQuality?: string                // [video mode] best / 1080p / 720p / 480p / 360p
+  wcVideoMaxFilesizeMb?: number          // [video mode] 檔案大小上限（MB）
+  wcVideoMaxDurationMin?: number         // [video mode] 影片長度上限（分鐘，0=不限）
+  wcVideoSubs?: boolean                  // [video mode] 是否下載字幕
+  wcVideoSubsLangs?: string              // [video mode] 字幕語言偏好（逗號分隔）
+  wcVideoSaveInfoJson?: boolean          // [video mode] 是否寫 video.info.json（預設 OFF）
   timeout: number
   retry: number
   index: number
@@ -80,6 +103,7 @@ export interface HumanConfirmData extends Record<string, unknown> {
   notifyTelegram: boolean  // 是否透過 Telegram 通知
   screenshot: boolean      // 是否自動截圖並傳送到 Telegram
   previewPrevOutput: boolean  // 是否 render 上一步驟輸出檔案成 PNG 傳 TG
+  sendPrevOutput: boolean  // 是否自動把上一步輸出檔當 document 傳到 TG（手機可下載）
   timeout: number          // 等待超時（秒）
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
@@ -176,6 +200,49 @@ export interface VisualValidationData extends Record<string, unknown> {
   errorMsg: string
 }
 
+/** 網頁爬蟲動作（panel 互動序列；對應 backend 的 wc_interactions list[dict]）*/
+export interface WebCrawlerAction {
+  type: 'click' | 'scroll' | 'wait' | 'wait_for' | 'type'
+  selector?: string             // click / wait_for / type 用
+  to?: 'top' | 'bottom' | 'pixels'  // scroll 用
+  pixels?: number               // scroll to=pixels 時
+  seconds?: number              // wait 用
+  text?: string                 // type 用
+}
+
+/** 網頁爬蟲節點：丟一個 URL 進去，吐 markdown + frontmatter 出來給後續 skill 解析 */
+export interface WebCrawlerData extends Record<string, unknown> {
+  name: string
+  mode: 'web' | 'video'            // 模式：web=Crawl4AI 抓網頁 / video=yt-dlp 抓影片
+  // 網頁模式
+  url: string                      // 向後相容單 URL；建議改用 urls
+  urls: string[]                   // 多 URL；> 1 個時 outputPath 解讀為資料夾、自動命名
+  jsRender: boolean
+  waitForSelector: string
+  cloudflareFallback: boolean
+  cookies: string                  // 登入 cookies（兩模式共用）
+  interactions: WebCrawlerAction[]
+  downloadAssets: boolean
+  // 智慧滾動（進階設定）
+  scrollCount: number              // 0=自動偵測 / >0=固定滾 N 次
+  targetPostCount: number          // 0=不設目標 / >0=滾到至少 N 個貼文連結
+  // 影片模式
+  videoUrl: string
+  videoQuality: string             // best / 1080p / 720p / 480p / 360p
+  videoMaxFilesizeMb: number       // 預設 500
+  videoMaxDurationMin: number      // 預設 30；0 = 不限
+  videoSubs: boolean               // 預設 true
+  videoSubsLangs: string           // 預設 ''（後端 fallback 'zh-TW,zh-Hant,zh-CN,zh-Hans,en'）
+  videoSaveInfoJson: boolean       // 預設 false；勾起來才存 video.info.json
+  // 共用
+  outputPath: string
+  retry: number
+  timeout: number
+  index: number
+  status: 'idle' | 'running' | 'success' | 'failed'
+  errorMsg: string
+}
+
 /** Outlook 自動化節點：透過 pywin32 + Outlook COM 處理寄信 / 收信 / 行事曆 / 附件 */
 export interface OutlookData extends Record<string, unknown> {
   name: string
@@ -205,10 +272,43 @@ export type HumanConfirmNode = Node<HumanConfirmData>
 export type ComputerUseNode = Node<ComputerUseData>
 export type VisualValidationNode = Node<VisualValidationData>
 export type OutlookNode = Node<OutlookData>
-export type AppNode = Node<StepData | AiValidationData | SkillData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData>
+export type WebCrawlerNode = Node<WebCrawlerData>
+export type AppNode = Node<StepData | AiValidationData | SkillData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData>
 
 export function newAiValidationData(index = 0): AiValidationData {
   return { expectText: '', targetPath: '', skillMode: false, index }
+}
+
+let _webCrawlerCounter = 0
+export function newWebCrawlerData(index = 0): WebCrawlerData {
+  _webCrawlerCounter++
+  return {
+    name: `網頁爬蟲 ${_webCrawlerCounter}`,
+    mode: 'web',
+    url: '',
+    urls: [],
+    jsRender: true,
+    waitForSelector: '',
+    cloudflareFallback: true,
+    cookies: '',
+    interactions: [],
+    downloadAssets: false,
+    scrollCount: 0,
+    targetPostCount: 0,
+    videoUrl: '',
+    videoQuality: '720p',
+    videoMaxFilesizeMb: 500,
+    videoMaxDurationMin: 30,
+    videoSubs: true,
+    videoSubsLangs: '',
+    videoSaveInfoJson: false,
+    outputPath: '',
+    retry: 1,
+    timeout: 600,  // 影片下載常需要 5-10 分鐘；網頁模式不會用到那麼久也沒影響
+    index,
+    status: 'idle',
+    errorMsg: '',
+  }
 }
 
 let _outlookCounter = 0
@@ -251,6 +351,7 @@ export function newHumanConfirmData(index = 0): HumanConfirmData {
     notifyTelegram: true,
     screenshot: false,
     previewPrevOutput: false,
+    sendPrevOutput: false,
     timeout: 3600,
     index,
     status: 'idle',
@@ -386,6 +487,40 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
         } as OutlookData,
       }
     }
+    if (s.webCrawler) {
+      return {
+        id: `step-${i}`,
+        type: 'webCrawler' as const,
+        position: { x: i * 320, y: 160 },
+        data: {
+          name: s.name,
+          mode: (s.wcMode === 'video' ? 'video' : 'web') as 'web' | 'video',
+          url: s.wcUrl || '',
+          urls: Array.isArray(s.wcUrls) ? s.wcUrls : [],
+          jsRender: s.wcJsRender ?? true,
+          waitForSelector: s.wcWaitForSelector || '',
+          cloudflareFallback: s.wcCloudflareFallback ?? true,
+          cookies: s.wcCookies || '',
+          interactions: Array.isArray(s.wcInteractions) ? s.wcInteractions : [],
+          downloadAssets: s.wcDownloadAssets ?? false,
+          scrollCount: s.wcScrollCount ?? 0,
+          targetPostCount: s.wcTargetPostCount ?? 0,
+          videoUrl: s.wcVideoUrl || '',
+          videoQuality: s.wcVideoQuality || '720p',
+          videoMaxFilesizeMb: s.wcVideoMaxFilesizeMb ?? 500,
+          videoMaxDurationMin: s.wcVideoMaxDurationMin ?? 30,
+          videoSubs: s.wcVideoSubs ?? true,
+          videoSubsLangs: s.wcVideoSubsLangs || '',
+          videoSaveInfoJson: s.wcVideoSaveInfoJson ?? false,
+          outputPath: s.outputPath,
+          retry: s.retry,
+          timeout: s.timeout || 600,
+          index: i,
+          status: 'idle' as const,
+          errorMsg: '',
+        } as WebCrawlerData,
+      }
+    }
     if (s.humanConfirm) {
       return {
         id: `step-${i}`,
@@ -397,6 +532,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           notifyTelegram: s.humanConfirmNotifyTelegram ?? true,
           screenshot: s.humanConfirmScreenshot ?? false,
           previewPrevOutput: s.humanConfirmPreview ?? false,
+          sendPrevOutput: s.humanConfirmSendPrevOutput ?? false,
           timeout: s.timeout || 3600,
           index: i,
           status: 'idle' as const,
@@ -469,7 +605,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
   for (const n of nodes) {
     if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation'
         || n.type === 'computerUse' || n.type === 'visualValidation'
-        || n.type === 'outlookAutomation') {
+        || n.type === 'outlookAutomation' || n.type === 'webCrawler') {
       execNodeIds.add(n.id)
       execNodes.push(n)
     }
@@ -497,21 +633,37 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
   const starts = execNodes.filter(n => !hasIncoming.has(n.id))
   if (!starts.length) return []
 
-  // 沿邊走，只收集有連接的節點
-  const adj = new Map<string, string>()
-  virtualEdges.forEach(e => adj.set(e.source, e.target))
-
+  // 沿邊走、收集有連接的節點。
+  // 之前用 Map<source,target>（單一 target）→ 同 source 多條出邊只保留最後一條、
+  // 後寫覆蓋前寫；使用者「插入中間節點忘記刪舊邊」會看運氣決定走不走中間節點，
+  // 而且中間節點會被當「孤立節點」靜默丟掉（user 收不到任何警告）。
+  // 改成 multimap + DFS 找最長路徑：插入新節點即使保留舊邊、新路徑也會被選中。
+  const adjMulti = new Map<string, string[]>()
+  for (const e of virtualEdges) {
+    if (!adjMulti.has(e.source)) adjMulti.set(e.source, [])
+    adjMulti.get(e.source)!.push(e.target)
+  }
+  // DFS 找最長路徑；visited 防 cycle、子探索用 set copy 不互相污染
+  const longestFrom = (node: string, visited: Set<string>): string[] => {
+    if (visited.has(node)) return []
+    const next = new Set(visited); next.add(node)
+    const targets = adjMulti.get(node) || []
+    if (targets.length === 0) return [node]
+    let best: string[] = []
+    for (const t of targets) {
+      const sub = longestFrom(t, next)
+      if (sub.length > best.length) best = sub
+    }
+    return [node, ...best]
+  }
+  const orderIds = longestFrom(starts[0].id, new Set<string>())
   const ordered: AppNode[] = []
-  const visited = new Set<string>()
-  let cur: string | undefined = starts[0].id
-  while (cur && !visited.has(cur)) {
-    visited.add(cur)
-    const node = execNodes.find(n => n.id === cur)
+  for (const id of orderIds) {
+    const node = execNodes.find(n => n.id === id)
     if (node) ordered.push(node)
-    cur = adj.get(cur)
   }
 
-  // 孤立節點不加入（邊驅動執行）
+  // 孤立節點不加入（邊驅動執行；DFS 已偏好最長路徑、避免中間節點被丟掉）
 
   return ordered.map((n, i) => {
     const aiData = aiDataByPredecessor.get(n.id)
@@ -582,6 +734,40 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         errorMsg: d.errorMsg,
       } as StepData
     }
+    if (n.type === 'webCrawler') {
+      const d = n.data as WebCrawlerData
+      return {
+        name: d.name,
+        batch: '',
+        workingDir: '',
+        outputPath: d.outputPath,
+        expect: '',
+        webCrawler: true,
+        wcMode: d.mode,
+        wcUrl: d.url,
+        wcUrls: d.urls,
+        wcJsRender: d.jsRender,
+        wcWaitForSelector: d.waitForSelector,
+        wcCloudflareFallback: d.cloudflareFallback,
+        wcCookies: d.cookies,
+        wcInteractions: d.interactions,
+        wcDownloadAssets: d.downloadAssets,
+        wcScrollCount: d.scrollCount ?? 0,
+        wcTargetPostCount: d.targetPostCount ?? 0,
+        wcVideoUrl: d.videoUrl,
+        wcVideoQuality: d.videoQuality,
+        wcVideoMaxFilesizeMb: d.videoMaxFilesizeMb,
+        wcVideoMaxDurationMin: d.videoMaxDurationMin,
+        wcVideoSubs: d.videoSubs,
+        wcVideoSubsLangs: d.videoSubsLangs,
+        wcVideoSaveInfoJson: d.videoSaveInfoJson,
+        timeout: typeof d.timeout === 'number' && d.timeout > 0 ? d.timeout : 600,
+        retry: d.retry,
+        index: i,
+        status: d.status,
+        errorMsg: d.errorMsg,
+      } as StepData
+    }
     if (n.type === 'humanConfirmation') {
       const d = n.data as HumanConfirmData
       return {
@@ -595,6 +781,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         humanConfirmNotifyTelegram: d.notifyTelegram,
         humanConfirmScreenshot: d.screenshot,
         humanConfirmPreview: d.previewPrevOutput,
+        humanConfirmSendPrevOutput: d.sendPrevOutput,
         timeout: d.timeout,
         retry: 0,
         index: i,
@@ -658,6 +845,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.humanConfirmNotifyTelegram === false) lines.push(`    notify_telegram: false`)
       if (s.humanConfirmScreenshot) lines.push(`    screenshot: true`)
       if (s.humanConfirmPreview) lines.push(`    preview_prev_output: true`)
+      if (s.humanConfirmSendPrevOutput) lines.push(`    send_prev_output: true`)
       if (s.timeout && s.timeout !== 3600) lines.push(`    timeout: ${s.timeout}`)
       continue
     }
@@ -679,6 +867,66 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         lines.push(`    vv_search_region: [${s.vvSearchRegion.join(', ')}]`)
       }
       if (s.timeout && s.timeout !== 120) lines.push(`    timeout: ${s.timeout}`)
+      continue
+    }
+    if (s.webCrawler) {
+      lines.push(`    web_crawler: true`)
+      if (s.wcMode && s.wcMode !== 'web') lines.push(`    wc_mode: ${s.wcMode}`)
+      // 共用 cookies
+      const ck = s.wcCookies || ''
+      if (ck) {
+        if (ck.includes('\n') || ck.length > 80) {
+          lines.push(`    wc_cookies: |`)
+          for (const dl of ck.split('\n')) lines.push(`      ${dl}`)
+        } else {
+          lines.push(`    wc_cookies: "${ck.replace(/"/g, '\\"')}"`)
+        }
+      }
+      if (s.wcMode === 'video') {
+        if (s.wcVideoUrl) lines.push(`    wc_video_url: "${s.wcVideoUrl.replace(/"/g, '\\"')}"`)
+        if (s.wcVideoQuality && s.wcVideoQuality !== '720p') lines.push(`    wc_video_quality: ${s.wcVideoQuality}`)
+        if (s.wcVideoMaxFilesizeMb !== undefined && s.wcVideoMaxFilesizeMb !== 500) lines.push(`    wc_video_max_filesize_mb: ${s.wcVideoMaxFilesizeMb}`)
+        if (s.wcVideoMaxDurationMin !== undefined && s.wcVideoMaxDurationMin !== 30) lines.push(`    wc_video_max_duration_min: ${s.wcVideoMaxDurationMin}`)
+        if (s.wcVideoSubs === false) lines.push(`    wc_video_subs: false`)
+        if (s.wcVideoSubsLangs) lines.push(`    wc_video_subs_langs: "${s.wcVideoSubsLangs.replace(/"/g, '\\"')}"`)
+        if (s.wcVideoSaveInfoJson === true) lines.push(`    wc_video_save_info_json: true`)
+      } else {
+        // 過濾使用者貼上的空行 / # 註解、只序列化有效 URL
+        const validUrls = (s.wcUrls || [])
+          .map(u => u.trim())
+          .filter(u => u && !u.startsWith('#'))
+        if (validUrls.length > 0) {
+          lines.push(`    wc_urls:`)
+          for (const u of validUrls) {
+            lines.push(`      - "${u.replace(/"/g, '\\"')}"`)
+          }
+        } else if (s.wcUrl) {
+          lines.push(`    wc_url: "${s.wcUrl.replace(/"/g, '\\"')}"`)
+        }
+        if (s.wcJsRender === false) lines.push(`    wc_js_render: false`)
+        if (s.wcWaitForSelector) lines.push(`    wc_wait_for_selector: "${s.wcWaitForSelector.replace(/"/g, '\\"')}"`)
+        if (s.wcCloudflareFallback === false) lines.push(`    wc_cloudflare_fallback: false`)
+        if (s.wcInteractions && s.wcInteractions.length > 0) {
+          lines.push(`    wc_interactions:`)
+          for (const a of s.wcInteractions) {
+            lines.push(`      - ${JSON.stringify(a)}`)
+          }
+        }
+        if (s.wcDownloadAssets === true) lines.push(`    wc_download_assets: true`)
+        // 智慧滾動：只在使用者有指定（非預設 0）時才寫入 yaml — 預設行為已在後端處理
+        if (typeof s.wcScrollCount === 'number' && s.wcScrollCount > 0) {
+          lines.push(`    wc_scroll_count: ${s.wcScrollCount}`)
+        }
+        if (typeof s.wcTargetPostCount === 'number' && s.wcTargetPostCount > 0) {
+          lines.push(`    wc_target_post_count: ${s.wcTargetPostCount}`)
+        }
+      }
+      if (s.outputPath) {
+        lines.push(`    output:`)
+        lines.push(`      path: ${s.outputPath}`)
+      }
+      if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
+      if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
       continue
     }
     if (s.outlookAutomation) {
@@ -785,7 +1033,7 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
     const steps: StepData[] = []
     let cur: Partial<StepData> | null = null
     let inOutput = false
-    let multilineTarget: 'batch' | 'expect' | 'vv_prompt' | null = null
+    let multilineTarget: 'batch' | 'expect' | 'vv_prompt' | 'wc_cookies' | null = null
     let multilineIndent = 0
     let multilineLines: string[] = []
 
@@ -794,6 +1042,7 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         const text = multilineLines.join('\n').replace(/\n+$/, '')
         if (multilineTarget === 'batch') cur.batch = text
         else if (multilineTarget === 'vv_prompt') cur.vvPrompt = text
+        else if (multilineTarget === 'wc_cookies') cur.wcCookies = text
         else cur.expect = text
       }
       multilineTarget = null
@@ -872,6 +1121,64 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.humanConfirmScreenshot = /true/.test(t)
       } else if (/^preview_prev_output:/.test(t) && cur) {
         cur.humanConfirmPreview = /true/.test(t)
+      } else if (/^send_prev_output:/.test(t) && cur) {
+        cur.humanConfirmSendPrevOutput = /true/.test(t)
+      } else if (/^web_crawler:/.test(t) && cur) {
+        cur.webCrawler = /true/.test(t)
+      } else if (/^wc_mode:/.test(t) && cur) {
+        const v = t.replace(/^wc_mode:\s*/, '').replace(/^"|"$/g, '').trim()
+        cur.wcMode = (v === 'video' ? 'video' : 'web')
+      } else if (/^wc_url:/.test(t) && cur) {
+        cur.wcUrl = t.replace(/^wc_url:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^wc_urls:/.test(t) && cur) {
+        cur.wcUrls = []
+      } else if (/^- ".*"$/.test(t) && cur && Array.isArray(cur.wcUrls)) {
+        // wc_urls 的列表項目（每行 "url"）
+        cur.wcUrls.push(t.replace(/^-\s*"/, '').replace(/"$/, ''))
+      } else if (/^wc_js_render:/.test(t) && cur) {
+        cur.wcJsRender = /true/.test(t)
+      } else if (/^wc_wait_for_selector:/.test(t) && cur) {
+        cur.wcWaitForSelector = t.replace(/^wc_wait_for_selector:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^wc_cloudflare_fallback:/.test(t) && cur) {
+        cur.wcCloudflareFallback = /true/.test(t)
+      } else if (/^wc_download_assets:/.test(t) && cur) {
+        cur.wcDownloadAssets = /true/.test(t)
+      } else if (/^wc_scroll_count:/.test(t) && cur) {
+        cur.wcScrollCount = parseInt(t.replace(/^wc_scroll_count:\s*/, '')) || 0
+      } else if (/^wc_target_post_count:/.test(t) && cur) {
+        cur.wcTargetPostCount = parseInt(t.replace(/^wc_target_post_count:\s*/, '')) || 0
+      } else if (/^wc_video_url:/.test(t) && cur) {
+        cur.wcVideoUrl = t.replace(/^wc_video_url:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^wc_video_quality:/.test(t) && cur) {
+        cur.wcVideoQuality = t.replace(/^wc_video_quality:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^wc_video_max_filesize_mb:/.test(t) && cur) {
+        cur.wcVideoMaxFilesizeMb = parseInt(t.replace(/^wc_video_max_filesize_mb:\s*/, '')) || 500
+      } else if (/^wc_video_max_duration_min:/.test(t) && cur) {
+        cur.wcVideoMaxDurationMin = parseInt(t.replace(/^wc_video_max_duration_min:\s*/, '')) || 0
+      } else if (/^wc_video_subs:/.test(t) && cur) {
+        cur.wcVideoSubs = /true/.test(t)
+      } else if (/^wc_video_subs_langs:/.test(t) && cur) {
+        cur.wcVideoSubsLangs = t.replace(/^wc_video_subs_langs:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^wc_video_save_info_json:/.test(t) && cur) {
+        cur.wcVideoSaveInfoJson = /true/.test(t)
+      } else if (/^wc_cookies:/.test(t) && cur) {
+        const val = t.replace(/^wc_cookies:\s*/, '').replace(/^"|"$/g, '')
+        if (val === '|' || val === '>') {
+          multilineTarget = 'wc_cookies'
+          const nextLine = lines[li + 1]
+          multilineIndent = nextLine ? (nextLine.match(/^(\s*)/)?.[1].length ?? 0) : 0
+        } else {
+          cur.wcCookies = val
+        }
+      } else if (/^wc_interactions:/.test(t) && cur) {
+        // 後面跟著一串 - { JSON } 行；抓下面到 indent 縮回去為止
+        cur.wcInteractions = []
+      } else if (/^- \{/.test(t) && cur && Array.isArray(cur.wcInteractions)) {
+        // wc_interactions 的 JSON 陣列項目
+        try {
+          const obj = JSON.parse(t.replace(/^-\s*/, ''))
+          cur.wcInteractions.push(obj)
+        } catch { /* ignore */ }
       } else if (/^visual_validation:/.test(t) && cur) {
         cur.visualValidation = /true/.test(t)
       } else if (/^vv_source:/.test(t) && cur) {
@@ -893,6 +1200,48 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         if (m) {
           const arr = m[1].split(',').map(x => parseInt(x.trim()) || 0)
           if (arr.length === 4) cur.vvSearchRegion = arr
+        }
+      } else if (/^outlook_automation:/.test(t) && cur) {
+        cur.outlookAutomation = /true/.test(t)
+      } else if (/^outlook_template:/.test(t) && cur) {
+        cur.outlookTemplate = t.replace(/^outlook_template:\s*/, '').replace(/^"|"$/g, '').trim()
+      } else if (/^outlook_params:/.test(t) && cur) {
+        // 兩種格式都接：
+        //   ✓ inline JSON：outlook_params: {"to":"x@y.com",...}
+        //   ✓ multi-line YAML：outlook_params:↵  to: x@y.com↵  subject: ...
+        // AI 助手本來指示用 inline JSON 但偶爾仍會吐 multi-line、這裡兜底
+        const raw = t.replace(/^outlook_params:\s*/, '').trim()
+        if (raw) {
+          try { cur.outlookParams = JSON.parse(raw) } catch { /* 壞 JSON 就略過 */ }
+        } else {
+          // multi-line YAML：往下讀比 outlook_params 縮排更深的 key: value 行
+          const baseIndent = line.match(/^(\s*)/)?.[1].length ?? 0
+          const params: Record<string, unknown> = {}
+          let lj = li + 1
+          while (lj < lines.length) {
+            const sub = lines[lj]
+            const subTrim = sub.trim()
+            if (!subTrim) { lj++; continue }
+            const subIndent = sub.match(/^(\s*)/)?.[1].length ?? 0
+            if (subIndent <= baseIndent) break  // 縮排回去了 → 結束
+            const m = subTrim.match(/^([\w\-]+)\s*:\s*(.*)$/)
+            if (!m) { lj++; continue }
+            const key = m[1]
+            let val: string = m[2].trim()
+            // 剝引號 — "x" / 'x'
+            if ((val.startsWith('"') && val.endsWith('"')) ||
+                (val.startsWith("'") && val.endsWith("'"))) {
+              val = val.slice(1, -1)
+            }
+            // 嘗試 boolean / number 推論
+            if (val === 'true') params[key] = true
+            else if (val === 'false') params[key] = false
+            else if (/^-?\d+$/.test(val)) params[key] = parseInt(val)
+            else params[key] = val
+            lj++
+          }
+          if (Object.keys(params).length > 0) cur.outlookParams = params
+          li = lj - 1  // 跳過已消化的子行（外層 for 會 ++）
         }
       } else if (/^timeout:/.test(t) && cur) {
         cur.timeout = parseInt(t.replace(/^timeout:\s*/, '')) || 300
@@ -916,6 +1265,12 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
 }
 
 function buildStep(partial: Partial<StepData>, index: number): StepData {
+  // Outlook 節點的編碼器把 outlookFreeText 寫進 batch:，這裡把它還原回 freeText、
+  // 避免畫布上 freeText 欄空白而 batch 帶著一段使用者不會用到的描述
+  if (partial.outlookAutomation && partial.batch && !partial.outlookFreeText) {
+    partial.outlookFreeText = partial.batch
+    partial.batch = ''
+  }
   return {
     name: partial.name ?? `步驟 ${index + 1}`,
     batch: partial.batch ?? '',
@@ -930,11 +1285,35 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     humanConfirmNotifyTelegram: partial.humanConfirmNotifyTelegram ?? true,
     humanConfirmScreenshot: partial.humanConfirmScreenshot ?? false,
     humanConfirmPreview: partial.humanConfirmPreview ?? false,
+    humanConfirmSendPrevOutput: partial.humanConfirmSendPrevOutput ?? false,
     visualValidation: partial.visualValidation ?? false,
     vvSource: partial.vvSource ?? 'prev_output',
     vvPrompt: partial.vvPrompt ?? '',
     vvSearchRegion: partial.vvSearchRegion ?? [],
-    timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : 300)),
+    webCrawler: partial.webCrawler ?? false,
+    wcMode: partial.wcMode ?? 'web',
+    wcUrl: partial.wcUrl ?? '',
+    wcUrls: partial.wcUrls ?? [],
+    wcJsRender: partial.wcJsRender ?? true,
+    wcWaitForSelector: partial.wcWaitForSelector ?? '',
+    wcCloudflareFallback: partial.wcCloudflareFallback ?? true,
+    wcCookies: partial.wcCookies ?? '',
+    wcInteractions: partial.wcInteractions ?? [],
+    wcDownloadAssets: partial.wcDownloadAssets ?? false,
+    wcScrollCount: partial.wcScrollCount ?? 0,
+    wcTargetPostCount: partial.wcTargetPostCount ?? 0,
+    wcVideoUrl: partial.wcVideoUrl ?? '',
+    wcVideoQuality: partial.wcVideoQuality ?? '720p',
+    wcVideoMaxFilesizeMb: partial.wcVideoMaxFilesizeMb ?? 500,
+    wcVideoMaxDurationMin: partial.wcVideoMaxDurationMin ?? 30,
+    wcVideoSubs: partial.wcVideoSubs ?? true,
+    wcVideoSubsLangs: partial.wcVideoSubsLangs ?? '',
+    wcVideoSaveInfoJson: partial.wcVideoSaveInfoJson ?? false,
+    outlookAutomation: partial.outlookAutomation ?? false,
+    outlookTemplate: partial.outlookTemplate ?? '',
+    outlookFreeText: partial.outlookFreeText ?? '',
+    outlookParams: partial.outlookParams ?? {},
+    timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : 300)))),
     retry: partial.retry ?? 0,
     index,
     status: 'idle',

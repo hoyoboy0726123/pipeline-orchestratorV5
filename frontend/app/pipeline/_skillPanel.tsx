@@ -279,7 +279,11 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
               placeholder="描述輸出應包含什麼內容…&#10;例如：CSV 檔案包含至少 20 筆資料，有 date 和 close 欄位"
               className={`${inputCls} resize-none text-xs leading-relaxed`}
             />
-            <p className="text-xs text-gray-400 mt-1">AI 完成後會用此描述深度驗證輸出是否正確</p>
+            <p className="text-xs text-gray-400 mt-1">
+              <b>填了</b> → AI 會用此描述嚴格驗證輸出（每步 +5-15 秒）。<br />
+              <b>留空</b> → 仍會做淺 LLM 驗證（防 silent fail：程式跑成功但結果偷工，每步 +5-15 秒）。<br />
+              想完全跳過驗證：把工作流 YAML 頂部 <code>validate: false</code> 設掉、或用 script 節點。
+            </p>
           </div>
 
           {/* Recipe status */}

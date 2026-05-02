@@ -187,7 +187,44 @@ async def run_visual_validation(
         # 多模態模型（Gemini）回傳 content 是 list[dict]，純文字模型是 str — 統一抽出 text
         raw = _extract_text_from_llm_result(result).strip()
     except Exception as e:
-        return (False, f"VLM 呼叫失敗（請確認 Settings 主模型支援視覺）：{e.__class__.__name__}: {e}")
+        # 把常見錯誤分類給使用者具體引導訊息，比丟堆疊好讀
+        err_str = f"{type(e).__name__}: {e}"
+        err_low = err_str.lower()
+        try:
+            from settings import get_settings
+            cur_provider = get_settings().get("provider", "?")
+            cur_model = get_settings().get("model", "?")
+        except Exception:
+            cur_provider, cur_model = "?", "?"
+
+        # 1. API Key / 認證
+        if any(k in err_low for k in ("api_key", "api key", "401", "unauthorized",
+                                       "authenticate", "authentication", "invalid token",
+                                       "access denied", "missing credential")):
+            msg = (f"❌ 視覺驗證失敗：LLM 服務認證錯誤（provider={cur_provider}）。"
+                   f"請到「設定」頁確認 API Key 已填入且未過期 → 重試。")
+        # 2. 模型不支援 vision
+        elif any(k in err_low for k in ("image", "vision", "multimodal", "not supported",
+                                         "unsupported", "image_url", "modality")):
+            msg = (f"❌ 視覺驗證失敗：當前模型「{cur_model}」可能不支援視覺輸入。"
+                   f"請到「設定」頁切到有 vision 能力的模型再試，例如：\n"
+                   f"• Groq：`meta-llama/llama-4-scout-17b-16e-instruct` / `llama-3.2-90b-vision-preview`\n"
+                   f"• Gemini：`gemini-2.5-pro` / `gemini-2.5-flash`\n"
+                   f"• OpenRouter：GPT-4o / Claude 3.5 / Gemini 2.5 等多模態模型")
+        # 3. 網路 / 連線
+        elif any(k in err_low for k in ("connection", "timeout", "timed out", "network",
+                                         "dns", "resolve")):
+            msg = (f"❌ 視覺驗證失敗：連不到 LLM provider（{cur_provider}）。"
+                   f"請檢查網路 / VPN，Ollama 用戶請確認 ollama serve 在跑。")
+        # 4. Rate limit
+        elif any(k in err_low for k in ("rate limit", "429", "quota", "too many")):
+            msg = (f"❌ 視覺驗證失敗：LLM provider 限流。請等幾分鐘再試、"
+                   f"或到設定頁切換另一個 provider。")
+        # 5. fallback
+        else:
+            msg = (f"❌ 視覺驗證失敗：{err_str[:300]}\n"
+                   f"（請確認設定頁的 provider={cur_provider} / model={cur_model} 可正常使用）")
+        return (False, msg)
 
     if not raw:
         return (False, "VLM 回應為空")

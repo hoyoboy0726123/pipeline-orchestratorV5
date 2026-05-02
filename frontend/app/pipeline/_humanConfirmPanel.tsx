@@ -122,6 +122,34 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete }:
           </button>
         </div>
 
+        {/* Send previous output as Telegram document */}
+        <div className="flex items-center justify-between p-3 rounded-xl border border-gray-200 bg-gray-50/50">
+          <div className="flex-1 min-w-0 mr-3">
+            <div className="text-sm font-medium text-gray-700">📎 自動傳送上一步輸出檔到 Telegram</div>
+            <p className="text-xs text-gray-400 mt-0.5">
+              {data.sendPrevOutput
+                ? '已啟用：抵達節點時把上一步 output.path 當文件傳到 TG（手機可直接下載）'
+                : '已關閉（仍可在 TG 點「📎 上一步輸出」按鈕手動取）'}
+            </p>
+            <p className="text-[11px] text-gray-500 mt-1 leading-relaxed">
+              ℹ️ 任何工作流的輸出檔都適用（markdown / xlsx / pdf / 圖片 / zip 等）。
+              資料夾會自動打包成 zip。檔案 &gt; 50 MB 會跳過、TG 訊息提示去 host 取。
+              不勾的話、Telegram 上人工確認的訊息**永遠**有「📎 上一步輸出 / 📂 任一步輸出」按鈕、
+              要時點即可。
+            </p>
+          </div>
+          <button
+            onClick={() => onUpdate({ sendPrevOutput: !data.sendPrevOutput })}
+            className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+              data.sendPrevOutput ? 'bg-emerald-500' : 'bg-gray-300'
+            }`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+              data.sendPrevOutput ? 'translate-x-5' : 'translate-x-0'
+            }`} />
+          </button>
+        </div>
+
         {/* Timeout */}
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">等待超時</label>

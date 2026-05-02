@@ -277,9 +277,15 @@ class SandboxResult:
 
 
 def _docker_exec_cmd(workdir_wsl: Optional[str], runner: list[str]) -> list[str]:
-    """組 `wsl <docker_prefix> exec [-w ...] pipeline-sandbox-v5 <runner...>`"""
+    """組 `wsl <docker_prefix> exec [-w ...] pipeline-sandbox-v5 <runner...>`
+
+    NODE_PATH：讓 LLM 跑 `subprocess.run(["node", ...])` 時、`require('docx')` /
+    `require('pptxgenjs')` 等全域 npm 套件能直接 resolve、不用每次 `npm install` 到 working_dir
+    （之前 LLM 寫 .docx 報告會在輸出資料夾留 node_modules/、~9 MB 殘檔）
+    """
     docker_prefix = _detect_docker_prefix()
-    cmd = ["wsl", "-e", *docker_prefix, "exec"]
+    cmd = ["wsl", "-e", *docker_prefix, "exec",
+           "-e", "NODE_PATH=/usr/local/lib/node_modules"]
     if workdir_wsl:
         cmd += ["-w", workdir_wsl]
     cmd += [CONTAINER_NAME, *runner]

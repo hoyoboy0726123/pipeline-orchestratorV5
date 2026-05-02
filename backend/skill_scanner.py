@@ -191,7 +191,11 @@ _NPM_CACHE_TTL = 60.0
 
 def list_global_npm_packages(force_refresh: bool = False) -> set[str]:
     """跑 `npm list -g --depth=0 --json` 取得目前全域安裝的 npm 套件名（小寫）。
-    有 60 秒記憶體快取；找不到 npm 或執行失敗時回傳空集合。"""
+    自動跟著 settings.skill_sandbox_mode 走：
+      - host 模式 → 查 host 機器的 npm
+      - sandbox 模式 → `wsl docker exec <container> npm list -g`（查容器）
+    有 60 秒記憶體快取；找不到 npm 或執行失敗時回傳空集合。
+    """
     import time as _time
     import subprocess
     import shutil as _shutil
@@ -199,16 +203,40 @@ def list_global_npm_packages(force_refresh: bool = False) -> set[str]:
     if not force_refresh and (_time.time() - _NPM_CACHE["ts"]) < _NPM_CACHE_TTL and _NPM_CACHE["data"]:
         return _NPM_CACHE["data"]
 
-    npm_cmd = _shutil.which("npm")
-    if not npm_cmd:
-        _NPM_CACHE["ts"] = _time.time()
-        _NPM_CACHE["data"] = set()
-        return set()
+    # 跟 skill_pkg_manager 同邏輯讀 mode
+    mode = "host"
     try:
-        proc = subprocess.run(
-            [npm_cmd, "list", "-g", "--depth=0", "--json"],
-            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="ignore",
-        )
+        from settings import get_settings
+        m = (get_settings().get("skill_sandbox_mode") or "host").strip()
+        if m == "wsl_docker":
+            mode = "sandbox"
+    except Exception:
+        pass
+
+    result: set[str] = set()
+    try:
+        if mode == "sandbox":
+            # 容器模式：透過 wsl docker exec 查容器內 npm globals
+            from pipeline.sandbox import _detect_docker_prefix, CONTAINER_NAME
+            prefix = _detect_docker_prefix()
+            cmd = ["wsl", "-e", *prefix, "exec", CONTAINER_NAME,
+                   "npm", "list", "-g", "--depth=0", "--json"]
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="ignore",
+            )
+        else:
+            # host 模式
+            npm_cmd = _shutil.which("npm")
+            if not npm_cmd:
+                _NPM_CACHE["ts"] = _time.time()
+                _NPM_CACHE["data"] = set()
+                return set()
+            proc = subprocess.run(
+                [npm_cmd, "list", "-g", "--depth=0", "--json"],
+                capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="ignore",
+            )
         data = json.loads(proc.stdout or "{}")
         deps = data.get("dependencies") or {}
         result = {name.lower() for name in deps.keys()}

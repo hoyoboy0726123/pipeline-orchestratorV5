@@ -24,6 +24,11 @@ class StepResult:
     validation_reason: str
     validation_suggestion: str
     retries_used: int = 0
+    # 步驟在 workflow 輸出資料夾實際產生 / 修改的主要檔案絕對路徑。
+    # 用 dir-snapshot 比對 mtime 算出來、給 TG「取任一步輸出」用。
+    # 沒明確 output.path 的 skill 節點，用這欄就能拿到該步真正寫的檔，
+    # 不會跟其他 skill 節點搶到同一個「workflow dir 最新檔」。
+    actual_output_path: str = ""
 
 
 @dataclass

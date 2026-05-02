@@ -158,6 +158,9 @@ class PipelineStep(BaseModel):
     # 後備：若 B1 失敗且 host 裝了 libreoffice，用 libreoffice --headless 轉 PDF 再 render
     preview_prev_output: bool = False
     preview_timeout: int = 30    # 暫時保留欄位（libreoffice 轉檔超時秒數）
+    # 人工確認節點：抵達時自動把上一步的輸出檔案傳到 Telegram（手機可下載）
+    # False（預設）= 不自動傳；但 inline keyboard 仍有「📎 上一步輸出」按鈕、需要時點來抓
+    send_prev_output: bool = False
     # ── 桌面自動化節點（computer_use）────────────────────────────────
     # 此為獨立第 4 種節點，不與 skill / script / human_confirm 混用。
     # 當 computer_use=True 時，runner 走桌面自動化引擎（pyautogui + cv2 比對），
@@ -197,6 +200,43 @@ class PipelineStep(BaseModel):
                                        # 例：daily_todo / search_summary / send_mail / calendar_list ...
     outlook_params: dict = {}          # 模板參數（subject、sender、since、until、to、folder 等
                                        # 由前端依模板填入，後端組進 prompt 給 agent）
+    # ── 網頁爬蟲節點（web_crawler）──────────────────────────────────
+    # 獨立節點類型：丟一個 URL 進去，吐 markdown + frontmatter 出來給後續 skill 節點吃。
+    # 執行流程：Tier 1 = 沙盒內 Crawl4AI（Playwright + Chromium）；偵測到 Cloudflare
+    # 擋下時 fallback Tier 2 = host 端打 FlareSolverr（port 8191、用 Puppeteer 解 CF challenge）。
+    # 不進 LLM、不進 recipe；輸出格式為 LLM-friendly markdown，下個 skill 節點直接讀 outputPath。
+    web_crawler: bool = False          # True = 網頁爬蟲節點
+    # 模式由前端明確選擇（不自動偵測），決定走哪條路徑：
+    #   "web"   → Crawl4AI（網頁 → markdown）；填 wc_url + wc_* 欄位
+    #   "video" → yt-dlp（YouTube/Vimeo/Bilibili 等 → mp4 + 字幕 + metadata）；填 wc_video_url + wc_video_* 欄位
+    # 兩個模式各自獨立的 URL 欄位（user 不會誤把 YT 連結貼到網頁區、反之亦然）
+    wc_mode: str = "web"
+    # ── 網頁模式 ────────────────────────────────────────────────────
+    wc_url: str = ""                   # [向後相容] 單 URL 欄位；wc_urls 為空時用這個
+    wc_urls: list[str] = []            # 多 URL 列表；非空時走多 URL 模式（output.path 視為資料夾）
+    wc_js_render: bool = True          # 啟用 JS 渲染（SPA 必須 True；純靜態站關掉省時間）
+    wc_wait_for_selector: str = ""     # 等指定 CSS selector 出現再抓（避免抓到還沒載完的頁面）
+    wc_cloudflare_fallback: bool = True  # Tier 1 被 CF 擋時自動 fallback FlareSolverr
+    wc_cookies: str = ""               # 登入 cookies（key=value 一行一個 / 整串 Cookie 標頭 / JSON 陣列）
+    wc_interactions: list[dict] = []   # JS 互動序列：[{type:click, selector:".x"} / {type:scroll, to:bottom}
+                                       # / {type:wait, seconds:2} / {type:wait_for, selector:".y"}
+                                       # / {type:type, selector:"input", text:"foo"}]
+    wc_download_assets: bool = False   # True = 把 markdown 裡圖片 / PDF 連結都下載到 assets/
+    # ── 智慧滾動（取代以前寫死的「滾 2 次就停」） ────────────────────
+    # 預設行為：自動滾到 scrollHeight 不再變大為止（最多 10 次 / 60 秒上限）
+    # 進階使用者可指定其中一個（同時填的話 scroll_count 優先）：
+    wc_scroll_count: int = 0           # 0 = 自動偵測；> 0 強制滾動 N 次後停
+    wc_target_post_count: int = 0      # 0 = 不設目標；> 0 = 滾到頁面出現至少 N 個貼文連結後停（仍受最大次數/時間上限保護）
+    # ── 影片模式（yt-dlp）─────────────────────────────────────────
+    wc_video_url: str = ""             # YouTube / Vimeo / Bilibili / 等 yt-dlp 支援的影音站 URL
+    wc_video_quality: str = "720p"     # best / 1080p / 720p / 480p / 360p（決定 yt-dlp -f 過濾條件）
+    wc_video_max_filesize_mb: int = 500   # 單檔上限；超過跳過、不下載半套再 cleanup
+    wc_video_max_duration_min: int = 30   # 影片長度上限（分鐘）；0 = 不限
+    wc_video_subs: bool = True            # 是否下載字幕（如果有的話；含 auto-generated）
+    wc_video_subs_langs: str = ""         # 字幕語言偏好（逗號分隔），空字串 = 預設「zh-TW,zh-Hant,zh-CN,zh-Hans,en」
+    wc_video_save_info_json: bool = False  # 是否寫 video.info.json（yt-dlp 完整 metadata dump）；預設 OFF
+                                           # 90% 內容是簽名 URL / 格式列表 / headers，6 小時後失效；
+                                           # 真要用的（chapters / tags / 全長描述 / 縮圖）勾起來才會落地
 
 
 class PipelineConfig(BaseModel):

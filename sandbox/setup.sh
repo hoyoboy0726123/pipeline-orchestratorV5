@@ -141,6 +141,21 @@ else
     echo "    $AGENTS_DIR → /root/.agents（容器內 ~/.agents 相容）"
 fi
 
+# ── 4b. FlareSolverr（web_crawler 節點 Tier 2 用：解 Cloudflare challenge）
+# 走 docker compose；compose file 在 $PROJECT_DIR/sandbox/docker-compose.yml
+# 失敗不擋整體（爬蟲 Tier 1 仍可運作，只是遇到 CF 站會 fallback 失敗）
+echo ""
+echo "==> 啟動 FlareSolverr（web_crawler 節點 Tier 2 fallback）..."
+if $DOCKER compose version &>/dev/null; then
+    if (cd "$PROJECT_DIR/sandbox" && $DOCKER compose up -d flaresolverr); then
+        echo "✓ FlareSolverr 已啟動：http://localhost:8191"
+    else
+        echo "⚠ FlareSolverr 啟動失敗（不影響 Tier 1 爬蟲；遇到 Cloudflare 時 Tier 2 會無法 fallback）"
+    fi
+else
+    echo "⚠ docker compose 不可用，跳過 FlareSolverr（你的 docker 版本太舊？升級到 20.10+ 即可）"
+fi
+
 # ── 5. 冒煙測試
 echo ""
 echo "==> 冒煙測試 — 核心套件："
@@ -162,6 +177,36 @@ if missing:
     print('    解法：setup_sandbox.bat --rebuild 重建')
 else:
     print('  ✓ python-pptx / pdfplumber / newspaper3k / cloudscraper / feedparser / fake_useragent 全部 OK')
+" || true
+
+echo "==> 冒煙測試 — web_crawler（Crawl4AI + Playwright Chromium）："
+$DOCKER exec "$CONTAINER" python -c "
+import sys
+try:
+    import crawl4ai
+    # crawl4ai 0.8 把版本放在 .__version__.__version__；舊版可能直接是字串
+    v = getattr(crawl4ai, '__version__', None)
+    v = getattr(v, '__version__', v)
+    print(f'  ✓ crawl4ai {v}')
+except Exception as e:
+    print(f'  ⚠ crawl4ai 未安裝（{e.__class__.__name__}）— setup_sandbox.bat --rebuild')
+try:
+    import trafilatura, html2text
+    print('  ✓ trafilatura + html2text')
+except Exception as e:
+    print(f'  ⚠ trafilatura / html2text 缺：{e}')
+# 用 Playwright 自己 API 拿 chromium binary 路徑（最可靠；版本不同子目錄名稱會變）
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        cp = p.chromium.executable_path
+    import os
+    if cp and os.path.exists(cp):
+        print(f'  ✓ Chromium binary：{cp}')
+    else:
+        print(f'  ⚠ Chromium binary 不存在：{cp} — setup_sandbox.bat --rebuild')
+except Exception as e:
+    print(f'  ⚠ Playwright Chromium 偵測失敗（{e.__class__.__name__}）— setup_sandbox.bat --rebuild')
 " || true
 
 echo "==> 冒煙測試 — Node.js + pptxgenjs："

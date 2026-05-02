@@ -24,6 +24,7 @@ import HumanConfirmNodeComponent   from './_humanConfirmNode'
 import ComputerUseNodeComponent    from './_computerUseNode'
 import VisualValidationNodeComponent from './_visualValidationNode'
 import OutlookNodeComponent        from './_outlookNode'
+import WebCrawlerNodeComponent     from './_webCrawlerNode'
 import ScriptConfigPanel           from './_scriptPanel'
 import SkillConfigPanel            from './_skillPanel'
 import AiValidationPanel           from './_aiValidationPanel'
@@ -31,14 +32,15 @@ import HumanConfirmPanel           from './_humanConfirmPanel'
 import ComputerUsePanel            from './_computerUsePanel'
 import VisualValidationPanel       from './_visualValidationPanel'
 import OutlookPanel                from './_outlookPanel'
+import WebCrawlerPanel             from './_webCrawlerPanel'
 import Sidebar                from './_sidebar'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
-  type ComputerUseData, type VisualValidationData, type OutlookData,
+  type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData,
   type ScriptNode, type SkillNode, type HumanConfirmNode, type ComputerUseNode, type VisualValidationNode,
-  type OutlookNode,
+  type OutlookNode, type WebCrawlerNode,
   newStepData, newSkillData, newAiValidationData, newHumanConfirmData, newComputerUseData,
-  newVisualValidationData, newOutlookData,
+  newVisualValidationData, newOutlookData, newWebCrawlerData,
   stepsToFlow, flowToSteps, stepsToYaml, parseYaml,
 } from './_helpers'
 import { useWorkflowStore } from './_store'
@@ -60,6 +62,7 @@ const nodeTypes = {
   computerUse: ComputerUseNodeComponent,
   visualValidation: VisualValidationNodeComponent,
   outlookAutomation: OutlookNodeComponent,
+  webCrawler: WebCrawlerNodeComponent,
 }
 
 // Edge 類型：全部用 InsertableEdge — hover 出 + / 🗑️ 按鈕（n8n 風格）
@@ -526,6 +529,7 @@ export default function PipelinePage() {
     if (n.type === 'humanConfirmation') return '#10b981'
     if (n.type === 'computerUse') return '#9333ea'
     if (n.type === 'outlookAutomation') return '#0078d4'
+    if (n.type === 'webCrawler') return '#0d9488'
     return '#3b82f6'
   }, [])
 
@@ -627,6 +631,17 @@ export default function PipelinePage() {
     setSelectedId(id)
   }, [nodes, setNodes])
 
+  // ── Add 網頁爬蟲節點 ──────────────────────────────────────────────────
+  const addWebCrawler = useCallback(() => {
+    const id = `web-crawler-${Date.now()}`
+    const data = newWebCrawlerData(nodes.length)
+    const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
+    const x = lastNode ? lastNode.position.x + 320 : 100
+    const y = lastNode ? lastNode.position.y : 160
+    setNodes(ns => [...ns, { id, type: 'webCrawler', position: { x, y }, data }])
+    setSelectedId(id)
+  }, [nodes, setNodes])
+
   // ── Edge 上的 ➕ 按鈕：在指定 edge 中間插入新節點 ──────────────────────────
   // _insertableEdge.tsx dispatch 'pipeline-insert-node-on-edge' CustomEvent
   // detail = { edgeId, source, target, nodeType, labelX, labelY }
@@ -648,6 +663,7 @@ export default function PipelinePage() {
         case 'computerUse':        data = newComputerUseData(0); break
         case 'visualValidation':   data = newVisualValidationData(0); break
         case 'outlookAutomation':  data = newOutlookData(0); break
+        case 'webCrawler':         data = newWebCrawlerData(0); break
         default: return
       }
       setNodes(ns => [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }])
@@ -755,13 +771,13 @@ export default function PipelinePage() {
 
   // ── Run pipeline ──────────────────────────────────────────────────────────
   const handleRunClick = async () => {
-    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation')
+    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler')
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
     const steps = flowToSteps(nodes, edges)
     // 空步驟檢查：排除有自己 schema 的節點類型（不靠 batch 跑的）
-    //   computer_use / human_confirm / visual_validation / outlook_automation 都不需要 batch，自有檢查
+    //   computer_use / human_confirm / visual_validation / outlook_automation / web_crawler 都不需要 batch，自有檢查
     const emptyStep = steps.find(s =>
-      !s.batch?.trim() && !s.humanConfirm && !s.computerUse && !s.visualValidation && !s.outlookAutomation
+      !s.batch?.trim() && !s.humanConfirm && !s.computerUse && !s.visualValidation && !s.outlookAutomation && !s.webCrawler
     )
     if (emptyStep) {
       toast.error(`步驟「${emptyStep.name}」尚未設定${emptyStep.skillMode ? '任務描述' : '執行指令'}，請點擊該步驟方塊填入`)
@@ -786,6 +802,39 @@ export default function PipelinePage() {
     if (emptyOu) {
       toast.error(`Outlook 自動化節點「${emptyOu.name}」尚未選模板、也沒打字描述需求，請點開節點選一個模板或在自由輸入區寫`)
       return
+    }
+    // web_crawler 節點：依模式檢查對應的 URL 欄位
+    const emptyWc = steps.find(s => {
+      if (!s.webCrawler) return false
+      const m = s.wcMode || 'web'
+      if (m === 'video') return !s.wcVideoUrl?.trim()
+      // 網頁模式：urls 陣列有任何非空 URL 或單欄位 wc_url 有值就算 OK
+      const hasUrls = (s.wcUrls || []).some(u => u && u.trim() && !u.trim().startsWith('#'))
+      return !hasUrls && !s.wcUrl?.trim()
+    })
+    if (emptyWc) {
+      const m = emptyWc.wcMode || 'web'
+      const hint = m === 'video' ? '影片 URL（YouTube/Vimeo/Bilibili 等）' : 'URL'
+      toast.error(`${m === 'video' ? '影片下載' : '網頁爬蟲'}節點「${emptyWc.name}」尚未填${hint}，請點開節點貼上`)
+      return
+    }
+    // 「節點有多個出邊」偵測：使用者插中間節點忘記刪原連線常見坑
+    // flowToSteps 改 multimap + DFS 找最長路徑後不會丟掉中間節點，
+    // 但仍提醒使用者去把多餘連線清掉、避免將來架構變化又踩雷
+    {
+      const stepNodeIds = new Set(stepNodes.map(n => n.id))
+      const branchNames: string[] = []
+      for (const n of stepNodes) {
+        const out = edges.filter(e => e.source === n.id && stepNodeIds.has(e.target))
+        if (out.length > 1) branchNames.push((n.data as any).name || n.id)
+      }
+      if (branchNames.length > 0) {
+        toast.warning(
+          `偵測到節點有多個出邊：${branchNames.join('、')}。` +
+          `系統會自動選最長路徑、但建議手動刪掉多餘連線（用 edge 上的 🗑️ 按鈕）`,
+          { duration: 8000 },
+        )
+      }
     }
     // 查詢 recipe 狀態，然後顯示選擇 dialog
     const skillSteps = steps.filter(s => s.skillMode).map(s => s.name)
@@ -1188,7 +1237,7 @@ export default function PipelinePage() {
         ) : (
           <button
             onClick={handleRunClick}
-            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation').length === 0}
+            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler').length === 0}
             className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium shadow-sm"
           >
             <Play className="w-3.5 h-3.5" /> 執行
@@ -1279,6 +1328,13 @@ export default function PipelinePage() {
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-sky-200 rounded-xl text-sm text-sky-700 hover:border-sky-400 hover:bg-sky-50 shadow-sm transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" /> Outlook
+              </button>
+              <button
+                onClick={addWebCrawler}
+                title="新增網頁爬蟲節點（沙盒內 Crawl4AI + Cloudflare fallback；輸出 markdown 給 skill 解析）"
+                className="flex items-center gap-1.5 px-3 py-2 bg-white border border-teal-200 rounded-xl text-sm text-teal-700 hover:border-teal-400 hover:bg-teal-50 shadow-sm transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> 網頁爬蟲
               </button>
             </div>
           </Panel>
@@ -1416,7 +1472,7 @@ export default function PipelinePage() {
         )}
 
         {/* Empty state */}
-        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation').length === 0 && <EmptyState onAdd={addScriptStep} />}
+        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler').length === 0 && <EmptyState onAdd={addScriptStep} />}
 
         {/* Node config panel */}
         {selectedNode && selectedNode.type === 'computerUse' ? (
@@ -1451,6 +1507,14 @@ export default function PipelinePage() {
         ) : selectedNode && selectedNode.type === 'outlookAutomation' ? (
           <OutlookPanel
             node={selectedNode as OutlookNode}
+            pipelineName={pipelineName}
+            onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
+            onClose={() => setSelectedId(null)}
+            onDelete={() => deleteStep(selectedNode.id)}
+          />
+        ) : selectedNode && selectedNode.type === 'webCrawler' ? (
+          <WebCrawlerPanel
+            node={selectedNode as WebCrawlerNode}
             pipelineName={pipelineName}
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}

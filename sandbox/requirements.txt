@@ -26,3 +26,9 @@ cloudscraper
 feedparser
 lxml_html_clean
 fake_useragent
+crawl4ai
+trafilatura
+html2text
+playwright
+yt-dlp
+markitdown[pptx]

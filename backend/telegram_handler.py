@@ -405,6 +405,177 @@ async def _poll_loop():
                             pass
                     continue
 
+                # ── 取上一步輸出檔（pipe_prev_output）──
+                # 人工確認 keyboard 的「📎 上一步輸出」按鈕；不論 send_prev_output 是否開都可用
+                if action == "prev_output":
+                    logger.info(f"Telegram: 取上一步輸出 for run {run_id}")
+                    try:
+                        from pipeline.store import get_store
+                        from pipeline.models import PipelineConfig
+                        from pipeline.runner import _send_step_output_to_tg
+                        store = get_store()
+                        run = store.load(run_id)
+                        if not run:
+                            await cb.answer("❌ 找不到此 run")
+                            continue
+                        config = PipelineConfig.from_dict(run.config_dict)
+                        # 跳過連續 human_confirm 找上一個可執行步驟（跟 auto-send 邏輯一致）
+                        idx = run.current_step - 1
+                        while idx >= 0 and config.steps[idx].human_confirm:
+                            idx -= 1
+                        if idx < 0:
+                            await cb.answer("⚠ 沒有上一步")
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id,
+                                text="⚠ 此節點是第一步、沒有上一步輸出可取",
+                            )
+                            continue
+                        prev_step = config.steps[idx]
+                        # 從 run.step_results 找對應的 StepResult、給 actual_output_path
+                        prev_result = next((sr for sr in run.step_results if sr.step_index == idx), None)
+                        await cb.answer("📎 取得中…")
+                        ok, msg = await _send_step_output_to_tg(
+                            cb.message.chat_id, prev_step,
+                            step_label=f"步驟 {idx+1}：{prev_step.name}",
+                            workflow_name=config.name,
+                            logger=logger,
+                            step_result=prev_result,
+                        )
+                        if not ok:
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id, text=f"⚠ {msg}",
+                            )
+                    except Exception as e:
+                        logger.error(f"prev_output failed: {e}")
+                        try: await cb.answer(f"❌ {str(e)[:150]}")
+                        except Exception: pass
+                    continue
+
+                # ── 列出所有步驟讓使用者挑要取哪一步輸出（pipe_select_step）──
+                # 點下去 bot 回一個新訊息、含每步的按鈕；按按鈕觸發 pipe_step_output:{run_id}:{idx}
+                if action == "select_step":
+                    logger.info(f"Telegram: 列出步驟選單 for run {run_id}")
+                    try:
+                        from pipeline.store import get_store
+                        from pipeline.models import PipelineConfig
+                        from pipeline.runner import _resolve_step_output_for_tg
+                        store = get_store()
+                        run = store.load(run_id)
+                        if not run:
+                            await cb.answer("❌ 找不到此 run")
+                            continue
+                        config = PipelineConfig.from_dict(run.config_dict)
+                        # 列「可能有輸出」的步驟：
+                        #   - 明確設 output.path（任何節點類型）
+                        #   - 節點類型有 default rule（outlook / web_crawler）
+                        #   - skill_mode / 一般 script（會寫檔到 working_dir）
+                        # 排除：human_confirm / visual_validation / computer_use（不寫檔）
+                        from pipeline.runner import _step_default_output_path
+                        # 預先把 step_results 做成 idx → StepResult map，給每步解析時用
+                        sr_by_idx = {sr.step_index: sr for sr in run.step_results}
+                        listed: list[tuple[int, str, str]] = []  # (idx, label, status_emoji)
+                        for i, st in enumerate(config.steps):
+                            has_explicit = bool(st.output and st.output.path)
+                            has_default = bool(_step_default_output_path(st, config.name))
+                            could_produce = bool(
+                                getattr(st, "skill_mode", False)
+                                or (not getattr(st, "human_confirm", False)
+                                    and not getattr(st, "visual_validation", False)
+                                    and not getattr(st, "computer_use", False)
+                                    and getattr(st, "batch", ""))
+                            )
+                            sr_i = sr_by_idx.get(i)
+                            has_actual = bool(getattr(sr_i, "actual_output_path", "") if sr_i else "")
+                            if not has_explicit and not has_default and not could_produce and not has_actual:
+                                continue  # 該節點本就沒輸出概念
+                            fp, _disp, err = _resolve_step_output_for_tg(
+                                st, workflow_name=config.name, logger=logger,
+                                step_result=sr_i,
+                            )
+                            emoji = "✅" if fp else "⚠"
+                            label = f"{emoji} {i+1}. {st.name}"
+                            # callback_data 上限 64 bytes、保險裁短 label
+                            if len(label) > 50:
+                                label = label[:47] + "…"
+                            listed.append((i, label, emoji))
+
+                        if not listed:
+                            await cb.answer("⚠ 沒有任何步驟有可傳的輸出")
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id,
+                                text="⚠ 此工作流沒有任何步驟有可傳的輸出檔（檢查 step.output.path）",
+                            )
+                            continue
+
+                        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                        rows = [[InlineKeyboardButton(label, callback_data=f"pipe_step_output:{run_id}:{i}")]
+                                for i, label, _ in listed]
+                        rows.append([InlineKeyboardButton("✕ 取消", callback_data=f"pipe_cancel_select:{run_id}")])
+                        await cb.answer()
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id,
+                            text=("📂 <b>選擇要取得哪一步的輸出</b>\n\n"
+                                  "✅ = 檔案準備好可傳；⚠ = 設了 output.path 但檔案不存在 / 太大"),
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup(rows),
+                        )
+                    except Exception as e:
+                        logger.error(f"select_step failed: {e}")
+                        try: await cb.answer(f"❌ {str(e)[:150]}")
+                        except Exception: pass
+                    continue
+
+                # ── 使用者從步驟選單挑了某步、傳該步輸出（pipe_step_output）──
+                if action == "step_output":
+                    try:
+                        target_idx = int(extra) if extra else -1
+                    except Exception:
+                        await cb.answer("❌ 步驟索引錯誤")
+                        continue
+                    logger.info(f"Telegram: 取步驟 #{target_idx} 輸出 for run {run_id}")
+                    try:
+                        from pipeline.store import get_store
+                        from pipeline.models import PipelineConfig
+                        from pipeline.runner import _send_step_output_to_tg
+                        store = get_store()
+                        run = store.load(run_id)
+                        if not run:
+                            await cb.answer("❌ 找不到此 run")
+                            continue
+                        config = PipelineConfig.from_dict(run.config_dict)
+                        if target_idx < 0 or target_idx >= len(config.steps):
+                            await cb.answer("❌ 步驟索引超出範圍")
+                            continue
+                        st = config.steps[target_idx]
+                        sr_target = next((sr for sr in run.step_results if sr.step_index == target_idx), None)
+                        await cb.answer("📎 取得中…")
+                        ok, msg = await _send_step_output_to_tg(
+                            cb.message.chat_id, st,
+                            step_label=f"步驟 {target_idx+1}：{st.name}",
+                            workflow_name=config.name,
+                            logger=logger,
+                            step_result=sr_target,
+                        )
+                        if not ok:
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id, text=f"⚠ {msg}",
+                            )
+                    except Exception as e:
+                        logger.error(f"step_output failed: {e}")
+                        try: await cb.answer(f"❌ {str(e)[:150]}")
+                        except Exception: pass
+                    continue
+
+                # ── 取消選擇步驟（pipe_cancel_select）──
+                if action == "cancel_select":
+                    try:
+                        await cb.answer()
+                        # 把選單訊息刪掉、避免殘留
+                        await cb.message.delete()
+                    except Exception:
+                        pass
+                    continue
+
                 # ── ask_user 按選項回答 ──
                 if action == "answer":
                     # extra 是 option index

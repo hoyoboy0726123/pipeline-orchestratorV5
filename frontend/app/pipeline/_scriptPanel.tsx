@@ -290,6 +290,9 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
                     <textarea rows={2} value={data.expect} onChange={e => upd({ expect: e.target.value })}
                       placeholder="描述輸出應包含什麼內容…" className={`${inputCls} resize-none`} />
                   )}
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    <b>填了</b> → AI 用此描述驗證（+5-15s）。<b>留空</b> → 只看 exit code + 檔案存在（你寫的腳本你負責）。
+                  </p>
                 </div>
                 <div>
                   <label className="text-xs text-gray-500 block mb-1">工作目錄</label>

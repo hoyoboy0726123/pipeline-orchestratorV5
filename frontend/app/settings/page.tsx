@@ -47,6 +47,68 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
 
   useEffect(() => { loadSkills() }, [])
 
+  // 目前的 sandbox 模式（host / sandbox）— 決定顯示什麼安裝指令給使用者
+  const [currentMode, setCurrentMode] = useState<'host' | 'sandbox'>('host')
+  const refreshMode = async () => {
+    try {
+      const s = await getSandboxStatus()
+      setCurrentMode(s.mode === 'wsl_docker' ? 'sandbox' : 'host')
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { refreshMode() }, [])
+
+  // 沙盒模式切換時清掉 deps 快取（不同 mode 的「已安裝」結果不同）+ 收起展開的卡片 + 重新讀 mode
+  // 不然使用者切到容器模式還會看到 host venv 掃出來的舊結果
+  useEffect(() => {
+    const handler = () => {
+      setDepsCache({})
+      setExpanded(null)
+      refreshMode()
+    }
+    window.addEventListener('sandbox-mode-changed', handler)
+    return () => window.removeEventListener('sandbox-mode-changed', handler)
+  }, [])
+
+  // 系統工具顯示名 → apt 套件名（沙盒容器是 Debian 12、用 apt）
+  const TOOL_TO_APT: Record<string, string> = {
+    'LibreOffice': 'libreoffice',
+    'Poppler': 'poppler-utils',
+    'FFmpeg': 'ffmpeg',
+    'ImageMagick': 'imagemagick',
+    'Tesseract OCR': 'tesseract-ocr',
+    'wkhtmltopdf': 'wkhtmltopdf',
+    'Pandoc': 'pandoc',
+    'Git': 'git',
+    'Node.js': 'nodejs',
+    'Node.js/npm': 'nodejs npm',
+    'Docker': 'docker.io',
+  }
+  const npmInstallCmd = (pkgs: string[]) =>
+    currentMode === 'sandbox'
+      ? `wsl docker exec pipeline-sandbox-v5 npm install -g ${pkgs.join(' ')}`
+      : `npm install -g ${pkgs.join(' ')}`
+  const aptInstallCmd = (tools: string[]) => {
+    const aptPkgs = tools.map(t => TOOL_TO_APT[t] || t.toLowerCase()).join(' ')
+    return `wsl docker exec pipeline-sandbox-v5 bash -c "apt-get update && apt-get install -y ${aptPkgs}"`
+  }
+
+  // 重抓目前展開的 skill 的依賴掃描（讓「尚未安裝」即時變「已安裝」）
+  const refreshExpandedDeps = async () => {
+    if (!expanded) return
+    setScanning(expanded)
+    try {
+      const deps = await scanSkillDependencies(expanded)
+      setDepsCache(prev => ({ ...prev, [expanded as string]: deps }))
+    } catch { /* ignore */ }
+    finally { setScanning(null) }
+  }
+
+  // 包一層、安裝後自動 refresh、不用 user 自己 collapse + expand
+  const handleInstall = async (pkg: string) => {
+    await onInstallRequest(pkg)
+    await refreshExpandedDeps()
+  }
+
   const handleToggleExpand = async (displayName: string) => {
     if (expanded === displayName) {
       setExpanded(null)
@@ -143,7 +205,7 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
                                   {deps.python.missing.map(pkg => (
                                     <div key={pkg} className="flex items-center gap-1 bg-amber-50 border border-amber-200 rounded px-2 py-1">
                                       <code className="text-amber-800">{pkg}</code>
-                                      <button onClick={() => onInstallRequest(pkg)}
+                                      <button onClick={() => handleInstall(pkg)}
                                         className="text-purple-600 hover:text-purple-800 text-[11px] font-medium ml-1">安裝</button>
                                     </div>
                                   ))}
@@ -194,7 +256,15 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
                                   <>
                                     {deps.node.missing_npm && deps.node.missing_npm.length > 0 && (
                                       <div className="bg-amber-50 border border-amber-200 rounded px-2 py-2">
-                                        <p className="text-amber-800 mb-1">尚未安裝（請在終端執行 <code className="bg-white px-1 rounded">npm install -g {deps.node.missing_npm.join(' ')}</code>）：</p>
+                                        <p className="text-amber-800 mb-1">
+                                          尚未安裝
+                                          <span className="ml-1 text-[11px] text-amber-700">
+                                            （目前 {currentMode === 'sandbox' ? '🛡 沙盒容器' : '💻 本機'} 模式、複製此指令到終端執行）：
+                                          </span>
+                                        </p>
+                                        <code className="block bg-white px-2 py-1 rounded text-amber-900 text-[11px] mb-1.5 break-all">
+                                          {npmInstallCmd(deps.node.missing_npm)}
+                                        </code>
                                         <div className="flex flex-wrap gap-1">
                                           {deps.node.missing_npm.map(pkg => (
                                             <code key={pkg} className="px-1.5 py-0.5 bg-white border border-amber-200 rounded text-amber-900">{pkg}</code>
@@ -220,15 +290,32 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
                           {/* 系統工具 */}
                           {deps.system_tools && deps.system_tools.length > 0 && (
                             <div>
-                              <div className="font-medium text-gray-700 mb-1.5">🛠 系統工具（需自行安裝）</div>
-                              <div className="flex flex-wrap gap-1.5">
+                              <div className="font-medium text-gray-700 mb-1.5">🛠 系統工具</div>
+                              <div className="flex flex-wrap gap-1.5 mb-2">
                                 {deps.system_tools.map(tool => (
                                   <span key={tool} className="px-2 py-0.5 bg-slate-100 border border-slate-300 rounded text-slate-700 text-[11px]">
                                     {tool}
                                   </span>
                                 ))}
                               </div>
-                              <p className="mt-1 text-[11px] text-gray-400">這些工具無法透過 pip / npm 安裝，需到官網或用系統套件管理器（winget / brew / apt）取得。</p>
+                              {currentMode === 'sandbox' ? (
+                                <div className="bg-slate-50 border border-slate-200 rounded px-2 py-2 text-[11px]">
+                                  <p className="text-slate-700 mb-1">
+                                    🛡 沙盒模式：可在容器內用 <code className="bg-white px-1 rounded">apt-get</code> 安裝。複製此指令執行：
+                                  </p>
+                                  <code className="block bg-white px-2 py-1 rounded text-slate-800 break-all">
+                                    {aptInstallCmd(deps.system_tools)}
+                                  </code>
+                                </div>
+                              ) : (
+                                <div className="text-[11px] text-gray-500 leading-relaxed">
+                                  💻 本機模式：這些工具無法透過 pip / npm 安裝，需到官網或用系統套件管理器（winget / brew / apt）取得。
+                                  <br />
+                                  例：<code className="bg-gray-100 px-1 rounded">winget install LibreOffice.LibreOffice</code> /
+                                  <code className="bg-gray-100 px-1 rounded ml-1">brew install poppler</code> /
+                                  <code className="bg-gray-100 px-1 rounded ml-1">apt install pandoc</code>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -406,7 +493,7 @@ function SkillPackagesSection() {
           </h2>
           <p className="text-sm text-gray-500">
             {currentTarget === 'sandbox'
-              ? '目前管理：pipeline-sandbox-v4 容器（切換到本機模式會改管 Host venv）'
+              ? '目前管理：pipeline-sandbox-v5 容器（切換到本機模式會改管 Host venv）'
               : '目前管理：Host Python venv（切換到沙盒模式會改管容器）'}
           </p>
         </div>
@@ -963,7 +1050,7 @@ function SandboxSection() {
           <Shield className="w-5 h-5 text-indigo-700" />
         </div>
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">Skill 沙盒（V4）</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Skill 沙盒（V5）</h2>
           <p className="text-sm text-gray-500">LLM 生成的 Python / Shell 程式碼要在哪裡執行</p>
         </div>
       </div>
@@ -984,7 +1071,7 @@ function SandboxSection() {
               </div>
               <p className="text-xs text-gray-500 leading-relaxed">
                 {status.mode === 'wsl_docker'
-                  ? 'Skill 節點 run_python / run_shell 送進 pipeline-sandbox-v4 容器執行。computer_use / script 節點仍在 host 跑（需要桌面權限）。'
+                  ? 'Skill 節點 run_python / run_shell 送進 pipeline-sandbox-v5 容器執行。computer_use / script 節點仍在 host 跑（需要桌面權限）。'
                   : 'Skill 節點 run_python / run_shell 直接在 Windows 跑（速度快、跟 V2 一致）。LLM 能完整存取你的檔案系統。'}
               </p>
             </div>

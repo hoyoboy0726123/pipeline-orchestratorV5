@@ -396,14 +396,54 @@ def _h_send_with_attachment(*, params: dict, output_path: Path,
         attachment = _resolve_user_path(custom_path)
         source_desc = "自訂路徑"
     else:
-        # 2. fallback：上一步輸出檔
+        # 2. fallback：上一步明確記錄的 output
         prev = _resolve_prev_output(prev_outputs)
-        if not prev:
-            raise OutlookTemplateError(
-                "send_with_attachment 需要附件 — 請填 attachment_path、或讓前一步有 output"
-            )
-        attachment = Path(prev)
-        source_desc = "上一步輸出"
+        if prev:
+            attachment = Path(prev)
+            source_desc = "上一步輸出"
+        else:
+            # 3. 最終 fallback：去 workflow 輸出資料夾（output_path 的 parent）找最新檔
+            # 場景：上一步是 human_confirm（沒 output）/ skill 節點沒設 output.path
+            # 但實際有產檔到工作目錄。根據 mtime 抓最新一個非雜訊檔。
+            wf_dir = output_path.parent if output_path else None
+            if wf_dir and wf_dir.exists() and wf_dir.is_dir():
+                skip_prefixes = ("screenshot_",)
+                skip_suffixes = ("_preview.png", "_compressed.jpg", "_libre.pdf", "_unsupported.png")
+                skip_exts = {".log"}
+                skip_names = {"pipeline_settings.json", "pipeline.db",
+                              "pipeline.db-shm", "pipeline.db-wal"}
+                # 也要排除這次自己即將輸出的 result.md（若已存在）
+                self_out = output_path.name if output_path else ""
+                candidates = []
+                for f in wf_dir.iterdir():
+                    if not f.is_file():
+                        continue
+                    n = f.name
+                    if n == self_out:
+                        continue  # 自己將要寫入的 .md、跳過
+                    if n.startswith(skip_prefixes):
+                        continue
+                    if any(n.endswith(suf) for suf in skip_suffixes):
+                        continue
+                    if f.suffix.lower() in skip_exts:
+                        continue
+                    if n in skip_names:
+                        continue
+                    candidates.append((f.stat().st_mtime, f))
+                if candidates:
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+                    attachment = candidates[0][1]
+                    source_desc = f"工作流輸出資料夾最新檔（{attachment.name}）"
+                else:
+                    raise OutlookTemplateError(
+                        f"send_with_attachment 找不到附件 — 上一步沒 output、"
+                        f"工作流資料夾 {wf_dir} 也沒可用檔案。"
+                        f"請填 attachment_path、或確認前面步驟有實際產生檔案。"
+                    )
+            else:
+                raise OutlookTemplateError(
+                    "send_with_attachment 需要附件 — 請填 attachment_path、或讓前一步有 output"
+                )
 
     if not attachment.exists():
         raise OutlookTemplateError(f"附件不存在（{source_desc}）：{attachment}")

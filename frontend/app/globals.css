@@ -118,3 +118,33 @@
   background: transparent !important;
   padding: 0 !important;
 }
+
+/* Markdown 內 <details>/<summary> 樣式（給 AI 助手 welcome 摺疊範例用）
+   ReactMarkdown + rehype-raw 會把使用者寫的 <details> 直接渲染、預設樣式陽春 */
+.prose details {
+  @apply border border-gray-200 rounded-lg my-1.5 overflow-hidden bg-white;
+}
+.prose details > summary {
+  @apply cursor-pointer px-2.5 py-1.5 text-xs font-medium text-gray-700
+         hover:bg-gray-50 transition-colors select-none list-none;
+}
+.prose details > summary::-webkit-details-marker { display: none; }
+.prose details > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  margin-right: 0.25rem;
+  transition: transform 0.15s ease;
+  color: #9ca3af;
+}
+.prose details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.prose details[open] > summary {
+  @apply border-b border-gray-100 bg-gray-50/50;
+}
+.prose details > *:not(summary) {
+  @apply px-2.5 py-2 text-xs;
+}
+.prose details > *:not(summary) > p {
+  @apply my-1;
+}

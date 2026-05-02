@@ -1530,7 +1530,60 @@ async def execute_step_with_skill(
   - 容器裡 `~` (`/root`) 有 mount `.agents`，所以 `Path.home() / ".agents"` 跟 `/mnt/c/Users/X/.agents` 指同一份
 - **PATH 上只有 Linux 工具**：`node`、`npm`、`python3`、`bash`、`ls`、`grep`、`curl` 等都有；
   沒有 `where`、`dir`、`type`、`copy` 這些 Windows 命令
-- 任務描述若給了 Windows 風格的路徑，自動轉成 `/mnt/<drive>/...` 再使用"""
+- 任務描述若給了 Windows 風格的路徑，自動轉成 `/mnt/<drive>/...` 再使用
+
+【🌐 網頁抓取準則（容器內專用）】
+**抓網頁一律用 `crawl4ai`**（容器已預裝 crawl4ai + playwright + chromium）。
+**禁用**：
+- ❌ `selenium`（容器沒裝 chromedriver、裝了也跑不起來）
+- ❌ `requests` / `urllib` / `httpx` 直接 GET HTML（拿不到 SPA 動態內容、Reddit/Twitter/X/Instagram 都是 SPA）
+- ❌ `playwright` 直接寫 driver code（會繞過 crawl4ai 的反爬處理）
+
+**為什麼要 crawl4ai**：自動處理 JS 渲染、Cloudflare bypass（fallback FlareSolverr）、cookies、滾動、自動轉 markdown。比手刻 Playwright/Selenium 穩很多。
+
+**最小樣板**（直接抄改）：
+```python
+import asyncio
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+
+async def fetch(url, scroll=True):
+    js = ""
+    if scroll:
+        # SPA 站要滾動觸發 lazy load
+        js = '''
+        await new Promise(r => setTimeout(r, 2000));
+        window.scrollTo(0, document.body.scrollHeight / 2);
+        await new Promise(r => setTimeout(r, 1500));
+        window.scrollTo(0, document.body.scrollHeight);
+        await new Promise(r => setTimeout(r, 1500));
+        '''
+    async with AsyncWebCrawler(config=BrowserConfig(headless=True)) as c:
+        r = await c.arun(url=url, config=CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            page_timeout=90000,
+            wait_until="domcontentloaded",  # SPA 站不能用 networkidle，會 timeout
+            js_code=js if js else None,
+        ))
+        return r.markdown if r.success else None
+
+# 多 URL 序列抓（rate limit 友善）
+async def fetch_many(urls):
+    results = []
+    for u in urls:
+        md = await fetch(u)
+        results.append((u, md))
+        await asyncio.sleep(1)  # 給站點喘息
+    return results
+
+md = asyncio.run(fetch("https://example.com/"))
+```
+
+**SPA 站特別注意**：Reddit / Twitter / X / Instagram / Threads / Bluesky 等動態載入內容的站，務必：
+1. `wait_until="domcontentloaded"`（不要用 `networkidle`、會 timeout）
+2. `js_code` 加滾動 + 等待，讓 lazy-load 內容渲染
+3. 抽連結時用 regex 過濾貼文 URL pattern（如 Reddit `/comments/<id>/<slug>/`），別拿頁首導覽連結
+
+**影片下載**用 `yt-dlp`（容器預裝），不要用 pytube / youtube-dl 等其他工具。"""
             logger.info(f"[{step_name}] 🛡 已注入 wsl_docker sandbox 環境資訊")
     except Exception as _e:
         logger.debug(f"[{step_name}] sandbox env 注入失敗（略過）：{_e}")
@@ -2544,3 +2597,144 @@ async def execute_step_with_outlook(
             exit_code=-3, stdout="\n".join(all_stdout),
             stderr=f"Outlook agent 例外：{e}",
         )
+
+
+# ── 網頁爬蟲節點（V5 新增）──────────────────────────────────────────
+
+async def execute_step_with_web_crawler(
+    *,
+    mode: str,
+    # web 模式
+    url: str,
+    urls: list[str],            # 多 URL 列表；非空時優先用、走 crawl_urls
+    js_render: bool,
+    wait_for_selector: str,
+    cloudflare_fallback: bool,
+    cookies: str,
+    interactions: list[dict],
+    download_assets: bool,
+    scroll_count: int = 0,          # 0=自動偵測 / >0=固定滾 N 次
+    target_post_count: int = 0,     # 0=不設目標 / >0=滾到至少 N 個貼文連結
+    # 影片模式
+    video_url: str,
+    video_quality: str,
+    video_max_filesize_mb: int,
+    video_max_duration_min: int,
+    video_subs: bool,
+    video_subs_langs: str,
+    video_save_info_json: bool,
+    # 共用
+    output_path: str,
+    timeout: int,
+    logger: logging.Logger,
+    step_name: str,
+) -> ExecResult:
+    """網頁爬蟲節點。mode 決定走哪條路徑：
+      "web"   → Crawl4AI（網頁 → markdown）；CF 偵測到時 fallback FlareSolverr
+      "video" → yt-dlp（影音站 → mp4 + 字幕 + .info.json + 摘要 .md）
+    """
+    if not output_path:
+        return ExecResult(exit_code=2, stdout="",
+                          stderr="web_crawler 節點未填 output.path")
+
+    if mode == "video":
+        if not video_url:
+            return ExecResult(exit_code=2, stdout="",
+                              stderr="web_crawler 影片模式未填 YouTube/Vimeo URL")
+        from pipeline.web_crawler import crawl_video
+        try:
+            result = await crawl_video(
+                url=video_url,
+                output_path=output_path,
+                quality=video_quality or "720p",
+                max_filesize_mb=video_max_filesize_mb or 500,
+                max_duration_min=video_max_duration_min if video_max_duration_min is not None else 30,
+                subs=video_subs,
+                subs_langs=video_subs_langs or "",
+                save_info_json=video_save_info_json,
+                cookies=cookies,
+                timeout=timeout,
+                logger=logger,
+                step_name=step_name,
+            )
+        except Exception as e:
+            logger.error(f"[{step_name}] 爬蟲例外：{e}", exc_info=True)
+            return ExecResult(exit_code=-3, stdout="", stderr=f"爬蟲例外：{e}")
+    else:
+        # 預設 web 模式 — 多 URL 還是單 URL？
+        # 過濾空行 / 註解後 list 多於 1 → 多 URL；其他都單 URL（含只填 wc_url）
+        cleaned_urls = [u.strip() for u in (urls or []) if u and u.strip() and not u.strip().startswith("#")]
+        if cleaned_urls and len(cleaned_urls) > 1:
+            # ── 多 URL 路徑 ──
+            from pipeline.web_crawler import crawl_urls
+            from pathlib import Path as _Path
+            # output_path 解讀為「資料夾」(去掉副檔名 / 拿 parent)
+            outp = _Path(output_path)
+            output_dir = str(outp.parent if outp.suffix else outp)
+            try:
+                manifest = await crawl_urls(
+                    urls=cleaned_urls,
+                    output_dir=output_dir,
+                    js_render=js_render,
+                    wait_for_selector=wait_for_selector,
+                    cloudflare_fallback=cloudflare_fallback,
+                    cookies=cookies,
+                    interactions=interactions or [],
+                    download_assets=download_assets,
+                    scroll_count=scroll_count,
+                    target_post_count=target_post_count,
+                    timeout=timeout,
+                    logger=logger,
+                    step_name=step_name,
+                )
+            except Exception as e:
+                logger.error(f"[{step_name}] 多 URL 爬蟲例外：{e}", exc_info=True)
+                return ExecResult(exit_code=-3, stdout="", stderr=f"爬蟲例外：{e}")
+            if not manifest.get("ok"):
+                return ExecResult(
+                    exit_code=1, stdout="",
+                    stderr=f"多 URL 爬取失敗：{manifest.get('successful')}/{manifest.get('total')} 成功；"
+                           f"{manifest.get('error') or '見 index.json'}",
+                )
+            summary = (
+                f"[爬蟲完成] 多 URL：{manifest['successful']}/{manifest['total']} 成功 "
+                f"耗時={manifest.get('duration_ms', 0)}ms → {output_dir}/index.json"
+            )
+            return ExecResult(exit_code=0, stdout=summary, stderr="")
+
+        # ── 單 URL 路徑（向後相容：用 wc_url 或 wc_urls 只有一個）──
+        single_url = cleaned_urls[0] if cleaned_urls else url
+        if not single_url:
+            return ExecResult(exit_code=2, stdout="",
+                              stderr="web_crawler 網頁模式未填 URL")
+        from pipeline.web_crawler import crawl_single_url
+        try:
+            result = await crawl_single_url(
+                url=single_url,
+                output_path=output_path,
+                js_render=js_render,
+                wait_for_selector=wait_for_selector,
+                cloudflare_fallback=cloudflare_fallback,
+                cookies=cookies,
+                interactions=interactions or [],
+                download_assets=download_assets,
+                scroll_count=scroll_count,
+                target_post_count=target_post_count,
+                timeout=timeout,
+                logger=logger,
+                step_name=step_name,
+            )
+        except Exception as e:
+            logger.error(f"[{step_name}] 爬蟲例外：{e}", exc_info=True)
+            return ExecResult(exit_code=-3, stdout="", stderr=f"爬蟲例外：{e}")
+
+    if not result.ok:
+        return ExecResult(exit_code=1, stdout="",
+                          stderr=f"爬取失敗（tier={result.tier}）：{result.error}")
+
+    summary = (
+        f"[爬蟲完成] tier={result.tier} status={result.status_code} "
+        f"title={result.title!r} 字數={len(result.markdown.split())} "
+        f"耗時={result.duration_ms}ms → {output_path}"
+    )
+    return ExecResult(exit_code=0, stdout=summary, stderr="")
