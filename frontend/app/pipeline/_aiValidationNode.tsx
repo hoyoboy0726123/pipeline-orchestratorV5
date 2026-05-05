@@ -1,6 +1,7 @@
 'use client'
 import { memo } from 'react'
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react'
+import { ShieldCheck } from 'lucide-react'
 import type { AiValidationData } from './_helpers'
 
 type AiValidationNode = Node<AiValidationData>
@@ -22,7 +23,7 @@ function AiValidationNodeComponent({ data, selected }: NodeProps<AiValidationNod
         className="!w-3 !h-3 !rounded-full !border-2 !border-white" style={{ background: color }} />
 
       <div className="px-3 py-2 flex items-center gap-2" style={{ background: color }}>
-        <span className="text-white text-sm">✓</span>
+        <ShieldCheck className="w-3.5 h-3.5 text-white shrink-0" strokeWidth={2.5} />
         <span className="text-white font-semibold text-sm flex-1 truncate">AI 驗證</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 text-white font-medium">驗證</span>
       </div>

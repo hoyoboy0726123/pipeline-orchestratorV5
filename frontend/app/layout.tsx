@@ -3,8 +3,8 @@ import './globals.css'
 import { Toaster } from 'sonner'
 
 export const metadata: Metadata = {
-  title: 'Pipeline Orchestrator',
-  description: 'Visual Pipeline Orchestration Tool',
+  title: 'Atlas',
+  description: 'Atlas — 視覺化工作流自動化系統',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

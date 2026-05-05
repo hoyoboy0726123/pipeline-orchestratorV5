@@ -411,6 +411,13 @@ export default function PipelinePage() {
       setTimeout(() => {
         savingRef.current = false
         rfInstanceRef.current?.fitView({ padding: 0.3, duration: 300 })
+        // 一次性 yaml backfill — 對舊工作流（DB yaml 欄位空）很關鍵，
+        // 因為單純點開不修改不會觸發 auto-save。idempotent，重複載入也只會覆寫成相同值。
+        // 這也是 TG 遠端遙控能讀到 yaml 的最後一道保險。
+        try {
+          const yaml = stepsToYaml(wf.name, flowToSteps(wf.nodes as AppNode[], wf.edges))
+          saveCanvas(activeId, wf.nodes as AppNode[], wf.edges, yaml)
+        } catch { /* 解析失敗就放過，下次編輯時 auto-save 會補 */ }
       }, 1000)
     }, 30)
     return () => clearTimeout(timer)
@@ -464,16 +471,18 @@ export default function PipelinePage() {
     return () => { if (bgDetectRef.current) clearInterval(bgDetectRef.current) }
   }, [pipelineName]) // eslint-disable-line
 
-  // Auto-save 到 store（防抖 800ms）
+  // Auto-save 到 store（防抖 800ms）— 同時把 YAML 帶下去，
+  // 讓 DB 的 yaml 欄位永遠跟畫布同步（TG 遠端遙控啟動會直接讀 yaml）
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (savingRef.current || !activeId) return
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current)
     autoSaveTimer.current = setTimeout(() => {
-      saveCanvas(activeId, nodes as AppNode[], edges)
+      const yaml = stepsToYaml(pipelineName, flowToSteps(nodes as AppNode[], edges))
+      saveCanvas(activeId, nodes as AppNode[], edges, yaml)
     }, 800)
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current) }
-  }, [nodes, edges]) // eslint-disable-line
+  }, [nodes, edges, pipelineName]) // eslint-disable-line
 
   // 同步名稱到 store
   useEffect(() => {
@@ -756,8 +765,9 @@ export default function PipelinePage() {
         setNodes(ns)
         setEdges(es)
         // activeId useEffect 會把 savingRef 卡住 ~1s，這段時間 autoSave 被 block，
-        // 所以新工作流內容無法自動存進後端 → 直接手動 saveCanvas 一次
-        saveCanvas(newId, ns as AppNode[], es)
+        // 所以新工作流內容無法自動存進後端 → 直接手動 saveCanvas 一次（含 yaml）
+        const importedYaml = stepsToYaml(name, flowToSteps(ns as AppNode[], es))
+        saveCanvas(newId, ns as AppNode[], es, importedYaml)
       }, 120)
       toast.success(`已建立新工作流「${name}」`)
     } else {

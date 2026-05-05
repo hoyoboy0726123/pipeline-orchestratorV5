@@ -21,6 +21,10 @@ _DEFAULT = {
     # 通知設定
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    # Telegram 遠端遙控：開啟後 bot 會處理你發的指令訊息（/menu 列工作流、按按鈕啟動）
+    # 預設 OFF — 安全起見、要使用時手動開
+    # 開啟前提：telegram_bot_token + telegram_chat_id 都要填好
+    "telegram_remote_control": False,
     "line_notify_token": "",       # LINE Notify（預留）
     # Skill 沙盒（V4）：run_python / run_shell 執行位置
     #   "host"       — Windows 原生 subprocess（快、跟 V2 一樣）

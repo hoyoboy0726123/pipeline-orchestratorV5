@@ -138,6 +138,11 @@ _pending_hints: dict[int, str] = {}
 # 等待用戶輸入 ask_user 自由回答的狀態：chat_id → run_id
 _pending_answers: dict[int, str] = {}
 
+# Polling loop 持有的 Bot 實例 — 升到 module scope 讓 _cmd_* 遠端遙控指令也能用
+# （沒升 module scope 之前，_cmd_menu 引用會 NameError）
+_bot_instance = None
+_current_token = ""
+
 
 def _i_still_hold_lock() -> bool:
     """檢查 lock file 裡的 pid 是不是自己。
@@ -162,10 +167,385 @@ def _i_still_hold_lock() -> bool:
         return True
 
 
+# ── 遠端遙控指令處理（settings.telegram_remote_control=True 才生效）──────
+def _is_remote_control_authorized(chat_id: int) -> bool:
+    """檢查 chat_id 是否被授權使用遠端遙控指令。
+    要求：(1) settings.telegram_remote_control=True (2) chat_id 等於授權 chat
+    授權 chat 解析順序：settings.telegram_chat_id → .env TELEGRAM_CHAT_ID（與 runner._get_tg_chat_id 一致）
+    任一不滿足都回 False（外人 DM 直接被忽略）"""
+    try:
+        from settings import get_settings
+        s = get_settings()
+        if not s.get("telegram_remote_control", False):
+            return False
+        auth_chat = (s.get("telegram_chat_id") or "").strip()
+        if not auth_chat:
+            auth_chat = (os.environ.get("TELEGRAM_CHAT_ID", "") or "").strip()
+        if not auth_chat:
+            return False
+        return str(chat_id) == auth_chat
+    except Exception:
+        return False
+
+
+async def _handle_remote_command(chat_id: int, text: str) -> None:
+    """處理 / 開頭的指令。"""
+    logger = logging.getLogger("telegram")
+    cmd = text.split()[0].lower() if text else ""
+    args = text[len(cmd):].strip()
+    logger.info(f"[遠端遙控] 收到指令 from chat {chat_id}: {cmd}")
+
+    try:
+        if cmd in ("/menu", "/list", "/start", "/選單"):
+            await _cmd_menu(chat_id)
+        elif cmd in ("/status", "/狀態"):
+            await _cmd_status(chat_id)
+        elif cmd in ("/help", "/幫助", "/?"):
+            await _cmd_help(chat_id)
+        elif cmd in ("/abort", "/中止"):
+            await _cmd_abort(chat_id, args)
+        elif cmd in ("/screenshot", "/截圖", "/screen"):
+            await _cmd_screenshot(chat_id)
+        else:
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"❓ 不認識的指令：{cmd}\n打 /help 看可用指令。",
+            )
+    except Exception as e:
+        logger.error(f"[遠端遙控] 指令 {cmd} 處理失敗：{e}", exc_info=True)
+        try:
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"❌ 指令處理失敗：{str(e)[:200]}",
+            )
+        except Exception:
+            pass
+
+
+def _format_next_run(iso_str) -> str:
+    """ISO datetime → 'MM/DD HH:MM'。失敗回空字串。"""
+    if not iso_str:
+        return ""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%m/%d %H:%M")
+    except Exception:
+        return ""
+
+
+def _build_menu_metadata(workflows: list[dict]) -> dict[str, dict]:
+    """為 /menu 蒐集每個工作流的狀態徽章資料。
+    回傳 {workflow_id: {"running": PipelineRun|None, "schedule": task_dict|None}}
+    """
+    meta: dict[str, dict] = {wf["id"]: {"running": None, "schedule": None} for wf in workflows}
+
+    # 執行中的 run（用 workflow_id 對應；store 已有此欄）
+    try:
+        from pipeline.store import get_store
+        for r in get_store().list_recent(limit=30):
+            wid = getattr(r, "workflow_id", None)
+            if (
+                r.status in ("running", "awaiting_human")
+                and wid
+                and wid in meta
+                and meta[wid]["running"] is None
+            ):
+                meta[wid]["running"] = r
+    except Exception:
+        pass
+
+    # 排程：scheduler 的 task name 對應 workflow name（既有的弱關聯，名字改了會脫鉤）
+    try:
+        from scheduler.manager import list_tasks
+        name_to_wid: dict[str, str] = {}
+        for wf in workflows:
+            n = wf.get("name") or ""
+            if n and n not in name_to_wid:
+                name_to_wid[n] = wf["id"]
+        for t in list_tasks():
+            if t.get("output_format") != "pipeline":
+                continue
+            wid = name_to_wid.get(t.get("name", ""))
+            if wid and wid in meta and meta[wid]["schedule"] is None:
+                meta[wid]["schedule"] = t
+    except Exception:
+        pass
+
+    return meta
+
+
+async def _cmd_menu(chat_id: int) -> None:
+    """列出工作流，附「啟動」按鈕 + 執行中／排程徽章。"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    import db
+    workflows = db.list_workflows()
+    if not workflows:
+        await _bot_instance.send_message(
+            chat_id=chat_id,
+            text="📭 沒有任何工作流。請先在前端建立。",
+        )
+        return
+
+    wf_meta = _build_menu_metadata(workflows)
+    rows = []
+    # callback_data 上限 64 bytes（wf_id 短不會爆）
+    # button label 上限約 256 字元，徽章塞在文字裡夠用
+    for wf in workflows[:25]:
+        wf_id = wf.get("id", "")
+        name = (wf.get("name") or wf_id)[:30]
+        info = wf_meta.get(wf_id, {})
+        badges: list[str] = []
+        running = info.get("running")
+        if running is not None:
+            badges.append("🔄 執行中" if running.status == "running" else "⏸ 等待人工")
+        sched = info.get("schedule")
+        if sched is not None:
+            nxt = _format_next_run(sched.get("next_run"))
+            badges.append(f"📅 {nxt}" if nxt else "📅 排程中")
+        label = f"▶ {name}"
+        if badges:
+            label += "  " + " ".join(badges)
+        rows.append([InlineKeyboardButton(label[:80], callback_data=f"pipe_start_wf:{wf_id}")])
+
+    extra_note = ""
+    if len(workflows) > 25:
+        extra_note = f"\n\n（還有 {len(workflows) - 25} 個未列出，請進前端 UI 啟動）"
+
+    await _bot_instance.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📋 <b>選擇要啟動的工作流</b>（共 {len(workflows)} 個）{extra_note}\n"
+            f"<i>🔄 = 執行中　📅 = 已排程（下次執行時間）</i>"
+        ),
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="HTML",
+    )
+
+
+async def _cmd_status(chat_id: int) -> None:
+    """列出執行中的 run。"""
+    from pipeline.store import get_store
+    runs = get_store().list_recent(limit=20)
+    active = [r for r in runs if r.status in ("running", "awaiting_human")]
+    if not active:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text="🟢 目前沒有執行中的 run。",
+        )
+        return
+    lines = ["📊 <b>執行中的 Run</b>", ""]
+    for r in active:
+        emoji = "🔄" if r.status == "running" else "⏸"
+        try:
+            steps = r.config_dict.get("steps") or []
+            total = len(steps)
+        except Exception:
+            total = "?"
+        lines.append(f"{emoji} <code>{r.run_id}</code> — {r.pipeline_name}")
+        lines.append(f"  步驟 {r.current_step + 1} / {total}")
+        if r.status == "awaiting_human" and r.awaiting_message:
+            lines.append(f"  等待中：{r.awaiting_message[:80]}")
+        lines.append("")
+    await _bot_instance.send_message(
+        chat_id=chat_id, text="\n".join(lines), parse_mode="HTML",
+    )
+
+
+async def _cmd_help(chat_id: int) -> None:
+    text = (
+        "📖 <b>Telegram 遠端遙控指令</b>\n\n"
+        "<code>/menu</code> — 列出工作流（點按鈕啟動）\n"
+        "<code>/status</code> — 查看執行中的 run\n"
+        "<code>/screenshot</code> — 抓 host 桌面即時截圖（看畫面決定要不要開工作流）\n"
+        "<code>/abort &lt;run_id&gt;</code> — 中止某個 run\n"
+        "<code>/help</code> — 顯示這份說明\n\n"
+        "啟動工作流後進度會自動推送到此對話。"
+    )
+    await _bot_instance.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+
+
+async def _cmd_screenshot(chat_id: int) -> None:
+    """/screenshot — 隨時抓 host 桌面截圖、傳到 TG。
+    1 螢幕 1 張、N 螢幕 N 張。委託 runner.take_screenshots + _tg_send_photos。"""
+    logger = logging.getLogger("telegram")
+    try:
+        await _bot_instance.send_message(chat_id=chat_id, text="📸 正在截圖…")
+        from pipeline.runner import take_screenshots, _tg_send_photos
+        # pipeline_name 給個固定夾名 _remote_screenshots(避免污染工作流目錄)
+        # step_name 用時間戳區分 — 多次按 /screenshot 不會互相覆蓋
+        import time as _t
+        ss_paths = take_screenshots("_remote_screenshots", f"tg_{_t.strftime('%H%M%S')}")
+        if ss_paths:
+            await _tg_send_photos(
+                chat_id,
+                ss_paths,
+                caption_prefix="📸 桌面即時截圖",
+            )
+        else:
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text="❌ 截圖失敗（host 主機可能無圖形介面、或 mss 套件出錯）",
+            )
+    except Exception as e:
+        logger.error(f"[/screenshot] 失敗：{e}", exc_info=True)
+        try:
+            await _bot_instance.send_message(
+                chat_id=chat_id, text=f"❌ 截圖失敗：{str(e)[:200]}",
+            )
+        except Exception:
+            pass
+
+
+async def _cmd_abort(chat_id: int, args: str) -> None:
+    run_id = (args or "").strip()
+    if not run_id:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text="⚠ 請帶 run_id：/abort &lt;run_id&gt;",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        from pipeline.runner import request_abort
+        request_abort(run_id)
+        await _bot_instance.send_message(
+            chat_id=chat_id, text=f"🛑 已要求中止 run <code>{run_id}</code>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text=f"❌ 中止失敗：{str(e)[:200]}",
+        )
+
+
+async def _register_bot_commands(bot) -> None:
+    """寫入 TG 客戶端 autocomplete 清單（取代 BotFather 既有設定）。
+    這是 bot-global 設定，會覆蓋此 bot token 在其他專案註冊過的 /commands、
+    /skill、/approve 等舊項目。Token 變更才呼叫一次，不需常駐刷新。
+    """
+    from telegram import BotCommand
+    try:
+        await bot.set_my_commands([
+            BotCommand("menu",       "列工作流並啟動（附執行中／排程徽章）"),
+            BotCommand("status",     "查看目前執行中的 run"),
+            BotCommand("screenshot", "抓 host 桌面即時截圖"),
+            BotCommand("abort",      "中止某個 run（用法：/abort <run_id>）"),
+            BotCommand("help",   "顯示指令說明"),
+        ])
+        logger.info("Telegram bot 指令清單（autocomplete）已更新為 V5 版本")
+    except Exception as e:
+        # set_my_commands 失敗不影響功能（autocomplete 只是視覺提示），記 log 就好
+        logger.warning(f"set_my_commands 失敗（忽略，不影響功能）：{e}")
+
+
+async def _start_workflow_from_tg(chat_id: int, wf_id: str, force: bool = False) -> None:
+    """從 TG 啟動工作流。把 chat_id 帶進 run、後續通知會推回此對話。
+    force=False 時若同 workflow 已有 running/awaiting 的 run，會先回警告 + 強制啟動按鈕。
+    """
+    logger = logging.getLogger("telegram")
+    import db
+    wf = db.get_workflow(wf_id)
+    if not wf:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text=f"❌ 找不到工作流：{wf_id}",
+        )
+        return
+    yaml_content = (wf.get("yaml") or "").strip()
+    if not yaml_content:
+        await _bot_instance.send_message(
+            chat_id=chat_id,
+            text=("⚠ 此工作流的 YAML 為空，無法直接啟動。"
+                  "請先在前端開啟並儲存一次（觸發 yaml 自動產生）後再試。"),
+        )
+        return
+
+    # ── 重複啟動守門：同 workflow 已在執行 → 先警告，需用戶確認才強跑 ──
+    if not force:
+        try:
+            from pipeline.store import get_store
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            for r in get_store().list_recent(limit=30):
+                if (
+                    getattr(r, "workflow_id", None) == wf_id
+                    and r.status in ("running", "awaiting_human")
+                ):
+                    status_label = "🔄 執行中" if r.status == "running" else "⏸ 等待人工確認"
+                    kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "⚠ 仍要強制啟動（會跑兩個 run）",
+                            callback_data=f"pipe_force_start_wf:{wf_id}",
+                        )],
+                        [InlineKeyboardButton("取消", callback_data="pipe_cancel_select")],
+                    ])
+                    await _bot_instance.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"⚠ 此工作流已有執行中的 run，先確認再操作：\n\n"
+                            f"  📛 名稱：<b>{wf.get('name') or wf_id}</b>\n"
+                            f"  🆔 run_id：<code>{r.run_id}</code>\n"
+                            f"  📍 狀態：{status_label}\n\n"
+                            f"建議：\n"
+                            f"  • <code>/status</code> 看詳細進度\n"
+                            f"  • <code>/abort {r.run_id}</code> 中止舊 run\n\n"
+                            f"若確定要再開一個（會兩個 run 平行跑），點下方按鈕。"
+                        ),
+                        reply_markup=kb,
+                        parse_mode="HTML",
+                    )
+                    return
+        except Exception as e:
+            logger.warning(f"重複 run 檢查失敗（忽略繼續啟動）：{e}")
+
+    try:
+        import uuid
+        import asyncio
+        import yaml as yaml_lib
+        from pipeline.models import PipelineConfig
+        from pipeline.runner import run_pipeline, register_task
+        from pipeline.store import PipelineRun as PRun, get_store
+        from pipeline.logger import create_run_logger
+
+        data = yaml_lib.safe_load(yaml_content) or {}
+        config_dict = data.get("pipeline", data)
+        config_dict["validate"] = True
+        config = PipelineConfig(**config_dict)
+
+        run_id = str(uuid.uuid4())[:12]
+        _, log_path = create_run_logger(run_id, config.name)
+        config_d = config.model_dump()
+        config_d["_workflow_id"] = wf_id
+
+        run = PRun(
+            run_id=run_id,
+            pipeline_name=config.name,
+            config_dict=config_d,
+            telegram_chat_id=chat_id,  # 後續通知推回此對話
+            log_path=log_path,
+            workflow_id=wf_id,
+        )
+        get_store().save(run)
+        task = asyncio.create_task(run_pipeline(config_d, chat_id=chat_id, run_id=run_id))
+        register_task(run_id, task)
+
+        await _bot_instance.send_message(
+            chat_id=chat_id,
+            text=(f"🚀 已啟動工作流：<b>{config.name}</b>\n"
+                  f"run_id: <code>{run_id}</code>\n\n"
+                  f"後續進度會自動推送到此對話。"),
+            parse_mode="HTML",
+        )
+        logger.info(f"[遠端遙控] 從 TG 啟動 run {run_id}（{config.name}）")
+    except Exception as e:
+        logger.error(f"[遠端遙控] 啟動失敗：{e}", exc_info=True)
+        await _bot_instance.send_message(
+            chat_id=chat_id, text=f"❌ 啟動失敗：{str(e)[:300]}",
+        )
+
+
 async def _poll_loop():
     """長輪詢 Telegram updates，處理 callback_query 和文字訊息"""
     from telegram import Bot
     from telegram.error import RetryAfter, TimedOut, NetworkError, Conflict
+    global _bot_instance, _current_token
 
     last_offset = 0
     _bot_instance = None
@@ -214,6 +594,8 @@ async def _poll_loop():
                 except Exception:
                     pass
                 logger.info("Telegram bot 已連線（session 已重置）")
+                # 把 autocomplete 指令清單覆寫成 V5 版（覆蓋舊專案殘留的 /skill、/approve 等）
+                await _register_bot_commands(_bot_instance)
 
             updates = await _bot_instance.get_updates(
                 offset=last_offset,
@@ -262,6 +644,25 @@ async def _poll_loop():
                                 chat_id=chat_id,
                                 text=f"❌ 重試失敗：{str(e)[:200]}",
                             )
+                        continue
+                    # ── 遠端遙控指令（必須 settings 開啟 + chat_id 授權）──
+                    text = update.message.text.strip()
+                    if text.startswith("/"):
+                        if _is_remote_control_authorized(chat_id):
+                            await _handle_remote_command(chat_id, text)
+                        else:
+                            # 不授權的 /command 也記一筆 — 方便 debug 為何 /menu 沒反應
+                            try:
+                                from settings import get_settings as _gs
+                                _s = _gs()
+                                _enabled = bool(_s.get("telegram_remote_control", False))
+                                _auth = (_s.get("telegram_chat_id") or "").strip() or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+                                logger.warning(
+                                    f"[遠端遙控] 拒絕 {text} from chat_id={chat_id}："
+                                    f"toggle={_enabled}, auth_chat={_auth!r}, match={str(chat_id) == _auth}"
+                                )
+                            except Exception:
+                                pass
                     continue
 
                 if not update.callback_query:
@@ -574,6 +975,34 @@ async def _poll_loop():
                         await cb.message.delete()
                     except Exception:
                         pass
+                    continue
+
+                # ── 遠端遙控：從 TG 啟動工作流 ──
+                if action in ("start_wf", "force_start_wf"):
+                    # 必須通過授權檢查
+                    if not _is_remote_control_authorized(cb.message.chat_id):
+                        await cb.answer("❌ 未授權")
+                        continue
+                    wf_id = run_id  # callback_data parsed slot 用來放 wf_id
+                    if not wf_id:
+                        await cb.answer("❌ 無效的工作流 ID")
+                        continue
+                    force = (action == "force_start_wf")
+                    try:
+                        await cb.answer("⏳ 啟動中…" if force else "⏳ 檢查中…")
+                        # 強制啟動時把警告訊息刪掉，避免畫面留警告
+                        if force:
+                            try:
+                                await cb.message.delete()
+                            except Exception:
+                                pass
+                        await _start_workflow_from_tg(cb.message.chat_id, wf_id, force=force)
+                    except Exception as e:
+                        logger.error(f"{action} failed: {e}", exc_info=True)
+                        try:
+                            await cb.answer(f"❌ {str(e)[:50]}")
+                        except Exception:
+                            pass
                     continue
 
                 # ── ask_user 按選項回答 ──

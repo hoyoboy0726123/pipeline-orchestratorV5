@@ -393,38 +393,103 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: P
                     </p>
                   </div>
 
-                  {/* 智慧滾動 — 兩個欄位都 0 時走自動模式 */}
+                  {/* 智慧滾動 — 預設「達到貼文數 10」，避免拖太久或燒太多下游 token */}
                   <div className="bg-white border border-gray-200 rounded-lg p-2.5 space-y-2">
                     <label className="text-sm font-medium text-gray-700 block">智慧滾動（infinite scroll）</label>
                     <p className="text-[11px] text-gray-500 leading-relaxed">
-                      <b>預設</b>（兩格都留 0）：滾 <b>2 次</b>（避免「無底站」如 Reddit / Twitter timeline 一次撈過量）。要更多就用下面兩格：
+                      <b>預設</b>：「達到 10 篇貼文就停」（適合多數「抓清單做摘要」場景；下游 LLM 處理量也合理）。
+                      要調整就用下面兩格：
                       <br />
-                      <b>固定次數</b>：強制滾 N 次後停（夾到 10 次上限）；適合知道大概要幾篇的場景。
+                      <b>固定次數</b>：強制滾 N 次後停（夾到 10 次上限）；不論貼文多寡。
                       <br />
                       <b>達到貼文數</b>：偵測貼文連結（Reddit <code className="font-mono text-[10px] bg-gray-100 px-1 rounded">/comments/</code> / Dcard <code className="font-mono text-[10px] bg-gray-100 px-1 rounded">/p/</code> / 新聞 <code className="font-mono text-[10px] bg-gray-100 px-1 rounded">/article/</code> 等）達標就停 — <b>不設輪數上限</b>，受底層 110 秒 deadline 約束。要撈幾百篇就填幾百。
                       <br />
-                      兩格同時填：<b>固定次數優先</b>。已填了下方「JS 互動序列」時這兩格會被忽略。
+                      兩格都清空（都 0）→ 退回「滾 2 次」基本模式。兩格同時填：<b>固定次數優先</b>。已填了下方「JS 互動序列」時這兩格會被忽略。
                     </p>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
-                        <label className="text-xs text-gray-600 block mb-1">固定滾動次數（0 = 自動 / 上限 10）</label>
+                        <label className="text-xs text-gray-600 block mb-1">固定滾動次數（上限 10）</label>
                         <input
                           type="number" min={0} max={10}
                           className={inputCls}
-                          value={data.scrollCount ?? 0}
-                          onChange={e => onUpdate({ scrollCount: Math.max(0, Math.min(10, parseInt(e.target.value) || 0)) })}
+                          // value 為 0 時顯示空字串、placeholder 提示 — 讓使用者可以清空後直接打字
+                          // 否則 React controlled input 會強制值為 "0"、清不掉
+                          value={data.scrollCount === 0 ? '' : data.scrollCount}
+                          placeholder="0 = 自動"
+                          onChange={e => {
+                            const raw = e.target.value
+                            const v = raw === '' ? 0 : parseInt(raw)
+                            if (isNaN(v)) return
+                            onUpdate({ scrollCount: Math.max(0, Math.min(10, v)) })
+                          }}
                         />
                       </div>
                       <div>
-                        <label className="text-xs text-gray-600 block mb-1">達到貼文數就停（0 = 不設目標）</label>
+                        <label className="text-xs text-gray-600 block mb-1">達到貼文數就停</label>
                         <input
                           type="number" min={0}
                           className={inputCls}
-                          value={data.targetPostCount ?? 0}
-                          onChange={e => onUpdate({ targetPostCount: Math.max(0, parseInt(e.target.value) || 0) })}
+                          value={data.targetPostCount === 0 ? '' : data.targetPostCount}
+                          placeholder="0 = 不設目標"
+                          onChange={e => {
+                            const raw = e.target.value
+                            const v = raw === '' ? 0 : parseInt(raw)
+                            if (isNaN(v)) return
+                            onUpdate({ targetPostCount: Math.max(0, v) })
+                          }}
                         />
                       </div>
                     </div>
+                  </div>
+
+                  {/* 論壇 / 列表模式（with_children）：自動抓子頁、合併單一 markdown */}
+                  <div className="bg-white border border-gray-200 rounded-lg p-2.5 space-y-2">
+                    <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                      <input type="checkbox" checked={!!data.withChildren}
+                             onChange={e => onUpdate({ withChildren: e.target.checked })} />
+                      <span className="font-medium">同時抓討論串子頁（論壇 / 列表模式）</span>
+                    </label>
+                    <p className="text-[11px] text-gray-500 leading-relaxed pl-6">
+                      開啟後：抓列表頁 → 自動抽前 N 個子頁連結 → 並行抓子頁 → <b>合併成單一 markdown</b>。
+                      下游 skill 節點直接讀此檔做摘要、不用自己寫爬蟲。適合 Reddit / PTT / Dcard / 新聞站等「列表 → 詳細頁」結構。
+                    </p>
+                    {data.withChildren && (
+                      <div className="grid grid-cols-2 gap-2 pl-6">
+                        <div>
+                          <label className="text-xs text-gray-600 block mb-1">最多抓幾個子頁</label>
+                          <input
+                            type="number" min={1} max={50}
+                            className={inputCls}
+                            value={data.maxChildren ?? 10}
+                            placeholder="10"
+                            onChange={e => {
+                              const raw = e.target.value
+                              const v = raw === '' ? 10 : parseInt(raw)
+                              if (isNaN(v)) return
+                              onUpdate({ maxChildren: Math.max(1, Math.min(50, v)) })
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-gray-600 block mb-1">子頁 URL pattern（空=自動）</label>
+                          <input
+                            type="text"
+                            className={inputCls}
+                            value={data.childLinkPattern ?? ''}
+                            placeholder="留空 = 自動辨識"
+                            onChange={e => onUpdate({ childLinkPattern: e.target.value })}
+                          />
+                        </div>
+                        <p className="text-[10px] text-gray-400 col-span-2 leading-relaxed">
+                          自動辨識涵蓋：Reddit <code className="font-mono bg-gray-100 px-1 rounded">/comments/</code>、Dcard <code className="font-mono bg-gray-100 px-1 rounded">/p/</code>、
+                          PTT <code className="font-mono bg-gray-100 px-1 rounded">/M.xxx.A.xxx</code>、HN <code className="font-mono bg-gray-100 px-1 rounded">/item?id=</code>、
+                          新聞 <code className="font-mono bg-gray-100 px-1 rounded">/article/</code> 等 12 種；
+                          其他站填 regex 例如 <code className="font-mono bg-gray-100 px-1 rounded">{'/posts/[a-z0-9]+'}</code>。
+                          <br />
+                          自動會跳過釘選 / 公告貼文（含「公告 / Pinned / 超級討論串 / 社群精選」字眼的區塊）。
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   {/* JS 互動序列 */}

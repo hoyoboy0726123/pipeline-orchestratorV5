@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import {
-  MessageSquare, CalendarClock, FolderOpen, Zap, GitBranch, Settings,
+  MessageSquare, CalendarClock, FolderOpen, GitBranch, Settings,
   ChevronDown, ChevronRight, Circle, AlertCircle, CheckCircle2,
   Info
 } from 'lucide-react'
@@ -50,12 +50,15 @@ export function Sidebar() {
 
   return (
     <aside className="w-64 border-r border-gray-200 flex flex-col bg-white shrink-0 overflow-hidden">
-      {/* Logo */}
+      {/* Logo — Atlas (山峰幾何 A) */}
       <div className="h-14 flex items-center gap-2.5 px-5 border-b border-gray-200 shrink-0">
-        <div className="w-7 h-7 rounded-lg bg-brand-600 flex items-center justify-center">
-          <Zap className="w-4 h-4 text-white" strokeWidth={2.5} />
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 via-indigo-600 to-purple-600 flex items-center justify-center shadow-md">
+          <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" aria-label="Atlas">
+            <path d="M4 21 L12 3 L20 21" />
+            <path d="M7.8 14 L16.2 14" />
+          </svg>
         </div>
-        <span className="font-semibold text-gray-900 tracking-tight">LangGraph Agent</span>
+        <span className="font-semibold text-gray-900 tracking-tight text-base">Atlas</span>
       </div>
 
       <div className="flex-1 overflow-y-auto">

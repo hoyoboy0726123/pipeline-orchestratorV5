@@ -368,25 +368,44 @@ async def crawl_single_url(
         ),
     )
 
-    # 偵測 Cloudflare：失敗 / 0 內容 / status >= 400 / 內文含 CF marker
+    # 偵測 Cloudflare / 反爬：失敗 / 0 內容 / status >= 400 / 內文含 CF marker
+    # 或「成功但內容過薄」(< 200 bytes — 反爬常見手法是回 200 + 空殼，
+    #   既有的 CF marker 偵測抓不到例如 nowsecure.nl 那種「6 字殼」)
+    md_len = len((result.markdown or "").strip())
     needs_fallback = (
         cloudflare_fallback
         and (
             not result.ok
             or result.status_code in (403, 503)
             or _looks_like_cf_challenge(result.html, result.markdown)
+            or md_len < 200
         )
     )
 
     if needs_fallback:
+        reason = (
+            "結果像被 Cloudflare 擋" if (not result.ok or result.status_code in (403, 503)
+                                          or _looks_like_cf_challenge(result.html, result.markdown))
+            else f"內容過薄（{md_len} bytes）疑似反爬空殼"
+        )
         logger.warning(
-            f"[{step_name}] Tier 1 結果像被 Cloudflare 擋"
+            f"[{step_name}] Tier 1 {reason}"
             f"（status={result.status_code}, ok={result.ok}）→ 切到 Tier 2 FlareSolverr"
         )
         flare = await _run_flaresolverr(url=url, cookies=_parse_cookies(cookies),
                                         timeout=timeout, logger=logger, step_name=step_name)
-        if flare.ok:
+        # 「不更差才覆寫」保護：Tier 2 拿到更多內容 / 或 Tier 1 本來就壞 → 才用 Tier 2
+        # 否則保留 Tier 1 — 避免 Tier 2 也回空殼把更長的 Tier 1 結果換掉
+        if flare.ok and (
+            len((flare.markdown or "").strip()) > md_len
+            or not result.ok
+        ):
             result = flare
+        elif flare.ok:
+            logger.info(
+                f"[{step_name}] Tier 2 拿到的內容（{len((flare.markdown or '').strip())} bytes）"
+                f"沒比 Tier 1 多，保留 Tier 1 結果"
+            )
 
     # ── SPA 自動重試 ──────────────────────────────────────────────
     # 條件三項都成立才觸發：
@@ -446,6 +465,269 @@ async def crawl_single_url(
     result.markdown = md
     result.duration_ms = int((time.time() - t0) * 1000)
     return result
+
+
+# ── 論壇 / 討論區模式：列表頁 → 抽子頁連結 → 並行抓子頁 → 合併單一 markdown ───
+# 取代之前「使用者拉 skill 節點讓 LLM 自己寫 crawl4ai code 抓 N 篇」的脆弱方案。
+# 整段 deterministic、無 LLM、不會有 hardcode 偷懶 bug。
+_AUTO_CHILD_LINK_PATTERNS = [
+    r'/comments/[a-z0-9]+/[\w-]+',     # Reddit
+    r'/p/\d+',                          # Dcard
+    r'/post/[a-z0-9-]+',                # Tumblr / wordpress.com / Threads
+    r'/posts/\d+',                      # ProductHunt
+    r'/article/[\w-]+',                 # 新聞站常見
+    r'/articles/[\w-]+',
+    r'/status/\d+',                     # Twitter / X
+    r'/threads/[\w-]+',
+    r'/video/[\w-]+',                   # TikTok 等影音
+    r'/item\?id=\d+',                   # Hacker News
+    r'/M\.\d+\.A\.[A-F0-9]+',           # PTT (M.timestamp.A.hash)
+    r'/bbs/[\w-]+/M\.\d+\.A\.[A-F0-9]+',  # PTT 含板名
+]
+
+
+def _extract_child_links_from_markdown(
+    md: str, pattern: str = "", max_count: int = 10,
+    skip_pinned_blocks: bool = True,
+    parent_host: str = "",
+) -> list[str]:
+    """從列表頁 markdown 抽子頁連結。
+
+    pattern：
+      - "" 或 "auto" → 用 _AUTO_CHILD_LINK_PATTERNS（涵蓋 Reddit/Dcard/PTT/HN 等 12 種）
+      - 其他字串 → 當 regex 用，需匹配 URL 的某段（用 re.search 而非 fullmatch）
+
+    skip_pinned_blocks：避開「公告 / Pinned / 超級討論串 / 社群精選」這類釘選區塊
+    （這些通常是版主公告、不是真正討論文，跟 reddit_asus 那次踩到的雷一樣）
+
+    parent_host：列表頁的 hostname；非空時會過濾掉「不同 domain」的子頁 URL。
+    這條對所有站點都通用安全 — 列表頁的子頁本來就應該是同站內容；
+    跨站連結（外部新聞、help 文件、廣告連結）抓回來幾乎一定不是要的東西。
+    例：r/ASUS 列表頁出現 support.reddithelp.com 文件、preview.redd.it 圖檔，
+    都會被這條擋下。
+
+    回傳：去重後的子頁 URL 列表（最多 max_count 個）
+    """
+    if not md:
+        return []
+    # 抽所有 markdown link target
+    url_re = re.compile(r'\]\((https?://[^)\s]+)\)')
+
+    # 釘選區塊過濾：分隔線之間若帶釘選關鍵字、整塊跳過
+    if skip_pinned_blocks:
+        # 用 markdown 的 hr (`* * *` / `---`) 切塊
+        blocks = re.split(r'\n\s*[\*\-]\s*[\*\-]\s*[\*\-]\s*\n', md)
+    else:
+        blocks = [md]
+
+    # 比對 pattern
+    custom_re = None
+    if pattern and pattern.strip().lower() not in ("", "auto"):
+        try:
+            custom_re = re.compile(pattern)
+        except re.error:
+            custom_re = None  # 壞 regex → fallback 到 auto
+
+    auto_re_list = [re.compile(p) for p in _AUTO_CHILD_LINK_PATTERNS]
+
+    def _match(url: str) -> bool:
+        if custom_re is not None:
+            return bool(custom_re.search(url))
+        return any(r.search(url) for r in auto_re_list)
+
+    seen = set()
+    out: list[str] = []
+    for block in blocks:
+        # 釘選區塊跳過
+        if skip_pinned_blocks and any(
+            kw in block for kw in ("超級討論串", "社群精選貼文", "公告", "Pinned",
+                                     "moderator post", "Announcement", "📌")
+        ):
+            continue
+        for url in url_re.findall(block):
+            if not _match(url):
+                continue
+            try:
+                p = urlparse(url)
+                # 同 domain 過濾（通用安全；parent_host 為空時不啟用、保留舊行為）
+                if parent_host and (p.hostname or "") != parent_host:
+                    continue
+                # 用 hostname + 去掉 trailing slash 的 path 當去重 key（同一篇不同 query 也視為同篇）
+                key = (p.hostname or "", p.path.rstrip("/"))
+            except Exception:
+                key = ("", url)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(url)
+            if len(out) >= max_count:
+                return out
+    return out
+
+
+async def crawl_list_with_children(
+    *,
+    list_url: str,
+    output_path: str,
+    js_render: bool = True,
+    wait_for_selector: str = "",
+    cloudflare_fallback: bool = True,
+    cookies: str = "",
+    interactions: Optional[list[dict]] = None,
+    download_assets: bool = False,
+    scroll_count: int = 0,
+    target_post_count: int = 0,
+    child_link_pattern: str = "",
+    max_children: int = 10,
+    timeout: int = DEFAULT_TIMEOUT_SEC,
+    logger: logging.Logger = log,
+    step_name: str = "web_crawler",
+) -> CrawlResult:
+    """論壇 / 列表式爬蟲：先抓列表頁、抽前 N 個子頁連結、並行抓子頁、合併成單一 markdown。
+
+    輸出格式（合併到 output_path）：
+      # 列表頁：<title>
+      ...列表頁 markdown...
+      ---
+      ---
+      # 子頁 1/N：<title>
+      URL：<url>
+      ...子頁 markdown...
+      ---
+      ---
+      # 子頁 2/N：...
+
+    下游 skill 節點直接讀這個檔做摘要、不用自己寫爬蟲程式。
+    """
+    import tempfile
+    t0 = time.time()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # 1. 抓列表頁（用臨時檔，最後不留下）
+    list_tmp = tempfile.NamedTemporaryFile(suffix="_list.md", delete=False)
+    list_tmp.close()
+    try:
+        logger.info(f"[{step_name}] ▶ 階段 1/2：抓列表頁 {list_url}")
+        list_result = await crawl_single_url(
+            url=list_url, output_path=list_tmp.name,
+            js_render=js_render,
+            wait_for_selector=wait_for_selector,
+            cloudflare_fallback=cloudflare_fallback,
+            cookies=cookies,
+            interactions=interactions or [],
+            download_assets=download_assets,
+            scroll_count=scroll_count,
+            target_post_count=target_post_count,
+            timeout=timeout,
+            logger=logger,
+            step_name=f"{step_name} (list)",
+        )
+        if not list_result.ok:
+            return list_result
+        list_md = list_result.markdown or ""
+
+        # 2. 抽子頁連結（同 domain 過濾 — 通用安全，避免跨站連結混進子頁清單）
+        try:
+            _parent_host = urlparse(list_url).hostname or ""
+        except Exception:
+            _parent_host = ""
+        child_urls = _extract_child_links_from_markdown(
+            list_md, pattern=child_link_pattern, max_count=max_children,
+            parent_host=_parent_host,
+        )
+        logger.info(f"[{step_name}] ▶ 從列表頁抽出 {len(child_urls)} 個子頁連結"
+                    f"（pattern={child_link_pattern or 'auto'}、max={max_children}）")
+
+        if not child_urls:
+            # 沒抽到子頁 → 至少把列表頁存下來、不要整個 step 失敗
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(list_md)
+            logger.warning(f"[{step_name}] ⚠ 沒抽到子頁、只輸出列表頁。"
+                           f"檢查 child_link_pattern 是否符合此站的子頁 URL 結構")
+            list_result.duration_ms = int((time.time() - t0) * 1000)
+            return list_result
+
+        # 3. 並行抓子頁（Semaphore 限 5、避免同站對方限流）
+        logger.info(f"[{step_name}] ▶ 階段 2/2：並行抓 {len(child_urls)} 個子頁（concurrency=5）")
+        sem = asyncio.Semaphore(5)
+
+        async def _crawl_one(url: str) -> tuple[str, Optional[str], str]:
+            async with sem:
+                tmp = tempfile.NamedTemporaryFile(suffix="_child.md", delete=False)
+                tmp.close()
+                try:
+                    r = await crawl_single_url(
+                        url=url, output_path=tmp.name,
+                        js_render=js_render,
+                        wait_for_selector=wait_for_selector,
+                        cloudflare_fallback=cloudflare_fallback,
+                        cookies=cookies,
+                        interactions=[],
+                        download_assets=False,
+                        scroll_count=0,
+                        target_post_count=0,
+                        timeout=timeout,
+                        logger=logger,
+                        step_name=f"{step_name} (child)",
+                    )
+                    return (url, r.markdown if r.ok else None, r.title or "")
+                except Exception as e:
+                    logger.warning(f"[{step_name}] 子頁失敗：{url} — {e}")
+                    return (url, None, "")
+                finally:
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+
+        child_results = await asyncio.gather(*[_crawl_one(u) for u in child_urls])
+
+        # 4. 合併成單一 markdown
+        ok_count = sum(1 for _, md, _ in child_results if md)
+        # 結構標記都用半形冒號 ":"（不是全形「：」），跟一般 prompt / 下游
+        # skill 寫的 regex 對齊。之前用全形時，LLM 看 prompt 寫 `# 子頁 N/M:`
+        # regex 抓不到全形 → 多繞 5 分鐘做 debug。
+        parts: list[str] = [
+            f"# 列表頁: {list_result.title or list_url}",
+            "",
+            f"來源 URL: {list_url}",
+            f"抓取時間: {datetime.now().isoformat(timespec='seconds')}",
+            f"子頁數: {ok_count}/{len(child_urls)} 成功",
+            "",
+            "---",
+            "",
+            list_md.strip(),
+            "",
+        ]
+        for i, (url, md, title) in enumerate(child_results, 1):
+            parts.extend([
+                "",
+                "---",
+                "---",
+                "",
+                f"# 子頁 {i}/{len(child_urls)}: {title or '(無標題)'}",
+                f"URL: {url}",
+                "",
+                (md.strip() if md else "（抓取失敗）"),
+                "",
+            ])
+        combined = "\n".join(parts)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(combined)
+        logger.info(f"[{step_name}] ✓ 合併寫入 {output_path}（{len(combined):,} bytes、"
+                    f"列表 + {ok_count}/{len(child_urls)} 子頁）")
+
+        # 用 list_result 當 base、改 markdown / duration / title
+        list_result.markdown = combined
+        list_result.duration_ms = int((time.time() - t0) * 1000)
+        if list_result.title:
+            list_result.title = f"{list_result.title} + {ok_count} 子頁"
+        return list_result
+    finally:
+        try:
+            os.unlink(list_tmp.name)
+        except Exception:
+            pass
 
 
 # ── Tier 1：Crawl4AI in sandbox ─────────────────────────────────────

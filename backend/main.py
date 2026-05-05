@@ -730,18 +730,30 @@ async def scan_skill_deps(skill_name: str):
 class NotificationSettingsRequest(BaseModel):
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    telegram_remote_control: Optional[bool] = None
     line_notify_token: Optional[str] = None
+
+
+def _notification_settings_payload(s: dict) -> dict:
+    # 額外回傳「.env 是否有 fallback 值」flag — UI 用來判斷是否可啟用遠端遙控
+    # 不直接把 env 值帶到前端（避免明文外洩 / 用戶誤以為已存到 settings）
+    import os as _os
+    env_token = (_os.environ.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    env_chat = (_os.environ.get("TELEGRAM_CHAT_ID", "") or "").strip()
+    return {
+        "telegram_bot_token": s.get("telegram_bot_token", ""),
+        "telegram_chat_id": s.get("telegram_chat_id", ""),
+        "telegram_remote_control": bool(s.get("telegram_remote_control", False)),
+        "line_notify_token": s.get("line_notify_token", ""),
+        "telegram_bot_token_env_present": bool(env_token),
+        "telegram_chat_id_env_present": bool(env_chat),
+    }
 
 
 @app.get("/settings/notifications")
 async def get_notification_settings():
     from settings import get_settings
-    s = get_settings()
-    return {
-        "telegram_bot_token": s.get("telegram_bot_token", ""),
-        "telegram_chat_id": s.get("telegram_chat_id", ""),
-        "line_notify_token": s.get("line_notify_token", ""),
-    }
+    return _notification_settings_payload(get_settings())
 
 
 @app.put("/settings/notifications")
@@ -754,6 +766,8 @@ async def put_notification_settings(req: NotificationSettingsRequest):
         s["telegram_bot_token"] = req.telegram_bot_token.strip()
     if req.telegram_chat_id is not None:
         s["telegram_chat_id"] = req.telegram_chat_id.strip()
+    if req.telegram_remote_control is not None:
+        s["telegram_remote_control"] = bool(req.telegram_remote_control)
     if req.line_notify_token is not None:
         s["line_notify_token"] = req.line_notify_token.strip()
     with _lock:
@@ -761,11 +775,7 @@ async def put_notification_settings(req: NotificationSettingsRequest):
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
             _json.dump(s, f, ensure_ascii=False, indent=2)
         _settings_mod._cache = s
-    return {
-        "telegram_bot_token": s.get("telegram_bot_token", ""),
-        "telegram_chat_id": s.get("telegram_chat_id", ""),
-        "line_notify_token": s.get("line_notify_token", ""),
-    }
+    return _notification_settings_payload(s)
 
 
 # ── Web Search (Tavily) ────────────────────────────────────
@@ -1466,7 +1476,9 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 4. **`outlook_params` 一律用 inline JSON 一行寫**（不要多行 YAML 格式 — 前端解析器只認 inline JSON）：
    - ✅ 正確：`outlook_params: {"to":"wilson@x.com","subject":"日報","body":"請查收"}`
    - ❌ 錯誤：`outlook_params:` 換行後 `  to: wilson@x.com` `  subject: ...`（多行格式會被前端解析器丟掉）
-5. **路徑用相對 `ai_output/<workflow>/...`**，不可絕對路徑、不可 `~/`
+   - **⚠ 已知 round-trip bug**：用戶把含 `outlook_params:` 的 YAML 貼到 YAML 面板「套用」後，這欄位有時會被前端 round-trip 吃掉。**所以你最後在 Plan / Confirm / 回應結尾必須附帶提醒**：
+     > 「貼上 YAML 套用後，請到畫布的 Outlook 節點 panel 點開、確認 to / subject / body 都填好（YAML round-trip 有時會吃掉這欄位）。」
+5. **路徑判斷**：使用者沒指定 → 用相對（純檔名最簡，系統自動落到 workflow dir）。使用者明說特定位置（含絕對路徑、家目錄、磁碟代號）→ 照用
 
 ---
 
@@ -1487,12 +1499,10 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 - name: 摘要報告
   skill_mode: true
   batch: |
-    讀 ai_output/news/raw.md，摘成 10 條重點，輸出 daily.md
+    讀 raw.md，摘成 10 條重點，輸出 daily.md
   timeout: 600
-  retry: 1
   output:
-    path: ai_output/news/daily.md
-    ai_validation: true
+    path: daily.md
     description: "10 條中文重點，每條一行"
 ```
 
@@ -1524,6 +1534,26 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 ```
 
 **多 URL** 用 `wc_urls: ["url1", "url2"]`，會輸出到資料夾、每 URL 一個檔。
+
+**論壇 / 列表模式 `wc_with_children`**（重要、優先推薦給「列表 → 詳細頁 → 摘要」場景）：
+使用者說「抓 PTT 股版前 10 篇做摘要」/「Reddit r/ASUS 討論摘要」/「Dcard 熱門帖內容分析」這類「**列表頁 → 子頁 → 處理**」結構時，**強烈建議開 `wc_with_children: true`**。
+單一節點完成「抓列表 + 抓 N 個子頁 + 合併單一 markdown」、後面只要一個 skill 節點做摘要：
+```yaml
+- name: 抓 PTT 股版列表 + 前 10 篇內文
+  web_crawler: true
+  wc_url: "https://www.pttweb.cc/bbs/Stock"
+  wc_with_children: true
+  wc_max_children: 10              # 預設 10、可調
+  # wc_child_link_pattern: ""      # 留空 = 自動辨識（涵蓋 Reddit/PTT/Dcard/HN/新聞 12 種）
+  timeout: 600
+```
+
+**為什麼比「skill 節點讓 LLM 寫爬蟲程式」好**：
+- 不會發生 LLM 偷懶 hardcode 答案在程式碼裡
+- 並行抓子頁（5 並發）、速度快
+- 自動跳過釘選 / 公告貼文
+- 自動過濾跨站連結（列表頁雜訊如圖檔 CDN、Help 站、廣告外鏈不會混進子頁清單）
+- 下游 skill 節點直接讀合併的 markdown 做摘要、不用碰 crawl4ai
 
 **SPA / 反爬注意事項**（要主動提醒使用者）：
 - Reddit / Twitter / X 等 SPA 站，內部已預設用 `domcontentloaded`（用 `networkidle` 會 timeout）
@@ -1577,25 +1607,75 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 - `name`：步驟名稱（中文 OK）
 - `timeout`：秒數。script 300 / skill 600 / human_confirm 3600 / visual_validation 120 / web_crawler 600
-- `retry`：失敗重試次數，skill 建議 1-2
+- `retry`：失敗重試次數。各節點預設值（不寫就走預設）：
+  - `script`: **1** — 程式碼出錯重跑也是同樣錯，但給一次寫入失敗 / 路徑問題的恢復機會
+  - `skill`: **1** — LLM 看到失敗 reason 有機會改寫程式
+  - `web_crawler`: **2** — 網路抖動類失敗多半暫時性、重抓很便宜（純 deterministic、零 LLM 費用）
+  - `outlook_automation`: **1**
+  - 想關掉重試 → `retry: 0`；網路類想多試 → `retry: 2`。**跟預設值一樣可以省略整個欄位**
 - `working_dir`：可選，省略走預設
-- `output.path`：**可省略** — 省略時系統自動推為 `ai_output/<pipeline name>/<step name 推導>`。**填寫的好處**：後續步驟引用時路徑明確、TG 自動傳檔能找到。建議在跨步驟引用時填。
-- `output.ai_validation: true` + `output.description`：產出後 AI 驗證是否符合描述
+- `output.path`：**可省略**（省略時系統自動推為 `<step name>_result.md`）。寫的話用相對路徑（見下方路徑慣例）
+- `output.description`：產出後 AI 驗證是否符合描述。**有填走深度驗證**（agent 自己跑工具查檔案內容）、**空白走淺驗證**（LLM 一次 call 看 stdout 表層）。寧缺勿濫 — 沒明確驗證需求就留空、不要硬寫
 
-# 路徑慣例（很嚴格）
+# 路徑慣例
 
-- 預設輸出根目錄：`ai_output/<pipeline name>/`，**一律用相對路徑**
-- 正確：`ai_output/daily_news/headlines.csv`
-- ❌ 錯誤：`~/ai_output/...` / `/Users/xxx/...` / 任何含磁碟代號的絕對路徑 / 沒有子資料夾的 `headlines.csv`
-- 後續步驟讀檔也用同一相對路徑
+判斷依據：**使用者有沒有明確指定路徑**？
+
+## 沒指定路徑（最常見）→ 用相對
+
+預設讓系統自動落到本工作流的輸出資料夾 `ai_output/<pipeline name>/`：
+- ✅ `output.path: posts_list.md` → 自動變 `ai_output/<workflow>/posts_list.md`（**推薦、最簡潔**）
+- ✅ `output.path: ai_output/daily_news/headlines.csv` → 視為「相對於專案根」（向後相容、auto-default 走這條）
+
+**為什麼預設用相對**：portable（跨機器/改名工作流不會壞）、TG 傳檔 / snapshot diff 等系統機制都跟 workflow dir 對齊。
+
+## 使用者指定了路徑 → 照用、含絕對路徑
+
+當使用者明說「報告存到 D:\Reports\daily.xlsx」「寫到 ~/Documents/output.md」這類**特定位置**時，
+**直接用使用者給的路徑、包含絕對路徑都 OK**。系統 backend 完全接受絕對路徑：
+- ✅ `output.path: D:\Reports\daily.xlsx`（Windows）
+- ✅ `output.path: ~/Documents/output.md`（家目錄展開）
+- ✅ `output.path: /shared/reports/daily.csv`（POSIX 絕對）
+
+**注意**：絕對路徑會綁定該機器、跨機器移植 YAML 時要手動改。所以使用者沒指定就**不要主動用絕對路徑**。
+
+## 重要：legacy script 整合場景 → 一定用絕對路徑
+
+使用者說「我有支舊的 `financial.py`，它寫死輸出到 `D:\Old\out.xlsx`，後面幫我做資料清洗」這種場景：
+
+**第一步 script 節點的 `output.path` 必須跟 script 內部寫死的位置一致**（用絕對路徑）。
+不這樣寫的話會踩兩個坑：
+1. **Validator 找不到檔案 → 假失敗 → 整個 step 卡 awaiting_human**
+2. **下一個 step 的 `prev_outputs` 會給錯路徑**，後處理 skill 讀不到上一步的東西
+
+正確寫法：
+
+```yaml
+- name: 跑既有財務系統
+  batch: python D:\LegacyProject\financial.py    # 內部寫死輸出到 D:\Old\out.xlsx
+  output:
+    path: D:\Old\out.xlsx                        # ← 跟 script 寫的一致
+
+- name: 資料清洗
+  skill_mode: true
+  batch: |
+    讀上一步產生的 Excel,清理後輸出 cleaned.xlsx
+  output:
+    path: cleaned.xlsx                           # ← 後續 skill 走 workflow dir 就好
+```
+
+**判斷規則**：使用者描述裡有「我的腳本 / 已有的程式 / legacy / 寫死 / 既有專案」+ 提到具體輸出位置 → 第一步用絕對路徑、後續 step 走相對。
+
+後續步驟讀檔用同一個檔名 / 相對路徑就好。
 
 # 常見組合模式
 
 | 情境 | 節點組合 |
 |---|---|
-| 單純抓網頁摘要 | `web_crawler → skill(摘要)` |
-| 加人工把關 | `web_crawler → human_confirm → skill → human_confirm` |
-| 抓 + 摘 + 寄 | `web_crawler → skill → human_confirm → outlook_automation` |
+| 單純抓單頁摘要 | `web_crawler → skill(摘要)` |
+| **論壇 / 討論區「列表→子頁→摘要」**（重要） | `web_crawler(wc_with_children=true) → skill(摘要)` ← 單節點抓列表+ N 篇子頁 |
+| 加人工把關 | `web_crawler(with_children) → human_confirm → skill → human_confirm` |
+| 抓 + 摘 + 寄 | `web_crawler(with_children) → skill → human_confirm → outlook_automation` |
 | 已有腳本 + AI 後處理 | `script → skill` |
 | 視覺驗證 | `skill → visual_validation` |
 | YouTube 影片摘要 | `web_crawler(video) → skill(轉文字+摘要)` |
@@ -1679,11 +1759,9 @@ YAML 本身不負責排程。使用者提到「每天早上 9 點 / 每週一 / 
 >   - name: 摘要 10 篇
 >     skill_mode: true
 >     batch: |
->       讀上一步抓回來的列表頁 markdown，抽前 10 篇連結展開抓內文，
->       每篇 80 字內摘要，輸出 daily.md。
+>       讀上一步抓回的內容,幫每一篇寫 80 字內中文摘要,輸出 daily.md。
 >     output:
->       path: ai_output/ptt_stock_daily/daily.md
->       ai_validation: true
+>       path: daily.md
 >       description: "10 篇中文摘要，每篇 80 字內"
 >     timeout: 1200
 >   - name: 人工確認
@@ -1694,6 +1772,43 @@ YAML 本身不負責排程。使用者提到「每天早上 9 點 / 每週一 / 
 >     outlook_template: send_with_attachment
 >     outlook_params: {"to":"boss@x.com","subject":"PTT 股版日報","body":"請查收"}
 > ```
+
+# 寫 skill 節點 batch（任務描述）的最佳實踐 — 重要
+
+skill 節點的 `batch` 欄位是給內層 LLM agent 看的任務描述。寫得好不好直接決定能不能跑出結果、跑多久、跑幾次。
+
+## 鐵則：簡短直接 > 複雜詳盡
+
+LLM agent 對「邊角案例清單」「禁止 X 禁止 Y 禁止 Z」這類**防禦性**提示**會反向 prime**：
+- 你警告「別把『載入失敗』訊息當沒內容」→ LLM 看到任何小錯誤就以為任務失敗、放棄、把所有結果填「(無實質內容)」
+- 你列十條雜訊範例 → LLM 注意力分散到擔心邊角、忘記主任務
+- 你堆連環否定句 → 焦點削弱、LLM 寫程式拼命做防禦檢查、跑很慢還容易失敗
+
+**簡單一句「找用戶寫的句子當摘要」反而觸發 LLM 自然的問題解決能力**，多半一次就過。
+
+## 寫法對照
+
+| ❌ 過度防禦（請避免） | ✅ 簡短直接（推薦） |
+|---|---|
+| 「讀檔。注意：開頭可能有圖片載入失敗訊息（如 `![媒體錯誤]`）、reddit 推 app 訊息、頁首選單，這些不是內文。真正內文在後面、形如『hello! ...』」 | 「讀檔，幫每篇寫 80 字摘要 + 情緒判斷」 |
+| 「整理清單。禁止從上半段抽連結、禁止抽留言、禁止抽圖片網址、禁止寫超過 10 篇」 | 「上一步抓了 10 篇，幫我整理成標題+作者+網址清單」 |
+
+## 例外：要寫具體結構提示的時機
+
+**只有當「合併檔有特殊結構、LLM 不知道從哪起手」時才加結構提示，且只加最少一句**：
+- ✅「全檔搜尋 `# 子頁` 關鍵字會找到 N 個位置，每個位置就是一篇貼文」（針對 with_children 合併檔）
+- ❌ 不要加：「上半段是雜亂列表頁忽略、下半段第 N/M 區塊用 # 子頁 N/M: 標記、要從那一行抽標題不要抽其他地方」
+
+## 你（AI 助手）替使用者寫 skill batch 時的原則
+
+當你產 YAML 裡的 skill batch 內容時：
+1. 用「我要 X」的**正向描述**、不要「不要 Y」連環
+2. **不列雜訊邊角清單**、信任 LLM 處理一般情況的能力
+3. 結構提示只在必要時加最少必要的一句
+4. **字數越少越好** — 8 行內能講完就 8 行
+5. 對 with_children 合併檔做摘要的場景，**頂多加「全檔搜尋 `# 子頁` 找到的位置就是要處理的貼文」這一句**就好
+
+跑壞了再加最少必要的提示，比一開始就堆滿邊角條件好用很多。
 """
 
 

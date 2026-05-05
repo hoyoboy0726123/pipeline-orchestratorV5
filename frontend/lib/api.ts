@@ -708,7 +708,12 @@ export async function getRecipeStatus(pipelineName: string, stepNames: string[])
 export interface NotificationSettings {
   telegram_bot_token: string
   telegram_chat_id: string
+  telegram_remote_control: boolean
   line_notify_token: string
+  // 後端額外旗標：對應的值是否存在於 .env（fallback 來源）
+  // 後端不會回傳 env 明文，前端用旗標判斷「可否啟用遠端遙控」
+  telegram_bot_token_env_present?: boolean
+  telegram_chat_id_env_present?: boolean
 }
 
 export async function getNotificationSettings(): Promise<NotificationSettings> {
