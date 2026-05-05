@@ -28,8 +28,24 @@ log = logging.getLogger(__name__)
 
 from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 
-SKILL_TOOL_TIMEOUT = 60
+SKILL_TOOL_TIMEOUT = 60          # 預設值：給沒透過 execute_step_with_skill 流程的呼叫者用
+SKILL_TOOL_TIMEOUT_MAX = 180     # 動態 tool timeout 上限（避免 step.timeout 開超大時 run_python 永遠不被砍）
 SKILL_MAX_ITERATIONS = 15
+
+
+def _compute_tool_timeout(step_timeout: int) -> int:
+    """從 step.timeout 推導「單次 run_python / run_shell 上限秒數」。
+    使用者已用 step.timeout 標註過該步驟大概要多久、tool 上限自然該跟著放寬。
+
+    公式：min(180, max(60, step.timeout // 5))
+    - step.timeout=300（短任務） → 60s
+    - step.timeout=600（skill 節點預設） → 120s
+    - step.timeout=1200（爬蟲類偏大 budget）→ 180s（封頂）
+
+    為什麼 step.timeout/5：skill agent 預期會跑 SKILL_MAX_ITERATIONS=15 次工具呼叫、
+    /5 留出 1/3 ratio 給 LLM 思考 + tool retry buffer，不會把整個 step.timeout 用光。
+    """
+    return min(SKILL_TOOL_TIMEOUT_MAX, max(60, int(step_timeout) // 5))
 ASK_USER_MAX = 3          # 一個 skill 節點最多 ask_user 次數（ask_mode ON 時取消）
 ASK_USER_TIMEOUT = 3600   # 單次等待使用者回答的逾時（秒）
 
@@ -394,7 +410,8 @@ def _get_skill_llm():
     return _skill_llm
 
 
-def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "") -> str:
+def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
+                      tool_timeout: int = SKILL_TOOL_TIMEOUT) -> str:
     """在 subprocess 中執行 Python 程式碼。"""
     # 截斷混入程式碼中的 <tool> 標籤（LLM 有時在 run_python 輸入末尾附加 <tool>done</tool>）
     tool_tag_pos = code.find('<tool>')
@@ -441,11 +458,11 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "") ->
         if run_id:
             register_proc(run_id, proc)
         try:
-            stdout, stderr = proc.communicate(timeout=SKILL_TOOL_TIMEOUT)
+            stdout, stderr = proc.communicate(timeout=tool_timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            return f"[錯誤] Python 執行超時（>{SKILL_TOOL_TIMEOUT}秒）"
+            return f"[錯誤] Python 執行超時（>{tool_timeout}秒）"
         finally:
             if run_id and proc:
                 unregister_proc(run_id, proc)
@@ -477,7 +494,8 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "") ->
             Path(tmp_path).unlink(missing_ok=True)
 
 
-def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "") -> str:
+def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "",
+                     tool_timeout: int = SKILL_TOOL_TIMEOUT) -> str:
     """執行 shell 命令。"""
     first_word = cmd.strip().split()[0] if cmd.strip() else ""
     if first_word in _DANGEROUS_COMMANDS:
@@ -502,11 +520,11 @@ def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "") -> s
         if run_id:
             register_proc(run_id, proc)
         try:
-            stdout, stderr = proc.communicate(timeout=SKILL_TOOL_TIMEOUT)
+            stdout, stderr = proc.communicate(timeout=tool_timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            return f"[錯誤] 命令執行超時（>{SKILL_TOOL_TIMEOUT}秒）"
+            return f"[錯誤] 命令執行超時（>{tool_timeout}秒）"
         finally:
             if run_id and proc:
                 unregister_proc(run_id, proc)
@@ -852,20 +870,22 @@ def _parse_skill_tool_calls(text: str) -> list[dict]:
 
 
 def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = None, run_id: str = "",
-                        logger: Optional[logging.Logger] = None, force_host: bool = False) -> str:
+                        logger: Optional[logging.Logger] = None, force_host: bool = False,
+                        tool_timeout: int = SKILL_TOOL_TIMEOUT) -> str:
     """執行單一工具。
     若 settings.skill_sandbox_mode='wsl_docker' 且沙盒可用，run_python / run_shell
     會走沙盒容器；其餘情況走原本 host subprocess。
     force_host=True：跳過沙盒檢查直接走 host（使用者透過 ask_user 同意 fallback 時 caller 會傳）。
-    logger: per-step 的 pipeline logger（有寫到 .log 檔）；None 的話沙盒標記只會印到 backend stdout。"""
+    logger: per-step 的 pipeline logger（有寫到 .log 檔）；None 的話沙盒標記只會印到 backend stdout。
+    tool_timeout：單次 run_python / run_shell 上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。"""
     if tool_name in ("run_python", "run_shell") and not force_host:
-        sandbox_out = _try_sandbox_exec(tool_name, tool_input, cwd, run_id, logger)
+        sandbox_out = _try_sandbox_exec(tool_name, tool_input, cwd, run_id, logger, tool_timeout=tool_timeout)
         if sandbox_out is not None:
             return sandbox_out
     if tool_name == "run_python":
-        return _skill_run_python(tool_input, cwd=cwd, run_id=run_id)
+        return _skill_run_python(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
     elif tool_name == "run_shell":
-        return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id)
+        return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
     elif tool_name == "read_file":
         return _skill_read_file(tool_input)
     elif tool_name == "web_search":
@@ -973,11 +993,13 @@ async def _preflight_sandbox(
 
 
 def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_id: str,
-                      logger: Optional[logging.Logger] = None) -> Optional[str]:
+                      logger: Optional[logging.Logger] = None,
+                      tool_timeout: int = SKILL_TOOL_TIMEOUT) -> Optional[str]:
     """若 settings.skill_sandbox_mode='wsl_docker' 且沙盒可用，就把 run_python/run_shell
     送進 pipeline-sandbox-v4 容器執行。回傳組好的 output 字串（格式對齊 host 版本）；
     若 mode=host 或沙盒不可用則回傳 None 讓 caller fallback 到 host subprocess。
-    logger: per-step pipeline logger；若提供則沙盒標記會出現在 .log 檔，否則只出現在 backend stdout。"""
+    logger: per-step pipeline logger；若提供則沙盒標記會出現在 .log 檔，否則只出現在 backend stdout。
+    tool_timeout：單次 tool 執行上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。"""
     _lg = logger if logger is not None else log
     try:
         import sys as _sys
@@ -1009,11 +1031,11 @@ def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_i
     if _SANDBOX_WARNED:
         _SANDBOX_WARNED.clear()
 
-    _lg.info(f"[sandbox] 🛡 在容器內執行 {tool_name}（{len(tool_input)} 字元）")
+    _lg.info(f"[sandbox] 🛡 在容器內執行 {tool_name}（{len(tool_input)} 字元、timeout={tool_timeout}s）")
     if tool_name == "run_python":
         res = _sandbox.run_python(
             tool_input, cwd=cwd,
-            timeout=SKILL_TOOL_TIMEOUT,
+            timeout=tool_timeout,
             run_id=run_id,
             register_cb=register_proc,
             unregister_cb=unregister_proc,
@@ -1021,7 +1043,7 @@ def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_i
     else:  # run_shell
         res = _sandbox.run_shell(
             tool_input, cwd=cwd,
-            timeout=SKILL_TOOL_TIMEOUT,
+            timeout=tool_timeout,
             run_id=run_id,
             register_cb=register_proc,
             unregister_cb=unregister_proc,
@@ -1153,6 +1175,13 @@ async def execute_step_with_skill(
         output_path:      預期輸出路徑（可選，讓 agent 知道要把結果存在哪）
         prev_outputs:     前幾步的輸出檔案資訊列表，格式 [{"path": "...", "schema": "..."}]
     """
+    # 從 step.timeout 推導「單次 run_python / run_shell 上限」
+    # — step.timeout=600 (skill 預設) → 120s tool_timeout
+    # — step.timeout=1200 (爬蟲類) → 180s tool_timeout（封頂）
+    # 寫進 prompt 給 LLM 看，讓它一開始就知道單次工具呼叫的限制、會自己用 asyncio 併發或分批
+    tool_timeout = _compute_tool_timeout(timeout)
+    logger.info(f"[{step_name}] 工具呼叫單次上限：{tool_timeout}s（從 step.timeout={timeout}s 推導）")
+
     # 展開 ~ 為完整路徑
     if output_path:
         output_path = str(Path(output_path).expanduser())
@@ -1234,11 +1263,13 @@ async def execute_step_with_skill(
                 # 沙盒不可用才退 host（這時 LLM 重學會學到 host 路徑、新 recipe 自洽）
                 def _replay_recipe():
                     sandbox_out = _try_sandbox_exec(
-                        "run_python", cached["code"], working_dir, run_id, logger
+                        "run_python", cached["code"], working_dir, run_id, logger,
+                        tool_timeout=tool_timeout,
                     )
                     if sandbox_out is not None:
                         return sandbox_out
-                    return _skill_run_python(cached["code"], cwd=working_dir, run_id=run_id)
+                    return _skill_run_python(cached["code"], cwd=working_dir, run_id=run_id,
+                                              tool_timeout=tool_timeout)
                 tool_result = await loop.run_in_executor(None, _replay_recipe)
                 runtime = _time.time() - t0
                 # 成功條件：輸出檔存在（若有指定）且無 [exit code: X]
@@ -1374,6 +1405,12 @@ async def execute_step_with_skill(
   正確：`subprocess.run([sys.executable, "script.py"], ...)`
   錯誤：`subprocess.run(["python3", "script.py"], ...)` 或 `subprocess.run(["python", "script.py"], ...)`
 - **產生隨機資料時，確保需要唯一的欄位（如姓名）不會重複。正確做法：先用集合或列表生成所有不重複的組合，再用 random.sample 取出所需數量。錯誤做法：在迴圈中用 random.choice 逐一組合（會產生重複）**
+- **❌ 禁止 hardcode 分析結果在程式碼裡**：要做摘要 / 情緒分析 / 內容分類等任務時，
+  必須先讀回實際資料（檔案內容 / API 回應）再用程式邏輯處理；
+  **不可在 Python 原始碼裡寫死 dict / list 預先填好答案**，
+  例：`analysis_map = {"slug1": {"summary": "..."}}` ← 這種樣板是繞過實際處理、產出無意義的「假答案」、會被驗證階段抓到
+  正確做法：用 LLM 工具呼叫 / `subprocess` 跑分析 / 規則式抽取（regex / NLP）等真實處理檔案內容
+  若你抓回的資料量多到一次處理不完、用分批策略（每次 run_python 處理 batch 的 1/3）、不要 hardcode
 
 【執行策略】
 - **如果任務需要讀取其他檔案（CSV、Excel 等），第一步先用 run_python 讀取檔案的前幾行，確認實際欄位名稱**
@@ -1584,6 +1621,23 @@ md = asyncio.run(fetch("https://example.com/"))
 3. 抽連結時用 regex 過濾貼文 URL pattern（如 Reddit `/comments/<id>/<slug>/`），別拿頁首導覽連結
 
 **影片下載**用 `yt-dlp`（容器預裝），不要用 pytube / youtube-dl 等其他工具。"""
+            # 動態注入「單次 tool 上限秒數」— 從 step.timeout 推導出來、不是寫死 60s。
+            # 讓 LLM 第一次寫程式時就知道單次 run_python 多久會被砍、自己用併發 / 分批避開
+            system_prompt += f"""
+
+【⏱ 單次 tool call 時間上限（重要）】
+本步驟的單次 `run_python` / `run_shell` 上限是 **{tool_timeout} 秒**（超過會被強制終止）。
+
+**處理長任務的策略**：
+- 多筆網路 I/O（如抓 N 個網頁、N 篇詳細頁）→ 用 `asyncio.gather` 配 `asyncio.Semaphore(5)` 限制並發
+- 大量 LLM 序列計算 → 拆成多次 run_python（每次處理 batch 的 1/3）
+- CPU 密集（大數據處理）→ 用 pandas / numpy 向量化，避免 Python for-loop
+
+**禁止的反模式**：
+- 一個 `run_python` 裡 sequential 跑 10+ 個慢操作（每個 5-10 秒、總和會超）
+- 在 `run_python` 內 sleep / wait / poll loop 等待外部事件（直接超時、不會 work）
+
+**注意**：你看到 `[錯誤] 執行超時` 表示這次任務已被砍掉 — 立即改用上面策略重寫、不要重送同一份程式。"""
             logger.info(f"[{step_name}] 🛡 已注入 wsl_docker sandbox 環境資訊")
     except Exception as _e:
         logger.debug(f"[{step_name}] sandbox env 注入失敗（略過）：{_e}")
@@ -1949,7 +2003,7 @@ md = asyncio.run(fetch("https://example.com/"))
                     )
                 force_host = (decision == "host")
             tool_result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda tn=tool_name, ti=tool_input, lg=logger, fh=force_host: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id, logger=lg, force_host=fh)
+                None, lambda tn=tool_name, ti=tool_input, lg=logger, fh=force_host, tt=tool_timeout: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id, logger=lg, force_host=fh, tool_timeout=tt)
             )
             # 完整記錄工具結果（錯誤訊息如 ModuleNotFoundError 常超過 300 字）
             _tr_preview = tool_result if len(tool_result) <= 3000 else tool_result[:3000] + f"...[已截斷，完整長度 {len(tool_result)} 字]"
@@ -2542,9 +2596,9 @@ async def execute_step_with_outlook(
                 )
                 tool_result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda ti=_injected_code, lg=logger: _execute_skill_tool(
+                    lambda ti=_injected_code, lg=logger, tt=_compute_tool_timeout(timeout): _execute_skill_tool(
                         "run_python", ti, cwd=working_dir, run_id=run_id,
-                        logger=lg, force_host=True,
+                        logger=lg, force_host=True, tool_timeout=tt,
                     ),
                 )
                 logger.debug(f"[{step_name}] 執行結果：{tool_result[:1500]}")
@@ -2615,6 +2669,10 @@ async def execute_step_with_web_crawler(
     download_assets: bool,
     scroll_count: int = 0,          # 0=自動偵測 / >0=固定滾 N 次
     target_post_count: int = 0,     # 0=不設目標 / >0=滾到至少 N 個貼文連結
+    # 論壇 / 列表模式
+    with_children: bool = False,           # True = 列表頁 + 抽前 N 子頁全部抓回合併
+    child_link_pattern: str = "",          # 子頁 URL pattern（空 = auto 內建 12 種）
+    max_children: int = 10,                # 最多抓幾個子頁
     # 影片模式
     video_url: str,
     video_quality: str,
@@ -2661,6 +2719,48 @@ async def execute_step_with_web_crawler(
             logger.error(f"[{step_name}] 爬蟲例外：{e}", exc_info=True)
             return ExecResult(exit_code=-3, stdout="", stderr=f"爬蟲例外：{e}")
     else:
+        # ── 論壇 / 列表模式（with_children）：自動抓子頁、合併單一 markdown ──
+        # 取代之前「使用者拉 skill 節點讓 LLM 寫 crawl4ai code 抓 N 篇」的脆弱方案。
+        # 必須是單 URL 才適用（列表頁本身）；多 URL 模式跟這個互斥
+        if with_children:
+            single_url = url or (
+                [u.strip() for u in (urls or []) if u and u.strip()][0]
+                if (urls and any(u.strip() for u in urls)) else ""
+            )
+            if not single_url:
+                return ExecResult(exit_code=2, stdout="",
+                                  stderr="web_crawler 論壇模式（with_children）未填列表頁 URL")
+            from pipeline.web_crawler import crawl_list_with_children
+            try:
+                result = await crawl_list_with_children(
+                    list_url=single_url,
+                    output_path=output_path,
+                    js_render=js_render,
+                    wait_for_selector=wait_for_selector,
+                    cloudflare_fallback=cloudflare_fallback,
+                    cookies=cookies,
+                    interactions=interactions or [],
+                    download_assets=download_assets,
+                    scroll_count=scroll_count,
+                    target_post_count=target_post_count,
+                    child_link_pattern=child_link_pattern,
+                    max_children=max_children,
+                    timeout=timeout,
+                    logger=logger,
+                    step_name=step_name,
+                )
+            except Exception as e:
+                logger.error(f"[{step_name}] 論壇模式爬蟲例外：{e}", exc_info=True)
+                return ExecResult(exit_code=-3, stdout="", stderr=f"爬蟲例外：{e}")
+            if not result.ok:
+                return ExecResult(exit_code=1, stdout="",
+                                  stderr=f"列表頁爬取失敗（tier={result.tier}）：{result.error}")
+            summary = (
+                f"[爬蟲完成] 論壇模式 tier={result.tier} 列表 + 子頁、"
+                f"合併 {len(result.markdown.split())} 字 耗時={result.duration_ms}ms → {output_path}"
+            )
+            return ExecResult(exit_code=0, stdout=summary, stderr="")
+
         # 預設 web 模式 — 多 URL 還是單 URL？
         # 過濾空行 / 註解後 list 多於 1 → 多 URL；其他都單 URL（含只填 wc_url）
         cleaned_urls = [u.strip() for u in (urls or []) if u and u.strip() and not u.strip().startswith("#")]

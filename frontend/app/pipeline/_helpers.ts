@@ -10,6 +10,10 @@ export interface StepData extends Record<string, unknown> {
   outputPath: string
   expect: string
   skillMode?: boolean   // optional — 僅在 YAML 序列化時使用，節點類型由 node.type 決定
+  // 「output 層的 skill_mode」：用 deep 驗證（validate_step_with_skill）。
+  // 純 skill 節點不需要這個（後端看 expect 有沒有填來決定深淺）；
+  // 只有 script 節點 + AI 驗證節點勾「Skill 模式」時才會被設成 true。
+  expectSkillMode?: boolean
   readonly?: boolean    // optional — skill 唯讀驗證模式
   skill?: string        // optional — 掛載的 Claude Code skill 名稱
   askMode?: boolean     // optional — 詢問模式（LLM 積極問使用者）
@@ -56,6 +60,10 @@ export interface StepData extends Record<string, unknown> {
   // 智慧滾動（取代寫死的「滾 2 次」）— 預設自動偵測 scrollHeight 不變才停
   wcScrollCount?: number                 // [web mode] 0=自動 / >0=固定滾 N 次
   wcTargetPostCount?: number             // [web mode] 0=不設目標 / >0=滾到至少 N 個貼文連結後停
+  // 論壇 / 列表模式（自動抓子頁）
+  wcWithChildren?: boolean               // [web mode] 開啟「列表頁 → 抽連結 → 並行抓子頁 → 合併」
+  wcChildLinkPattern?: string            // 子頁 URL pattern（空 = auto 內建 12 種）
+  wcMaxChildren?: number                 // 最多抓幾個子頁（預設 10）
   // 影片模式
   wcVideoUrl?: string                    // [video mode] YouTube/Vimeo/Bilibili URL
   wcVideoQuality?: string                // [video mode] best / 1080p / 720p / 480p / 360p
@@ -226,6 +234,10 @@ export interface WebCrawlerData extends Record<string, unknown> {
   // 智慧滾動（進階設定）
   scrollCount: number              // 0=自動偵測 / >0=固定滾 N 次
   targetPostCount: number          // 0=不設目標 / >0=滾到至少 N 個貼文連結
+  // 論壇 / 列表模式（自動抓子頁）
+  withChildren: boolean            // 開啟「列表頁 → 抽連結 → 並行抓子頁 → 合併」
+  childLinkPattern: string         // 空字串 = auto 內建 pattern；可填 regex 客製
+  maxChildren: number              // 最多抓幾個子頁（預設 10）
   // 影片模式
   videoUrl: string
   videoQuality: string             // best / 1080p / 720p / 480p / 360p
@@ -294,7 +306,13 @@ export function newWebCrawlerData(index = 0): WebCrawlerData {
     interactions: [],
     downloadAssets: false,
     scrollCount: 0,
-    targetPostCount: 0,
+    // 預設「達到 10 篇就停」— 對大多「抓清單做摘要」的場景剛好；
+    // 想要「全部撈不限」就清空欄位（變 0 = 不設目標、走預設 2 滾）
+    targetPostCount: 10,
+    // 論壇 / 列表模式預設關閉；要爬「列表 → N 篇詳細頁」才打開
+    withChildren: false,
+    childLinkPattern: '',
+    maxChildren: 10,
     videoUrl: '',
     videoQuality: '720p',
     videoMaxFilesizeMb: 500,
@@ -303,7 +321,10 @@ export function newWebCrawlerData(index = 0): WebCrawlerData {
     videoSubsLangs: '',
     videoSaveInfoJson: false,
     outputPath: '',
-    retry: 1,
+    // 爬蟲節點 default 設 2（其他節點是 1）。理由：失敗多半是暫時性（CF challenge、
+    // timeout、503），重抓很便宜（純 deterministic 重跑、零 LLM token），retry 2 的
+    // CP 值高。不需要的話 panel 改 0/1 即可。
+    retry: 2,
     timeout: 600,  // 影片下載常需要 5-10 分鐘；網頁模式不會用到那麼久也沒影響
     index,
     status: 'idle',
@@ -393,7 +414,10 @@ export function newStepData(index = 0): StepData {
     outputPath: '',
     expect: '',
     timeout: 300,
-    retry: 0,
+    // 與 backend models.py PipelineStep.retry default 對齊；
+    // 讓失敗有一次自我修正的機會（節點失敗後 LLM 會看到 reason 重試）。
+    // 不想要重試的步驟在 UI 改成 0 即可。
+    retry: 1,
     index,
     status: 'idle',
     errorMsg: '',
@@ -413,7 +437,9 @@ export function newSkillData(index = 0): SkillData {
     skill: '',
     askMode: false,
     timeout: 300,
-    retry: 0,
+    // 與 backend default 對齊。skill 節點失敗常見是 LLM 程式碼瑕疵，
+    // retry 1 給它看到 reason 自我修正一次的機會。
+    retry: 1,
     index,
     status: 'idle',
     errorMsg: '',
@@ -505,6 +531,9 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           downloadAssets: s.wcDownloadAssets ?? false,
           scrollCount: s.wcScrollCount ?? 0,
           targetPostCount: s.wcTargetPostCount ?? 0,
+          withChildren: s.wcWithChildren ?? false,
+          childLinkPattern: s.wcChildLinkPattern || '',
+          maxChildren: s.wcMaxChildren ?? 10,
           videoUrl: s.wcVideoUrl || '',
           videoQuality: s.wcVideoQuality || '720p',
           videoMaxFilesizeMb: s.wcVideoMaxFilesizeMb ?? 500,
@@ -754,6 +783,9 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         wcDownloadAssets: d.downloadAssets,
         wcScrollCount: d.scrollCount ?? 0,
         wcTargetPostCount: d.targetPostCount ?? 0,
+        wcWithChildren: d.withChildren ?? false,
+        wcChildLinkPattern: d.childLinkPattern || '',
+        wcMaxChildren: d.maxChildren ?? 10,
         wcVideoUrl: d.videoUrl,
         wcVideoQuality: d.videoQuality,
         wcVideoMaxFilesizeMb: d.videoMaxFilesizeMb,
@@ -799,6 +831,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         outputPath: d.outputPath,
         expect: aiData?.expectText || d.expectedOutput,
         skillMode: true,
+        // 對 skill 節點不設 expectSkillMode — 後端用 has_expect 自動判斷深淺
         readonly: d.readonly || false,
         skill: d.skill || '',
         askMode: d.askMode || false,
@@ -817,7 +850,9 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       workingDir: d.workingDir || '',
       outputPath: (aiData?.targetPath && !d.outputPath) ? aiData.targetPath : d.outputPath,
       expect: aiData?.expectText || d.expect,
-      skillMode: aiData?.skillMode || false,
+      skillMode: false,  // script / 其他節點：step-level 永不是 skill
+      // AI 驗證節點若勾「Skill 模式」→ expectSkillMode=true → 走 deep 驗證
+      expectSkillMode: !!aiData?.skillMode,
       timeout: d.timeout,
       retry: d.retry,
       index: i,
@@ -920,6 +955,16 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         if (typeof s.wcTargetPostCount === 'number' && s.wcTargetPostCount > 0) {
           lines.push(`    wc_target_post_count: ${s.wcTargetPostCount}`)
         }
+        // 論壇 / 列表模式：只在開啟時寫；max_children 跟 pattern 也只在非預設時寫
+        if (s.wcWithChildren === true) {
+          lines.push(`    wc_with_children: true`)
+          if (s.wcChildLinkPattern) {
+            lines.push(`    wc_child_link_pattern: "${s.wcChildLinkPattern.replace(/"/g, '\\"')}"`)
+          }
+          if (typeof s.wcMaxChildren === 'number' && s.wcMaxChildren !== 10) {
+            lines.push(`    wc_max_children: ${s.wcMaxChildren}`)
+          }
+        }
       }
       if (s.outputPath) {
         lines.push(`    output:`)
@@ -1000,7 +1045,6 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       lines.push(`    output:`)
       if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
       if (s.expect) {
-        lines.push(`      ai_validation: true`)
         if (s.expect.includes('\n') || s.expect.length > 80) {
           lines.push(`      description: |`)
           for (const dl of s.expect.split('\n')) {
@@ -1010,10 +1054,12 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
           lines.push(`      description: "${s.expect.replace(/"/g, '\\"')}"`)
         }
       }
-      if (s.skillMode) lines.push(`      skill_mode: true`)
+      // output.skill_mode 只在 script 節點 + AI 驗證節點勾深度時寫；skill 節點不寫
+      if (s.expectSkillMode) lines.push(`      skill_mode: true`)
     }
     if (s.timeout !== 300) lines.push(`    timeout: ${s.timeout}`)
-    if (s.retry > 0)       lines.push(`    retry: ${s.retry}`)
+    // retry 的後端 default 是 1，只要不等於 1 都得寫出來（包含使用者明確設 0）
+    if (s.retry !== 1)     lines.push(`    retry: ${s.retry}`)
   }
   return lines.join('\n')
 }
@@ -1102,9 +1148,15 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
           cur.expect = val
         }
       } else if (/^ai_validation:/.test(t) && cur && inOutput) {
-        if (/true/.test(t)) validate = true
+        // ai_validation 是後端 model 上的死欄位，這裡單純忽略；
+        // 解析時不再以它觸發任何狀態（避免「YAML 寫但行為不變」的假設）
       } else if (/^skill_mode:/.test(t) && cur) {
-        cur.skillMode = /true/.test(t)
+        // 區分 step-level（cur.skillMode）跟 output.skill_mode（cur.expectSkillMode）
+        if (inOutput) {
+          cur.expectSkillMode = /true/.test(t)
+        } else {
+          cur.skillMode = /true/.test(t)
+        }
       } else if (/^skill:/.test(t) && cur) {
         cur.skill = t.replace(/^skill:\s*/, '').replace(/^"|"$/g, '')
       } else if (/^readonly:/.test(t) && cur) {
@@ -1147,6 +1199,12 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.wcScrollCount = parseInt(t.replace(/^wc_scroll_count:\s*/, '')) || 0
       } else if (/^wc_target_post_count:/.test(t) && cur) {
         cur.wcTargetPostCount = parseInt(t.replace(/^wc_target_post_count:\s*/, '')) || 0
+      } else if (/^wc_with_children:/.test(t) && cur) {
+        cur.wcWithChildren = /true/.test(t)
+      } else if (/^wc_child_link_pattern:/.test(t) && cur) {
+        cur.wcChildLinkPattern = t.replace(/^wc_child_link_pattern:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^wc_max_children:/.test(t) && cur) {
+        cur.wcMaxChildren = parseInt(t.replace(/^wc_max_children:\s*/, '')) || 10
       } else if (/^wc_video_url:/.test(t) && cur) {
         cur.wcVideoUrl = t.replace(/^wc_video_url:\s*/, '').replace(/^"|"$/g, '')
       } else if (/^wc_video_quality:/.test(t) && cur) {
@@ -1278,6 +1336,7 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     outputPath: partial.outputPath ?? '',
     expect: partial.expect ?? '',
     skillMode: partial.skillMode ?? false,
+    expectSkillMode: partial.expectSkillMode ?? false,
     readonly: partial.readonly ?? false,
     skill: partial.skill ?? '',
     humanConfirm: partial.humanConfirm ?? false,
@@ -1302,6 +1361,9 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     wcDownloadAssets: partial.wcDownloadAssets ?? false,
     wcScrollCount: partial.wcScrollCount ?? 0,
     wcTargetPostCount: partial.wcTargetPostCount ?? 0,
+    wcWithChildren: partial.wcWithChildren ?? false,
+    wcChildLinkPattern: partial.wcChildLinkPattern ?? '',
+    wcMaxChildren: partial.wcMaxChildren ?? 10,
     wcVideoUrl: partial.wcVideoUrl ?? '',
     wcVideoQuality: partial.wcVideoQuality ?? '720p',
     wcVideoMaxFilesizeMb: partial.wcVideoMaxFilesizeMb ?? 500,
@@ -1314,7 +1376,10 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     outlookFreeText: partial.outlookFreeText ?? '',
     outlookParams: partial.outlookParams ?? {},
     timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : 300)))),
-    retry: partial.retry ?? 0,
+    // YAML 沒寫 retry 時的 fallback — 跟 newSkillData / newStepData 跟 backend
+    // PipelineStep.retry default 一致（都是 1）。讓「貼 YAML 進來」跟「拉新節點」
+    // 看到的預設值相同，避免使用者疑惑。
+    retry: partial.retry ?? 1,
     index,
     status: 'idle',
     errorMsg: '',

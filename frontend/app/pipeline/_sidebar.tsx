@@ -739,12 +739,15 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
         </div>
       )}
 
-      {/* ── Logo ── */}
+      {/* ── Logo — Atlas (山峰幾何 A) ── */}
       <div className="flex items-center gap-2.5 px-4 py-4 border-b border-gray-100">
-        <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center shrink-0">
-          <Workflow className="w-4 h-4 text-white" />
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 via-indigo-600 to-purple-600 flex items-center justify-center shrink-0 shadow-md">
+          <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" aria-label="Atlas">
+            <path d="M4 21 L12 3 L20 21" />
+            <path d="M7.8 14 L16.2 14" />
+          </svg>
         </div>
-        <span className="font-bold text-gray-800 text-sm flex-1">Pipeline</span>
+        <span className="font-bold text-gray-900 text-base flex-1 tracking-tight">Atlas</span>
         <Link
           href="/recipes"
           className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"

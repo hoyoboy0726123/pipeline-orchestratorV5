@@ -1,6 +1,7 @@
 'use client'
 import { memo } from 'react'
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react'
+import { Mail } from 'lucide-react'
 import type { OutlookData } from './_helpers'
 import { useRunStatusStore } from './_runStatus'
 
@@ -55,7 +56,7 @@ function OutlookStepNode({ data, selected }: NodeProps<OutlookNodeType>) {
 
       {/* Header */}
       <div className="px-3 py-2.5 flex items-center gap-2" style={{ background: color }}>
-        <span className="text-white text-xs">📧</span>
+        <Mail className="w-3.5 h-3.5 text-white shrink-0" strokeWidth={2.5} />
         <span className="text-white font-semibold text-sm flex-1 truncate leading-tight">{data.name}</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 text-white font-medium shrink-0">
           Outlook

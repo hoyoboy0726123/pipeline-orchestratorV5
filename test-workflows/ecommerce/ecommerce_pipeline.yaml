@@ -1,0 +1,36 @@
+name: ecommerce
+validate: false
+
+# 執行前提：此 YAML 放在 test-workflows/ecommerce/ 內，四個 stage*.py 與本檔同目錄。
+# 所有 output.path 為相對路徑，系統會自動解析到 {專案根目錄}/ai_output/ecommerce/ 下。
+# batch 指令使用絕對路徑叫 Python（請將 <PROJECT_ROOT> 換成你實際的安裝路徑，例如
+# C:\Users\<user>\pipeline-orchestratorV5），或 clone 本專案後沿用此範例即可。
+
+steps:
+  - name: Stage1｜產生原始訂單資料
+    batch: python <PROJECT_ROOT>/test-workflows/ecommerce/stage1_generate_orders.py
+    timeout: 60
+    output:
+      path: ai_output/ecommerce/raw_orders.xlsx
+      description: Excel 檔案，含 Order_ID、Order_Time、Customer_ID、Product_Name、Category、Quantity、Amount 等欄位，約 800-900 筆資料
+
+  - name: Stage2｜訂單清洗
+    batch: python <PROJECT_ROOT>/test-workflows/ecommerce/stage2_clean_orders.py
+    timeout: 60
+    output:
+      path: ai_output/ecommerce/cleaned_orders.xlsx
+      description: Excel 檔案，僅留 Completed 訂單、補時間維度、加 Gross_Profit 欄
+
+  - name: Stage3｜銷售分析彙總
+    batch: python <PROJECT_ROOT>/test-workflows/ecommerce/stage3_analyze_sales.py
+    timeout: 60
+    output:
+      path: ai_output/ecommerce/sales_summary.xlsx
+      description: 多工作表 Excel，含 KPI、類別別、Top 10 商品、地區別、付款別、時段別、星期別、每日趨勢
+
+  - name: Stage4｜銷售管理報表
+    batch: python <PROJECT_ROOT>/test-workflows/ecommerce/stage4_generate_report.py
+    timeout: 60
+    output:
+      path: ai_output/ecommerce/Sales_Report.xlsx
+      description: 格式化 Excel 報表，含封面、KPI 摘要、各維度明細，嵌入類別圓餅圖、Top 商品長條、每日營收/毛利雙線、星期別 4 張圖

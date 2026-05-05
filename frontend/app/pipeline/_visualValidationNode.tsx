@@ -1,6 +1,7 @@
 'use client'
 import { memo } from 'react'
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react'
+import { ScanEye } from 'lucide-react'
 import type { VisualValidationData } from './_helpers'
 
 type VisualValidationNode = Node<VisualValidationData>
@@ -27,7 +28,7 @@ function VisualValidationNodeComponent({ data, selected }: NodeProps<VisualValid
         className="!w-3 !h-3 !rounded-full !border-2 !border-white" style={{ background: color }} />
 
       <div className="px-3 py-2 flex items-center gap-2" style={{ background: color }}>
-        <span className="text-white text-sm">👁</span>
+        <ScanEye className="w-3.5 h-3.5 text-white shrink-0" strokeWidth={2.5} />
         <span className="text-white font-semibold text-sm flex-1 truncate">{data.name || '視覺驗證'}</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 text-white font-medium">VLM</span>
       </div>

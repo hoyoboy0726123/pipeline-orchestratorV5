@@ -227,6 +227,14 @@ class PipelineStep(BaseModel):
     # 進階使用者可指定其中一個（同時填的話 scroll_count 優先）：
     wc_scroll_count: int = 0           # 0 = 自動偵測；> 0 強制滾動 N 次後停
     wc_target_post_count: int = 0      # 0 = 不設目標；> 0 = 滾到頁面出現至少 N 個貼文連結後停（仍受最大次數/時間上限保護）
+    # ── 論壇 / 列表模式（同時抓子頁）────────────────────────────────
+    # 開啟後 web_crawler 變成「先抓列表頁 → 抽前 N 個子頁連結 → 並行抓子頁 →
+    # 合併成單一 markdown」的整套流程。下游 skill 節點直接讀此檔做摘要、
+    # 不用自己寫 crawl4ai 程式（之前 LLM 寫程式時容易 hardcode 答案的雷）
+    wc_with_children: bool = False     # True = 開啟論壇 / 列表模式（自動抓子頁）
+    wc_child_link_pattern: str = ""    # 空字串 = auto（內建 12 種常見 pattern：Reddit/PTT/Dcard/HN 等）
+                                       # 也可填 regex（如 r"/articles/\d+"）覆寫
+    wc_max_children: int = 10          # 最多抓幾個子頁；對齊 wc_target_post_count 預設值
     # ── 影片模式（yt-dlp）─────────────────────────────────────────
     wc_video_url: str = ""             # YouTube / Vimeo / Bilibili / 等 yt-dlp 支援的影音站 URL
     wc_video_quality: str = "720p"     # best / 1080p / 720p / 480p / 360p（決定 yt-dlp -f 過濾條件）

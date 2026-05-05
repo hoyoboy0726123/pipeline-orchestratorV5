@@ -31,9 +31,22 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     requests beautifulsoup4 lxml "httpx[http2]"
 
-# ── Tier 3a：繪圖（matplotlib + deps）──
-# 單獨一層，讓 layer commit 的資料量不會跟 Tier 3b 疊加
+# ── Tier 3a：繪圖（matplotlib + 中文字型）──
+# 單獨一層，讓 layer commit 的資料量不會跟 Tier 3b 疊加。
+# 中文字型 fonts-noto-cjk = Google Noto Sans CJK（繁中/簡中/日/韓 一包搞定，~50MB）。
+# 沒裝會狂吐 "Glyph XXXX missing from font(s) DejaVu Sans" + 圖中文變豆腐□。
+# 字型先裝、matplotlib 後裝，這樣 font cache 第一次建時就會掃到 Noto CJK。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir matplotlib
+# 設 matplotlibrc 預設字型鏈：Noto CJK 排前、DejaVu 殿後當 ASCII fallback。
+# axes.unicode_minus=False 解決中文圖負號變成 □ 的舊問題（matplotlib FAQ 標準解）。
+# 這樣 LLM 寫 plt.plot(...) 不用每次自己 set_rcParams 也能正確顯示中文。
+RUN MPLRC=$(python -c "import matplotlib; print(matplotlib.matplotlib_fname())") \
+    && echo "font.family: sans-serif" >> "$MPLRC" \
+    && echo "font.sans-serif: Noto Sans CJK TC, Noto Sans CJK SC, DejaVu Sans, sans-serif" >> "$MPLRC" \
+    && echo "axes.unicode_minus: False" >> "$MPLRC"
 
 # ── Tier 3b：影像處理（opencv headless，最大的單一套件）──
 RUN pip install --no-cache-dir opencv-python-headless

@@ -673,6 +673,11 @@ function NotificationSection() {
   const [saving, setSaving] = useState(false)
   const [tgToken, setTgToken] = useState('')
   const [tgChatId, setTgChatId] = useState('')
+  // 遠端遙控：開啟後 bot 接受 /menu 指令、可從 TG 啟動工作流。預設 OFF（安全）
+  const [tgRemoteControl, setTgRemoteControl] = useState(false)
+  // .env fallback 旗標 — UI 沒填但 .env 有值時，仍應允許啟用遠端遙控
+  const [tgTokenEnv, setTgTokenEnv] = useState(false)
+  const [tgChatIdEnv, setTgChatIdEnv] = useState(false)
   const [lineToken, setLineToken] = useState('')
   const [original, setOriginal] = useState<NotificationSettings | null>(null)
 
@@ -683,6 +688,9 @@ function NotificationSection() {
         const s = await getNotificationSettings()
         setTgToken(s.telegram_bot_token)
         setTgChatId(s.telegram_chat_id)
+        setTgRemoteControl(!!s.telegram_remote_control)
+        setTgTokenEnv(!!s.telegram_bot_token_env_present)
+        setTgChatIdEnv(!!s.telegram_chat_id_env_present)
         setLineToken(s.line_notify_token)
         setOriginal(s)
       } catch (e) { toast.error((e as Error).message) }
@@ -693,6 +701,7 @@ function NotificationSection() {
   const dirty = original && (
     tgToken !== original.telegram_bot_token ||
     tgChatId !== original.telegram_chat_id ||
+    tgRemoteControl !== !!original.telegram_remote_control ||
     lineToken !== original.line_notify_token
   )
 
@@ -702,6 +711,7 @@ function NotificationSection() {
       const saved = await saveNotificationSettings({
         telegram_bot_token: tgToken,
         telegram_chat_id: tgChatId,
+        telegram_remote_control: tgRemoteControl,
         line_notify_token: lineToken,
       })
       setOriginal(saved)
@@ -758,6 +768,38 @@ function NotificationSection() {
                 />
                 <p className="text-xs text-gray-400 mt-1">你的 Telegram 用戶 ID 或群組 ID，可透過 <code className="bg-gray-100 px-1 py-0.5 rounded">@userinfobot</code> 取得</p>
               </div>
+
+              {/* 遠端遙控 toggle — 預設 OFF。開啟後 bot 接受 /menu 指令啟動工作流 */}
+              {/* 啟用條件：UI 有填 OR .env 有 fallback 值，兩種來源任一即可 */}
+              {(() => {
+                const tokenReady = !!tgToken || tgTokenEnv
+                const chatReady = !!tgChatId || tgChatIdEnv
+                const canEnable = tokenReady && chatReady
+                const usingEnvOnly = (!tgToken && tgTokenEnv) || (!tgChatId && tgChatIdEnv)
+                return (
+                  <div className="pt-3 border-t border-gray-100">
+                    <label className="flex items-start gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={tgRemoteControl}
+                        onChange={e => setTgRemoteControl(e.target.checked)}
+                        disabled={!canEnable}
+                        className="mt-1"
+                      />
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-gray-800">📲 啟用 Telegram 遠端遙控</div>
+                        <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+                          開啟後從 Telegram 傳 <code className="bg-gray-100 px-1 py-0.5 rounded font-mono">/menu</code> 給 bot、會回工作流清單、點按鈕即可啟動並接收進度通知。<br />
+                          支援指令：<code className="bg-gray-100 px-1 py-0.5 rounded font-mono">/menu</code>（列工作流）、<code className="bg-gray-100 px-1 py-0.5 rounded font-mono">/status</code>（查執行中 run）、<code className="bg-gray-100 px-1 py-0.5 rounded font-mono">/help</code>（指令表）。<br />
+                          <span className="text-amber-700">⚠ 安全考量：只接受授權 Chat ID 的訊息，其他人 DM 會被忽略。</span>
+                          {!canEnable && <span className="text-red-500 block mt-1">需先填好 Bot Token + Chat ID（UI 或 .env 任一來源）才能開啟。</span>}
+                          {canEnable && usingEnvOnly && <span className="text-emerald-700 block mt-1">✓ 偵測到 .env 已設定 Bot Token / Chat ID，可直接勾選啟用。</span>}
+                        </p>
+                      </div>
+                    </label>
+                  </div>
+                )
+              })()}
             </div>
           </div>
 

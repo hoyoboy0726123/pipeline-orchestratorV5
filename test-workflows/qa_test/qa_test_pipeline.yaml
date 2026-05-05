@@ -1,0 +1,36 @@
+name: qa_test
+validate: false
+
+# 執行前提：此 YAML 放在 test-workflows/qa_test/ 內，四個 stage*.py 與本檔同目錄。
+# 所有 output.path 為相對路徑，系統會自動解析到 {專案根目錄}/ai_output/qa_test/ 下。
+# batch 指令使用絕對路徑叫 Python（請將 <PROJECT_ROOT> 換成你實際的安裝路徑，例如
+# C:\Users\<user>\pipeline-orchestratorV5），或 clone 本專案後沿用此範例即可。
+
+steps:
+  - name: Stage1｜產生原始測試紀錄
+    batch: python <PROJECT_ROOT>/test-workflows/qa_test/stage1_generate_test_records.py
+    timeout: 60
+    output:
+      path: ai_output/qa_test/raw_test_records.xlsx
+      description: Excel 檔案，含 Record_ID、Test_Date、Batch、Serial_Number、Test_Item、Measured_Value、Result 等欄位，約 2000 筆資料
+
+  - name: Stage2｜資料清洗
+    batch: python <PROJECT_ROOT>/test-workflows/qa_test/stage2_clean_records.py
+    timeout: 60
+    output:
+      path: ai_output/qa_test/cleaned_test_records.xlsx
+      description: Excel 檔案，剔除設備異常、修正單位、標記缺值，含 Spec_Deviation 欄
+
+  - name: Stage3｜品質分析彙總
+    batch: python <PROJECT_ROOT>/test-workflows/qa_test/stage3_analyze_quality.py
+    timeout: 60
+    output:
+      path: ai_output/qa_test/quality_summary.xlsx
+      description: 多工作表 Excel，含 KPI 總覽、批次別/測項別/產線別/操作員別良率、週 trend
+
+  - name: Stage4｜管理報表產生
+    batch: python <PROJECT_ROOT>/test-workflows/qa_test/stage4_generate_report.py
+    timeout: 60
+    output:
+      path: ai_output/qa_test/QA_quality_report.xlsx
+      description: 格式化 Excel 報表，含封面、KPI 摘要、各維度明細，嵌入長條圖/不良率排行/週 trend 折線圖

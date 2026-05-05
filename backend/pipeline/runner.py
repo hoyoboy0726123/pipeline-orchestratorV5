@@ -747,7 +747,8 @@ def _find_prev_output_file(run, config) -> Optional[str]:
         from pathlib import Path as _P
         import time as _t
 
-        # 策略 1：看 step.output.path
+        # 策略 1：看 step.output.path（同 _resolve_path / _deterministic_validate 規則）
+        proj_root = _P(__file__).parent.parent.parent.absolute()
         idx = run.current_step - 1
         while idx >= 0:
             st = config.steps[idx]
@@ -756,6 +757,12 @@ def _find_prev_output_file(run, config) -> Optional[str]:
                 continue
             if st.output and st.output.path:
                 p = _P(st.output.path).expanduser()
+                if not p.is_absolute():
+                    parts = p.parts
+                    if parts and parts[0] == "ai_output":
+                        p = proj_root / p
+                    else:
+                        p = proj_root / "ai_output" / run.pipeline_name / p
                 if p.exists() and p.is_file():
                     return str(p)
             idx -= 1
@@ -922,8 +929,11 @@ async def _notify_final(run: PipelineRun, config: PipelineConfig):
 
 # ── Deterministic validation (fast recipe mode) ──────────────────────────────
 
-def _deterministic_validate(step, exec_result, logger) -> ValidationResult:
-    """Recipe 快速模式：不叫 LLM，只做確定性檢查。"""
+def _deterministic_validate(step, exec_result, logger, workflow_name: str = "") -> ValidationResult:
+    """Recipe 快速模式：不叫 LLM，只做確定性檢查。
+    workflow_name：用來解析相對路徑（同 _resolve_path 規則 — 純檔名落到 workflow dir、
+    `ai_output/...` 開頭視為相對於專案根）。沒傳就走 backend cwd（向後相容、但會踩坑）。
+    """
     from pathlib import Path as _Path
 
     # 1. exit code
@@ -934,9 +944,16 @@ def _deterministic_validate(step, exec_result, logger) -> ValidationResult:
             suggestion="Recipe 執行失敗，建議改用完整模式重跑",
         )
 
-    # 2. 輸出檔存在 + 大小
+    # 2. 輸出檔存在 + 大小（路徑用跟 run_pipeline _resolve_path 一致的規則）
     if step.output and step.output.path:
         p = _Path(step.output.path).expanduser()
+        if not p.is_absolute():
+            proj_root = _Path(__file__).parent.parent.parent.absolute()
+            parts = p.parts
+            if parts and parts[0] == "ai_output":
+                p = proj_root / p
+            elif workflow_name:
+                p = proj_root / "ai_output" / workflow_name / p
         if not p.exists():
             return ValidationResult(
                 status="failed",
@@ -1088,6 +1105,16 @@ async def run_pipeline(
             logger.info(f"已重建 {len(completed_outputs)} 個前步驟的輸出資訊：{[o['path'] for o in completed_outputs]}")
 
     no_save_recipe = run.config_dict.get("_no_save_recipe", False)
+
+    # ── 自動偵測：工作流含 web_crawler 節點時，自動關閉 recipe 儲存 ──
+    # 理由：爬蟲輸出每次不同（網頁內容 / 抓取時間都會變），下游 skill 步驟
+    # 的 input_fingerprint 永遠不會跟既有 recipe 相符 → 命中率 0、純占空間。
+    # 還會在 UI 顯示「已有 Recipe 快取」假訊號誤導使用者。
+    # 使用者明確要求「跑就跑、不管命不命中」的話可手動 force `_use_recipe=true`。
+    if not no_save_recipe and any(getattr(s, "web_crawler", False) for s in config.steps):
+        no_save_recipe = True
+        logger.info("偵測到 web_crawler 節點 → 自動關閉 recipe 儲存"
+                    "（爬蟲輸出每次不同、recipe 永遠 miss、存了也不會命中）")
 
     while run.current_step < len(config.steps):
         # ── 每步開始前檢查中止旗標 ──
@@ -1268,11 +1295,23 @@ async def run_pipeline(
             """把 output.path 解析成絕對路徑：
             - `~/xxx` 展開到使用者家目錄
             - 絕對路徑直接用
-            - 相對路徑 → 以**專案根目錄**為基準（而非 backend cwd）"""
+            - 相對路徑（一般情況）→ 以**本 workflow 的輸出資料夾**為基準
+              （ai_output/<workflow_name>/）。所以 `path: posts_list.md` 會
+              落到 ai_output/<workflow>/posts_list.md，不會跑到專案根目錄。
+            - 相對路徑（已含 `ai_output/` 開頭）→ 以**專案根目錄**為基準。
+              這條保留是因為 runner 內部 auto-default 路徑都是
+              `ai_output/<workflow>/<step>_result.md` 的完整格式，必須以專案
+              根當基準才解析得到正確位置。
+            """
             pp = _Path(p).expanduser()
-            if not pp.is_absolute():
-                pp = _PROJ_ROOT / pp
-            return pp
+            if pp.is_absolute():
+                return pp
+            parts = pp.parts
+            if parts and parts[0] == "ai_output":
+                # 已經是「相對於專案根」的完整 workflow 路徑（auto-default 走這條）
+                return _PROJ_ROOT / pp
+            # 一般使用者寫的相對路徑 → 落到本 workflow 的輸出資料夾
+            return _PROJ_ROOT / "ai_output" / config.name / pp
 
         # 預設：專案根目錄/ai_output/{pipeline_name}/
         default_wd = str(_PROJ_ROOT / "ai_output" / config.name)
@@ -1399,6 +1438,9 @@ async def run_pipeline(
                     download_assets=step.wc_download_assets,
                     scroll_count=getattr(step, "wc_scroll_count", 0) or 0,
                     target_post_count=getattr(step, "wc_target_post_count", 0) or 0,
+                    with_children=getattr(step, "wc_with_children", False),
+                    child_link_pattern=getattr(step, "wc_child_link_pattern", "") or "",
+                    max_children=getattr(step, "wc_max_children", 10) or 10,
                     video_url=step.wc_video_url,
                     video_quality=step.wc_video_quality,
                     video_max_filesize_mb=step.wc_video_max_filesize_mb,
@@ -1498,7 +1540,7 @@ async def run_pipeline(
                 )
             elif recipe_hit and use_recipe and exec_result.exit_code == 0 and not has_expect:
                 # 確定性檢查：exit code=0、輸出檔存在、檔案大小合理（無 AI 驗證節點）
-                val = _deterministic_validate(step, exec_result, logger)
+                val = _deterministic_validate(step, exec_result, logger, workflow_name=config.name)
             elif recipe_hit and use_recipe and exec_result.exit_code == 0 and has_expect:
                 # Recipe 命中但有 AI 驗證節點 → 快速 LLM 驗證（不走 Skill 深度驗證）
                 logger.info(f"[{step.name}] 🔍 Recipe 命中 + 有 AI 驗證需求，走快速 LLM 驗證")
@@ -1514,8 +1556,11 @@ async def run_pipeline(
                 )
             elif config.validate and has_expect:
                 # 使用者填了「預期輸出描述」→ 跑 LLM 驗證
-                # output.skill_mode=true 走深度（agent 主動跑工具驗證）；否則走快速 LLM 一次驗證
-                use_skill = step.output and step.output.skill_mode
+                # 走 deep（agent 自己跑工具驗）的時機：
+                #   1. skill 節點 + 有 expect（前端 UI 沒提供 output.skill_mode 開關，純看 expect）
+                #   2. script 節點 + AI 驗證節點勾「Skill 模式」→ output.skill_mode=true
+                # 兩者以外（script 純 AI 驗證淺、或 skill 沒填 expect）走 shallow validate_step。
+                use_skill = step.skill_mode or bool(step.output and step.output.skill_mode)
                 validate_fn = validate_step_with_skill if use_skill else validate_step
                 val = await validate_fn(
                     step_name=step.name,
@@ -1546,7 +1591,7 @@ async def run_pipeline(
             elif config.validate and not has_expect:
                 # Script / 其他無 skill_mode 節點 + 沒填 expect → 只做確定性檢查
                 # 理由：script 是使用者自己寫的程式、自己負責正確性，外層 LLM 沒足夠上下文判斷
-                val = _deterministic_validate(step, exec_result, logger)
+                val = _deterministic_validate(step, exec_result, logger, workflow_name=config.name)
                 logger.info(f"[{step.name}] ⚡ Script 節點沒填預期輸出，只看 exit code + 檔案存在")
             else:
                 status = "ok" if exec_result.exit_code == 0 else "failed"
@@ -1622,8 +1667,11 @@ async def run_pipeline(
                 # 後者讓沒設 output.path 的 skill 步驟也能被後續 outlook send_with_attachment 自動抓到正確檔
                 _eff_path = ""
                 if step.output and step.output.path:
-                    _eff_path = step.output.path
-                elif actual_out:  # 上面 snapshot diff 算出來的
+                    # 一律存絕對路徑進 completed_outputs，下一步的 LLM agent 拿到
+                    # 純檔名也找不到、必須給它絕對路徑（_resolve_path 把純檔名接到
+                    # workflow dir、ai_output/... 接專案根、絕對路徑直接用）
+                    _eff_path = str(_resolve_path(step.output.path))
+                elif actual_out:  # 上面 snapshot diff 算出來的（已是絕對）
                     _eff_path = actual_out
                 if _eff_path:
                     out_info = {"path": _eff_path, "schema": ""}

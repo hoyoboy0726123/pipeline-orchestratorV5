@@ -75,8 +75,10 @@ interface WorkflowStore {
   setActive:      (id: string) => void
   getActive:      () => Workflow | undefined
 
-  // 儲存目前畫布狀態（debounced by caller）
-  saveCanvas: (id: string, nodes: AppNode[], edges: Edge[]) => void
+  // 儲存目前畫布狀態（debounced by caller）。
+  // 同時帶上 yaml 一起存，讓 TG 遠端遙控等不經過前端 getYaml() 的入口
+  // 也能直接讀到對應的 YAML（不再因為 yaml 欄位空而拒絕啟動）。
+  saveCanvas: (id: string, nodes: AppNode[], edges: Edge[], yaml?: string) => void
 }
 
 // 防抖佇列：合併多次快速 saveCanvas / updateWorkflow 呼叫
@@ -164,15 +166,17 @@ export const useWorkflowStore = create<WorkflowStore>()(
       return workflows.find(w => w.id === activeId)
     },
 
-    saveCanvas: (id, nodes, edges) => {
+    saveCanvas: (id, nodes, edges, yaml) => {
       // 立即更新本地狀態
       set(s => ({
         workflows: s.workflows.map(w =>
           w.id === id ? { ...w, nodes, edges, updatedAt: Date.now() } : w
         ),
       }))
-      // 異步 debounced 更新後端
-      _debouncedApiUpdate(id, { canvas: { nodes, edges } })
+      // 異步 debounced 更新後端 — 帶 yaml 一起存（給 TG 遠端遙控用）
+      const patch: Record<string, any> = { canvas: { nodes, edges } }
+      if (typeof yaml === 'string') patch.yaml = yaml
+      _debouncedApiUpdate(id, patch)
     },
   })
 )
