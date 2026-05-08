@@ -436,15 +436,25 @@ export default function PipelinePage() {
     if (bgDetectRef.current) clearInterval(bgDetectRef.current)
     if (!pipelineName) return
 
+    // 切 workflow 時 reset 跑 / log，避免上一個 workflow 的狀態殘留蓋過去
+    // (這個 reset 不影響 awaiting_human 訊息，因為下面 detect 會立即接管 active run)
+    runIdRef.current = null
+    setLogLines([])
+    setRunning(false)
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+
+    // initial fallback 旗標：第一輪 detect 找不到 active 時、改載 latest run 的 log
+    // 切 workflow 一次只 fallback 一次，後續 detect 只負責偵測新 active(user 啟動 / TG / 排程觸發)
+    let initialDone = false
+
     const detect = async () => {
-      // 已在前端執行中就不重複偵測
-      if (runIdRef.current) return
       try {
         const runs = await getPipelineRuns()
         const active = runs.find(
           r => (r.status === 'running' || r.status === 'awaiting_human') && r.pipeline_name === pipelineName
         )
-        if (active && !runIdRef.current) {
+        // 偵測 active(running / awaiting)— 接管條件:有 active 且不是當前已偵測過的同一個 run
+        if (active && runIdRef.current !== active.run_id) {
           runIdRef.current = active.run_id
           setRunning(true)
           if (active.status === 'awaiting_human') {
@@ -469,6 +479,21 @@ export default function PipelinePage() {
           toast.info(`偵測到排程執行中`)
           pollStatus(active.run_id)
           pollRef.current = setInterval(() => pollStatus(active.run_id), 1500)
+          initialDone = true
+          return
+        }
+        // 沒 active：第一輪做 fallback — 找該 workflow 最新一筆 run、載入該 run 的 log
+        // 讓使用者切過去就能看到上次跑的結果(不用按執行)；trace 視圖也會吃到同個 runIdRef
+        if (!initialDone) {
+          initialDone = true
+          const latest = runs.find(r => r.pipeline_name === pipelineName)
+          if (latest) {
+            runIdRef.current = latest.run_id
+            try {
+              const data = await getPipelineLog(latest.run_id)
+              setLogLines((data.log || '').split('\n'))
+            } catch { /* ignore */ }
+          }
         }
       } catch { /* ignore */ }
     }
@@ -1176,13 +1201,18 @@ export default function PipelinePage() {
   }, [logLines, showLog])
 
   // Trace 視圖 live poll — 開啟期間每 3 秒重抓 run、保持 token / tool_calls / 步驟狀態 up-to-date
+  // 切 workflow(pipelineName 變)時也重 trigger，立即 fetch 新 workflow 的 run trace
   useEffect(() => {
     if (!showTrace) return
     let stopped = false
     const tick = async () => {
       if (stopped) return
       const rid = runIdRef.current
-      if (!rid) return
+      if (!rid) {
+        // 該 workflow 還沒跑過任何 run、清掉舊 trace 避免顯示其他 workflow 的殘影
+        setTraceRun(null)
+        return
+      }
       try {
         const run = await getPipelineRun(rid)
         if (!stopped) setTraceRun(run)
@@ -1191,7 +1221,7 @@ export default function PipelinePage() {
     tick()
     const id = setInterval(tick, 3000)
     return () => { stopped = true; clearInterval(id) }
-  }, [showTrace, running])
+  }, [showTrace, running, pipelineName])
 
   // 開啟 log 時重置 auto-scroll
   useEffect(() => { if (showLog) logAutoScrollRef.current = true }, [showLog])
