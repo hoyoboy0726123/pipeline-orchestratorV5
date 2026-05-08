@@ -127,6 +127,18 @@ class ComputerUseAction(BaseModel):
     # 不是讓 VLM 決定座標、不是讓它執行動作；只回傳 {"pass": bool, "reason": str}
     # 模型本身不支援視覺時，呼叫會直接報錯（不靜默 fallback）
     vlm_prompt: str = ""
+    # ── VLM 把關 Phase 1:每動作執行後驗證(跟 vlm_check 不同) ──────────
+    # vlm_check 是「動作序列裡的 explicit 檢查步」、不點擊純判斷;
+    # 這兩個欄位是「click/type/hotkey 等動作執行**之後**自動把前後截圖送 VLM 看
+    # 是否符合 expected」、用來抓「點空了」「對話框沒開」等錄製座標漂移問題。
+    # 觸發條件由 expected(有沒填) + step.cu_vlm_check_strategy + verify_critical 三個一起決定:
+    #   strategy=off          → 永遠不驗
+    #   strategy=after_each   → 每個 expected 非空的動作都驗
+    #   strategy=critical_only → 只驗 expected 非空 AND verify_critical=True 的動作
+    expected: str = ""           # 動作後預期狀態的自然語言描述(例「另存新檔對話框已開啟」)
+                                  # 空字串 = 不對此動作做 VLM 驗證
+    verify_critical: bool = False # True = strategy=critical_only 時也會驗
+                                  # (讓使用者錄製時標出哪幾步絕對不能漂)
     # ── click_image 專用：VLM 輔助模式 ─────────────────────────────
     # 設計核心：永遠不讓 VLM 給座標 — 它只負責「決定要找的東西」，
     # 真正的點擊位置由既有的確定性管線（OCR / CV）算出
@@ -176,6 +188,20 @@ class PipelineStep(BaseModel):
     cv_trigger_hover: bool = True  # True = 比對前先把游標移到錄製座標並等，讓 Windows hover 效果出現
     cv_hover_wait_ms: int = 200    # hover 等待時間：200（快）/ 400（保險，Windows 部分動畫較慢）
     cv_coord_fallback: bool = False # True = CV 完全找不到時退回錄製座標硬點下去；False（預設）= 失敗就 FAIL 不亂點
+    # ── VLM 把關 Phase 1:節點層級設定(每動作 expected 走 ComputerUseAction.verify_after)──
+    # 設計目的:錄製座標確定性主路徑 + AI 驗證層、99% 失敗從「整套悶著錯」變「立刻發現+人介入」
+    # 詳見 docs/computer-use-vlm-verifier-plan.md
+    cu_vlm_check_strategy: str = "off"   # off / after_each / critical_only
+                                          # off          = 完全關 VLM 驗證(現況、預設)
+                                          # after_each   = 每個有 expected 的動作都驗
+                                          # critical_only = 只驗 verify_critical=True 的動作
+    cu_on_mismatch: str = "stop_notify"  # stop_notify / retry_once / skip_and_continue
+                                          # stop_notify       = 立即停 + push TG + pipeline awaiting_human(預設、最安全)
+                                          # retry_once        = 重試一次同動作、仍失敗才 stop_notify
+                                          # skip_and_continue = 警告但繼續(用於非關鍵步、容忍偏離)
+    cu_vlm_provider: str = ""            # 空字串 = 跟 settings.model 同(自動推斷);
+                                          # 也可指定 "anthropic" / "openai"
+    cu_vlm_max_retries: int = 1          # retry_once 模式下最多重試幾次
     # ── OCR 比對設定 ──────────────────────────────────────────────────
     ocr_threshold: float = 0.6     # OCR 最小 confidence：低於這數字視為沒匹配到
                                    # 分級: 1.0 精確 / 0.9 target⊆word / 0.8 跨詞行層級 / 0.6 模糊
