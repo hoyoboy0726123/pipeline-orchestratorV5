@@ -403,9 +403,27 @@ async def run_subagent(
         })
         log.info(f"[{step_name}] 🛠 tool={tool_name} 完成（result {len(result_str)} 字）")
 
+        # 截斷大型 tool 輸出再接回 messages、防 context 雪崩
+        # 真實案例:某 run_shell(find / pip list 之類)回 92K 字、被 append 後
+        # 之後每輪 input 全帶這 92K、瞬間衝爆 context、max_iter 燒完
+        # 留前 4K + 後 1K(中間 elide)、保訊息開頭 + 失敗尾巴(stderr 通常在尾)
+        _MAX_TOOL_OUT = 5000
+        if len(result_str) > _MAX_TOOL_OUT:
+            _head = result_str[:4000]
+            _tail = result_str[-1000:]
+            result_for_msg = (
+                f"{_head}\n"
+                f"\n…[中間省略 {len(result_str) - 5000} 字、完整長度 {len(result_str)}、"
+                f"看尾段或 head/tail 字串]…\n"
+                f"{_tail}"
+            )
+            log.info(f"[{step_name}] 🪚 tool 結果過長({len(result_str)} 字)、截到 ~5K 接回 messages")
+        else:
+            result_for_msg = result_str
+
         # 把 LLM 回覆 + tool 結果接回對話（沿用 skill loop 慣例）
         messages.append(HumanMessage(content=reply))
-        messages.append(HumanMessage(content=f"[工具結果 — {tool_name}]\n{result_str}"))
+        messages.append(HumanMessage(content=f"[工具結果 — {tool_name}]\n{result_for_msg}"))
 
     iterations_done = min(max_iter, i + 1)
 
