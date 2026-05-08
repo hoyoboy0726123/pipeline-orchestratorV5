@@ -215,7 +215,7 @@ class PipelineStep(BaseModel):
     # 不適合：每天跑相同邏輯的固定任務（用 skill 節點 + recipe 即可、零 token）
     subagent: bool = False
     subagent_role: str = "data_analyst"   # data_analyst | coder | researcher | critic | planner
-    subagent_max_iter: int = 5             # 最多 LLM 輪數上限（含 tool call 來回）
+    subagent_max_iter: int = 10            # 最多 LLM 輪數上限(含 tool call 來回);實測 5 對非簡單任務太低
 
     web_crawler: bool = False          # True = 網頁爬蟲節點
     # 模式由前端明確選擇（不自動偵測），決定走哪條路徑：
