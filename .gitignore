@@ -50,3 +50,4 @@ test-workflows/*.xlsx
 _test_*.json
 # VLM verifier test image outputs (regenerated each run)
 backend/_test_cu_vlm_images/
+backend/_test_cu_int_assets/
