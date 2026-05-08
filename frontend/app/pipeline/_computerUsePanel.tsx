@@ -69,6 +69,8 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   const [ocrOpen, setOcrOpen] = useState(false)
   // VLM 把關 Phase 1 摺疊（預設收折、進階功能）
   const [vlmOpen, setVlmOpen] = useState(false)
+  // 4 種 VLM 功能決策樹摺疊（預設收折、給混淆的人查）
+  const [vlmHelpOpen, setVlmHelpOpen] = useState(false)
 
   // 預設錄製輸出目錄
   const defaultAssetsDir = data.assetsDir ||
@@ -826,6 +828,46 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                   ? '開啟：OCR 找不到 → 接著跑 CV 圖像比對鏈（gray→edge），CV 再失敗時是否退座標看上方 CV 設定'
                   : '關閉（預設）：OCR 失敗就直接 FAIL，不退到 CV 或座標。選擇 OCR 代表目標位置/樣式會變、CV 不適用'}
               </p>
+            </div>
+          )}
+        </div>
+
+        {/* ℹ VLM 功能決策樹（4 種 VLM 用途搞混時查這個）──────────────── */}
+        <div className="rounded-xl border border-blue-200 bg-blue-50/30 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setVlmHelpOpen(v => !v)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-blue-100/50 transition-colors"
+          >
+            {vlmHelpOpen ? <ChevronUp className="w-3.5 h-3.5 text-blue-600" />
+                         : <ChevronDown className="w-3.5 h-3.5 text-blue-600" />}
+            <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide flex-1">ℹ 4 種 VLM 功能何時用哪個?</span>
+          </button>
+          {vlmHelpOpen && (
+            <div className="px-3 pb-3 border-t border-blue-200 text-[11px] text-gray-700 leading-relaxed space-y-2">
+              <div className="pt-3" />
+              <div className="space-y-1.5">
+                <div className="flex items-start gap-2">
+                  <span className="font-mono text-emerald-700 shrink-0 w-32">expected(下方 ↓)</span>
+                  <span>動作執行<strong>後</strong>自動驗有沒生效。例:點 Save As 後驗對話框開了</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-mono text-purple-700 shrink-0 w-32">vlm_mode=description</span>
+                  <span>動作<strong>前</strong>找「點哪裡」、目標<strong>文字會變</strong>(例最低價金額)。每個 click_image 上設</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-mono text-purple-700 shrink-0 w-32">vlm_mode=anchor_pick</span>
+                  <span>動作<strong>前</strong>找「點哪裡」、目標<strong>有 UI 變體</strong>(hover 變色 / 主題)。多張候選 VLM 挑</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-mono text-amber-700 shrink-0 w-32">vlm_check action</span>
+                  <span>序列<strong>中間</strong>插一個獨立檢查步、不點擊純判斷。例登入後驗成功訊息</span>
+                </div>
+              </div>
+              <div className="pt-1.5 mt-1.5 border-t border-blue-200/70 text-[10px] text-blue-700">
+                💡 詳細對照 + 範例見 <span className="font-mono">docs/vlm-features-decision-tree.md</span>。
+                每次 VLM call ~$0.005-0.015、純錄製重播沒 UI 變動的場景別開 VLM。
+              </div>
             </div>
           )}
         </div>
