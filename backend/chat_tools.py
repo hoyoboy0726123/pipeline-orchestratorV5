@@ -1711,6 +1711,27 @@ def cancel_subagent_task(task_id: str) -> str:
     )
 
 
+@tool
+def read_help_doc(topic: str = "") -> str:
+    """讀子代理進階用法的 help doc。**system prompt 沒寫細節時來查這裡**。
+
+    可選 topic:
+    - chain   : 多階段子代理接力(dispatch follow_up 參數的格式 / 各 role 的 max_iter
+                建議 / 何時用 chain vs 單一 dispatch / 典型 chain 配置)
+    - files   : 子代理產物的讀檔 / 傳檔(read_subagent_file vs send_subagent_file_to_tg
+                vs send_file_to_tg 差別)
+    - cancel  : 中止跑中的子代理(cancel_subagent_task 判斷規則 / TG push 行為)
+
+    Args:
+        topic: 上述 topic 之一。留空 → 列可選 topic + 簡介。
+
+    Returns:
+        該 topic 的完整教學(markdown)。
+    """
+    from help_docs import get_help_doc
+    return get_help_doc(topic)
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
@@ -1721,5 +1742,6 @@ CHAT_TOOLS = [
     dispatch_subagent_async, check_subagent_status,  # 子代理派出 / 查狀態(沙盒隔離、無 confirm)
     read_subagent_file, send_subagent_file_to_tg,    # 子代理產物 讀 / 傳 TG(限定 task working_dir)
     cancel_subagent_task,                            # 中止正在跑的子代理(asyncio.cancel + push TG)
+    read_help_doc,                                   # 進階用法 lazy doc(chain / files / cancel)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}

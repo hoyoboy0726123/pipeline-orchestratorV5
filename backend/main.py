@@ -1842,51 +1842,10 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
   跟使用者說「跑了 N 輪沒完成、原因 X」、讓使用者決定:加 max_iter 重派 / 改任務描述 / 放棄。
   連續派 3 次都 max_iter exceeded 等於白燒 token、要主動 stop
 
-### Chain 模式 — 多階段自動接力(複雜任務強烈推薦)
-
-當任務含「寫 + 審查 + 改進」「規劃 + 執行 + 驗證」這種多階段、用 follow_up 參數
-讓 backend 自動接力、**不要每階段都等使用者再 trigger**(那樣使用者體驗很差、
-chat agent 也沒能力背景監控)。
-
-```python
-dispatch_subagent_async(
-    role="coder",
-    task="寫 calculator.py、加基本 test",
-    working_dir="ai_output/calc/",
-    max_iter=8,
-    follow_up=[
-        {"role": "critic", "task": "審查 calculator.py 列 3 個最重要問題、寫 review.md", "max_iter": 10},
-        {"role": "coder", "task": "讀 review.md、修正 calculator.py、跑 test", "max_iter": 10},
-    ],
-)
-```
-
-特性:
-- 每階段 backend 自動接力(不靠 chat agent)、共用同一個 working_dir
-- 上一階段 summary + cwd 自動 prepend 進下個 task prompt
-- 任一階段失敗整條 chain 停、TG push「失敗在第 N/M 階段」
-- 每階段完都 push TG「✅ N/M 完、N+1 派出」、最後一階段 push「🎉 整條完成」
-
-**各 role 的 max_iter 建議下限**(低於這個很容易 max_iter exceeded):
-- `coder` 寫小 script(<100 行)+ 跑驗證 → 8
-- `coder` 寫中型 script / 多檔 / 含 test → 10-12
-- `critic` / `planner` 讀-寫-思任務(讀檔 → 分析 → 寫 review.md / plan.md → done)
-  → **10-12、不要給 5**(光「讀檔 + 寫 markdown + done」就要 4-5 輪、扣掉
-  retry / re-read 5 輪幾乎一定 exceed)
-- `researcher` 收料 + 整理 → 8-10
-- `data_analyst` 讀 csv + 算 + 出表 → 8-12(看資料量)
-
-**何時用 chain vs 單一 dispatch**:
-- 任務含多階段(多 role 配合) → chain
-- 使用者 explicit 說「先 X 再 Y 再 Z」 → chain
-- 任務只是寫個 X / 跑一下 → 單一 dispatch 就好
-
-**典型 chain 配置**:
-- coder → critic → coder fix(寫 + 審 + 改)
-- planner → coder → critic(規劃 + 執行 + 審)
-- researcher → data_analyst(收料 + 整理)
-- **派出後**：告訴使用者 task_id、然後**繼續對話**(對話沒卡)
-- **失敗或卡住**：之後 check_subagent_status 拿到結果再決定:再派一次 / 改 prompt / 放棄
+### Chain 模式(多階段自動接力)
+複雜任務含「寫 + 審 + 改」「規劃 + 執行 + 驗證」、用 dispatch_subagent_async 的
+follow_up 參數讓 backend 自動接力、不必每階段再 trigger。**格式 / max_iter 建議 /
+典型配置請 call `read_help_doc('chain')`**。
 
 ### 不要做的事
 
@@ -1905,43 +1864,12 @@ System prompt 結尾若有「in-flight 子代理」digest、回應使用者時�
 - **已完成且超過 60 秒、使用者沒問**：不再主動提(避免每次都重複報)
 - 想看細節 → 呼叫 `check_subagent_status(task_id)` 拿完整 summary、tool 用量、token 數
 
-## 📂 子代理產物的「讀內容」/「傳檔」(關鍵:不要用 send_file_to_tg)
-
-子代理寫的檔在 `chat-adhoc/<timestamp>_<id>/`、**不屬於任何 workflow**、所以
-`send_file_to_tg`(那個是給 workflow 用的)會失敗。改用兩個 ad-hoc 專用工具:
-
-### `read_subagent_file(task_id, filename)` — 讀檔內容貼進 chat
-- 使用者問「程式內容是什麼」「貼給我看」「寫了什麼」 → 用這個
-- filename 留空 → 先列該 task 的 working_dir 內所有檔
-- 50KB 以下 inline 貼回;過大會建議改用 send_subagent_file_to_tg
-- 安全:限定 task 的 working_dir 內、不能讀外部
-
-### `send_subagent_file_to_tg(task_id, filename, confirm)` — 傳檔到 TG
-- 使用者要「下載」「傳給我」「把 .py 檔給我」 → 用這個(走兩步協議)
-- 跟 send_file_to_tg 不同:後者要 workflow_query、本工具用 task_id
-- 大檔 / binary / 不適合 inline 的都用這個
-
-### 不要做的事
-- 不要為了 ad-hoc 子代理產物去建一個假 workflow 然後用 send_file_to_tg 送(本來就有
-  read_subagent_file / send_subagent_file_to_tg 兩個專用工具)
-- 不要先 read_subagent_file 再貼到 chat 結尾(會讓 chat 訊息巨大、改用 send_*
-  傳檔比較好、user 要看就在手機開)
-
-## ⏹ 中止正在跑的子代理 — `cancel_subagent_task(task_id)`
-
-使用者說「停止」「中斷」「不要跑了」「太久了 cancel」「砍掉」→ 用這個。
-
-判斷規則:
-- check_subagent_status 顯示 state=running、且使用者明確要停 → cancel
-- 已 completed / failed / cancelled 的 → 不用呼叫(回 noop)
-- 跑超過 5 分鐘還沒完 + 使用者沒指示 → **主動建議**「要不要 cancel?」、不擅自停
-
-cancel 後 TG 會自動收到「❌ 子代理 X (cancelled)」通知、chat 不必再額外解釋
-(push 由 backend 直接發、不繞 chat agent)。
-
-**重要警告(別亂提)**:cancel 不會立即停 docker exec、已 spawn 的 subprocess
-會跑完 5-10 秒、但不影響 state — 對使用者來說等同停了。不要因此額外解釋細節、
-混淆使用者。
+## 📂 子代理產物 / ⏹ 中止子代理(細節 lazy load)
+- 使用者問「貼程式給我」「下載」「傳檔」 → call `read_help_doc('files')` 看
+  read_subagent_file / send_subagent_file_to_tg 用法(子代理產物**不能**用
+  send_file_to_tg、那個是 workflow 用的)
+- 使用者說「停止」「中斷」「不要跑了」 → call `read_help_doc('cancel')` 看
+  cancel_subagent_task 規則(完成 / 失敗的不用 cancel)
 <!--TG_ONLY_END-->
 
 ## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML
@@ -2585,8 +2513,15 @@ async def _chat_agent_loop(
 
     # ── 嘗試 bind_tools；失敗就退到舊單輪 ────────────────────────
     tools_enabled = True
+    # desktop 不做 ad-hoc 子代理(那是 TG 專用)、把整套 subagent admin tools 拿掉
+    # 省 6 個 tool schema(每個 ~400-600 tok)、desktop 每輪節省 ~2-3K token
+    _TG_ONLY_TOOLS = {
+        "dispatch_subagent_async", "check_subagent_status",
+        "read_subagent_file", "send_subagent_file_to_tg",
+        "cancel_subagent_task", "read_help_doc",
+    }
     _active_tools = CHAT_TOOLS if _channel == "telegram" else [
-        t for t in CHAT_TOOLS if t.name not in ("dispatch_subagent_async", "check_subagent_status")
+        t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS
     ]
     try:
         llm_with_tools = llm.bind_tools(_active_tools)
@@ -2741,7 +2676,13 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         system_prompt += "\n\n" + req.extra_system
 
     tools_enabled = True
-    _active_tools = [t for t in CHAT_TOOLS if t.name not in ("dispatch_subagent_async", "check_subagent_status")]
+    # stream 端點永遠 desktop、把整套 subagent admin tools 拿掉(同 _chat_agent_loop)
+    _TG_ONLY_TOOLS = {
+        "dispatch_subagent_async", "check_subagent_status",
+        "read_subagent_file", "send_subagent_file_to_tg",
+        "cancel_subagent_task", "read_help_doc",
+    }
+    _active_tools = [t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS]
     try:
         llm_with_tools = llm.bind_tools(_active_tools)
     except Exception as e:
