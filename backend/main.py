@@ -1860,6 +1860,28 @@ System prompt 結尾若有「in-flight 子代理」digest、回應使用者時�
   > （✅ 子代理 abc123 跑完了：寫了 sincos.py 在 ai_output/sincos_tool/、test 通過）
 - **已完成且超過 60 秒、使用者沒問**：不再主動提(避免每次都重複報)
 - 想看細節 → 呼叫 `check_subagent_status(task_id)` 拿完整 summary、tool 用量、token 數
+
+## 📂 子代理產物的「讀內容」/「傳檔」(關鍵:不要用 send_file_to_tg)
+
+子代理寫的檔在 `chat-adhoc/<timestamp>_<id>/`、**不屬於任何 workflow**、所以
+`send_file_to_tg`(那個是給 workflow 用的)會失敗。改用兩個 ad-hoc 專用工具:
+
+### `read_subagent_file(task_id, filename)` — 讀檔內容貼進 chat
+- 使用者問「程式內容是什麼」「貼給我看」「寫了什麼」 → 用這個
+- filename 留空 → 先列該 task 的 working_dir 內所有檔
+- 50KB 以下 inline 貼回;過大會建議改用 send_subagent_file_to_tg
+- 安全:限定 task 的 working_dir 內、不能讀外部
+
+### `send_subagent_file_to_tg(task_id, filename, confirm)` — 傳檔到 TG
+- 使用者要「下載」「傳給我」「把 .py 檔給我」 → 用這個(走兩步協議)
+- 跟 send_file_to_tg 不同:後者要 workflow_query、本工具用 task_id
+- 大檔 / binary / 不適合 inline 的都用這個
+
+### 不要做的事
+- 不要為了 ad-hoc 子代理產物去建一個假 workflow 然後用 send_file_to_tg 送(本來就有
+  read_subagent_file / send_subagent_file_to_tg 兩個專用工具)
+- 不要先 read_subagent_file 再貼到 chat 結尾(會讓 chat 訊息巨大、改用 send_*
+  傳檔比較好、user 要看就在手機開)
 <!--TG_ONLY_END-->
 
 ## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML

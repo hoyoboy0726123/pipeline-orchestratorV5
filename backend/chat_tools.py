@@ -1205,6 +1205,157 @@ def check_subagent_status(task_id: str = "") -> str:
     return "\n".join(out)
 
 
+@tool
+def read_subagent_file(task_id: str, filename: str = "") -> str:
+    """讀 ad-hoc 子代理(dispatch_subagent_async 派出的)產物檔案內容、純文字回到 chat。
+
+    用途:使用者要看子代理寫了什麼程式 / 報告 / 結果時、用這個工具讀檔貼在 chat 內。
+
+    Args:
+        task_id: dispatch_subagent_async 回的 task_id(12 字 hex)
+        filename: 檔名(留空 → 列 working_dir 內所有檔)
+
+    Returns:
+        檔案文字內容(50KB 以下)、過大或 binary 檔提示用 send_subagent_file_to_tg 改傳檔。
+
+    安全限制:
+        - 路徑限定在該 task 的 working_dir 內、無法讀外部
+        - 50 KB 以下才能 inline 貼進 chat、避免 token 爆
+    """
+    from pathlib import Path
+    info = _chat_subagents.get(task_id)
+    if not info:
+        return f"❌ task_id={task_id!r} 不存在(可能還沒派、或重啟後消失)。先 check_subagent_status 看現有 task"
+    wd = Path(info.get("working_dir", "")).resolve()
+    if not wd.exists():
+        return f"❌ working_dir 不存在: {wd}(子代理可能還沒寫任何檔)"
+
+    if not filename or not filename.strip():
+        files = sorted(f for f in wd.iterdir() if f.is_file())
+        if not files:
+            return f"📁 task {task_id} working_dir 內目前沒任何檔: {wd}"
+        listing = "\n".join(f"  - {f.name} ({f.stat().st_size:,} bytes)" for f in files)
+        return f"📁 task {task_id} working_dir: {wd}\n{listing}\n\n用 filename 參數指定要讀哪個。"
+
+    # 安全:解析 filename 不可跳出 wd
+    target = (wd / filename).resolve()
+    try:
+        target.relative_to(wd)
+    except ValueError:
+        return f"❌ {filename!r} 跳出 task working_dir、拒絕"
+    if not target.exists():
+        return f"❌ {filename!r} 不存在 in {wd}"
+    if not target.is_file():
+        return f"❌ {filename!r} 不是檔案"
+
+    size = target.stat().st_size
+    if size > 50_000:
+        return (
+            f"❌ {filename} 太大 ({size:,} bytes、>50KB)、不適合 inline 貼進 chat。\n"
+            f"請改呼叫 send_subagent_file_to_tg 直接傳檔到使用者 Telegram。"
+        )
+
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+        return f"=== {filename} ({size:,} bytes) ===\n{content}"
+    except Exception as e:
+        return f"❌ 讀 {filename} 失敗: {type(e).__name__}: {e}"
+
+
+@tool
+def send_subagent_file_to_tg(task_id: str, filename: str = "", confirm: bool = False) -> str:
+    """把 ad-hoc 子代理的產物送到使用者 Telegram(走 send_document)。
+
+    跟 send_file_to_tg 的差別:後者必須綁某 workflow、不接受 chat-adhoc 路徑;
+    本工具用 task_id 索引、限定在該 task 的 working_dir 內、可送任何 binary / 大檔。
+
+    Args:
+        task_id: dispatch_subagent_async 的 task_id
+        filename: 檔名(留空 → 列檔讓使用者選);
+                  也接受相對路徑(例 'src/main.py')、解到 working_dir 內。
+        confirm: False=預覽(走兩步協議) / True=實送
+
+    安全限制:
+        - 路徑限定在該 task 的 working_dir 內
+        - TG 單檔上限 50 MB(TG 自己限制)
+    """
+    from pathlib import Path
+    info = _chat_subagents.get(task_id)
+    if not info:
+        return f"❌ task_id={task_id!r} 不存在"
+    wd = Path(info.get("working_dir", "")).resolve()
+    if not wd.exists():
+        return f"❌ working_dir 不存在: {wd}"
+
+    if not filename or not filename.strip():
+        files = sorted(f for f in wd.iterdir() if f.is_file())
+        if not files:
+            return f"📁 working_dir 內沒任何檔: {wd}"
+        listing = "\n".join(f"  - {f.name} ({f.stat().st_size:,} bytes)" for f in files)
+        return f"📁 task {task_id} 內可送的檔:\n{listing}\n\n用 filename 指定送哪個。"
+
+    target = (wd / filename).resolve()
+    try:
+        target.relative_to(wd)
+    except ValueError:
+        return f"❌ {filename!r} 跳出 task working_dir、拒絕"
+    if not target.exists():
+        return f"❌ {filename!r} 不存在 in {wd}"
+    if not target.is_file():
+        return f"❌ {filename!r} 不是檔案"
+
+    size_bytes = target.stat().st_size
+    size_kb = size_bytes / 1024
+
+    if not confirm:
+        return (
+            f"[PREVIEW 不送] task {task_id} → {filename}\n"
+            f"路徑: {target}\n"
+            f"大小: {size_kb:,.1f} KB ({size_bytes:,} bytes)\n"
+            f"⚠️ 取得使用者同意後、再次呼叫本工具並設 confirm=True。\n"
+            f"（TG 單檔上限 50 MB、超過會失敗）"
+        )
+
+    if size_bytes > 50 * 1024 * 1024:
+        return f"❌ {size_kb:,.1f} KB 超過 TG 50 MB 上限"
+
+    try:
+        from pipeline.runner import _get_tg_token, _get_tg_chat_id
+        from telegram import Bot
+        import asyncio as _asyncio
+        token = _get_tg_token()
+        chat_id = _get_tg_chat_id()
+        if not token or not chat_id:
+            return "❌ Telegram 未設定(token / chat_id 缺)、無法送"
+
+        async def _do_send():
+            async with Bot(token=token) as bot:
+                with open(target, "rb") as f:
+                    await bot.send_document(
+                        chat_id=chat_id,
+                        document=f,
+                        filename=target.name,
+                        caption=f"📎 {target.name}\n來自子代理 task {task_id} ({info.get('role')})",
+                    )
+
+        # sync tool → async send:看當前是否有 running event loop、若有就 thread 內跑 asyncio.run
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_asyncio.run, _do_send())
+                    future.result(timeout=120)
+            else:
+                loop.run_until_complete(_do_send())
+        except RuntimeError:
+            _asyncio.run(_do_send())
+
+        return f"✅ 已送出 {target.name} ({size_kb:,.1f} KB) 到 Telegram"
+    except Exception as e:
+        return f"❌ 送 TG 失敗: {type(e).__name__}: {e}"
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
@@ -1213,5 +1364,6 @@ CHAT_TOOLS = [
     web_search,                              # 網路搜尋(限定工作流相關研究)
     list_schedules, schedule_workflow, cancel_schedule,  # 排程相關(write 走 two-step)
     dispatch_subagent_async, check_subagent_status,  # 子代理派出 / 查狀態(沙盒隔離、無 confirm)
+    read_subagent_file, send_subagent_file_to_tg,    # 子代理產物 讀 / 傳 TG(限定 task working_dir)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}
