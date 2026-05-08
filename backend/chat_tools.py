@@ -1150,12 +1150,26 @@ async def dispatch_subagent_async(
                 "result": {"error": f"{type(e).__name__}: {e}"},
             })
         # Phase 3:子代理完成時 push 訊息到使用者 TG(繞過 chat agent、直接 send_message)
-        # 因 chat 是 request-response、AI 不會自己跳出來說話、不 push 的話使用者要主動問。
-        # 這個 push 對 TG 通道有意義(手機收得到 notification);桌面用戶不在 TG 上不影響
         try:
             await _push_subagent_done_to_tg(task_id)
         except Exception:
             pass
+
+    _bg_task = asyncio.create_task(_runner())
+    # 把 asyncio.Task 物件也存進 registry、給 cancel_subagent_task 用
+    _chat_subagents[task_id]["_task"] = _bg_task
+
+    est = "30-60s" if max_iter <= 4 else "60-180s"
+    return (
+        f"✅ 子代理已派出\n"
+        f"  task_id: {task_id}\n"
+        f"  role:    {role}\n"
+        f"  working_dir: {wd}\n"
+        f"  max_iter: {max_iter}\n"
+        f"  預估: {est}\n\n"
+        f"對話可繼續。要查狀態 → check_subagent_status('{task_id}')。"
+    )
+
 
 # ── 完成 push 到 TG(任何 channel 派出的 subagent 都能 push、只要有 telegram_chat_id) ──
 async def _push_subagent_done_to_tg(task_id: str) -> None:
@@ -1210,21 +1224,6 @@ async def _push_subagent_done_to_tg(task_id: str) -> None:
                 await bot.send_message(chat_id=int(chat_id), text=msg)
         except Exception:
             pass
-
-    _bg_task = asyncio.create_task(_runner())
-    # 把 asyncio.Task 物件也存進 registry、給 cancel_subagent_task 用
-    _chat_subagents[task_id]["_task"] = _bg_task
-
-    est = "30-60s" if max_iter <= 4 else "60-180s"
-    return (
-        f"✅ 子代理已派出\n"
-        f"  task_id: {task_id}\n"
-        f"  role:    {role}\n"
-        f"  working_dir: {wd}\n"
-        f"  max_iter: {max_iter}\n"
-        f"  預估: {est}\n\n"
-        f"對話可繼續。要查狀態 → check_subagent_status('{task_id}')。"
-    )
 
 
 @tool
