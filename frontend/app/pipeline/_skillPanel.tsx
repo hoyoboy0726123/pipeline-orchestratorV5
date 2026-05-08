@@ -211,7 +211,7 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
                   Skill 功能需要模型有足夠推理能力才能正確理解 SKILL.md 與使用子資源腳本。建議：
                 </p>
                 <ul className="text-amber-700 mt-1 ml-3 list-disc space-y-0.5">
-                  <li><b>Groq / Gemini / OpenRouter</b>：使用各家旗艦或大型模型（非輕量版）</li>
+                  <li><b>Groq / Gemini / OpenAI / Anthropic</b>：使用各家旗艦或大型模型（非輕量版）</li>
                   <li><b>Ollama</b>：避免使用 8B 以下小模型（能力不足會忽略 skill 指示）</li>
                 </ul>
                 <p className="text-amber-700 mt-1">若結果不如預期，切換更強的模型並以「完整模式」重跑覆蓋 recipe。</p>

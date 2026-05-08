@@ -210,7 +210,8 @@ async def run_visual_validation(
                    f"請到「設定」頁切到有 vision 能力的模型再試，例如：\n"
                    f"• Groq：`meta-llama/llama-4-scout-17b-16e-instruct` / `llama-3.2-90b-vision-preview`\n"
                    f"• Gemini：`gemini-2.5-pro` / `gemini-2.5-flash`\n"
-                   f"• OpenRouter：GPT-4o / Claude 3.5 / Gemini 2.5 等多模態模型")
+                   f"• OpenAI：`gpt-4o` / `gpt-4o-mini`\n"
+                   f"• Anthropic：`claude-sonnet-4-6` / `claude-opus-4-7`")
         # 3. 網路 / 連線
         elif any(k in err_low for k in ("connection", "timeout", "timed out", "network",
                                          "dns", "resolve")):

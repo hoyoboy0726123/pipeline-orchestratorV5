@@ -94,7 +94,7 @@ class ModelSettingsRequest(BaseModel):
     ollama_thinking: Optional[str] = None   # "auto" | "on" | "off"
     ollama_num_ctx: Optional[int] = None
     gemini_thinking: Optional[str] = None   # "off" | "auto" | "low" | "medium" | "high"
-    openrouter_thinking: Optional[str] = None  # "off" | "on"
+    anthropic_thinking: Optional[str] = None  # "off" | "on" — Claude Opus 4 extended thinking
 
 
 @app.put("/settings/model")
@@ -103,7 +103,7 @@ async def put_model_settings(req: ModelSettingsRequest):
     try:
         return update_settings(
             req.provider, req.model, req.ollama_base_url, req.ollama_thinking, req.ollama_num_ctx,
-            req.gemini_thinking, req.openrouter_thinking,
+            req.gemini_thinking, req.anthropic_thinking,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -120,7 +120,7 @@ async def get_available_models(refresh: bool = False):
     import time as _time
     import asyncio as _asyncio
     import httpx
-    from config import GROQ_API_KEY as _groq_key, GEMINI_API_KEY as _gemini_key, OPENROUTER_API_KEY as _or_key
+    from config import GROQ_API_KEY as _groq_key, GEMINI_API_KEY as _gemini_key, OPENAI_API_KEY as _oai_key, ANTHROPIC_API_KEY as _ant_key
 
     # 命中快取直接回，~5ms
     if not refresh and _MODELS_CACHE["data"] and (_time.time() - _MODELS_CACHE["ts"]) < _MODELS_CACHE_TTL:
@@ -132,8 +132,10 @@ async def get_available_models(refresh: bool = False):
     groq_error: Optional[str] = None
     gemini_models: list[dict] = []
     gemini_error: Optional[str] = None
-    openrouter_models: list[dict] = []
-    openrouter_error: Optional[str] = None
+    openai_models: list[dict] = []
+    openai_error: Optional[str] = None
+    anthropic_models: list[dict] = []
+    anthropic_error: Optional[str] = None
 
     base_url = "http://localhost:11434"
     try:
@@ -200,26 +202,51 @@ async def get_available_models(refresh: bool = False):
             except Exception as e:
                 return [], f"Gemini API 錯誤：{e}"
 
-        async def fetch_openrouter() -> tuple[list[dict], Optional[str]]:
+        async def fetch_openai() -> tuple[list[dict], Optional[str]]:
+            if not _oai_key:
+                return [], "未設定 OPENAI_API_KEY"
             try:
-                r = await client.get("https://openrouter.ai/api/v1/models")
+                r = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {_oai_key}"},
+                )
                 r.raise_for_status()
+                # OpenAI list 含很多 embedding / audio / image / fine-tune 模型、過濾出 chat 用的
+                _CHAT_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
+                _EXCLUDE = ("audio", "transcribe", "tts", "embed", "moderation", "realtime",
+                            "instruct", "vision-preview", "search-preview")
                 models = []
                 for m in r.json().get("data", []):
-                    pricing = m.get("pricing", {})
-                    if str(pricing.get("prompt", "1")) != "0" or str(pricing.get("completion", "1")) != "0":
-                        continue
                     mid = m.get("id", "")
-                    ctx = m.get("context_length", 0)
-                    name = m.get("name", mid)
-                    label = name
-                    if ctx:
-                        label += f"（ctx={ctx // 1024}K）"
-                    models.append({"id": mid, "label": label, "context_length": ctx})
+                    if not any(mid.startswith(p) for p in _CHAT_PREFIXES):
+                        continue
+                    if any(kw in mid for kw in _EXCLUDE):
+                        continue
+                    models.append({"id": mid, "label": mid})
                 models.sort(key=lambda x: x["id"])
                 return models, None
             except Exception as e:
-                return [], f"OpenRouter API 錯誤：{e}"
+                return [], f"OpenAI API 錯誤：{e}"
+
+        async def fetch_anthropic() -> tuple[list[dict], Optional[str]]:
+            if not _ant_key:
+                return [], "未設定 ANTHROPIC_API_KEY"
+            try:
+                r = await client.get(
+                    "https://api.anthropic.com/v1/models",
+                    headers={"x-api-key": _ant_key, "anthropic-version": "2023-06-01"},
+                )
+                r.raise_for_status()
+                models = []
+                for m in r.json().get("data", []):
+                    mid = m.get("id", "")
+                    display = m.get("display_name") or mid
+                    label = f"{display}（{mid}）" if display != mid else mid
+                    models.append({"id": mid, "label": label})
+                models.sort(key=lambda x: x["id"])
+                return models, None
+            except Exception as e:
+                return [], f"Anthropic API 錯誤：{e}"
 
         async def fetch_ollama() -> tuple[list[dict], Optional[str]]:
             try:
@@ -237,18 +264,25 @@ async def get_available_models(refresh: bool = False):
             except Exception as e:
                 return [], f"無法連線 Ollama（{base_url}）：{e}"
 
-        # 四條 coroutine 一口氣併發執行，總時間 ≈ max 而不是 sum
+        # 五條 coroutine 一口氣併發執行，總時間 ≈ max 而不是 sum
         (groq_models, groq_error), (gemini_models, gemini_error), \
-        (openrouter_models, openrouter_error), (ollama_models, ollama_error) = \
-            await _asyncio.gather(fetch_groq(), fetch_gemini(), fetch_openrouter(), fetch_ollama())
+        (openai_models, openai_error), (anthropic_models, anthropic_error), \
+        (ollama_models, ollama_error) = \
+            await _asyncio.gather(
+                fetch_groq(), fetch_gemini(),
+                fetch_openai(), fetch_anthropic(),
+                fetch_ollama(),
+            )
 
     payload = {
         "groq": groq_models,
         "groq_error": groq_error,
         "gemini": gemini_models,
         "gemini_error": gemini_error,
-        "openrouter": openrouter_models,
-        "openrouter_error": openrouter_error,
+        "openai": openai_models,
+        "openai_error": openai_error,
+        "anthropic": anthropic_models,
+        "anthropic_error": anthropic_error,
         "ollama": ollama_models,
         "ollama_base_url": base_url,
         "ollama_error": ollama_error,

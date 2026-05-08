@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any, Optional
 
-from config import GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
+from config import GROQ_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
 from settings import get_settings
 
 
@@ -45,17 +45,23 @@ def build_llm(temperature: float = 0.0) -> Any:
                 kwargs["thinking_budget"] = budget_map.get(gem_thinking, -1)
         return ChatGoogleGenerativeAI(**kwargs)
 
-    if provider == "openrouter":
+    if provider == "openai":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model,
-            api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
+            api_key=OPENAI_API_KEY,
             temperature=temperature,
-            default_headers={
-                "HTTP-Referer": "http://localhost:3002",
-                "X-Title": "Pipeline Orchestrator",
-            },
+        )
+
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        # Anthropic 預設沒設 max_tokens 會吃 LangChain 的 1024 default、Claude 4 系列容易截斷；
+        # 這裡明確給 8192、跟 Gemini 那邊邏輯一致
+        return ChatAnthropic(
+            model=model,
+            api_key=ANTHROPIC_API_KEY,
+            temperature=temperature,
+            max_tokens=8192,
         )
 
     if provider == "ollama":

@@ -335,13 +335,13 @@ export async function deletePipelineSchedule(taskId: string): Promise<void> {
 
 // ── Settings ─────────────────────────────────────────────────
 export interface ModelSettings {
-  provider: 'groq' | 'ollama' | 'gemini' | 'openrouter'
+  provider: 'groq' | 'ollama' | 'gemini' | 'openai' | 'anthropic'
   model: string
   ollama_base_url: string
   ollama_thinking: 'auto' | 'on' | 'off'
   ollama_num_ctx: number
   gemini_thinking: 'off' | 'auto' | 'low' | 'medium' | 'high'
-  openrouter_thinking: 'off' | 'on'
+  anthropic_thinking: 'off' | 'on'
 }
 
 export interface ModelOption {
@@ -356,8 +356,10 @@ export interface AvailableModels {
   groq_error: string | null
   gemini: ModelOption[]
   gemini_error: string | null
-  openrouter: ModelOption[]
-  openrouter_error: string | null
+  openai: ModelOption[]
+  openai_error: string | null
+  anthropic: ModelOption[]
+  anthropic_error: string | null
   ollama: ModelOption[]
   ollama_base_url: string
   ollama_error: string | null

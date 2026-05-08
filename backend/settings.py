@@ -11,13 +11,13 @@ _lock = threading.Lock()
 
 # 預設：沿用環境變數 / config.py 預設的 Groq 模型
 _DEFAULT = {
-    "provider": "groq",           # "groq" | "ollama"
+    "provider": "groq",           # "groq" | "ollama" | "gemini" | "openai" | "anthropic"
     "model": GROQ_MODEL_MAIN,      # e.g. "meta-llama/llama-4-scout-17b-16e-instruct" or "qwen3:8b"
     "ollama_base_url": "http://localhost:11434",
-    "ollama_thinking": "off",      # "auto" | "on" | "off" — 預���關閉，避免 thinking 模式 rambling 卡��
+    "ollama_thinking": "off",      # "auto" | "on" | "off" — 預設關閉，避免 thinking 模式 rambling 卡住
     "ollama_num_ctx": 16384,       # Ollama context window tokens（僅 Ollama）
     "gemini_thinking": "off",      # "off" | "auto" | "low" | "medium" | "high"
-    "openrouter_thinking": "off",  # "off" | "on" — DeepSeek R1 等模型的思考模式
+    "anthropic_thinking": "off",   # "off" | "on" — Claude Opus 4 系列 extended thinking
     # 通知設定
     "telegram_bot_token": "",
     "telegram_chat_id": "",
@@ -71,11 +71,11 @@ def update_settings(
     ollama_thinking: Optional[str] = None,
     ollama_num_ctx: Optional[int] = None,
     gemini_thinking: Optional[str] = None,
-    openrouter_thinking: Optional[str] = None,
+    anthropic_thinking: Optional[str] = None,
 ) -> dict:
     """更新並寫入磁碟。"""
     global _cache
-    if provider not in ("groq", "ollama", "gemini", "openrouter"):
+    if provider not in ("groq", "ollama", "gemini", "openai", "anthropic"):
         raise ValueError(f"unsupported provider: {provider}")
     if not model or not isinstance(model, str):
         raise ValueError("model is required")
@@ -85,9 +85,9 @@ def update_settings(
     gem_thinking = (gemini_thinking or "off").strip()
     if gem_thinking not in ("off", "auto", "low", "medium", "high"):
         raise ValueError(f"invalid gemini_thinking: {gem_thinking}")
-    or_thinking = (openrouter_thinking or "off").strip()
-    if or_thinking not in ("off", "on"):
-        raise ValueError(f"invalid openrouter_thinking: {or_thinking}")
+    ant_thinking = (anthropic_thinking or "off").strip()
+    if ant_thinking not in ("off", "on"):
+        raise ValueError(f"invalid anthropic_thinking: {ant_thinking}")
     num_ctx = ollama_num_ctx if ollama_num_ctx is not None else _DEFAULT["ollama_num_ctx"]
     if not isinstance(num_ctx, int) or num_ctx < 2048 or num_ctx > 262144:
         raise ValueError(f"invalid ollama_num_ctx: {num_ctx}（需介於 2048~262144）")
@@ -102,7 +102,7 @@ def update_settings(
             "ollama_thinking": thinking,
             "ollama_num_ctx": num_ctx,
             "gemini_thinking": gem_thinking,
-            "openrouter_thinking": or_thinking,
+            "anthropic_thinking": ant_thinking,
         })
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:

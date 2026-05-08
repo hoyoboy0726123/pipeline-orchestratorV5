@@ -1668,7 +1668,7 @@ async def run_pipeline(
                 val = ValidationResult(
                     status="rate_limited",
                     reason=(exec_result.stderr or "LLM 配額用盡或速率受限（429）"),
-                    suggestion="等配額重置或在 Settings 切換 provider（Groq / OpenRouter / Ollama 本地）",
+                    suggestion="等配額重置或在 Settings 切換 provider（Groq / OpenAI / Anthropic / Ollama 本地）",
                 )
             # outlook_automation 節點：agent 自己回 done(success) 就決定成敗了，不需 LLM 驗證
             elif step.outlook_automation:
