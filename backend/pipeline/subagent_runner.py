@@ -107,6 +107,9 @@ class SubagentResult:
     iterations: int
     tool_calls_made: list[dict] = field(default_factory=list)
     error: Optional[str] = None
+    # 多輪 LLM call 的累計 token 用量、給 budget 統計與 trace 視圖。
+    # 結構: {"input_tokens": int, "output_tokens": int, "total_tokens": int, "model": str}
+    token_usage: dict = field(default_factory=dict)
 
 
 def load_roles() -> dict[str, dict]:
@@ -263,27 +266,40 @@ async def run_subagent(
     tool_calls_made: list[dict] = []
     final_message = ""
     success = False
+    # 累計每輪 LLM 的 token usage（subagent 整段執行的總成本）
+    accumulated_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "model": ""}
 
     for i in range(max_iter):
         iteration = i + 1
         log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter}")
 
         try:
-            reply = (await invoke_with_streaming(
+            llm_result = await invoke_with_streaming(
                 llm, messages,
                 label=f"subagent[{role_name}]/{step_name}",
                 timeout=600.0,
                 logger=log,
-            )).strip()
+                return_usage=True,
+            )
+            reply = (llm_result.get("content") or "").strip()
+            um = llm_result.get("usage_metadata") or {}
+            if um:
+                accumulated_usage["input_tokens"] += um.get("input_tokens", 0) or 0
+                accumulated_usage["output_tokens"] += um.get("output_tokens", 0) or 0
+                accumulated_usage["total_tokens"] += um.get("total_tokens", 0) or 0
+            if not accumulated_usage["model"]:
+                accumulated_usage["model"] = llm_result.get("model") or ""
         except asyncio.TimeoutError:
             return SubagentResult(
                 success=False, final_message="", iterations=iteration,
                 tool_calls_made=tool_calls_made, error="LLM 串流逾時",
+                token_usage=accumulated_usage,
             )
         except Exception as e:
             return SubagentResult(
                 success=False, final_message="", iterations=iteration,
                 tool_calls_made=tool_calls_made, error=f"LLM 呼叫失敗: {type(e).__name__}: {e}",
+                token_usage=accumulated_usage,
             )
 
         tool_calls = _parse_skill_tool_calls(reply)
@@ -363,6 +379,7 @@ async def run_subagent(
         return SubagentResult(
             success=False, final_message=final_message, iterations=iterations_done,
             tool_calls_made=tool_calls_made, error="reached_max_iter_without_done",
+            token_usage=accumulated_usage,
         )
 
     return SubagentResult(
@@ -370,4 +387,5 @@ async def run_subagent(
         final_message=final_message,
         iterations=iterations_done,
         tool_calls_made=tool_calls_made,
+        token_usage=accumulated_usage,
     )

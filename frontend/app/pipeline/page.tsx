@@ -351,6 +351,9 @@ export default function PipelinePage() {
   const [pendingRecipeCount, setPendingRecipeCount] = useState(0)
   const [showLog, setShowLog]       = useState(false)
   const [logLines, setLogLines]     = useState<string[]>([])
+  // Trace 模式：log panel 切換顯示「pipeline run 的 step_results / tool_calls / token timeline」
+  const [showTrace, setShowTrace]   = useState(false)
+  const [traceRun, setTraceRun]     = useState<PipelineRun | null>(null)
   const logEndRef  = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
   const logAutoScrollRef = useRef(true)
@@ -1705,11 +1708,85 @@ export default function PipelinePage() {
               {running && <span className="text-xs text-green-400 animate-pulse">● 執行中</span>}
               {!running && runIdRef.current && <span className="text-xs text-gray-500">Run: {runIdRef.current}</span>}
               <div className="flex-1" />
+              <button
+                onClick={async () => {
+                  const next = !showTrace
+                  if (next && runIdRef.current) {
+                    try {
+                      const run = await getPipelineRun(runIdRef.current)
+                      setTraceRun(run)
+                    } catch { /* ignore */ }
+                  }
+                  setShowTrace(next)
+                }}
+                className={`text-xs px-2 py-0.5 rounded transition-colors ${showTrace ? 'bg-indigo-700 text-white hover:bg-indigo-600' : 'text-gray-500 hover:text-gray-300'}`}
+                title="切換 Trace 視圖（顯示每步驟的 tool 呼叫與 token 用量）"
+              >📊 Trace</button>
               <button onClick={() => setLogLines([])} className="text-xs text-gray-500 hover:text-gray-300 px-2">清除</button>
               <button onClick={() => setShowLog(false)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
+            {/* Trace block — toggle 自 header 的 📊 按鈕；展示當前 run 的 step / tool / token 時間軸 */}
+            {showTrace && (
+              <div className="border-b border-gray-800 bg-gray-900/50 max-h-64 overflow-y-auto p-3 font-mono text-xs leading-5 shrink-0">
+                {!traceRun ? (
+                  <span className="text-gray-600">{runIdRef.current ? '載入 trace 中…（再按一次 📊 重新拉）' : '尚無 run — 請先執行 Pipeline'}</span>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-baseline gap-3 pb-1 border-b border-gray-800">
+                      <span className="text-gray-300 font-semibold">{traceRun.pipeline_name}</span>
+                      <span className="text-gray-500">({traceRun.status})</span>
+                      {(() => {
+                        const srs = traceRun.step_results || []
+                        const totalTokens = srs.reduce((s: number, sr) => s + (sr.token_usage?.total_tokens || 0), 0)
+                        const totalTools = srs.reduce((s: number, sr) => s + (sr.tool_calls?.length || 0), 0)
+                        return (
+                          <span className="text-gray-400 text-[11px] ml-auto">
+                            合計 <span className="text-indigo-300">{totalTokens.toLocaleString()}</span> tokens ·{' '}
+                            <span className="text-indigo-300">{totalTools}</span> tool calls ·{' '}
+                            <span className="text-indigo-300">{srs.length}</span> steps
+                          </span>
+                        )
+                      })()}
+                    </div>
+                    {(traceRun.step_results || []).map((sr, i) => {
+                      const ok = sr.validation_status === 'ok'
+                      const failed = sr.validation_status === 'failed'
+                      return (
+                        <details key={i} open className="bg-gray-950/60 border border-gray-800 rounded">
+                          <summary className="px-2 py-1.5 cursor-pointer text-gray-300 hover:bg-gray-800/40 select-none">
+                            <span className="text-gray-500">[{i + 1}]</span>{' '}
+                            <span className={ok ? 'text-green-400' : failed ? 'text-red-400' : 'text-yellow-400'}>
+                              {ok ? '✓' : failed ? '✗' : '⚠'}
+                            </span>{' '}
+                            <span className="font-medium">{sr.step_name}</span>
+                            {sr.token_usage?.total_tokens ? (
+                              <span className="text-gray-500 ml-2 text-[11px]">({(sr.token_usage.total_tokens).toLocaleString()} tok)</span>
+                            ) : null}
+                            {sr.tool_calls?.length ? (
+                              <span className="text-gray-500 ml-1 text-[11px]">· {sr.tool_calls.length} tools</span>
+                            ) : null}
+                          </summary>
+                          <div className="px-2 pb-2 space-y-1 border-t border-gray-800 pt-1.5">
+                            {(sr.tool_calls || []).map((tc, j) => (
+                              <div key={j} className="bg-gray-950 rounded px-2 py-1 border border-gray-800/50">
+                                <div className="text-indigo-300">🛠 <span className="font-mono">{tc.name}</span></div>
+                                {tc.input_preview && <div className="text-gray-500 mt-0.5 break-all">› {tc.input_preview}</div>}
+                                {tc.result_preview && <div className="text-gray-400 mt-0.5 break-all">← {tc.result_preview}</div>}
+                              </div>
+                            ))}
+                            {!sr.tool_calls?.length && (
+                              <div className="text-gray-600 text-[11px]">（無 tool call — 此步驟非 LLM agent loop，例如 script / human_confirm / web_crawler）</div>
+                            )}
+                          </div>
+                        </details>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
             <div ref={logContainerRef} className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-5"
               onScroll={() => {
                 const el = logContainerRef.current

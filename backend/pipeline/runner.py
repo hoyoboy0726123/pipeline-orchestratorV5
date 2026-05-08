@@ -1256,6 +1256,13 @@ async def run_pipeline(
         total = len(config.steps)
         logger.info(f"══ 步驟 {step_num}/{total}：{step.name} ══")
 
+        # Trace / token tracking — 每步重置、subagent / skill 分支會填入。
+        # 其他 step type（script / human_confirm / web_crawler / 等）保持空 dict / 空 list、
+        # 表示這步沒有 LLM 多輪推理可記。step_result 結尾再寫進 StepResult.token_usage / tool_calls。
+        step_token_usage: dict = {}
+        step_tool_calls: list = []
+        step_started_at = datetime.now().isoformat()
+
         # 步驟開始前 snapshot workflow 輸出資料夾（mtime 比對用）
         # 步驟結束後 _diff_snapshot_pick_main 找新增/修改的檔，存進 StepResult.actual_output_path
         # → TG「取任一步輸出」就能對應到該步真正寫的檔（不再讓多個 skill 步驟搶到「最新檔」）
@@ -1595,6 +1602,9 @@ async def run_pipeline(
                     step_logger=logger,
                 )
                 _tools_used = [tc.get("name", "?") for tc in sub_result.tool_calls_made]
+                # 把 subagent 的 token usage / tool 呼叫時間軸記到該 step、StepResult 結尾寫入
+                step_token_usage = sub_result.token_usage or {}
+                step_tool_calls = list(sub_result.tool_calls_made or [])
                 exec_result = _ExecResult(
                     exit_code=0 if sub_result.success else 1,
                     stdout=(
@@ -1794,6 +1804,10 @@ async def run_pipeline(
                 validation_suggestion=val.suggestion,
                 retries_used=retries_used,
                 actual_output_path=actual_out,
+                token_usage=step_token_usage,
+                tool_calls=step_tool_calls,
+                started_at=step_started_at,
+                ended_at=datetime.now().isoformat(),
             )
 
             # 更新或追加步驟結果

@@ -2697,7 +2697,12 @@ def _run_to_dict(r):
             {"step_index": s.step_index, "step_name": s.step_name, "exit_code": s.exit_code,
              "validation_status": s.validation_status, "validation_reason": s.validation_reason,
              "validation_suggestion": s.validation_suggestion, "retries_used": s.retries_used,
-             "stdout_tail": s.stdout_tail, "stderr_tail": s.stderr_tail}
+             "stdout_tail": s.stdout_tail, "stderr_tail": s.stderr_tail,
+             "actual_output_path": getattr(s, 'actual_output_path', '') or '',
+             "token_usage": getattr(s, 'token_usage', {}) or {},
+             "tool_calls": getattr(s, 'tool_calls', []) or [],
+             "started_at": getattr(s, 'started_at', '') or '',
+             "ended_at": getattr(s, 'ended_at', '') or ''}
             for s in r.step_results
         ],
         "config_dict": r.config_dict,
