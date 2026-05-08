@@ -33,3 +33,4 @@ playwright
 yt-dlp
 markitdown[pptx]
 qrcode
+xlsxwriter
