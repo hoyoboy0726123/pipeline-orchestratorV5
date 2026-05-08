@@ -1855,7 +1855,7 @@ dispatch_subagent_async(
     working_dir="ai_output/calc/",
     max_iter=8,
     follow_up=[
-        {"role": "critic", "task": "審查 calculator.py 列 3 個最重要問題、寫 review.md", "max_iter": 5},
+        {"role": "critic", "task": "審查 calculator.py 列 3 個最重要問題、寫 review.md", "max_iter": 10},
         {"role": "coder", "task": "讀 review.md、修正 calculator.py、跑 test", "max_iter": 10},
     ],
 )
@@ -1866,6 +1866,15 @@ dispatch_subagent_async(
 - 上一階段 summary + cwd 自動 prepend 進下個 task prompt
 - 任一階段失敗整條 chain 停、TG push「失敗在第 N/M 階段」
 - 每階段完都 push TG「✅ N/M 完、N+1 派出」、最後一階段 push「🎉 整條完成」
+
+**各 role 的 max_iter 建議下限**(低於這個很容易 max_iter exceeded):
+- `coder` 寫小 script(<100 行)+ 跑驗證 → 8
+- `coder` 寫中型 script / 多檔 / 含 test → 10-12
+- `critic` / `planner` 讀-寫-思任務(讀檔 → 分析 → 寫 review.md / plan.md → done)
+  → **10-12、不要給 5**(光「讀檔 + 寫 markdown + done」就要 4-5 輪、扣掉
+  retry / re-read 5 輪幾乎一定 exceed)
+- `researcher` 收料 + 整理 → 8-10
+- `data_analyst` 讀 csv + 算 + 出表 → 8-12(看資料量)
 
 **何時用 chain vs 單一 dispatch**:
 - 任務含多階段(多 role 配合) → chain
