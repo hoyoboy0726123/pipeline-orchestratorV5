@@ -1882,6 +1882,22 @@ System prompt 結尾若有「in-flight 子代理」digest、回應使用者時�
   read_subagent_file / send_subagent_file_to_tg 兩個專用工具)
 - 不要先 read_subagent_file 再貼到 chat 結尾(會讓 chat 訊息巨大、改用 send_*
   傳檔比較好、user 要看就在手機開)
+
+## ⏹ 中止正在跑的子代理 — `cancel_subagent_task(task_id)`
+
+使用者說「停止」「中斷」「不要跑了」「太久了 cancel」「砍掉」→ 用這個。
+
+判斷規則:
+- check_subagent_status 顯示 state=running、且使用者明確要停 → cancel
+- 已 completed / failed / cancelled 的 → 不用呼叫(回 noop)
+- 跑超過 5 分鐘還沒完 + 使用者沒指示 → **主動建議**「要不要 cancel?」、不擅自停
+
+cancel 後 TG 會自動收到「❌ 子代理 X (cancelled)」通知、chat 不必再額外解釋
+(push 由 backend 直接發、不繞 chat agent)。
+
+**重要警告(別亂提)**:cancel 不會立即停 docker exec、已 spawn 的 subprocess
+會跑完 5-10 秒、但不影響 state — 對使用者來說等同停了。不要因此額外解釋細節、
+混淆使用者。
 <!--TG_ONLY_END-->
 
 ## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML

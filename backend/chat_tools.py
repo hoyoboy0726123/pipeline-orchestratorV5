@@ -1211,7 +1211,9 @@ async def _push_subagent_done_to_tg(task_id: str) -> None:
         except Exception:
             pass
 
-    asyncio.create_task(_runner())
+    _bg_task = asyncio.create_task(_runner())
+    # 把 asyncio.Task 物件也存進 registry、給 cancel_subagent_task 用
+    _chat_subagents[task_id]["_task"] = _bg_task
 
     est = "30-60s" if max_iter <= 4 else "60-180s"
     return (
@@ -1439,6 +1441,65 @@ def send_subagent_file_to_tg(task_id: str, filename: str = "", confirm: bool = F
         return f"❌ 送 TG 失敗: {type(e).__name__}: {e}"
 
 
+@tool
+def cancel_subagent_task(task_id: str) -> str:
+    """中止正在跑的 ad-hoc 子代理 task。標記為 cancelled、push TG 通知、回收 asyncio.Task。
+
+    使用情境:
+    - 使用者說「停止」「中斷」「不要跑了」「太久了 cancel」
+    - 子代理跑超過合理時間(>5 分鐘)、而且 check_subagent_status 顯示還 running
+    - 使用者已經拿到夠用的部分結果、不必等完整完成
+
+    限制:
+    - 只能 cancel still-running 的 task。已 completed / failed / cancelled 的 noop
+    - asyncio.cancel 會中斷正在 await 的 LLM call / tool dispatch、
+      但**已 spawn 的 docker exec subprocess 可能還會跑完 5-10 秒**(不影響 state)
+    - 重啟 backend 過的 task_id 會找不到、回不存在
+    """
+    import asyncio as _asyncio
+    import time as _time
+    info = _chat_subagents.get(task_id)
+    if not info:
+        return f"❌ task_id={task_id!r} 不存在(可能 backend 重啟過、in-memory registry 清了)"
+    state = info.get("state")
+    if state in ("completed", "failed", "cancelled"):
+        return f"task {task_id} 已是 {state}、不需 cancel"
+
+    bg_task = info.get("_task")
+    if bg_task is not None and not bg_task.done():
+        try:
+            bg_task.cancel()
+        except Exception:
+            pass
+
+    info["state"] = "cancelled"
+    info["ended_at"] = _time.time()
+    info["result"] = {
+        "success": False,
+        "iterations": 0,
+        "tools": [],
+        "token_usage": {},
+        "summary": "使用者主動 cancel",
+        "error": "cancelled by user",
+    }
+
+    # Push TG「已停止」(fire-and-forget)
+    try:
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            _asyncio.create_task(_push_subagent_done_to_tg(task_id))
+        else:
+            loop.run_until_complete(_push_subagent_done_to_tg(task_id))
+    except Exception:
+        pass
+
+    return (
+        f"✅ task {task_id} 已標記為 cancelled、TG 已通知。\n"
+        f"⚠️ 背景已 spawn 的 docker exec 可能還會跑完 5-10 秒(資源無關緊要)、"
+        f"但不會再影響 state 或重新派出。"
+    )
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
@@ -1448,5 +1509,6 @@ CHAT_TOOLS = [
     list_schedules, schedule_workflow, cancel_schedule,  # 排程相關(write 走 two-step)
     dispatch_subagent_async, check_subagent_status,  # 子代理派出 / 查狀態(沙盒隔離、無 confirm)
     read_subagent_file, send_subagent_file_to_tg,    # 子代理產物 讀 / 傳 TG(限定 task working_dir)
+    cancel_subagent_task,                            # 中止正在跑的子代理(asyncio.cancel + push TG)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}
