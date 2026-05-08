@@ -1098,11 +1098,33 @@ async def dispatch_subagent_async(
     }
     _trim_registry()
 
+    # 把 working_dir 明確 prepend 到 task prompt、覆蓋 subagent_runner 的 sandbox
+    # hint「專案根目錄為基準」(那段對 chat-adhoc 會誤導:LLM 看到 task 內路徑會用
+    # V5 root 為 anchor 算 absolute、結果寫去專案根而非 cwd)
+    try:
+        from pipeline.sandbox import windows_to_wsl_path
+        wd_wsl = windows_to_wsl_path(str(wd)) or str(wd)
+    except Exception:
+        wd_wsl = str(wd)
+    augmented_task = (
+        f"⚠️ 路徑規則(很重要、優先此規則):\n"
+        f"- 你在 Linux Docker container 內、**cwd 已被 docker exec 設為**:\n"
+        f"  `{wd_wsl}`\n"
+        f"- **寫檔請用 relative path 直接寫進 cwd**、例如:\n"
+        f"  `Path('calculator.py').write_text(...)` ← 直接落在 cwd 內、不要加任何前綴\n"
+        f"- **不要**自己算 absolute path、**不要**用「專案根目錄」當 anchor、\n"
+        f"  **不要**寫到 `/mnt/c/.../pipeline-orchestratorV5/...`\n"
+        f"- 任務描述內的相對路徑(例如 'ai_output/calc_v2/')是**訊息級別**的描述、\n"
+        f"  你的 cwd 已經幫你解到對的位置了、寫檔時忽略那段 prefix、用 basename 即可\n"
+        f"\n"
+        f"任務:\n{task}"
+    )
+
     async def _runner():
         try:
             result = await run_subagent(
                 role_name=role,
-                task=task,
+                task=augmented_task,
                 max_iter=max_iter,
                 workflow_dir=str(wd),
                 run_id=f"chat-{task_id}",
