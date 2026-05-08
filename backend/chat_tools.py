@@ -1015,7 +1015,7 @@ async def dispatch_subagent_async(
     task: str,
     working_dir: str = "",
     max_iter: int = 8,
-    follow_up: Optional[list] = None,
+    follow_up: Optional[list[dict]] = None,
 ) -> str:
     """派子代理進沙盒 (WSL Docker 內 pipeline-sandbox-v5) 非同步執行 ad-hoc 編碼 /
     分析任務。立即 return task_id、不等子代理完成、對話可繼續。
