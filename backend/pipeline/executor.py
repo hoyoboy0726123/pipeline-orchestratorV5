@@ -1966,7 +1966,18 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     logger.info(f"[{step_name}] Skill 執行完成：{'成功' if success else '失敗'} — {summary}")
                     # 成功 → 儲存 recipe 供下次快速重跑
                     _pending_recipe = None
-                    if success and pipeline_id and last_successful_code:
+                    # Recipe 表 workflow_id 有 FK 約束、跑 ad-hoc YAML(無關聯 workflow)時 pipeline_id
+                    # 是 config.name 字串、不在 workflows 表 → save 會炸 FOREIGN KEY constraint。
+                    # 先驗 pipeline_id 是真實 workflow id 才繼續、否則直接跳過 recipe(這種 run 本來
+                    # 也不會被前端用 cache 重播、不存 recipe 不影響)。
+                    _is_real_wf = False
+                    if success and pipeline_id:
+                        try:
+                            from db import get_workflow as _gw_check
+                            _is_real_wf = _gw_check(pipeline_id) is not None
+                        except Exception:
+                            _is_real_wf = False
+                    if success and pipeline_id and last_successful_code and _is_real_wf:
                         try:
                             import sys as _sys2
                             from pipeline.recipe import _sha1 as _recipe_sha1, _fingerprint_input as _recipe_fp
