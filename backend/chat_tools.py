@@ -1073,6 +1073,8 @@ async def dispatch_subagent_async(
         working_dir = f"ai_output/chat-adhoc/{ts}_{task_id[:6]}"
 
     # 解析絕對路徑(支援相對於 OUTPUT_BASE_PATH 的父目錄、跟 pipeline runner 邏輯一致)
+    # 強制 .resolve() 確保 absolute、避免 sandbox docker exec -w 拿到 relative path
+    # 撞「OCI runtime exec failed: Cwd must be an absolute path」
     wd = Path(working_dir)
     if not wd.is_absolute():
         # ai_output 已是 OUTPUT_BASE_PATH、外面包個 ai_output/ prefix 視為相對於 root
@@ -1080,6 +1082,7 @@ async def dispatch_subagent_async(
             wd = OUTPUT_BASE_PATH.parent / working_dir
         else:
             wd = OUTPUT_BASE_PATH / working_dir
+    wd = wd.resolve()
     wd.mkdir(parents=True, exist_ok=True)
 
     _chat_subagents[task_id] = {
