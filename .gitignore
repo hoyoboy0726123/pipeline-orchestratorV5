@@ -48,3 +48,5 @@ test-workflows/*.xlsx
 
 # Throwaway test fixtures (curl POST payloads)
 _test_*.json
+# VLM verifier test image outputs (regenerated each run)
+backend/_test_cu_vlm_images/
