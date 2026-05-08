@@ -273,34 +273,70 @@ async def run_subagent(
         iteration = i + 1
         log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter}")
 
-        try:
-            llm_result = await invoke_with_streaming(
-                llm, messages,
-                label=f"subagent[{role_name}]/{step_name}",
-                timeout=600.0,
-                logger=log,
-                return_usage=True,
+        # LLM call with retry — Gemma / Gemini 免費 tier 高負載常 503、其他 provider
+        # 也有 429 / overloaded、長 task 容易撞。retriable error 用 exponential
+        # backoff 重試 2 次(1s / 2s wait)、總共最多 3 次嘗試。非 retriable
+        # exception(語法錯、key 無效等)直接 fail、不浪費時間。
+        _RETRIABLE_KEYWORDS = (
+            "503", "429", "unavailable", "rate limit", "rate_limit",
+            "service_unavailable", "overloaded", "internal error", "500",
+            "deadline exceeded", "resource_exhausted",
+        )
+        llm_result = None
+        last_llm_err: Optional[Exception] = None
+        last_was_timeout = False
+        for _attempt in range(3):  # 1 + 2 retries
+            try:
+                llm_result = await invoke_with_streaming(
+                    llm, messages,
+                    label=f"subagent[{role_name}]/{step_name}",
+                    timeout=600.0,
+                    logger=log,
+                    return_usage=True,
+                )
+                last_llm_err = None
+                break
+            except asyncio.TimeoutError as e:
+                last_llm_err = e
+                last_was_timeout = True
+                if _attempt < 2:
+                    _wait = 2 ** _attempt
+                    log.warning(f"[{step_name}] LLM 串流逾時、{_wait}s 後 retry({_attempt + 1}/2)")
+                    await asyncio.sleep(_wait)
+                    continue
+                break
+            except Exception as e:
+                last_llm_err = e
+                last_was_timeout = False
+                _msg = str(e).lower()
+                _retriable = any(k in _msg for k in _RETRIABLE_KEYWORDS)
+                if _retriable and _attempt < 2:
+                    _wait = 2 ** _attempt
+                    log.warning(
+                        f"[{step_name}] LLM 暫時錯誤、{_wait}s 後 retry({_attempt + 1}/2):"
+                        f" {type(e).__name__}: {str(e)[:200]}"
+                    )
+                    await asyncio.sleep(_wait)
+                    continue
+                break  # 非 retriable 或 retry 用完
+        if last_llm_err is not None:
+            err_msg = "LLM 串流逾時(retry 3 次仍失敗)" if last_was_timeout else (
+                f"LLM 呼叫失敗: {type(last_llm_err).__name__}: {last_llm_err}"
             )
-            reply = (llm_result.get("content") or "").strip()
-            um = llm_result.get("usage_metadata") or {}
-            if um:
-                accumulated_usage["input_tokens"] += um.get("input_tokens", 0) or 0
-                accumulated_usage["output_tokens"] += um.get("output_tokens", 0) or 0
-                accumulated_usage["total_tokens"] += um.get("total_tokens", 0) or 0
-            if not accumulated_usage["model"]:
-                accumulated_usage["model"] = llm_result.get("model") or ""
-        except asyncio.TimeoutError:
             return SubagentResult(
                 success=False, final_message="", iterations=iteration,
-                tool_calls_made=tool_calls_made, error="LLM 串流逾時",
+                tool_calls_made=tool_calls_made, error=err_msg,
                 token_usage=accumulated_usage,
             )
-        except Exception as e:
-            return SubagentResult(
-                success=False, final_message="", iterations=iteration,
-                tool_calls_made=tool_calls_made, error=f"LLM 呼叫失敗: {type(e).__name__}: {e}",
-                token_usage=accumulated_usage,
-            )
+        # llm_result 拿到、解析 reply + 累計 token
+        reply = (llm_result.get("content") or "").strip()
+        um = llm_result.get("usage_metadata") or {}
+        if um:
+            accumulated_usage["input_tokens"] += um.get("input_tokens", 0) or 0
+            accumulated_usage["output_tokens"] += um.get("output_tokens", 0) or 0
+            accumulated_usage["total_tokens"] += um.get("total_tokens", 0) or 0
+        if not accumulated_usage["model"]:
+            accumulated_usage["model"] = llm_result.get("model") or ""
 
         tool_calls = _parse_skill_tool_calls(reply)
 

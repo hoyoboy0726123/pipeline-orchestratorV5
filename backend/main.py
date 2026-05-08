@@ -1836,7 +1836,11 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
   純拆步驟、不執行 → `planner`
 - **working_dir**：使用者沒明說 → 留空(系統自動推 `ai_output/chat-adhoc/<timestamp>/`)。
   使用者說「放在 X」→ 把 X 帶進去
-- **max_iter**：簡單任務 4-5、複雜任務 6-10
+- **max_iter**：簡單任務 6-8、複雜任務 10-15。**不要設 5 以下**:寫 .py + 跑 + done
+  最少 3 輪、LLM 多繞 read_file / 試錯就 5-7 輪、設 5 高機率 max_iter exceeded 失敗
+- **失敗時不要自動重派同樣 prompt**:看 check_subagent_status 的 error / summary、
+  跟使用者說「跑了 N 輪沒完成、原因 X」、讓使用者決定:加 max_iter 重派 / 改任務描述 / 放棄。
+  連續派 3 次都 max_iter exceeded 等於白燒 token、要主動 stop
 - **派出後**：告訴使用者 task_id、然後**繼續對話**(對話沒卡)
 - **失敗或卡住**：之後 check_subagent_status 拿到結果再決定:再派一次 / 改 prompt / 放棄
 

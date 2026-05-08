@@ -1011,7 +1011,7 @@ async def dispatch_subagent_async(
     role: str,
     task: str,
     working_dir: str = "",
-    max_iter: int = 5,
+    max_iter: int = 8,
 ) -> str:
     """派子代理進沙盒 (WSL Docker 內 pipeline-sandbox-v5) 非同步執行 ad-hoc 編碼 /
     分析任務。立即 return task_id、不等子代理完成、對話可繼續。
@@ -1023,7 +1023,9 @@ async def dispatch_subagent_async(
         task: 自然語言任務描述、給子代理當 prompt
         working_dir: 工作 / 輸出資料夾、相對路徑會解到 ai_output/<dir>。
                      留空 → 自動推 ai_output/chat-adhoc/<timestamp>_<id>/
-        max_iter: 子代理最多輪數(預設 5、複雜 8-10)
+        max_iter: 子代理最多輪數(預設 8、簡單任務 6-8、複雜 10-15)。
+                  寫 .py + 跑 + done 至少 3 輪、但 LLM 會繞 read_file / 試錯、
+                  通常實際 5-7 輪、給 8 算 safe baseline。降到 5 以下高機率 max_iter 失敗
 
     Returns:
         task_id 字串 + 預估時間 + 後續查詢提示。
