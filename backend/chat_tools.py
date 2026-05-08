@@ -1407,25 +1407,69 @@ async def _push_subagent_done_to_tg(task_id: str) -> None:
     summary = (r.get("summary") or "").strip()[:600]
     success_mark = "✅" if r.get("success") else "❌"
 
+    # chain 上下文(若是 chain 一員、加進訊息頂)
+    chain_total = info.get("chain_total", 1)
+    chain_pos = info.get("chain_position", 0) + 1  # 1-indexed for display
+    chain_root = info.get("chain_root_id", task_id)
+    is_chain = chain_total > 1
+    is_last_stage = chain_pos == chain_total
+    remaining_steps = info.get("follow_up") or []
+
     if state == "completed":
-        msg = (
-            f"{success_mark} 子代理 `{task_id}` ({role}) 完成\n\n"
-            f"輪數: {r.get('iterations')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
-            f"工具: {tools}\n"
-            f"產物: `{wd}`\n\n"
-            f"摘要:\n{summary}\n\n"
-            f"想看內容 → 「貼 <檔名> 給我」\n"
-            f"想下載檔案 → 「把 <檔名> 傳給我」"
-        )
+        if is_chain and is_last_stage and r.get("success"):
+            # chain 完整跑完(最後一階段成功)
+            msg = (
+                f"🎉 整條 chain 完成({chain_total} 階段全成功)\n"
+                f"chain root: `{chain_root}`\n\n"
+                f"最後階段 ({role}, `{task_id}`):\n"
+                f"  輪數: {r.get('iterations')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
+                f"  工具: {tools}\n"
+                f"  產物: `{wd}`\n\n"
+                f"摘要:\n{summary}\n\n"
+                f"想看內容 → 「貼 <檔名> 給我」\n"
+                f"想下載檔案 → 「把 <檔名> 傳給我」"
+            )
+        else:
+            msg = (
+                f"{success_mark} 子代理 `{task_id}` ({role}) 完成\n\n"
+                f"輪數: {r.get('iterations')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
+                f"工具: {tools}\n"
+                f"產物: `{wd}`\n\n"
+                f"摘要:\n{summary}\n\n"
+                f"想看內容 → 「貼 <檔名> 給我」\n"
+                f"想下載檔案 → 「把 <檔名> 傳給我」"
+            )
     else:
         err = r.get("error") or "未知錯誤"
-        msg = (
-            f"❌ 子代理 `{task_id}` ({role}) 失敗\n\n"
-            f"原因: {err[:300]}\n"
-            f"輪數: {r.get('iterations', '?')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
-            f"產物: `{wd}` (可能空 / 部分產出)\n\n"
-            f"要不要重派、改 prompt、或放棄? 跟我說。"
-        )
+        if is_chain:
+            # chain 中斷:標明階段、列未跑階段
+            chain_header = (
+                f"❌ chain 中斷在第 {chain_pos}/{chain_total} 階段 ({role}) — `{task_id}`\n"
+                f"chain root: `{chain_root}`\n\n"
+            )
+            skipped_lines = ""
+            if remaining_steps:
+                skipped_lines = "\n未跑階段(已取消):\n"
+                for i, step in enumerate(remaining_steps, start=chain_pos + 1):
+                    sr = step.get("role", "?")
+                    st = (step.get("task") or "")[:80]
+                    skipped_lines += f"  - 第 {i}/{chain_total} ({sr}): {st}\n"
+            msg = (
+                f"{chain_header}"
+                f"原因: {err[:300]}\n"
+                f"輪數: {r.get('iterations', '?')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
+                f"產物: `{wd}` (可能空 / 部分產出)"
+                f"{skipped_lines}\n"
+                f"要不要重派此階段、跳過、或放棄整 chain? 跟我說。"
+            )
+        else:
+            msg = (
+                f"❌ 子代理 `{task_id}` ({role}) 失敗\n\n"
+                f"原因: {err[:300]}\n"
+                f"輪數: {r.get('iterations', '?')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
+                f"產物: `{wd}` (可能空 / 部分產出)\n\n"
+                f"要不要重派、改 prompt、或放棄? 跟我說。"
+            )
     try:
         async with Bot(token=token) as bot:
             await bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="Markdown")
