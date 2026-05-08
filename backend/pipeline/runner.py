@@ -1652,6 +1652,16 @@ async def run_pipeline(
             if recipe_hit:
                 exec_result.stderr = ""  # 清掉標記
 
+            # Trace：把 ExecResult 帶回的 token_usage / tool_calls 接到該 step（skill / outlook
+            # / 一般 script 都走這條；subagent 分支已自己 set 過、這裡不會覆寫到、因為
+            # ExecResult.token_usage 預設 empty dict、覆寫只會把空值塞回去 — 用 truthy 判斷保護）
+            _tu = getattr(exec_result, 'token_usage', None) or {}
+            if _tu and _tu.get('total_tokens', 0) > 0:
+                step_token_usage = _tu
+            _tc = getattr(exec_result, 'tool_calls', None) or []
+            if _tc:
+                step_tool_calls = list(_tc)
+
             has_expect = step.output and step.output.get_expect()
             # exit_code -429 = LLM 配額用盡（executor 標記），直接走 rate_limited 路徑、不再叫 validator（會再 429 一次）
             if exec_result.exit_code == -429:

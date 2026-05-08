@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -369,6 +369,11 @@ class ExecResult:
     stderr: str
     pending_recipe: Optional[dict] = None  # 延遲儲存的 recipe 資料
     missing_packages: list = None          # LLM 回報缺少的套件（供 runner 產生安裝建議）
+    # Trace / token tracking — skill / outlook agent loop 累計填入；shell 路徑保持 default 空。
+    # 結構: {"input_tokens": int, "output_tokens": int, "total_tokens": int}
+    token_usage: dict = field(default_factory=dict)
+    # 結構: list[{"name": str, "input_preview": str, "result_preview": str}]
+    tool_calls: list = field(default_factory=list)
 
 
 async def execute_step(
@@ -1922,6 +1927,16 @@ md = asyncio.run(fetch("https://example.com/"))
         import time as _time
         skill_start_time = _time.time()
 
+        # Trace / token tracking — 累計 skill loop 全程 LLM 用量 + tool 呼叫時間軸；
+        # 在每個 ExecResult return 前透過 _attach_trace() 接上、給前端 trace 視圖渲染。
+        acc_usage: dict = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        acc_tool_calls: list = []
+
+        def _attach_trace(r: ExecResult) -> ExecResult:
+            r.token_usage = dict(acc_usage)
+            r.tool_calls = list(acc_tool_calls)
+            return r
+
         # ── 檔案變化追蹤（C：iteration 之間的檔案 diff）────────────────────
         # 每次 run_python 後比對 working_dir 的 mtime 變化，log 哪些檔被新增/改了
         # 解決：LLM 多輪 rewrite 留下混雜的 PNG/XLSX，下游 validator 看到「不知是哪輪寫的」混亂狀態
@@ -1973,9 +1988,16 @@ md = asyncio.run(fetch("https://example.com/"))
                 await asyncio.sleep(SKILL_REQUEST_INTERVAL)
 
             from llm_factory import invoke_with_streaming
-            reply = (await invoke_with_streaming(
-                llm, messages, label=step_name, timeout=600.0, logger=logger
-            )).strip()
+            llm_result = await invoke_with_streaming(
+                llm, messages, label=step_name, timeout=600.0, logger=logger,
+                return_usage=True,
+            )
+            reply = (llm_result.get("content") or "").strip()
+            _um = llm_result.get("usage_metadata") or {}
+            if _um:
+                for _k in ("input_tokens", "output_tokens", "total_tokens"):
+                    _v = _um.get(_k) or 0
+                    if _v: acc_usage[_k] = acc_usage.get(_k, 0) + int(_v)
             # 完整記錄 LLM 回覆（含程式碼），避免 log 截斷讓後續分析誤判
             _reply_preview = reply if len(reply) <= 4000 else reply[:4000] + f"...[已截斷，完整長度 {len(reply)} 字]"
             logger.debug(f"[{step_name}] Agent 回覆：\n{_reply_preview}")
@@ -2005,6 +2027,12 @@ md = asyncio.run(fetch("https://example.com/"))
             tool_input = call["input"]
             logger.info(f"[{step_name}] 解析結果：tool={tool_name}, input_len={len(tool_input)}"
                         + (f"（⚠ 偵測到 {_tag_count} 個 <tool> 標籤、只跑第一個）" if multi_tool_warn else ""))
+            # Trace：push 該輪 tool 呼叫（name + input、result 由後續 dispatch 拿到後 update）
+            acc_tool_calls.append({
+                "name": tool_name,
+                "input_preview": (tool_input or "")[:200],
+                "result_preview": "",
+            })
 
             # done → 結束（但先驗證 output 檔案是否存在 + 最近 run_python 必須沒失敗）
             if tool_name == "done":
@@ -2106,13 +2134,13 @@ md = asyncio.run(fetch("https://example.com/"))
                         logger.info(f"[{step_name}] LLM 回報缺少套件：{pkgs}")
                     final_stdout = (_build_clean_success_stdout(all_stdout, "[Skill 完成]")
                                     if success else "\n".join(all_stdout))
-                    return ExecResult(
+                    return _attach_trace(ExecResult(
                         exit_code=0 if success else 1,
                         stdout=final_stdout,
                         stderr="" if success else summary,
                         pending_recipe=_pending_recipe,
                         missing_packages=pkgs or None,
-                    )
+                    ))
                 except json.JSONDecodeError:
                     messages.append(HumanMessage(content=reply))
                     messages.append(HumanMessage(content="[系統] done 的 input 必須是有效 JSON，請重試。"))
@@ -2275,6 +2303,9 @@ md = asyncio.run(fetch("https://example.com/"))
             # 完整記錄工具結果（錯誤訊息如 ModuleNotFoundError 常超過 300 字）
             _tr_preview = tool_result if len(tool_result) <= 3000 else tool_result[:3000] + f"...[已截斷，完整長度 {len(tool_result)} 字]"
             logger.debug(f"[{step_name}] 工具結果：\n{_tr_preview}")
+            # Trace：把 tool result 補回上一輪 push 的 entry
+            if acc_tool_calls and acc_tool_calls[-1].get("name") == tool_name and not acc_tool_calls[-1].get("result_preview"):
+                acc_tool_calls[-1]["result_preview"] = (str(tool_result) or "")[:300]
             all_stdout.append(f"[{tool_name}] {tool_result}")
             # 追蹤 run_python 成敗：用 [exit code:] 在 tool_result 是否出現當判斷
             # （sandbox 跟 host 兩條路徑都用同個 marker，見 _skill_run_python / _try_sandbox_exec）
@@ -2441,22 +2472,22 @@ md = asyncio.run(fetch("https://example.com/"))
                     continue  # 回到迭代頂端，不要走下面的 consecutive_failures bail-out
                 # ask_mode OFF：照舊行為，直接中止
                 logger.error(f"[{step_name}] ⛔ 連續失敗 {consecutive_failures} 次，提早中止避免浪費 token")
-                return ExecResult(
+                return _attach_trace(ExecResult(
                     exit_code=1,
                     stdout="\n".join(all_stdout),
                     stderr=(
-                        f"Skill 連續失敗 {consecutive_failures} 次（累計 {iteration + 1} 次迭代），提早中止。"
+                        f"Skill 連續失敗 {consecutive_failures} 次(累計 {iteration + 1} 次迭代)，提早中止。"
                         f"最後一次錯誤：{tool_result[-500:]}"
                     ),
-                )
+                ))
 
         # 超過最大迭代
         logger.warning(f"[{step_name}] Skill agent 達到最大迭代次數")
-        return ExecResult(
+        return _attach_trace(ExecResult(
             exit_code=1,
             stdout="\n".join(all_stdout),
             stderr=f"Skill agent 在 {SKILL_MAX_ITERATIONS} 次迭代內未完成任務",
-        )
+        ))
 
     except Exception as e:
         # 429 / RESOURCE_EXHAUSTED：用獨立 exit code -429 標記，runner 看到後不重試
@@ -2466,17 +2497,17 @@ md = asyncio.run(fetch("https://example.com/"))
                     or "quota" in _err_str.lower() or "rate limit" in _err_str.lower())
         if is_quota:
             logger.error(f"[{step_name}] Skill 執行 LLM 配額/速率受限（429）— 不重試，避免燒光配額：{_err_str[:200]}")
-            return ExecResult(
+            return _attach_trace(ExecResult(
                 exit_code=-429,
                 stdout="\n".join(all_stdout),
                 stderr=f"LLM provider 配額用盡或速率受限（429）：{_err_str}",
-            )
+            ))
         logger.error(f"[{step_name}] Skill 執行異常：{e}")
-        return ExecResult(
+        return _attach_trace(ExecResult(
             exit_code=-3,
             stdout="\n".join(all_stdout),
             stderr=f"Skill 執行異常：{e}",
-        )
+        ))
 
 
 # ── Outlook 自動化節點專屬 agent ──────────────────────────────────────────────
