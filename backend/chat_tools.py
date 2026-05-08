@@ -1149,6 +1149,67 @@ async def dispatch_subagent_async(
                 "ended_at": _time.time(),
                 "result": {"error": f"{type(e).__name__}: {e}"},
             })
+        # Phase 3:子代理完成時 push 訊息到使用者 TG(繞過 chat agent、直接 send_message)
+        # 因 chat 是 request-response、AI 不會自己跳出來說話、不 push 的話使用者要主動問。
+        # 這個 push 對 TG 通道有意義(手機收得到 notification);桌面用戶不在 TG 上不影響
+        try:
+            await _push_subagent_done_to_tg(task_id)
+        except Exception:
+            pass
+
+# ── 完成 push 到 TG(任何 channel 派出的 subagent 都能 push、只要有 telegram_chat_id) ──
+async def _push_subagent_done_to_tg(task_id: str) -> None:
+    info = _chat_subagents.get(task_id)
+    if not info:
+        return
+    try:
+        from pipeline.runner import _get_tg_token, _get_tg_chat_id
+        from telegram import Bot
+    except Exception:
+        return
+    token = _get_tg_token()
+    chat_id = _get_tg_chat_id()
+    if not token or not chat_id:
+        return  # 沒設 TG 就跳過
+
+    state = info.get("state", "?")
+    role = info.get("role", "?")
+    r = info.get("result") or {}
+    tu = r.get("token_usage") or {}
+    tools = r.get("tools") or []
+    wd = info.get("working_dir", "")
+    summary = (r.get("summary") or "").strip()[:600]
+    success_mark = "✅" if r.get("success") else "❌"
+
+    if state == "completed":
+        msg = (
+            f"{success_mark} 子代理 `{task_id}` ({role}) 完成\n\n"
+            f"輪數: {r.get('iterations')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
+            f"工具: {tools}\n"
+            f"產物: `{wd}`\n\n"
+            f"摘要:\n{summary}\n\n"
+            f"想看內容 → 「貼 <檔名> 給我」\n"
+            f"想下載檔案 → 「把 <檔名> 傳給我」"
+        )
+    else:
+        err = r.get("error") or "未知錯誤"
+        msg = (
+            f"❌ 子代理 `{task_id}` ({role}) 失敗\n\n"
+            f"原因: {err[:300]}\n"
+            f"輪數: {r.get('iterations', '?')}  ·  tokens: {tu.get('total_tokens', 0):,}\n"
+            f"產物: `{wd}` (可能空 / 部分產出)\n\n"
+            f"要不要重派、改 prompt、或放棄? 跟我說。"
+        )
+    try:
+        async with Bot(token=token) as bot:
+            await bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="Markdown")
+    except Exception:
+        # Markdown parse fail 退到純文字
+        try:
+            async with Bot(token=token) as bot:
+                await bot.send_message(chat_id=int(chat_id), text=msg)
+        except Exception:
+            pass
 
     asyncio.create_task(_runner())
 
