@@ -519,6 +519,24 @@ export async function cropAnchorFromFull(req: CropAnchorReq): Promise<{
   return res.json()
 }
 
+/** 把 base64 PNG 直接存到 assets_dir(VLM 錨點立即截圖用、瀏覽器內裁切後上傳) */
+export async function saveAnchorPng(req: {
+  dir: string
+  name: string
+  png_b64: string
+}): Promise<{ image: string; width: number; height: number; variance: number; size_bytes: number }> {
+  const res = await fetch(`${BASE}/computer-use/assets/save-png`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `存錨點 PNG 失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
 export interface NodeStatus {
   node_installed: boolean
   node_version: string

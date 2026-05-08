@@ -666,6 +666,75 @@ async def crop_anchor_from_full(req: CropRequest):
     }
 
 
+class SavePngRequest(BaseModel):
+    """前端裁切完直接送 base64 PNG 存到 assets_dir、給 VLM 錨點立即截圖用。
+    跟 crop_anchor_from_full 不同:那個要先有 full_image 在磁碟、這個直接收 base64。"""
+    dir: str                 # assets 資料夾
+    name: str                # 檔名(可不含 .png、會自動補)
+    png_b64: str             # 純 PNG base64(不含 data: prefix)
+
+
+@app.post("/computer-use/assets/save-png")
+async def save_png_to_assets(req: SavePngRequest):
+    """把前端 canvas.toBlob() 出來的 PNG bytes 存進 assets_dir。
+    用途:VLM 錨點立即截圖功能 — 使用者按下截圖、瀏覽器內裁切、再回傳裁好的圖。
+    跟 crop_anchor_from_full 互補(那個吃磁碟上的 full_image、這個吃 base64)。
+    """
+    import base64
+    target_dir = _validate_assets_path(req.dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    save_name = req.name.strip()
+    if not save_name:
+        raise HTTPException(status_code=400, detail="name 為空")
+    # 過濾路徑符號(防 .. / 等跳出資料夾)
+    if "/" in save_name or "\\" in save_name or save_name.startswith("."):
+        raise HTTPException(status_code=400, detail=f"name 含非法字元:{save_name!r}")
+    if not save_name.lower().endswith(".png"):
+        save_name += ".png"
+
+    try:
+        # 容忍前端有沒帶 data:image/png;base64, prefix
+        b64 = req.png_b64.split(",", 1)[-1] if "," in req.png_b64 else req.png_b64
+        data = base64.b64decode(b64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"base64 解碼失敗:{e}")
+
+    if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise HTTPException(status_code=400, detail="不是有效 PNG bytes")
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"PNG 太大({len(data)} bytes、上限 5MB)")
+
+    out_path = target_dir / save_name
+    try:
+        out_path.write_bytes(data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"寫檔失敗:{e}")
+
+    # 跟 crop 同步回 metadata、讓前端 UI 顯示一致
+    try:
+        import cv2
+        import numpy as np
+        arr = np.frombuffer(data, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is not None:
+            h, w = img.shape[:2]
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            variance = float(np.var(gray))
+        else:
+            h, w, variance = 0, 0, 0.0
+    except Exception:
+        h, w, variance = 0, 0, 0.0
+
+    return {
+        "image": save_name,
+        "width": w,
+        "height": h,
+        "variance": round(variance, 1),
+        "size_bytes": len(data),
+    }
+
+
 @app.delete("/computer-use/assets")
 async def delete_computer_use_assets(dir: str):
     """刪除指定的錨點資料夾（含 PNG、actions.json、meta.json）。
