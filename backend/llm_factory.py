@@ -200,6 +200,13 @@ async def invoke_with_streaming(
         # provider model name（給成本對照表用）
         rm = getattr(final_chunk, "response_metadata", None) or {}
         model_name = rm.get("model_name") or rm.get("model") or ""
+    # streaming chunk 沒 attach model 名稱時(常見:Groq / 部分 Gemini)，用設定頁的 model 當 fallback
+    if not model_name:
+        try:
+            from settings import get_settings
+            model_name = (get_settings().get("model") or "").strip()
+        except Exception:
+            pass
 
     if reasoning_len:
         log.info(

@@ -55,6 +55,7 @@ import {
   deleteComputerUseAssets,
 } from '@/lib/api'
 import type { PipelineRun } from '@/lib/types'
+import { computeCostUsd, formatCostUsd } from '@/lib/cost'
 import { useRunStatusStore } from './_runStatus'
 
 const nodeTypes = {
@@ -1792,11 +1793,22 @@ export default function PipelinePage() {
                         const srs = traceRun.step_results || []
                         const totalTokens = srs.reduce((s: number, sr) => s + (sr.token_usage?.total_tokens || 0), 0)
                         const totalTools = srs.reduce((s: number, sr) => s + (sr.tool_calls?.length || 0), 0)
+                        // 累計 USD 成本：每 step 用各自的 model 算（不同 step 可能切過 model）
+                        let totalCost = 0
+                        let hasCost = false
+                        for (const sr of srs) {
+                          const tu = sr.token_usage
+                          if (tu?.model && tu.total_tokens) {
+                            const c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
+                            if (c !== null) { totalCost += c; hasCost = true }
+                          }
+                        }
                         return (
                           <span className="text-gray-400 text-[11px] ml-auto">
                             合計 <span className="text-indigo-300">{totalTokens.toLocaleString()}</span> tokens ·{' '}
                             <span className="text-indigo-300">{totalTools}</span> tool calls ·{' '}
                             <span className="text-indigo-300">{srs.length}</span> steps
+                            {hasCost && <> · <span className="text-emerald-300" title="估算成本（公開定價、僅參考）">~{formatCostUsd(totalCost)}</span></>}
                           </span>
                         )
                       })()}
@@ -1818,6 +1830,13 @@ export default function PipelinePage() {
                             {sr.tool_calls?.length ? (
                               <span className="text-gray-500 ml-1 text-[11px]">· {sr.tool_calls.length} tools</span>
                             ) : null}
+                            {(() => {
+                              const tu = sr.token_usage
+                              if (!tu?.model || !tu.total_tokens) return null
+                              const c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
+                              if (c === null) return null
+                              return <span className="text-emerald-400/70 ml-1 text-[11px]" title={`model: ${tu.model}`}>· ~{formatCostUsd(c)}</span>
+                            })()}
                           </summary>
                           <div className="px-2 pb-2 space-y-1 border-t border-gray-800 pt-1.5">
                             {(sr.tool_calls || []).map((tc, j) => (
