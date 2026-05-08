@@ -1050,6 +1050,21 @@ async def dispatch_subagent_async(
     if not task or not task.strip():
         return "❌ task 不能為空、請描述要子代理做什麼"
 
+    # 並發 cap (#4)：避免使用者一聲令下派 10 個 ad-hoc 子代理擠爆沙盒。
+    # 沙盒層另有 SANDBOX_MAX_CONCURRENT semaphore(預設 3)、那是 docker exec 級;
+    # 這層是「dispatch 路徑」級、防止 in-flight subagent 過多
+    _IN_FLIGHT_CAP = 3
+    running_count = sum(1 for info in _chat_subagents.values()
+                        if info.get("state") == "running")
+    if running_count >= _IN_FLIGHT_CAP:
+        running_ids = [tid for tid, info in _chat_subagents.items()
+                       if info.get("state") == "running"][:5]
+        return (
+            f"❌ 已有 {running_count} 個子代理在跑、達到上限 {_IN_FLIGHT_CAP}。\n"
+            f"in-flight task_ids: {', '.join(running_ids)}\n"
+            f"先 check_subagent_status 看其中一個狀態、等完成再派。"
+        )
+
     task_id = _uuid.uuid4().hex[:12]
     if not working_dir or not working_dir.strip():
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
