@@ -36,6 +36,10 @@ export interface StepData extends Record<string, unknown> {
   cvCoordFallback?: boolean              // true = CV 失敗時退回錄製座標硬點（預設 false = 失敗就停）
   ocrThreshold?: number                  // OCR 最小 conf 門檻（預設 0.6）
   ocrCvFallback?: boolean                // true = OCR 失敗接著 CV 比對（預設 false = 失敗就停）
+  // VLM 把關 Phase 1（每動作後驗證 expected outcome）
+  cuVlmCheckStrategy?: 'off' | 'after_each' | 'critical_only'   // 預設 off
+  cuOnMismatch?: 'stop_notify' | 'retry_once' | 'skip_and_continue'  // 預設 stop_notify
+  cuVlmMaxRetries?: number                // retry_once 模式重試上限（預設 1）
   // 視覺驗證節點（visual_validation）
   visualValidation?: boolean             // optional — 視覺驗證步驟
   vvSource?: 'prev_output' | 'current_screen'
@@ -170,6 +174,9 @@ export interface ComputerUseAction {
   ocr_box_height?: number
   // 嚴格鎖定範圍：true = 框內找不到立即 fail（不退附近、不退全螢幕）
   ocr_strict_region?: boolean
+  // VLM 把關 Phase 1：動作後預期狀態（自然語言）+ 是否標記為 critical（critical_only 模式下才驗）
+  expected?: string
+  verify_critical?: boolean
   anchor_off_x?: number // 點擊相對錨點影像中心的偏移 x
   anchor_off_y?: number // 點擊相對錨點影像中心的偏移 y
   full_image?: string   // 全螢幕截圖檔名（手動圈選編輯錨點時用）
@@ -208,6 +215,10 @@ export interface ComputerUseData extends Record<string, unknown> {
   cvCoordFallback: boolean  // true = CV 失敗時退回錄製座標硬點。預設 false（失敗就停，不亂點）
   ocrThreshold: number      // OCR 最小 conf 門檻（1.0/0.9/0.8/0.6 分級；預設 0.6）
   ocrCvFallback: boolean    // true = OCR 失敗時繼續試 CV 比對鏈。預設 false（失敗就停）
+  // VLM 把關 Phase 1（節點層級設定）
+  cuVlmCheckStrategy: 'off' | 'after_each' | 'critical_only'        // 預設 off
+  cuOnMismatch: 'stop_notify' | 'retry_once' | 'skip_and_continue'  // 預設 stop_notify
+  cuVlmMaxRetries: number   // retry_once 重試上限（預設 1）
   timeout: number           // 秒（執行上限）
   retry: number
   index: number
@@ -416,6 +427,9 @@ export function newComputerUseData(index = 0): ComputerUseData {
     cvCoordFallback: false,
     ocrThreshold: 0.6,
     ocrCvFallback: false,
+    cuVlmCheckStrategy: 'off',
+    cuOnMismatch: 'stop_notify',
+    cuVlmMaxRetries: 1,
     timeout: 300,
     retry: 0,
     index,
@@ -509,6 +523,9 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           cvCoordFallback: s.cvCoordFallback ?? false,
           ocrThreshold: s.ocrThreshold ?? 0.6,
           ocrCvFallback: s.ocrCvFallback ?? false,
+          cuVlmCheckStrategy: s.cuVlmCheckStrategy ?? 'off',
+          cuOnMismatch: s.cuOnMismatch ?? 'stop_notify',
+          cuVlmMaxRetries: s.cuVlmMaxRetries ?? 1,
           timeout: s.timeout,
           retry: s.retry,
           index: i,
@@ -776,6 +793,9 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         ocrThreshold: d.ocrThreshold,
         ocrCvFallback: d.ocrCvFallback,
         cvCoordFallback: d.cvCoordFallback,
+        cuVlmCheckStrategy: d.cuVlmCheckStrategy,
+        cuOnMismatch: d.cuOnMismatch,
+        cuVlmMaxRetries: d.cuVlmMaxRetries,
         timeout: d.timeout,
         retry: d.retry,
         index: i,
@@ -1116,6 +1136,10 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.cvCoordFallback === true) lines.push(`    cv_coord_fallback: true`)
       if (s.ocrThreshold !== undefined && s.ocrThreshold !== 0.6) lines.push(`    ocr_threshold: ${s.ocrThreshold}`)
       if (s.ocrCvFallback === true) lines.push(`    ocr_cv_fallback: true`)
+      // VLM 把關 Phase 1 — 預設 off / stop_notify / 1、只在不同預設時寫入
+      if (s.cuVlmCheckStrategy && s.cuVlmCheckStrategy !== 'off') lines.push(`    cu_vlm_check_strategy: ${s.cuVlmCheckStrategy}`)
+      if (s.cuOnMismatch && s.cuOnMismatch !== 'stop_notify') lines.push(`    cu_on_mismatch: ${s.cuOnMismatch}`)
+      if (s.cuVlmMaxRetries !== undefined && s.cuVlmMaxRetries !== 1) lines.push(`    cu_vlm_max_retries: ${s.cuVlmMaxRetries}`)
       if (s.computerUseActions && s.computerUseActions.length > 0) {
         // 以 JSON 陣列寫入 actions（一行一動作，夠精簡又能 yaml parse）
         lines.push(`    actions:`)

@@ -67,6 +67,8 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   const [cvOpen, setCvOpen] = useState(false)
   // OCR 比對設定摺疊（預設收折）
   const [ocrOpen, setOcrOpen] = useState(false)
+  // VLM 把關 Phase 1 摺疊（預設收折、進階功能）
+  const [vlmOpen, setVlmOpen] = useState(false)
 
   // 預設錄製輸出目錄
   const defaultAssetsDir = data.assetsDir ||
@@ -551,6 +553,35 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         </div>
                       )
                     })()}
+                    {/* VLM 把關 Phase 1：每動作後驗證(expected outcome)─────── */}
+                    {/* 只在節點層級啟用 VLM 時(strategy != off)才顯示這欄、避免干擾沒用的人 */}
+                    {data.cuVlmCheckStrategy && data.cuVlmCheckStrategy !== 'off' && (
+                      <div className="mt-1.5 pt-1.5 border-t border-dashed border-emerald-200">
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span className="text-[10px] font-semibold text-emerald-700">🛡 VLM 預期</span>
+                          {data.cuVlmCheckStrategy === 'critical_only' && (
+                            <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                              <input type="checkbox" checked={a.verify_critical === true}
+                                onChange={e => applyAnchorPatch(i, { verify_critical: e.target.checked } as Partial<ComputerUseAction>)}
+                                className="w-3 h-3 accent-emerald-600" />
+                              <span className="text-emerald-700">標為 critical</span>
+                            </label>
+                          )}
+                          {a.expected && (
+                            <span className="text-[9px] text-emerald-600 font-mono">(會驗)</span>
+                          )}
+                        </div>
+                        <textarea
+                          value={a.expected || ''}
+                          onChange={e => applyAnchorPatch(i, { expected: e.target.value } as Partial<ComputerUseAction>)}
+                          placeholder={data.cuVlmCheckStrategy === 'critical_only' && !a.verify_critical
+                            ? '(critical_only 模式下、勾上方 critical 才會驗;此欄留空 = 不驗)'
+                            : '動作後應看到的狀態（例：另存新檔對話框已開啟、含 File name 輸入框）'}
+                          rows={1}
+                          className="w-full text-[10px] px-1.5 py-1 rounded border border-emerald-200 bg-emerald-50/30 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300/20 resize-y"
+                        />
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-col shrink-0">
                     <button onClick={() => moveAction(i, -1)} className="p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" disabled={i === 0}>
@@ -795,6 +826,108 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                   ? '開啟：OCR 找不到 → 接著跑 CV 圖像比對鏈（gray→edge），CV 再失敗時是否退座標看上方 CV 設定'
                   : '關閉（預設）：OCR 失敗就直接 FAIL，不退到 CV 或座標。選擇 OCR 代表目標位置/樣式會變、CV 不適用'}
               </p>
+            </div>
+          )}
+        </div>
+
+        {/* 🛡 VLM 把關設定（Phase 1 — 動作後驗 expected outcome）─────────── */}
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/30 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setVlmOpen(v => !v)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-emerald-100/50 transition-colors"
+          >
+            {vlmOpen ? <ChevronUp className="w-3.5 h-3.5 text-emerald-600" />
+                     : <ChevronDown className="w-3.5 h-3.5 text-emerald-600" />}
+            <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide flex-1">🛡 VLM 把關（每動作後驗證）</span>
+            <span className="text-[11px] text-emerald-600 font-mono">
+              {(data.cuVlmCheckStrategy || 'off') === 'off' ? '已關閉' :
+               (data.cuVlmCheckStrategy === 'after_each' ? '每步都驗' : '只驗 critical')}
+              {data.cuOnMismatch && data.cuOnMismatch !== 'stop_notify' ? ` · ${data.cuOnMismatch === 'retry_once' ? '重試' : '略過'}` : ''}
+            </span>
+          </button>
+          {vlmOpen && (
+            <div className="px-3 pb-3 space-y-3 border-t border-emerald-200">
+              <div className="pt-3" />
+              <p className="text-[11px] text-emerald-700 leading-relaxed">
+                錄製座標準確主路徑、VLM 額外當「驗證者」。每動作後比對「動作前 / 動作後截圖」+ 你寫的 expected 描述、
+                偏離立刻停 + push TG 通知。99% 失敗模式從「整套悶著錯」變「立刻發現+人介入」。
+                <br />
+                <span className="text-[10px] text-emerald-600">每次驗證 ~$0.005-0.015、用設定頁的主模型(必須支援 vision)。</span>
+              </p>
+
+              {/* strategy 3 選 */}
+              <div>
+                <label className="text-xs text-gray-600 block mb-1.5">驗證策略</label>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { v: 'off', label: '關閉', hint: '完全不驗(預設、向後相容)' },
+                    { v: 'after_each', label: '每步都驗', hint: '所有有 expected 的動作都送 VLM' },
+                    { v: 'critical_only', label: '只驗 critical', hint: '只驗有勾「critical」的動作' },
+                  ].map(opt => (
+                    <button
+                      key={opt.v}
+                      type="button"
+                      onClick={() => onUpdate({ cuVlmCheckStrategy: opt.v as 'off' | 'after_each' | 'critical_only' })}
+                      title={opt.hint}
+                      className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                        (data.cuVlmCheckStrategy || 'off') === opt.v
+                          ? 'bg-emerald-500 text-white border-emerald-500'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-emerald-300'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* on_mismatch 3 選 */}
+              {(data.cuVlmCheckStrategy || 'off') !== 'off' && (
+                <>
+                  <div>
+                    <label className="text-xs text-gray-600 block mb-1.5">偏離時行為</label>
+                    <div className="grid grid-cols-3 gap-1">
+                      {[
+                        { v: 'stop_notify', label: '停 + 通知', hint: '立即停 pipeline、push TG 截圖、等人介入(預設、最安全)' },
+                        { v: 'retry_once', label: '重試', hint: '重執行同動作 N 次、仍失敗才停' },
+                        { v: 'skip_and_continue', label: '略過繼續', hint: '警告但繼續、用於非關鍵步' },
+                      ].map(opt => (
+                        <button
+                          key={opt.v}
+                          type="button"
+                          onClick={() => onUpdate({ cuOnMismatch: opt.v as 'stop_notify' | 'retry_once' | 'skip_and_continue' })}
+                          title={opt.hint}
+                          className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                            (data.cuOnMismatch || 'stop_notify') === opt.v
+                              ? 'bg-emerald-500 text-white border-emerald-500'
+                              : 'bg-white text-gray-600 border-gray-200 hover:border-emerald-300'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* retry_once 模式才顯示 max_retries */}
+                  {data.cuOnMismatch === 'retry_once' && (
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1.5">重試上限</label>
+                      <input type="number" min={1} max={5}
+                        value={data.cuVlmMaxRetries || 1}
+                        onChange={e => onUpdate({ cuVlmMaxRetries: Math.max(1, Math.min(5, parseInt(e.target.value) || 1)) })}
+                        className={`${inputCls} w-24`} />
+                      <p className="text-[10px] text-emerald-600 mt-1">每動作最多重試 N 次、仍失敗才走 stop_notify</p>
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-emerald-700 leading-relaxed bg-emerald-100/40 px-2 py-1.5 rounded">
+                    💡 在每個動作上面填「expected 預期狀態」(例「另存對話框已開」)、VLM 驗證才有用。
+                    {data.cuVlmCheckStrategy === 'critical_only' && ' 此模式下還要勾上 critical 那格。'}
+                  </p>
+                </>
+              )}
             </div>
           )}
         </div>
