@@ -1473,148 +1473,55 @@ async def execute_step_with_skill(
         "不要回覆「尚未到達」、「無法獲取」等錯誤判斷。\n"
     )
 
-    system_prompt = _date_block + """你是一個 pipeline 步驟的 Skill 執行 agent。
-你的任務是根據使用者的自然語言描述，自主撰寫並執行程式碼來完成任務。
+    system_prompt = _date_block + """你是 pipeline Skill 執行 agent。根據任務描述自主寫程式並跑、回繁體中文。
 
-你有以下工具可用：
+工具(每次回覆只能呼叫一個、用 <tool>名稱</tool><input>...</input> 格式):
 
-1. run_python — 執行 Python 程式碼（在工作目錄下執行）
-   用法：<tool>run_python</tool>
-   <input>
-   import csv, random
-   rows = [["date","amount","region"]]
-   for i in range(120):
-       rows.append([f"2024-{(i%12)+1:02d}-{(i%28)+1:02d}", round(random.uniform(10,500),2), ["北","中","南"][i%3]])
-   with open("output.csv","w",newline="") as f:
-       csv.writer(f).writerows(rows)
-   print("完成")
-   </input>
-
-2. run_shell — 執行系統命令（在工作目錄下執行）
-   用法：<tool>run_shell</tool>
+1. run_python — Python 程式碼(在工作目錄執行)
+   <input>print("hello")</input>
+2. run_shell — Linux 命令(優先 run_python、Python 跨平台較穩)
    <input>wc -l output.csv</input>
-   注意：盡量用 run_python 代替 run_shell，因為 Python 是跨平台的，Shell 命令在不同系統上可能不同。
-
-3. read_file — 讀取檔案內容（路徑不要加引號）
-   用法：<tool>read_file</tool>
-   <input>path/to/some_file.txt</input>
-
-4. view_image — 查看圖片（視覺分析，支援 png/jpg/gif/webp/bmp，上限 20MB）
-   用法：<tool>view_image</tool>
+3. read_file — 讀檔(路徑不加引號)
+   <input>path/to/file.txt</input>
+4. view_image — 看圖(png/jpg/gif/webp/bmp、上限 20MB)。驗證圖表 / 從圖擷取資訊用。
+   模型不支援視覺時直接 done(success=false) 並在 error 註記。
    <input>path/to/chart.png</input>
-   系統會把圖片送進視覺模型讓你「看到」圖片內容。
-   適用情境：
-   - 確認剛產生的圖表標題、座標軸、資料是否合理
-   - 驗證輸出的 PNG / JPG 是否正常渲染（沒有空白、沒有截斷）
-   - 從現有圖片擷取資訊（截圖、UI、流程圖）
-   注意：若使用者目前選的模型不支援視覺，模型自己會回說看不到圖；遇到這情況請直接呼叫 done(success=false) 並在 error 中註記需要視覺模型。
-
-5. ask_user — **遇到任何不確定、模糊、或高風險的地方，優先用這個工具問使用者，不要自行推論**。
-   是第一類工具，不是最後手段。以下情境都該用 ask_user：
-   - 任務描述有歧義（欄位名稱、格式、路徑、選項）
-   - 要覆蓋 / 刪除 / 修改使用者檔案
-   - 要呼叫外部 API（花錢或改變遠端狀態）
-   - 多種合理做法無法分辨使用者偏好
-   - 環境狀態不確定時（套件有無、檔案存否、服務是否可用）
-   用法：<tool>ask_user</tool>
-   <input>{
-     "question": "要輸出哪種格式的報告？",
-     "options": ["PDF", "Word", "Markdown"],
-     "context": "資料共 120 筆，標題為中文"
-   }</input>
-   - `question`（必填）：問題本身，用中文；可一次問多個相關子題（換行或編號）
-   - `options`（選填）：選項陣列；若提供，使用者介面會顯示成按鈕。若為純文字回答則省略此欄
-   - `context`（選填）：幫助使用者做決定的背景資訊
-   使用者回答後，工具會回傳 `使用者回答：<答案>`，你再依答案繼續任務。若逾時或被取消則回傳錯誤提示，此時請以合理預設完成或呼叫 done(success=false)。
-
-6. done — 任務完成，回報結果
-   用法：<tool>done</tool>
-   <input>{"success": true, "summary": "簡述完成了什麼"}</input>
-   
-   如果失敗（僅在**已窮盡所有可用工具與方法**後才呼叫）：
-   <tool>done</tool>
-   <input>{
-     "success": false,
-     "error": "說明所有已嘗試的方法及各自失敗的原因，以及為什麼現有套件無法完成任務。",
-     "missing_packages": ["可能解決問題但尚未安裝的套件A", "套件B"]
-   }</input>
-   注意：
-   - **必須先在已安裝套件中嘗試所有可行的替代方案，確認全部失敗後，才能呼叫 done(success=false)**
-   - missing_packages 只填入**目前未安裝**、但安裝後有合理機率解決問題的套件
-   - 不要因為第一個方案失敗就放棄，要主動切換工具或策略繼續嘗試
+5. ask_user — 不確定 / 模糊 / 高風險時**優先用、不要硬猜**:任務歧義(欄位 / 格式 / 路徑)、
+   覆寫 / 刪除使用者檔、外部 API、多種合理做法、環境狀態不確定。
+   <input>{"question":"輸出哪種格式?","options":["PDF","Word","MD"],"context":"資料 120 筆"}</input>
+   question 必填(中文、可一次多題)、options 選填(陣列 → UI 顯示按鈕)、context 選填。
+   使用者回 → 工具回傳「使用者回答：<答案>」、再依答案繼續。逾時 / 取消 → 用合理預設或 done(success=false)。
+6. done — 完成回報。
+   成功:<input>{"success":true,"summary":"完成了什麼"}</input>
+   失敗(已窮盡所有可用工具與方法後):<input>{"success":false,"error":"已試 X/Y/Z 各自失敗原因","missing_packages":["套件A"]}</input>
+   - 必須先試完已安裝套件的所有替代方案才呼叫 success=false
+   - missing_packages 只填**未安裝**、裝後有合理機率解的套件
+   - 不要第一方案失敗就放棄、要切策略再試
 
 【可用 Python 套件】
-標準庫：csv, json, random, os, pathlib, re, math, datetime, io, collections, itertools, functools, glob, shutil, hashlib, urllib
-已安裝的第三方套件：{installed_packages}
+標準庫:csv, json, random, os, pathlib, re, math, datetime, io, collections, itertools, functools, glob, shutil, hashlib, urllib
+已安裝第三方:{installed_packages}
+不在清單上的也可 import、系統會偵測缺失提示安裝。
 
-以上套件可直接 import 使用。如果任務需要其他未列出的套件，也可以直接 import，系統會自動偵測並提示用戶安裝。
+【規則(必守)】
+- 嚴格遵守任務指定的欄位名 / 路徑 / 數值範圍、不得自改
+- 一律絕對路徑(根據工作目錄 + 輸出路徑 hint)、用 pathlib.Path 或 os.path.join、不要字串拼 `/`
+- 只用上方套件、絕對不要 sudo / pip install / apt install
+- 跑其他 Python script 用 sys.executable、不要寫死 python3 / python(PATH 不一定對)
+  正確:`subprocess.run([sys.executable, "script.py"], ...)`
+- 隨機資料須唯一(姓名等):先用集合生成不重複組合再 random.sample、不要迴圈內 random.choice 累積
+- ❌ 禁止 hardcode 結果(摘要 / 情緒 / 分類):必須讀實際資料 + 程式邏輯處理、不可在原始碼寫死答案 dict / list、會被驗證階段抓
+- 嚴禁 input() / getpass() / sys.stdin.read() — pipeline 非互動環境、會永久卡死
+- 任務需選擇:優先用任務指定;無指定 → 最合理預設值 + summary 註明假設;只有「會嚴重影響結果(覆蓋重要檔、無法回復)」才用 done(success=false)
+- 讀其他檔(csv / xlsx)第一步先 run_python 看前幾行確認欄位、不要猜
+- 重試:絕不重複同一方法、回顧歷史、用尚未嘗試的不同套件 / 策略;耗盡才 done(success=false) + missing_packages
 
-【matplotlib 繪圖注意事項】
-- 使用 matplotlib.pyplot 時，務必在最前面加 `import matplotlib; matplotlib.use('Agg')` 以避免 GUI 問題
-- boxplot 的 `labels` 參數已在新版棄用，請改用 `tick_labels`
-- 繪製分組箱形圖時，需要先將資料按分組欄位 pivot/reshape，再分別傳入各組資料
-- 中文顯示：macOS 使用 'PingFang HK' 或 'Arial Unicode MS'；Windows 使用 'Microsoft JhengHei'（微軟正黑體）或 'SimHei'
-  跨平台安全寫法：
-  ```
-  import matplotlib
-  for font in ['PingFang HK', 'Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']:
-      try:
-          matplotlib.font_manager.findfont(font, fallback_to_default=False)
-          matplotlib.rcParams['font.family'] = font
-          break
-      except: pass
-  ```
-- 繪圖完成後務必呼叫 `plt.savefig(路徑, dpi=150, bbox_inches='tight')` 並 `plt.close()`
-
-【重要規則】
-- **嚴格遵守任務描述中指定的欄位名稱、檔案路徑、數值範圍等具體要求，不得自行更改**
-- **所有檔案一律使用絕對路徑存取（根據工作目錄和輸出路徑提示）**
-- **路徑處理：一律使用 `pathlib.Path` 或 `os.path.join` 組合路徑，不要用字串拼接 `/`**
-- **只使用上方列出的已安裝套件，不要安裝新套件**
-- **絕對不要執行 sudo、pip install、apt 等安裝命令**
-- **要執行其他 Python 腳本時，必須用 `sys.executable` 而非寫死 `python3` 或 `python`，避免 PATH 解析到錯誤的 interpreter**
-  正確：`subprocess.run([sys.executable, "script.py"], ...)`
-  錯誤：`subprocess.run(["python3", "script.py"], ...)` 或 `subprocess.run(["python", "script.py"], ...)`
-- **產生隨機資料時，確保需要唯一的欄位（如姓名）不會重複。正確做法：先用集合或列表生成所有不重複的組合，再用 random.sample 取出所需數量。錯誤做法：在迴圈中用 random.choice 逐一組合（會產生重複）**
-- **❌ 禁止 hardcode 分析結果在程式碼裡**：要做摘要 / 情緒分析 / 內容分類等任務時，
-  必須先讀回實際資料（檔案內容 / API 回應）再用程式邏輯處理；
-  **不可在 Python 原始碼裡寫死 dict / list 預先填好答案**，
-  例：`analysis_map = {"slug1": {"summary": "..."}}` ← 這種樣板是繞過實際處理、產出無意義的「假答案」、會被驗證階段抓到
-  正確做法：用 LLM 工具呼叫 / `subprocess` 跑分析 / 規則式抽取（regex / NLP）等真實處理檔案內容
-  若你抓回的資料量多到一次處理不完、用分批策略（每次 run_python 處理 batch 的 1/3）、不要 hardcode
-
-【執行策略】
-- **如果任務需要讀取其他檔案（CSV、Excel 等），第一步先用 run_python 讀取檔案的前幾行，確認實際欄位名稱**
-- **確認欄位名稱後，再寫完整的處理程式碼**
-- **不要猜測欄位名稱，一定要先確認**
-
-【非互動式執行（重要）】
-- **嚴禁在程式碼中使用 `input()`、`getpass()`、`sys.stdin.read()` 或任何會等待使用者輸入的函式 — Pipeline 是非互動環境，這些呼叫會造成永久卡死**
-- 若任務需要做選擇，優先以任務描述中的指定為準；若無指定，選擇**最合理的預設值**並在 summary 中說明假設
-- 只有當選擇會嚴重影響結果（例如會覆蓋重要檔案、無法回復的操作）才呼叫 `done(success=false)` 讓使用者補充後重跑
-
-【重試策略（重要）】
-- **如果上一次嘗試失敗，絕對不要用相同的方法重試**
-- **每次重試前，先回顧對話歷史中已嘗試過的所有方法，選擇一個尚未使用過的不同套件或策略**
-- **利用已安裝套件清單，系統性地找出所有能完成此任務的替代方案並逐一嘗試**
-  - 例如：若 requests + beautifulsoup4 失敗，改試 urllib；若需要試不同的解析/處理策略，也要切換
-  - 例如：若某種資料格式的讀取方法失敗，改試其他已安裝的相容套件
-- **只有當已安裝的所有可行方案都已嘗試並全部失敗後，才呼叫 done(success=false)**
-- **在呼叫 done(success=false) 時，missing_packages 填入安裝後可能解決問題的套件（必須是目前未安裝的）**
-
-【最重要：正確的工具呼叫格式】
-- **每次回覆只能包含一個工具呼叫，且所有程式碼必須完整放在 <tool> 和 <input> 標籤內**
-- **絕對禁止在 markdown ``` 區塊展示程式碼後再用 <tool> 呼叫。你的回覆中不應包含 ``` 符號。**
-- **正確做法：直接用 <tool>run_python</tool> 然後 <input>完整程式碼</input>**
-- **錯誤做法：先用 ```python 展示程式碼，再用 <tool> 呼叫其他程式碼**
-- **一個回覆中只能有一個 <tool>，後面跟一個 <input>**
-- **把所有邏輯寫在一個 run_python 呼叫中，不要分成「先讀取再處理」兩個步驟**
-- 如果執行結果有錯誤，嘗試修正並重試
-- **絕對不要在 Python 程式碼裡呼叫 done(...)、view_image(...)、read_file(...) — 這些是工具名稱，不是 Python 函式！**
-- **工具只能透過 <tool>工具名</tool><input>參數</input> 的格式呼叫，不能寫在 Python 程式碼中**
-- **程式碼執行成功後，下一回覆直接用 <tool>done</tool><input>{"success": true, "summary": "..."}</input> 結束**
-- 最後一定要呼叫 done 工具回報結果
-- 用中文回覆 summary / error"""
+【工具呼叫格式(最重要)】
+- 每次回覆只一個 tool call、所有程式碼放 <tool> + <input> 標籤內
+- 禁止 markdown ``` 區塊展示程式碼:回覆中不應出現 ``` 符號
+- 不要分「先讀後處理」兩步、邏輯寫在一個 run_python 裡
+- 絕不在 Python 程式碼裡呼叫 done(...) / view_image(...) / read_file(...) — 那是 tool 名、不是函式
+- 程式跑成功 → 下回覆直接 done"""
 
     # 網路搜尋工具：僅在 settings.web_search_enabled AND 有 tavily_api_key 時對 agent 揭露
     # 沒啟用就完全不提（agent 連這工具名都看不到，不會誤呼叫）
@@ -1626,50 +1533,26 @@ async def execute_step_with_skill(
         from settings import get_settings as _gs_ws
         _ws_settings = _gs_ws()
         if _ws_settings.get("web_search_enabled") and (_ws_settings.get("tavily_api_key") or "").strip():
+            # FIRST_ITER 區塊:LLM 第一輪看過後內化、後續輪數會被 strip 省 token
             system_prompt += r"""
 
-【🔍 工具 7：web_search — 網路搜尋】
-使用者已啟用網路搜尋。當任務需要「即時 / 外部資訊」時可以用這工具查網（Tavily），
-結果會回到這個對話裡。**不是每個任務都需要搜網**，下面列情境作判斷：
+<!--FIRST_ITER_BEGIN-->
+【🔍 工具 7：web_search】
+Tavily 搜網、結果回對話。**不是每個任務都要搜**:
+- ✅ 即時資訊(股價 / 新聞 / 匯率)、使用者提「查」「最新」、缺背景知識、確認套件 / API 最新做法
+- ❌ 純資料處理、任務已給完整資料、為「驗證想法」亂搜(先動手)
 
-✅ 什麼時候用 web_search：
-- 需要即時資訊（今天的股價、新聞、匯率、賽事比分）
-- 使用者提到「查」「最新」「現在」「目前」等詞
-- 生成內容前缺背景知識（人物、地點、事件）
-- 要確認某套件 / API / 錯誤訊息的最新做法
-❌ 什麼時候不要用：
-- 純資料處理（讀檔、清洗、計算）
-- 使用者已在任務描述提供完整資料
-- 為了「驗證自己想法」亂搜（先動手做）
+<input>{"query":"今天美國科技新聞","max_results":5,"search_depth":"basic","include_full_content":true}</input>
+- max_results: 1-5(預設 5)
+- search_depth: "basic"(預設便宜) / "advanced"(貴 2x、較精)
+- include_full_content=true → 拿每則完整原文(~3000 字/篇)
 
-用法：<tool>web_search</tool>
-<input>{
-  "query": "今天美國科技新聞",
-  "max_results": 5,               # 1-5；預設 5
-  "search_depth": "basic",        # "basic"（預設便宜）或 "advanced"（貴 2x 結果更精）
-  "include_full_content": true    # 開啟 = 一次拿到每則完整文章原文（~3000 字/篇），見下面
-}</input>
+⭐ 任務要「擷取內文 / 分析全文」時直接 `include_full_content=true`、別寫 requests/newspaper 自己爬
+   (Tavily 已處理 CF / JS 渲染 / 反爬、自爬幾乎一定 403 或拿不到 SPA 內容)
 
-兩段式輸出：
-- **關閉 include_full_content（輕量）** = Tavily 的 `answer` 摘要 + URL 清單（~500 字）
-  適合：只要結論、只要知道有哪些來源
-- **開啟 include_full_content（完整）** = answer + URL + 每則文章完整原文（~15000 字）
-  適合：要擷取新聞內文、翻譯、深度摘要、比對多篇
-
-⭐ **強烈建議：任務要「擷取內文 / 複製內容 / 分析全文」時直接開 `include_full_content=true`**，
-   不要另外寫 requests.get / newspaper 爬蟲。Tavily 已經處理 Cloudflare / JS 渲染等反爬機制，
-   你自己爬常常 403 / 空內容；直接用 Tavily 拉成功率高很多。
-   使用者開啟本工具時就意識到「需要雲端大 context」，所以不用擔心 token 爆。
-
-實例對照：
-  任務：「抓 5 則美國科技新聞，包含標題與完整內文，存成 CSV」
-    ✅ **正確**：web_search query="latest US tech news" include_full_content=true
-       → 一次拿回 5 則完整文章 → run_python 把資料寫成 CSV（只用 csv 模組，不碰爬蟲）
-    ❌ **錯誤**：web_search 拿 URL → 寫 `newspaper.build('reuters.com')` 自己爬
-       （幾乎一定失敗：CF 擋、anti-bot、動態渲染）
-
-⚠️ 每個步驟最多搜 5 次（每次 $0.01-0.025 USD），請整合後再下一次 query。
-⚠️ include_full_content=true 會讓回傳達 15000 字以上，只在任務確實需要時才開。"""
+⚠️ 每步驟最多搜 5 次($0.01-0.025/次)、整合後再 query
+⚠️ include_full_content=true 回傳 ~15000 字、只在確需才開
+<!--FIRST_ITER_END-->"""
             logger.info(f"[{step_name}] 🔍 web_search 工具已啟用（Tavily）")
     except Exception as _e:
         logger.debug(f"[{step_name}] web_search 工具注入失敗（略過）：{_e}")
@@ -1692,13 +1575,10 @@ async def execute_step_with_skill(
     # 預設（未勾選）：保守使用 ask_user，優先靠任務描述 + 合理預設完成任務
     # 勾選後：把「遇到不確定就問」的優先度拉到最高，減少 LLM 自己猜的情況
     if ask_mode:
-        # 先覆寫 base 裡跟詢問模式相衝突的「優先用預設值」那行，避免 LLM 拿到兩條矛盾指令
-        # 不用 if/else 重寫 base 是為了保留「不能 input()」那行（仍然要防程式碼卡死）
+        # 先覆寫 base 裡跟詢問模式相衝突的「優先用預設值」那行,避免 LLM 拿到兩條矛盾指令
         system_prompt = system_prompt.replace(
-            "- 若任務需要做選擇，優先以任務描述中的指定為準；若無指定，選擇**最合理的預設值**並在 summary 中說明假設\n"
-            "- 只有當選擇會嚴重影響結果（例如會覆蓋重要檔案、無法回復的操作）才呼叫 `done(success=false)` 讓使用者補充後重跑",
-            "- 若任務需要做選擇，**一律優先用 ask_user 問使用者**（詢問模式下 ask_user 無次數上限）\n"
-            "- 只有當使用者先前已經明確指定，或有次超明顯的單一答案時才用預設；其餘情況都問",
+            "- 任務需選擇:優先用任務指定;無指定 → 最合理預設值 + summary 註明假設;只有「會嚴重影響結果(覆蓋重要檔、無法回復)」才用 done(success=false)",
+            "- 任務需選擇:**一律優先用 ask_user 問使用者**(詢問模式 ask_user 無次數上限);只有使用者已明確指定 / 唯一明顯答案才用預設",
         )
         system_prompt += """
 
@@ -1752,39 +1632,30 @@ async def execute_step_with_skill(
                 _v5_root_wsl = f"/mnt/{_drive}/{_rest}"
             except Exception:
                 _v5_root_wsl = "/mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV5"
+            # FIRST_ITER 區塊:沙盒環境規則第一輪講完、後續輪數 strip 省 ~70 行 / 輪
             system_prompt += rf"""
 
-【🛡️ Sandbox 環境資訊（重要，務必遵守）】
-本步驟的 run_python / run_shell **在 Linux Docker 容器內執行**（python:3.13-slim），不是 Windows host：
-- **OS = Linux**：沒有 win32com / pywin32 / PowerShell / cmd.exe，直接忽略它們，用純 Python 或 Linux 工具
-- **產生 PPT**：容器已預裝 `python-pptx`（首選）與 Node.js + `pptxgenjs`（走 `.agents/skills/pptx`）
-  — **不要 import win32com.client**，它在容器裡永遠 ImportError
-- **路徑轉換**：Windows 格式 `C:\...` 或 `C:/...` 在容器無效，pathlib 會當相對路徑處理導致找不到檔：
-  - 把 `C:\Users\X\...` 轉成 `/mnt/c/Users/X/...`
-  - 把 `D:\data\...` 轉成 `/mnt/d/data/...`
-  - 容器裡 `~` (`/root`) 有 mount `.agents`，所以 `Path.home() / ".agents"` 跟 `/mnt/c/Users/X/.agents` 指同一份
-- **PATH 上只有 Linux 工具**：`node`、`npm`、`python3`、`bash`、`ls`、`grep`、`curl` 等都有；
-  沒有 `where`、`dir`、`type`、`copy` 這些 Windows 命令
-- 任務描述若給了 Windows 風格的路徑，自動轉成 `/mnt/<drive>/...` 再使用
+<!--FIRST_ITER_BEGIN-->
+【🛡️ Sandbox 環境(Linux Docker 容器、python:3.13-slim、不是 Windows)】
+- OS = Linux:沒有 win32com / pywin32 / PowerShell / cmd.exe — 用純 Python 或 Linux 工具
+- 產 PPT 用 `python-pptx`(首選)或 Node.js + `pptxgenjs`(走 `.agents/skills/pptx`);**不要 import win32com.client**(永遠 ImportError)
+- 路徑轉換:Windows `C:\...` / `C:/...` 在容器無效、pathlib 會當相對路徑導致找不到檔
+  - `C:\Users\X\...` → `/mnt/c/Users/X/...`
+  - `D:\data\...` → `/mnt/d/data/...`
+  - 容器 `~`(`/root`)mount `.agents`、`Path.home()/".agents"` 跟 `/mnt/c/Users/X/.agents` 同一份
+- PATH 只有 Linux 工具(node/npm/python3/bash/ls/grep/curl);沒 where/dir/type/copy
+- 任務給 Windows 路徑 → 自動轉 `/mnt/<drive>/...` 再用
 
-【📁 專案根目錄（處理相對路徑時用）】
-- **本專案根目錄**：`{_v5_root_wsl}`
-- 任務描述裡的**相對路徑**（例 `external_projects/...`、`scripts/...`、`docs/...`）
-  → 一律以**專案根目錄**為基準展開，不要拿沙盒 CWD 當 base
-- 例：任務寫「我有個工具在 `external_projects/interactive_demo/main.py`」
-  → 完整路徑 = `{_v5_root_wsl}/external_projects/interactive_demo/main.py`
-- 不確定檔案位置時直接 `list(Path("{_v5_root_wsl}").rglob("檔名"))` 一次找到，不要一層層 ls 探
+【📁 專案根目錄】`{_v5_root_wsl}`
+- 任務裡相對路徑(`external_projects/...` / `scripts/...` / `docs/...`)以**專案根**展開、不要拿 sandbox CWD
+- 例:`external_projects/interactive_demo/main.py` → `{_v5_root_wsl}/external_projects/interactive_demo/main.py`
+- 不確定位置直接 `list(Path("{_v5_root_wsl}").rglob("檔名"))`、不要一層層 ls
 
-【🌐 網頁抓取準則（容器內專用）】
-**抓網頁一律用 `crawl4ai`**（容器已預裝 crawl4ai + playwright + chromium）。
-**禁用**：
-- ❌ `selenium`（容器沒裝 chromedriver、裝了也跑不起來）
-- ❌ `requests` / `urllib` / `httpx` 直接 GET HTML（拿不到 SPA 動態內容、Reddit/Twitter/X/Instagram 都是 SPA）
-- ❌ `playwright` 直接寫 driver code（會繞過 crawl4ai 的反爬處理）
+【🌐 網頁抓取(容器內)】
+- **一律用 `crawl4ai`**(容器已預裝 + playwright + chromium、處理 JS / CF / cookies / 滾動 / 轉 md)
+- ❌ 禁用 selenium(容器沒 chromedriver) / requests/urllib/httpx 直接 GET HTML(SPA 拿不到) / 自寫 playwright(繞過反爬)
 
-**為什麼要 crawl4ai**：自動處理 JS 渲染、Cloudflare bypass（fallback FlareSolverr）、cookies、滾動、自動轉 markdown。比手刻 Playwright/Selenium 穩很多。
-
-**最小樣板**（直接抄改）：
+最小樣板(直接抄改):
 ```python
 import asyncio
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
@@ -1792,7 +1663,6 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 async def fetch(url, scroll=True):
     js = ""
     if scroll:
-        # SPA 站要滾動觸發 lazy load
         js = '''
         await new Promise(r => setTimeout(r, 2000));
         window.scrollTo(0, document.body.scrollHeight / 2);
@@ -1804,46 +1674,29 @@ async def fetch(url, scroll=True):
         r = await c.arun(url=url, config=CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
             page_timeout=90000,
-            wait_until="domcontentloaded",  # SPA 站不能用 networkidle，會 timeout
+            wait_until="domcontentloaded",  # SPA 不能用 networkidle、會 timeout
             js_code=js if js else None,
         ))
         return r.markdown if r.success else None
 
-# 多 URL 序列抓（rate limit 友善）
-async def fetch_many(urls):
-    results = []
-    for u in urls:
-        md = await fetch(u)
-        results.append((u, md))
-        await asyncio.sleep(1)  # 給站點喘息
-    return results
-
 md = asyncio.run(fetch("https://example.com/"))
 ```
 
-**SPA 站特別注意**：Reddit / Twitter / X / Instagram / Threads / Bluesky 等動態載入內容的站，務必：
-1. `wait_until="domcontentloaded"`（不要用 `networkidle`、會 timeout）
-2. `js_code` 加滾動 + 等待，讓 lazy-load 內容渲染
-3. 抽連結時用 regex 過濾貼文 URL pattern（如 Reddit `/comments/<id>/<slug>/`），別拿頁首導覽連結
-
-**影片下載**用 `yt-dlp`（容器預裝），不要用 pytube / youtube-dl 等其他工具。"""
-            # 動態注入「單次 tool 上限秒數」— 從 step.timeout 推導出來、不是寫死 60s。
-            # 讓 LLM 第一次寫程式時就知道單次 run_python 多久會被砍、自己用併發 / 分批避開
+SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloaded"` + js_code 加滾動 + regex 過濾貼文 URL pattern(別拿頁首導覽連結)。
+影片下載用 `yt-dlp`(容器預裝)、不要 pytube / youtube-dl。
+<!--FIRST_ITER_END-->"""
+            # 動態注入「單次 tool 上限秒數」— 從 step.timeout 推導出來、不是寫死 60s
             system_prompt += f"""
 
-【⏱ 單次 tool call 時間上限（重要）】
-本步驟的單次 `run_python` / `run_shell` 上限是 **{tool_timeout} 秒**（超過會被強制終止）。
-
-**處理長任務的策略**：
-- 多筆網路 I/O（如抓 N 個網頁、N 篇詳細頁）→ 用 `asyncio.gather` 配 `asyncio.Semaphore(5)` 限制並發
-- 大量 LLM 序列計算 → 拆成多次 run_python（每次處理 batch 的 1/3）
-- CPU 密集（大數據處理）→ 用 pandas / numpy 向量化，避免 Python for-loop
-
-**禁止的反模式**：
-- 一個 `run_python` 裡 sequential 跑 10+ 個慢操作（每個 5-10 秒、總和會超）
-- 在 `run_python` 內 sleep / wait / poll loop 等待外部事件（直接超時、不會 work）
-
-**注意**：你看到 `[錯誤] 執行超時` 表示這次任務已被砍掉 — 立即改用上面策略重寫、不要重送同一份程式。"""
+<!--FIRST_ITER_BEGIN-->
+【⏱ 單次 tool call 上限 {tool_timeout} 秒(超過會被強制終止)】
+- 多筆網路 I/O(抓 N 網頁) → asyncio.gather + asyncio.Semaphore(5) 限併發
+- 大量 LLM 序列 → 拆多次 run_python(每次 batch 的 1/3)
+- CPU 密集 → pandas / numpy 向量化、避免 Python for-loop
+- ❌ 一個 run_python 裡 sequential 跑 10+ 慢操作(每個 5-10s、總和會超)
+- ❌ run_python 內 sleep / wait / poll loop 等外部事件(直接超時)
+- 看到「[錯誤] 執行超時」 → 立即改策略重寫、別重送同份程式
+<!--FIRST_ITER_END-->"""
             logger.info(f"[{step_name}] 🛡 已注入 wsl_docker sandbox 環境資訊")
     except Exception as _e:
         logger.debug(f"[{step_name}] sandbox env 注入失敗（略過）：{_e}")
@@ -1882,6 +1735,34 @@ md = asyncio.run(fetch("https://example.com/"))
         system_prompt = system_prompt.replace("{installed_packages}", ", ".join(pkg_lines))
     else:
         system_prompt = system_prompt.replace("{installed_packages}", "pandas, openpyxl, matplotlib, requests, beautifulsoup4, Pillow, python-docx")
+
+    # ── matplotlib lazy injection:只有任務含繪圖關鍵字才注入(原本每次都送 ~15 行) ──
+    # 90% 的 skill 任務不繪圖、塞這段純粹浪費 token
+    _plot_keywords = ("圖", "繪", "chart", "plot", "視覺", "png", "jpg", "jpeg",
+                      "折線", "長條", "直方", "柱狀", "圓餅", "散點", "pie", "scatter",
+                      "boxplot", "heatmap", "dashboard", "視覺化", "matplotlib", "seaborn", "plotly")
+    _td_lower = (task_description or "").lower()
+    if any(kw.lower() in _td_lower for kw in _plot_keywords):
+        system_prompt += """
+
+<!--FIRST_ITER_BEGIN-->
+【matplotlib 繪圖】
+- 最前面加 `import matplotlib; matplotlib.use('Agg')` 避免 GUI 問題
+- boxplot 的 `labels` 已棄用、改 `tick_labels`
+- 中文字型:macOS 'PingFang HK';Windows 'Microsoft JhengHei' / 'SimHei'
+  跨平台寫法:
+  ```python
+  import matplotlib
+  for font in ['PingFang HK', 'Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']:
+      try:
+          matplotlib.font_manager.findfont(font, fallback_to_default=False)
+          matplotlib.rcParams['font.family'] = font
+          break
+      except: pass
+  ```
+- 完成 → `plt.savefig(路徑, dpi=150, bbox_inches='tight')` + `plt.close()`
+<!--FIRST_ITER_END-->"""
+        logger.info(f"[{step_name}] 📊 偵測到繪圖關鍵字、注入 matplotlib 提示")
 
     # ── 注入前次失敗歷史（重試時） ──
     failures_hint = ""
@@ -1977,6 +1858,20 @@ md = asyncio.run(fetch("https://example.com/"))
 
         for iteration in range(SKILL_MAX_ITERATIONS):
             logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS}")
+
+            # 第一輪後 strip <!--FIRST_ITER_BEGIN/END--> 區塊(sandbox env / web_search / matplotlib /
+            # tool_timeout 等規則第一輪 LLM 已內化、後續輪數重送純粹浪費 token)
+            # 平均省 70-130 行 system prompt / 後續輪、約 1-2K tok / 輪
+            if iteration == 1 and "<!--FIRST_ITER_BEGIN-->" in messages[0].content:
+                import re as _re_strip
+                _stripped = _re_strip.sub(
+                    r"<!--FIRST_ITER_BEGIN-->.*?<!--FIRST_ITER_END-->\s*",
+                    "",
+                    messages[0].content,
+                    flags=_re_strip.DOTALL,
+                )
+                messages[0] = SystemMessage(content=_stripped)
+                logger.debug(f"[{step_name}] 🪶 第二輪起 system prompt 已 strip first-iter blocks")
 
             # 冷卻機制：每 SKILL_COOLDOWN_EVERY 次呼叫後暫停
             if iteration > 0 and iteration % SKILL_COOLDOWN_EVERY == 0:
