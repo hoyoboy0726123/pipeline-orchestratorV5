@@ -1175,6 +1175,24 @@ export default function PipelinePage() {
     if (showLog && logAutoScrollRef.current) logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [logLines, showLog])
 
+  // Trace 視圖 live poll — 開啟期間每 3 秒重抓 run、保持 token / tool_calls / 步驟狀態 up-to-date
+  useEffect(() => {
+    if (!showTrace) return
+    let stopped = false
+    const tick = async () => {
+      if (stopped) return
+      const rid = runIdRef.current
+      if (!rid) return
+      try {
+        const run = await getPipelineRun(rid)
+        if (!stopped) setTraceRun(run)
+      } catch { /* ignore */ }
+    }
+    tick()
+    const id = setInterval(tick, 3000)
+    return () => { stopped = true; clearInterval(id) }
+  }, [showTrace, running])
+
   // 開啟 log 時重置 auto-scroll
   useEffect(() => { if (showLog) logAutoScrollRef.current = true }, [showLog])
 
@@ -1704,7 +1722,7 @@ export default function PipelinePage() {
             />
             <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 shrink-0">
               <Terminal className="w-3.5 h-3.5 text-gray-400" />
-              <span className="text-xs text-gray-400 font-mono">Pipeline Log</span>
+              <span className="text-xs text-gray-400 font-mono">Pipeline {showTrace ? 'Trace' : 'Log'}</span>
               {running && <span className="text-xs text-green-400 animate-pulse">● 執行中</span>}
               {!running && runIdRef.current && <span className="text-xs text-gray-500">Run: {runIdRef.current}</span>}
               <div className="flex-1" />
@@ -1712,6 +1730,8 @@ export default function PipelinePage() {
                 onClick={async () => {
                   const next = !showTrace
                   if (next && runIdRef.current) {
+                    // Trace 跟 Log 是同一個 run 的兩個視圖、永遠繫到 runIdRef.current；
+                    // 想看別 run 請在 sidebar 切換 workflow（log 跟 trace 同步切）
                     try {
                       const run = await getPipelineRun(runIdRef.current)
                       setTraceRun(run)
@@ -1719,24 +1739,25 @@ export default function PipelinePage() {
                   }
                   setShowTrace(next)
                 }}
-                className={`text-xs px-2 py-0.5 rounded transition-colors ${showTrace ? 'bg-indigo-700 text-white hover:bg-indigo-600' : 'text-gray-500 hover:text-gray-300'}`}
-                title="切換 Trace 視圖（顯示每步驟的 tool 呼叫與 token 用量）"
-              >📊 Trace</button>
+                className={`text-xs px-2 py-0.5 rounded transition-colors ${showTrace ? 'bg-indigo-700 text-white hover:bg-indigo-600' : 'border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
+                title={showTrace ? '切回 Log 視圖（時序文字流）' : '切到 Trace 視圖（每步驟 tool 呼叫與 token 用量）'}
+              >{showTrace ? '📜 Log' : '📊 Trace'}</button>
               <button onClick={() => setLogLines([])} className="text-xs text-gray-500 hover:text-gray-300 px-2">清除</button>
               <button onClick={() => setShowLog(false)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
-            {/* Trace block — toggle 自 header 的 📊 按鈕；展示當前 run 的 step / tool / token 時間軸 */}
+            {/* Trace 視圖 — toggle 自 header 的 📊 按鈕；showTrace=true 時取代 log 顯示，
+                並在 useEffect 內 3 秒 poll 一次保持 live update */}
             {showTrace && (
-              <div className="border-b border-gray-800 bg-gray-900/50 max-h-64 overflow-y-auto p-3 font-mono text-xs leading-5 shrink-0">
+              <div className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-5 bg-gray-900/30">
                 {!traceRun ? (
                   <span className="text-gray-600">{runIdRef.current ? '載入 trace 中…（再按一次 📊 重新拉）' : '尚無 run — 請先執行 Pipeline'}</span>
                 ) : (
                   <div className="space-y-2">
                     <div className="flex items-baseline gap-3 pb-1 border-b border-gray-800">
                       <span className="text-gray-300 font-semibold">{traceRun.pipeline_name}</span>
-                      <span className="text-gray-500">({traceRun.status})</span>
+                      <span className="text-gray-500 text-[11px]">({traceRun.status})</span>
                       {(() => {
                         const srs = traceRun.step_results || []
                         const totalTokens = srs.reduce((s: number, sr) => s + (sr.token_usage?.total_tokens || 0), 0)
@@ -1787,7 +1808,7 @@ export default function PipelinePage() {
                 )}
               </div>
             )}
-            <div ref={logContainerRef} className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-5"
+            <div ref={logContainerRef} className={`flex-1 overflow-y-auto p-3 font-mono text-xs leading-5${showTrace ? ' hidden' : ''}`}
               onScroll={() => {
                 const el = logContainerRef.current
                 if (!el) return
