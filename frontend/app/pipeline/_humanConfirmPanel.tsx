@@ -1,5 +1,5 @@
 'use client'
-import { X } from 'lucide-react'
+import { X, UserCheck } from 'lucide-react'
 import type { HumanConfirmData, HumanConfirmNode } from './_helpers'
 
 const CONFIRM_COLOR = '#10b981'
@@ -19,8 +19,8 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete }:
     <div className="absolute top-0 right-0 h-full w-[380px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: CONFIRM_COLOR, borderTopWidth: 3 }}>
-        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-          style={{ background: CONFIRM_COLOR }}>✋</span>
+        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
+          style={{ background: CONFIRM_COLOR }}><UserCheck className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
           <span className="font-semibold text-gray-800 text-sm block truncate">人工確認節點</span>
           <span className="text-xs text-gray-400">暫停 Pipeline 等待人工確認，可透過 Telegram 或網頁操作</span>
@@ -41,11 +41,17 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete }:
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">確認訊息</label>
           <textarea
-            rows={4}
+            rows={6}
             value={data.message}
             onChange={e => onUpdate({ message: e.target.value })}
+            onWheel={(e) => {
+              const el = e.currentTarget
+              const atTop = el.scrollTop === 0
+              const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+              if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+            }}
             placeholder={'（選填）自訂確認提示…\n例如：請確認抓取的資料筆數正確，再繼續進行分析'}
-            className={`${inputCls} resize-none text-xs leading-relaxed`}
+            className={`${inputCls} resize-y text-xs leading-relaxed min-h-[100px]`}
           />
           <p className="text-xs text-gray-400 mt-1.5">留空則顯示預設訊息：「請確認上一步結果是否正確」</p>
         </div>

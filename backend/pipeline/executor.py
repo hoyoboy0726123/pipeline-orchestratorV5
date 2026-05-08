@@ -81,6 +81,87 @@ def get_pending_question(run_id: str) -> Optional[dict]:
     pending = _pending_questions.get(run_id)
     if not pending:
         return None
+
+
+# ── Phase B: ask_mode 命令分類攔截（in-memory pending state）──
+# 正在等待的命令授權：run_id -> {category, label, preview, event, decision}
+_pending_command_approvals: dict[str, dict] = {}
+
+
+def deliver_command_approval(run_id: str, decision: str) -> bool:
+    """外部（resume_pipeline）呼叫：把命令授權結果送給正在等待的 skill agent。
+    decision: "allow" | "deny" | "hint"
+    """
+    pending = _pending_command_approvals.get(run_id)
+    if not pending:
+        return False
+    pending["decision"] = decision
+    pending["event"].set()
+    return True
+
+
+def get_pending_command_approval(run_id: str) -> Optional[dict]:
+    """查詢某 run 目前是否在等命令授權。"""
+    pending = _pending_command_approvals.get(run_id)
+    if not pending:
+        return None
+    return {k: v for k, v in pending.items() if k != "event"}
+
+
+# ── 命令分類規則（順序：先具體、後通用；first-match-wins）──
+# 安全原則：判斷「是不是安裝行為」而非「是不是缺依賴」— LLM 主動裝套件也要攔
+import re as _cmd_cls_re
+_COMMAND_CLASSIFY_RULES = [
+    # privileged: 提升權限（最高優先）
+    (_cmd_cls_re.compile(r'\bsudo\b'), 'privileged', 'sudo 提升權限'),
+    (_cmd_cls_re.compile(r'\brunas\b'), 'privileged', 'runas 提升權限'),
+
+    # remote-exec: 從網路下載執行（次高優先）
+    (_cmd_cls_re.compile(r'curl\s+[^|;]*\|\s*(?:sh|bash)\b'), 'remote-exec', '從網路下載並執行（curl | sh）'),
+    (_cmd_cls_re.compile(r'wget\s+[^|;]*\|\s*(?:sh|bash)\b'), 'remote-exec', '從網路下載並執行（wget | sh）'),
+
+    # install: 安裝/移除套件 — 須先於 subprocess / destructive 規則,優先匹配
+    (_cmd_cls_re.compile(r'\bpip3?\s+install\b'), 'install', 'pip 安裝套件'),
+    (_cmd_cls_re.compile(r'\bpip3?\s+uninstall\b'), 'install', 'pip 移除套件'),
+    (_cmd_cls_re.compile(r'\bpython3?\s+-m\s+pip\s+install\b'), 'install', 'pip 安裝套件（python -m pip）'),
+    (_cmd_cls_re.compile(r'\bnpm\s+(?:install|i)\b'), 'install', 'npm 安裝套件'),
+    (_cmd_cls_re.compile(r'\bpnpm\s+(?:add|install)\b'), 'install', 'pnpm 安裝套件'),
+    (_cmd_cls_re.compile(r'\byarn\s+add\b'), 'install', 'yarn 安裝套件'),
+    (_cmd_cls_re.compile(r'\bpoetry\s+add\b'), 'install', 'poetry 新增套件'),
+    (_cmd_cls_re.compile(r'\bconda\s+install\b'), 'install', 'conda 安裝套件'),
+    (_cmd_cls_re.compile(r'\bapt(?:-get)?\s+install\b'), 'install', 'apt 安裝系統套件'),
+    (_cmd_cls_re.compile(r'\bbrew\s+install\b'), 'install', 'brew 安裝套件'),
+    (_cmd_cls_re.compile(r'\bInstall-Module\b'), 'install', 'PowerShell 安裝模組'),
+    (_cmd_cls_re.compile(r'\bwinget\s+install\b'), 'install', 'winget 安裝程式'),
+    # subprocess.run(["pip", "install", ...]) 等用 subprocess 包裝的安裝命令(優先列為 install)
+    (_cmd_cls_re.compile(r"""(?:subprocess\.(?:run|call|Popen|check_output|check_call)|os\.system)\s*\(\s*['"\[]+\s*['"]?(?:pip3?|npm|pnpm|yarn|poetry|conda|apt|apt-get|brew|winget)['"]?\s*[,'"\]\s]+(?:install|add|i\b)"""), 'install', 'subprocess/os.system 安裝套件'),
+
+    # destructive: 刪除檔案/目錄
+    (_cmd_cls_re.compile(r'\brm\s+(?:-[rRfF]+\s+|--recursive\s+|--force\s+)'), 'destructive', '刪除目錄/檔案（rm -r/-f）'),
+    (_cmd_cls_re.compile(r'shutil\.rmtree\b'), 'destructive', '刪除目錄（shutil.rmtree）'),
+    (_cmd_cls_re.compile(r'os\.remove\b|os\.unlink\b'), 'destructive', '刪除檔案（os.remove / os.unlink）'),
+    (_cmd_cls_re.compile(r'\b\w+\.unlink\(\)|\bPath\([^)]+\)\.unlink'), 'destructive', '刪除檔案（Path.unlink）'),
+
+    # subprocess: 執行外部命令(排除 python 自呼)
+    (_cmd_cls_re.compile(r"subprocess\.(?:run|call|Popen|check_output|check_call)\s*\(\s*\[\s*['\"](?!python)[^'\"]+['\"]"), 'subprocess', '透過 subprocess 執行外部命令'),
+]
+
+
+def classify_command(code: str) -> Optional[tuple[str, str, str]]:
+    """偵測 ask_mode 下需要強制詢問的敏感命令。
+    回 (category, label, preview) 或 None。
+    """
+    if not code:
+        return None
+    for pattern, cat, label in _COMMAND_CLASSIFY_RULES:
+        m = pattern.search(code)
+        if m:
+            line_start = code.rfind('\n', 0, m.start()) + 1
+            line_end = code.find('\n', m.end())
+            line = code[line_start:line_end if line_end > 0 else len(code)].strip()
+            preview = line[:140] + ('...' if len(line) > 140 else '')
+            return (cat, label, preview)
+    return None
     return {
         "question": pending["question"],
         "options": pending["options"],
@@ -1146,6 +1227,90 @@ async def _wait_for_ask_user(
     return answer
 
 
+# ── Phase B: 命令授權等待（同 _wait_for_ask_user pattern）──
+COMMAND_APPROVAL_TIMEOUT = 1800  # 30 分鐘等用戶按按鈕
+
+async def _wait_for_command_approval(
+    run_id: str,
+    category: str,
+    label: str,
+    preview: str,
+    tool_name: str,
+    logger: logging.Logger,
+    step_name: str,
+) -> str:
+    """ask_mode ON 時、敏感命令呼叫前的授權等待。
+    回 "allow" / "deny" / "hint"（hint 是用戶要改任務）/ "timeout"。
+    """
+    from pipeline.store import get_store
+    store = get_store()
+    run = store.load(run_id)
+    if not run:
+        logger.warning(f"[{step_name}] command_approval 失敗：找不到 run {run_id}")
+        return "deny"  # 找不到 run 安全起見拒絕
+
+    event = asyncio.Event()
+    _pending_command_approvals[run_id] = {
+        "category": category,
+        "label": label,
+        "preview": preview,
+        "tool_name": tool_name,
+        "event": event,
+        "decision": None,
+    }
+
+    # 寫 awaiting_human 狀態
+    run.status = "awaiting_human"
+    run.awaiting_type = "command_approval"
+    run.awaiting_message = f"敏感操作需授權:{label}"
+    run.awaiting_suggestion = json.dumps({
+        "category": category,
+        "label": label,
+        "preview": preview,
+        "tool_name": tool_name,
+        "step_name": step_name,
+    }, ensure_ascii=False)
+    store.save(run)
+
+    # 通知 TG / 前端
+    try:
+        from pipeline.runner import _send_command_approval_notification
+        await _send_command_approval_notification(run, category, label, preview, step_name)
+    except Exception as e:
+        logger.warning(f"[{step_name}] command_approval 通知發送失敗：{e}")
+
+    logger.warning(
+        f"[{step_name}] ⏸ ask_mode 攔截敏感命令 ({category})、等用戶授權:{preview[:80]}"
+    )
+    try:
+        await asyncio.wait_for(event.wait(), timeout=COMMAND_APPROVAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(f"[{step_name}] command_approval 逾時 ({COMMAND_APPROVAL_TIMEOUT}s)")
+        _pending_command_approvals.pop(run_id, None)
+        run2 = store.load(run_id)
+        if run2 and run2.awaiting_type == "command_approval":
+            run2.status = "running"
+            run2.awaiting_type = ""
+            run2.awaiting_message = ""
+            run2.awaiting_suggestion = ""
+            store.save(run2)
+        return "timeout"
+
+    decision = _pending_command_approvals[run_id]["decision"]
+    _pending_command_approvals.pop(run_id, None)
+
+    run3 = store.load(run_id)
+    if run3:
+        run3.status = "running"
+        run3.awaiting_type = ""
+        run3.awaiting_message = ""
+        run3.awaiting_suggestion = ""
+        store.save(run3)
+
+    logger.info(f"[{step_name}] ▶ command_approval 收到決定:{decision}")
+    return decision or "deny"
+
+
 async def execute_step_with_skill(
     task_description: str,
     timeout: int,
@@ -1163,6 +1328,7 @@ async def execute_step_with_skill(
     recipe_step_key: Optional[str] = None,
     skill_name: str = "",
     ask_mode: bool = False,
+    silent_recipe: bool = False,
 ) -> ExecResult:
     """
     Skill 模式執行器：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼。
@@ -1540,7 +1706,27 @@ async def execute_step_with_skill(
 - 第一次嘗試失敗、在選下一種做法前（先問「要繼續試其他套件還是放棄」）
 **判斷原則反過來**：base prompt 預設「能推論就不問」，詢問模式下改成「**有任何疑慮就問**」。
 **詢問模式下 ask_user 沒有次數上限**（原本限制 3 次，此模式下取消），請放心多問幾次。
-每個 ask_user 可以同時包 1 題或多題相關問題（用換行或編號）一次收齊，減少往返。"""
+每個 ask_user 可以同時包 1 題或多題相關問題（用換行或編號）一次收齊，減少往返。
+
+【🚀 啟動既有 Python 專案的特別規則】
+任務描述含「啟動 / 跑 / 執行」+ 一個 .py 檔案路徑(尤其是 main.py / run.py / app.py / start.py)時:
+- 在 subprocess 啟動子程序**之前**,**先 read_file 看一遍源碼**(至少前 200 行)
+- 重點找:
+  - `input(...)` 互動輸入呼叫
+  - `argparse` / `sys.argv` 命令列參數
+  - 環境變數讀取(`os.environ` / `os.getenv`)
+  - `print` 出來的 menu/選單(會跟 input 配對)
+- **發現 input() 或選單** → 用 ask_user 問使用者該回什麼,再用 stdin pipe 餵進子程序:
+  ```python
+  result = subprocess.run(
+      [sys.executable, "main.py"],
+      input="user_answer_1\nuser_answer_2\n",  # 對應 input() 順序
+      text=True, capture_output=True, timeout=120
+  )
+  ```
+- **發現需要 argv 參數** → 用 ask_user 問參數值,組進 subprocess 命令
+- **絕對不要**直接 `subprocess.run([sys.executable, "main.py"])` 然後等 timeout、再去猜為什麼卡住
+原因:子程序 input() 會 block stdin 直到 timeout(60-120 秒),純粹浪費時間;先讀源碼 + 主動問用戶才是專業做法。"""
         logger.info(f"[{step_name}] ❓ 詢問模式已啟用（LLM 遇到模糊處會主動問使用者；ask_user 無上限）")
 
     # ── 沙盒環境提示（僅在 wsl_docker 模式注入）──
@@ -1554,7 +1740,14 @@ async def execute_step_with_skill(
             _sys2.path.insert(0, _backend_dir2)
         from settings import get_settings as _get_settings_for_sandbox
         if (_get_settings_for_sandbox().get("skill_sandbox_mode") or "host").strip() == "wsl_docker":
-            system_prompt += r"""
+            try:
+                _v5_root_win = Path(__file__).parent.parent.parent.absolute()
+                _drive = str(_v5_root_win)[0].lower()
+                _rest = str(_v5_root_win)[3:].replace("\\", "/")
+                _v5_root_wsl = f"/mnt/{_drive}/{_rest}"
+            except Exception:
+                _v5_root_wsl = "/mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV5"
+            system_prompt += rf"""
 
 【🛡️ Sandbox 環境資訊（重要，務必遵守）】
 本步驟的 run_python / run_shell **在 Linux Docker 容器內執行**（python:3.13-slim），不是 Windows host：
@@ -1568,6 +1761,14 @@ async def execute_step_with_skill(
 - **PATH 上只有 Linux 工具**：`node`、`npm`、`python3`、`bash`、`ls`、`grep`、`curl` 等都有；
   沒有 `where`、`dir`、`type`、`copy` 這些 Windows 命令
 - 任務描述若給了 Windows 風格的路徑，自動轉成 `/mnt/<drive>/...` 再使用
+
+【📁 專案根目錄（處理相對路徑時用）】
+- **本專案根目錄**：`{_v5_root_wsl}`
+- 任務描述裡的**相對路徑**（例 `external_projects/...`、`scripts/...`、`docs/...`）
+  → 一律以**專案根目錄**為基準展開，不要拿沙盒 CWD 當 base
+- 例：任務寫「我有個工具在 `external_projects/interactive_demo/main.py`」
+  → 完整路徑 = `{_v5_root_wsl}/external_projects/interactive_demo/main.py`
+- 不確定檔案位置時直接 `list(Path("{_v5_root_wsl}").rglob("檔名"))` 一次找到，不要一層層 ls 探
 
 【🌐 網頁抓取準則（容器內專用）】
 **抓網頁一律用 `crawl4ai`**（容器已預裝 crawl4ai + playwright + chromium）。
@@ -1794,7 +1995,7 @@ md = asyncio.run(fetch("https://example.com/"))
                 continue
 
             # 多工具偵測：LLM 一次塞 run_python + done 是惡習（會把假成功訊息混進 done），
-            # 我們仍然只跑第一個 tool（既有行為），但要明確告訴 LLM「這次只跑 X、忽略 Y」
+            # 預設只跑第一個 tool（既有行為）、明確告訴 LLM「這次只跑 X、忽略 Y」
             # 用獨立 regex 算 <tool>name</tool> tag 數，比 parser 的多階段 fallback 結果更直接
             _tag_count = len(re.findall(r"<tool>\s*\w+\s*</tool>", reply))
             multi_tool_warn = _tag_count > 1
@@ -1859,16 +2060,30 @@ md = asyncio.run(fetch("https://example.com/"))
                                 "runtime_sec": runtime,
                                 "was_interactive": was_interactive,
                             }
-                            if no_save_recipe:
-                                # 延遲模式：檢查是否已有 recipe
-                                from db import get_recipe as _get_recipe, save_recipe as _db_save_recipe
-                                existing = _get_recipe(pipeline_id, _rkey)
+                            from db import get_recipe as _get_recipe, save_recipe as _db_save_recipe
+                            existing = _get_recipe(pipeline_id, _rkey)
+                            if silent_recipe:
+                                # 無人值守模式（TG / 排程觸發）:
+                                # - 有 recipe → **跳過、不覆寫**（保護用戶手動微調過的版本）
+                                # - 無 recipe → 直接建立（首次跑可以 seed）
                                 if existing:
-                                    # 已有 recipe → 延遲儲存等用戶確認（避免覆蓋）
+                                    logger.info(f"[{step_name}] silent_recipe:Recipe 已存在、跳過(不覆寫)")
+                                else:
+                                    _db_save_recipe(
+                                        pipeline_id, _rkey, recipe_data["task_hash"],
+                                        _fp, output_path, last_successful_code,
+                                        recipe_data["python_version"], runtime,
+                                        was_interactive=was_interactive,
+                                    )
+                                    logger.info(f"[{step_name}] silent_recipe:首次建立 Recipe")
+                            elif no_save_recipe:
+                                # 互動延遲模式（桌面手動跑）：
+                                if existing:
+                                    # 已有 recipe → 延遲儲存等用戶確認(避免覆蓋)
                                     _pending_recipe = recipe_data
                                     logger.info(f"[{step_name}] Recipe 已存在，延遲儲存等待確認")
                                 else:
-                                    # 無 recipe → 直接儲存（建立新的不算覆蓋）
+                                    # 無 recipe → 直接儲存(建立新的不算覆蓋)
                                     _db_save_recipe(
                                         pipeline_id, _rkey, recipe_data["task_hash"],
                                         _fp, output_path, last_successful_code,
@@ -1877,7 +2092,7 @@ md = asyncio.run(fetch("https://example.com/"))
                                     )
                                     logger.info(f"[{step_name}] 首次建立 Recipe")
                             else:
-                                from db import save_recipe as _db_save_recipe
+                                # 正常模式（桌面 + 工作流無 skill / 工作流明確要 inline 寫）
                                 _db_save_recipe(
                                     pipeline_id, _rkey, recipe_data["task_hash"],
                                     _fp, output_path, last_successful_code,
@@ -2002,6 +2217,58 @@ md = asyncio.run(fetch("https://example.com/"))
                         missing_packages=None,
                     )
                 force_host = (decision == "host")
+
+            # ── Phase B: ask_mode ON 時、敏感命令攔截 ──
+            # 只對 run_python / run_shell 檢查（其他 tool 沒命令執行風險）
+            # A1 模式:每次命中都問,不記憶
+            if ask_mode and tool_name in ("run_python", "run_shell"):
+                _classification = classify_command(tool_input)
+                if _classification:
+                    _cat, _label, _preview = _classification
+                    logger.warning(
+                        f"[{step_name}] 🛡 ask_mode 偵測到敏感命令（{_cat}）→ 等用戶授權"
+                    )
+                    _decision = await _wait_for_command_approval(
+                        run_id=run_id,
+                        category=_cat,
+                        label=_label,
+                        preview=_preview,
+                        tool_name=tool_name,
+                        logger=logger,
+                        step_name=step_name,
+                    )
+                    if _decision == "deny":
+                        logger.warning(f"[{step_name}] 用戶拒絕命令 → 中止 step")
+                        return ExecResult(
+                            exit_code=2,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"使用者拒絕執行敏感命令（{_cat}:{_label}）",
+                            pending_recipe=None,
+                            missing_packages=None,
+                        )
+                    if _decision == "hint":
+                        # 用戶要改任務 — 走 retry_with_hint 機制（runner 層處理）
+                        # 這裡退出 agent loop、stderr 標記讓 runner 跳到 retry_with_hint awaiting
+                        logger.info(f"[{step_name}] 用戶選擇改任務、退出 agent loop")
+                        return ExecResult(
+                            exit_code=2,
+                            stdout="\n".join(all_stdout),
+                            stderr="使用者選擇改任務（command_approval hint）",
+                            pending_recipe=None,
+                            missing_packages=None,
+                        )
+                    if _decision == "timeout":
+                        logger.warning(f"[{step_name}] command_approval 逾時、中止 step")
+                        return ExecResult(
+                            exit_code=2,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"敏感命令授權等待逾時（{COMMAND_APPROVAL_TIMEOUT}s）",
+                            pending_recipe=None,
+                            missing_packages=None,
+                        )
+                    # _decision == "allow" → 繼續執行
+                    logger.info(f"[{step_name}] ✓ 用戶授權執行命令（{_cat}）")
+
             tool_result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda tn=tool_name, ti=tool_input, lg=logger, fh=force_host, tt=tool_timeout: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id, logger=lg, force_host=fh, tool_timeout=tt)
             )
@@ -2018,6 +2285,33 @@ md = asyncio.run(fetch("https://example.com/"))
                 else:
                     last_run_python_ok = False
                     logger.info(f"[{step_name}] run_python 失敗 → last_run_python_ok=False（下次 done 會被守門）")
+
+                    # ── ModuleNotFoundError 早期攔截 ──
+                    # LLM 自己修不了（套件根本沒裝），讓它 iter 5 次只是浪費 token。
+                    # 直接 break agent loop、回 ExecResult.missing_packages → runner 接到後
+                    # 走新的 awaiting_type=missing_dependency 路徑、彈安裝確認對話框給用戶
+                    import re as _mnf_re
+                    _mnf_match = _mnf_re.search(
+                        r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]",
+                        tool_result,
+                    )
+                    if _mnf_match:
+                        _missing_pkg = _mnf_match.group(1).split(".")[0]  # pandas.io.x → pandas
+                        logger.warning(
+                            f"[{step_name}] 🛑 偵測到 ModuleNotFoundError: '{_missing_pkg}' "
+                            f"→ 提早中止 agent loop、轉交 runner 處理（不浪費 LLM iter）"
+                        )
+                        # 注意:不能引用 _pending_recipe — 那個變數只在後面 done(success=true)
+                        # 分支才定義,在這個提早 return 路徑會 NameError 被外層 try/except
+                        # 抓住、回退成 exit_code=-3 missing_packages=None,讓 runner 看不到攔截結果
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"ModuleNotFoundError: 缺少套件 '{_missing_pkg}'。"
+                                   f"系統將彈出安裝確認對話框（TG / 前端 modal）。",
+                            pending_recipe=None,
+                            missing_packages=[_missing_pkg],
+                        )
                 # 檔案 diff：log 這次 run_python 改了哪些檔（C 優化）
                 if _wd_for_diff:
                     cur_mtimes = _snapshot_dir_mtimes(_wd_for_diff)

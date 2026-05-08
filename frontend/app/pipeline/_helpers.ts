@@ -41,6 +41,10 @@ export interface StepData extends Record<string, unknown> {
   vvSource?: 'prev_output' | 'current_screen'
   vvPrompt?: string
   vvSearchRegion?: number[]              // [left, top, width, height]，空陣列 = 看整個螢幕
+  // Subagent 節點（subagent）
+  subagent?: boolean                     // optional — Subagent 步驟（多輪 LLM agent loop）
+  subagentRole?: string                  // data_analyst | coder | researcher | critic | planner
+  subagentMaxIter?: number               // 最多 LLM 輪數上限（預設 5）
   // Outlook 自動化節點（outlook_automation）
   outlookAutomation?: boolean            // optional — Outlook 自動化步驟
   outlookTemplate?: string               // 選單模板 ID（空字串 = 自由輸入需求）
@@ -72,6 +76,21 @@ export interface StepData extends Record<string, unknown> {
   wcVideoSubs?: boolean                  // [video mode] 是否下載字幕
   wcVideoSubsLangs?: string              // [video mode] 字幕語言偏好（逗號分隔）
   wcVideoSaveInfoJson?: boolean          // [video mode] 是否寫 video.info.json（預設 OFF）
+  timeout: number
+  retry: number
+  index: number
+  status: 'idle' | 'running' | 'success' | 'failed'
+  errorMsg: string
+}
+
+/** Subagent 節點：多輪 LLM agent loop、role-based、跳過 recipe + validator */
+export interface SubagentData extends Record<string, unknown> {
+  name: string
+  taskDescription: string
+  workingDir: string
+  outputPath: string
+  role: string             // data_analyst | coder | researcher | critic | planner
+  maxIter: number          // 最多 LLM 輪數上限（1-10、預設 5）
   timeout: number
   retry: number
   index: number
@@ -279,13 +298,14 @@ export interface OutlookData extends Record<string, unknown> {
 
 export type ScriptNode = Node<StepData>
 export type SkillNode = Node<SkillData>
+export type SubagentNode = Node<SubagentData>
 export type AiValidationNode = Node<AiValidationData>
 export type HumanConfirmNode = Node<HumanConfirmData>
 export type ComputerUseNode = Node<ComputerUseData>
 export type VisualValidationNode = Node<VisualValidationData>
 export type OutlookNode = Node<OutlookData>
 export type WebCrawlerNode = Node<WebCrawlerData>
-export type AppNode = Node<StepData | AiValidationData | SkillData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData>
+export type AppNode = Node<StepData | AiValidationData | SkillData | SubagentData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData>
 
 export function newAiValidationData(index = 0): AiValidationData {
   return { expectText: '', targetPath: '', skillMode: false, index }
@@ -425,6 +445,24 @@ export function newStepData(index = 0): StepData {
 }
 
 let _skillCounter = 0
+let _subagentCounter = 0
+export function newSubagentData(index = 0): SubagentData {
+  _subagentCounter++
+  return {
+    name: `Subagent ${_subagentCounter}`,
+    taskDescription: '',
+    workingDir: '',
+    outputPath: '',
+    role: 'data_analyst',
+    maxIter: 5,
+    timeout: 600,
+    retry: 1,
+    index,
+    status: 'idle',
+    errorMsg: '',
+  }
+}
+
 export function newSkillData(index = 0): SkillData {
   _skillCounter++
   return {
@@ -569,6 +607,26 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
         } as HumanConfirmData,
       }
     }
+    if (s.subagent) {
+      return {
+        id: `step-${i}`,
+        type: 'subagent' as const,
+        position: { x: i * 320, y: 160 },
+        data: {
+          name: s.name,
+          taskDescription: s.batch,
+          workingDir: s.workingDir || '',
+          outputPath: s.outputPath,
+          role: s.subagentRole || 'data_analyst',
+          maxIter: s.subagentMaxIter ?? 5,
+          timeout: s.timeout,
+          retry: s.retry,
+          index: i,
+          status: 'idle' as const,
+          errorMsg: '',
+        } as SubagentData,
+      }
+    }
     if (s.skillMode) {
       // 向後相容：舊格式 skillMode=true → skillStep 節點
       return {
@@ -632,7 +690,8 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
   const execNodeIds = new Set<string>()
   const execNodes: AppNode[] = []
   for (const n of nodes) {
-    if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation'
+    if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'subagent'
+        || n.type === 'humanConfirmation'
         || n.type === 'computerUse' || n.type === 'visualValidation'
         || n.type === 'outlookAutomation' || n.type === 'webCrawler') {
       execNodeIds.add(n.id)
@@ -843,6 +902,25 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       } as StepData
     }
 
+    if (n.type === 'subagent') {
+      const d = n.data as SubagentData
+      return {
+        name: d.name,
+        batch: d.taskDescription,
+        workingDir: d.workingDir || '',
+        outputPath: d.outputPath,
+        expect: '',  // subagent 不走 validator、無 expect
+        subagent: true,
+        subagentRole: d.role || 'data_analyst',
+        subagentMaxIter: d.maxIter ?? 5,
+        timeout: d.timeout,
+        retry: d.retry,
+        index: i,
+        status: d.status,
+        errorMsg: d.errorMsg,
+      } as StepData
+    }
+
     const d = n.data as StepData
     return {
       name: d.name,
@@ -966,6 +1044,33 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
           }
         }
       }
+      if (s.outputPath) {
+        lines.push(`    output:`)
+        lines.push(`      path: ${s.outputPath}`)
+      }
+      if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
+      if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
+      continue
+    }
+    if (s.subagent) {
+      lines.push(`    subagent: true`)
+      if (s.subagentRole && s.subagentRole !== 'data_analyst') {
+        lines.push(`    subagent_role: ${s.subagentRole}`)
+      } else {
+        lines.push(`    subagent_role: ${s.subagentRole || 'data_analyst'}`)
+      }
+      if (s.subagentMaxIter !== undefined && s.subagentMaxIter !== 5) {
+        lines.push(`    subagent_max_iter: ${s.subagentMaxIter}`)
+      }
+      if (s.batch) {
+        if (s.batch.includes('\n') || s.batch.length > 80) {
+          lines.push(`    batch: |`)
+          for (const bl of s.batch.split('\n')) lines.push(`      ${bl}`)
+        } else {
+          lines.push(`    batch: ${s.batch}`)
+        }
+      }
+      if (s.workingDir) lines.push(`    working_dir: ${s.workingDir}`)
       if (s.outputPath) {
         lines.push(`    output:`)
         lines.push(`      path: ${s.outputPath}`)
@@ -1259,6 +1364,12 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
           const arr = m[1].split(',').map(x => parseInt(x.trim()) || 0)
           if (arr.length === 4) cur.vvSearchRegion = arr
         }
+      } else if (/^subagent:/.test(t) && cur) {
+        cur.subagent = /true/.test(t)
+      } else if (/^subagent_role:/.test(t) && cur) {
+        cur.subagentRole = t.replace(/^subagent_role:\s*/, '').replace(/^"|"$/g, '').trim() || 'data_analyst'
+      } else if (/^subagent_max_iter:/.test(t) && cur) {
+        cur.subagentMaxIter = parseInt(t.replace(/^subagent_max_iter:\s*/, '')) || 5
       } else if (/^outlook_automation:/.test(t) && cur) {
         cur.outlookAutomation = /true/.test(t)
       } else if (/^outlook_template:/.test(t) && cur) {
@@ -1375,7 +1486,10 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     outlookTemplate: partial.outlookTemplate ?? '',
     outlookFreeText: partial.outlookFreeText ?? '',
     outlookParams: partial.outlookParams ?? {},
-    timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : 300)))),
+    subagent: partial.subagent ?? false,
+    subagentRole: partial.subagentRole ?? 'data_analyst',
+    subagentMaxIter: partial.subagentMaxIter ?? 5,
+    timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : (partial.subagent ? 600 : 300))))),
     // YAML 沒寫 retry 時的 fallback — 跟 newSkillData / newStepData 跟 backend
     // PipelineStep.retry default 一致（都是 1）。讓「貼 YAML 進來」跟「拉新節點」
     // 看到的預設值相同，避免使用者疑惑。

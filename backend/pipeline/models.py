@@ -205,6 +205,18 @@ class PipelineStep(BaseModel):
     # 執行流程：Tier 1 = 沙盒內 Crawl4AI（Playwright + Chromium）；偵測到 Cloudflare
     # 擋下時 fallback Tier 2 = host 端打 FlareSolverr（port 8191、用 Puppeteer 解 CF challenge）。
     # 不進 LLM、不進 recipe；輸出格式為 LLM-friendly markdown，下個 skill 節點直接讀 outputPath。
+    # ── Subagent 節點（subagent）────────────────────────────────────
+    # 獨立節點類型：跟 skill 一樣是 agent loop（多輪 LLM + tool call），但：
+    #   1. system prompt 由 subagent_role 決定（data_analyst / coder / researcher / critic / planner）
+    #   2. 工具白名單按 role 過濾（critic 只能 read_file、planner 只能 done）
+    #   3. 跳過 recipe cache（多輪結果非確定性、cache 命中率低）
+    #   4. 跳過 AI validator（loop 內已自我驗證）
+    # 適合：探索性、結構不固定的任務（研究 / debug / 寫稿）
+    # 不適合：每天跑相同邏輯的固定任務（用 skill 節點 + recipe 即可、零 token）
+    subagent: bool = False
+    subagent_role: str = "data_analyst"   # data_analyst | coder | researcher | critic | planner
+    subagent_max_iter: int = 5             # 最多 LLM 輪數上限（含 tool call 來回）
+
     web_crawler: bool = False          # True = 網頁爬蟲節點
     # 模式由前端明確選擇（不自動偵測），決定走哪條路徑：
     #   "web"   → Crawl4AI（網頁 → markdown）；填 wc_url + wc_* 欄位

@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
-import { X, AlertTriangle, Loader2, Check } from 'lucide-react'
+import { X, AlertTriangle, Loader2, Check, Mail } from 'lucide-react'
 import { toast } from 'sonner'
 import { testOutlookConnection } from '@/lib/api'
 import type { OutlookData, OutlookNode } from './_helpers'
@@ -369,10 +369,16 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
     if (p.type === 'textarea') {
       return (
         <textarea
-          className={`${inputCls} font-mono`} rows={4}
+          className={`${inputCls} font-mono resize-y min-h-[100px]`} rows={6}
           placeholder={p.placeholder}
           value={(v as string) || ''}
           onChange={e => setParam(p.key, e.target.value)}
+          onWheel={(e) => {
+            const el = e.currentTarget
+            const atTop = el.scrollTop === 0
+            const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+            if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+          }}
         />
       )
     }
@@ -419,8 +425,8 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
     <div className="absolute top-0 right-0 h-full w-[420px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: NODE_COLOR, borderTopWidth: 3 }}>
-        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-          style={{ background: NODE_COLOR }}>📧</span>
+        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
+          style={{ background: NODE_COLOR }}><Mail className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
           <span className="font-semibold text-gray-800 text-sm block truncate">Outlook 自動化節點</span>
           <span className="text-xs text-gray-400">透過 pywin32 + Outlook COM；只在 Windows host 跑</span>
@@ -627,11 +633,17 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete }: Prop
               不在上面選單裡的需求，直接打字描述。agent 限定使用 pywin32 + Outlook COM；做不到會回報無法執行、不會 fallback 到其他工具。
             </p>
             <textarea
-              className={`${inputCls} font-mono ${data.template ? 'opacity-50' : ''}`}
-              rows={4}
+              className={`${inputCls} font-mono resize-y min-h-[110px] ${data.template ? 'opacity-50' : ''}`}
+              rows={6}
               placeholder="範例：把昨天到今天主旨含『發票』的信件附件全部存到 D:/invoices，並寄一封摘要給 a@x.com"
               value={data.freeText}
               disabled={!!data.template}
+              onWheel={(e) => {
+                const el = e.currentTarget
+                const atTop = el.scrollTop === 0
+                const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+                if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+              }}
               onChange={e => onUpdate({ freeText: e.target.value })}
             />
             {data.template && (

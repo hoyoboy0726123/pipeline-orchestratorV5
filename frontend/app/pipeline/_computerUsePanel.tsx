@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
-import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown, Pencil, Plus, Eye } from 'lucide-react'
+import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown, Pencil, Plus, Eye, MousePointer2 } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_helpers'
 
@@ -220,8 +220,8 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     <div className="absolute top-0 right-0 h-full w-[420px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: NODE_COLOR, borderTopWidth: 3 }}>
-        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-          style={{ background: NODE_COLOR }}>🖱</span>
+        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
+          style={{ background: NODE_COLOR }}><MousePointer2 className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
           <span className="font-semibold text-gray-800 text-sm block truncate">桌面自動化節點</span>
           <span className="text-xs text-gray-400">錄製滑鼠/鍵盤操作，以圖像錨點穩定回放</span>

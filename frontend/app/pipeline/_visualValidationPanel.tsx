@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { X, MousePointerSquareDashed, Trash2 } from 'lucide-react'
+import { X, MousePointerSquareDashed, Trash2, ScanEye } from 'lucide-react'
 import type { VisualValidationData } from './_helpers'
 import ScreenRegionPicker from './_screenRegionPicker'
 
@@ -23,9 +23,9 @@ export default function VisualValidationPanel({ data, onUpdate, onClose, onDelet
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: NODE_COLOR, borderTopWidth: 3 }}>
         <span
-          className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
+          className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
           style={{ background: NODE_COLOR }}
-        >👁</span>
+        ><ScanEye className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
           <span className="font-semibold text-gray-800 text-sm block truncate">視覺驗證節點</span>
           <span className="text-xs text-gray-400">用 VLM 看畫面判斷是否符合預期（取代 AI 驗證的「文字檢查」）</span>
@@ -102,15 +102,21 @@ export default function VisualValidationPanel({ data, onUpdate, onClose, onDelet
             判斷條件（給 VLM 的 prompt）
           </label>
           <textarea
-            rows={5}
+            rows={7}
             value={data.prompt}
             onChange={e => onUpdate({ prompt: e.target.value })}
+            onWheel={(e) => {
+              const el = e.currentTarget
+              const atTop = el.scrollTop === 0
+              const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+              if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+            }}
             placeholder={
               data.source === 'current_screen'
                 ? '例：登入後右上角是否出現綠色的「登入成功」訊息？沒有任何錯誤紅字？'
                 : '例：圖表是否每個部門都用「不同的顏色」？柱狀條沒有重疊或缺漏？'
             }
-            className={`${inputCls} resize-y font-mono text-xs leading-relaxed`}
+            className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[120px]`}
           />
           <p className="text-[11px] text-gray-400 mt-1">VLM 會回 pass / fail + 原因。pass=false 步驟即失敗（會走 retry 邏輯）</p>
         </div>

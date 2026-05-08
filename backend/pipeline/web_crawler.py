@@ -368,26 +368,38 @@ async def crawl_single_url(
         ),
     )
 
-    # 偵測 Cloudflare / 反爬：失敗 / 0 內容 / status >= 400 / 內文含 CF marker
-    # 或「成功但內容過薄」(< 200 bytes — 反爬常見手法是回 200 + 空殼，
-    #   既有的 CF marker 偵測抓不到例如 nowsecure.nl 那種「6 字殼」)
+    # 偵測 Cloudflare / 反爬。三個獨立訊號才 fallback FlareSolverr：
+    #   A. 真 CF 跡象：status 403/503,或 HTML 含 CF challenge marker
+    #   B. 上游 HTTP 錯誤：not ok 且有有效 status_code(非 0,如 5xx)— 站點真的回錯
+    #   C. 成功但內容過薄(< 200 bytes)— 反爬常見「200 + 空殼」(例 nowsecure.nl 6 字殼)
+    #
+    # 故意排除:status_code=0 + ok=False 的情況。這代表 Crawl4AI 內部失敗
+    # (Playwright timeout / SPA wait 條件沒命中等),不是被 CF 擋。
+    # 這時 FlareSolverr (Puppeteer) 救不了、白繞 ~10 秒、徒增延遲。
     md_len = len((result.markdown or "").strip())
-    needs_fallback = (
-        cloudflare_fallback
-        and (
-            not result.ok
-            or result.status_code in (403, 503)
-            or _looks_like_cf_challenge(result.html, result.markdown)
-            or md_len < 200
-        )
+    is_cf_signal = (
+        result.status_code in (403, 503)
+        or _looks_like_cf_challenge(result.html, result.markdown)
     )
+    is_upstream_error = (not result.ok) and result.status_code not in (0, None)
+    is_thin = md_len < 200 and result.ok  # 只在「成功但內容薄」時算反爬空殼
+
+    needs_fallback = cloudflare_fallback and (is_cf_signal or is_upstream_error or is_thin)
+
+    # 跳過 fallback 但有失敗跡象 → 紀錄為 Crawl4AI 內部問題,讓 user 知道不是 CF
+    if cloudflare_fallback and not needs_fallback and not result.ok:
+        logger.info(
+            f"[{step_name}] Tier 1 抓取失敗（status={result.status_code}, ok={result.ok}）"
+            f" — 判定為 Crawl4AI 內部錯誤而非 Cloudflare,不 fallback FlareSolverr"
+        )
 
     if needs_fallback:
-        reason = (
-            "結果像被 Cloudflare 擋" if (not result.ok or result.status_code in (403, 503)
-                                          or _looks_like_cf_challenge(result.html, result.markdown))
-            else f"內容過薄（{md_len} bytes）疑似反爬空殼"
-        )
+        if is_cf_signal:
+            reason = "結果像被 Cloudflare 擋"
+        elif is_upstream_error:
+            reason = f"上游回非 2xx（status={result.status_code}）"
+        else:
+            reason = f"內容過薄（{md_len} bytes）疑似反爬空殼"
         logger.warning(
             f"[{step_name}] Tier 1 {reason}"
             f"（status={result.status_code}, ok={result.ok}）→ 切到 Tier 2 FlareSolverr"

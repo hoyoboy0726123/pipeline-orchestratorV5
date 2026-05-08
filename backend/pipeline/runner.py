@@ -112,6 +112,30 @@ def _decision_keyboard(run_id: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _missing_dep_keyboard(run_id: str, packages: list[str]) -> InlineKeyboardMarkup:
+    """缺套件時的決策鍵盤。每個套件一行『允許安裝』按鈕；最下方拒絕 / 改任務 / 中止。
+    callback_data: pipe_install_dep:{run_id}:{pkg_name}
+    """
+    rows = []
+    for pkg in packages[:5]:  # 最多 5 個（callback_data 64 byte 限制）
+        rows.append([InlineKeyboardButton(
+            f"✅ 允許安裝 {pkg}",
+            callback_data=f"pipe_install_dep:{run_id}:{pkg}",
+        )])
+    # 一次允許全部（多個套件時）
+    if len(packages) > 1:
+        rows.append([InlineKeyboardButton(
+            f"✅ 全部安裝（{len(packages)} 個）",
+            callback_data=f"pipe_install_all:{run_id}",
+        )])
+    rows.append([
+        InlineKeyboardButton("💬 改任務", callback_data=f"pipe_hint:{run_id}"),
+        InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"),
+    ])
+    rows.append([InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _confirm_keyboard(run_id: str, screenshot: bool = False, allow_hint: bool = False,
                       preview_enabled: bool = False) -> InlineKeyboardMarkup:
     # 人工確認節點的按鈕。allow_hint 只在「上一個可執行節點是 AI 技能（skill_mode）」時 True。
@@ -186,6 +210,49 @@ async def _send_ask_user_notification(run, question: str, options: list, context
         lines.append("\n請點「自由輸入」並傳送文字回答。")
     await _tg_send(run.telegram_chat_id, "\n".join(lines),
                    _ask_user_keyboard(run.run_id, options))
+
+
+def _command_approval_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    """ask_mode 敏感命令授權的 TG 按鈕。"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ 允許執行", callback_data=f"pipe_approve_cmd:{run_id}"),
+        ],
+        [
+            InlineKeyboardButton("❌ 拒絕並中止", callback_data=f"pipe_deny_cmd:{run_id}"),
+            InlineKeyboardButton("💬 改任務", callback_data=f"pipe_hint_cmd:{run_id}"),
+        ],
+    ])
+
+
+async def _send_command_approval_notification(
+    run, category: str, label: str, preview: str, step_name: str,
+):
+    """ask_mode 敏感命令攔截時送 TG 訊息 + inline keyboard。"""
+    import html as _html
+    total = len(run.config_dict.get("steps", [])) if run.config_dict else 0
+    step_num = run.current_step + 1
+    cat_emoji = {
+        "destructive":      "🗑",
+        "privileged":       "🔐",
+        "remote-exec":      "🌐",
+        "install":          "📦",
+        "subprocess":       "⚙",
+        "outside-workflow": "📁",
+    }.get(category, "🛡")
+    lines = [
+        f"{cat_emoji} <b>敏感命令需授權（ask 模式）</b>",
+        "",
+        f"📋 {run.pipeline_name}",
+        f"📍 步驟 {step_num}/{total}:<b>{_html.escape(step_name)}</b>",
+        "",
+        f"<b>類型</b>:{_html.escape(label)}（<code>{category}</code>）",
+        f"<b>命令</b>:<code>{_html.escape(preview)}</code>",
+        "",
+        "請選擇授權方式:",
+    ]
+    await _tg_send(run.telegram_chat_id, "\n".join(lines),
+                   _command_approval_keyboard(run.run_id))
 
 
 def _is_valid_tg_token(token: str) -> bool:
@@ -872,6 +939,54 @@ async def _notify_failure(run: PipelineRun, val: ValidationResult, step_name: st
     """詢問用戶如何處理失敗步驟"""
     step_num = run.current_step + 1
     total = len(PipelineConfig.from_dict(run.config_dict).steps)
+
+    # ── 缺套件特化通知 ──
+    # awaiting_type=missing_dependency 時用專屬訊息 + 安裝確認按鈕（不走 generic 失敗）
+    if run.awaiting_type == "missing_dependency":
+        import json as _json
+        try:
+            meta = _json.loads(run.awaiting_suggestion or "{}")
+        except Exception:
+            meta = {}
+        pkgs = meta.get("packages") or []
+        stderr_tail = (meta.get("stderr_tail") or "")[-200:]
+
+        # 比對 skill_packages.txt — 在清單內代表「應該裝、但 venv 損壞 / import 失敗」
+        try:
+            import sys as _sys
+            from pathlib import Path as _PI
+            _backend = str(_PI(__file__).parent.parent.absolute())
+            if _backend not in _sys.path:
+                _sys.path.insert(0, _backend)
+            from skill_pkg_manager import _read_packages, _read_sandbox_packages
+            from settings import get_settings as _gs
+            sandbox_mode = _gs().get("skill_sandbox_mode", "host") == "wsl_docker"
+            existing = set(_read_sandbox_packages() if sandbox_mode else _read_packages())
+        except Exception:
+            existing = set()
+
+        in_list = [p for p in pkgs if p in existing]
+        not_in_list = [p for p in pkgs if p not in existing]
+
+        text = (
+            f"📦 <b>需要安裝套件</b>\n\n"
+            f"📋 {run.pipeline_name}\n"
+            f"📍 步驟 {step_num}/{total}：<b>{step_name}</b>\n\n"
+            f"程式碼用到的套件還沒安裝：\n"
+        )
+        for p in pkgs:
+            tag = "（清單內、可能 venv 損壞）" if p in existing else "（不在清單）"
+            text += f"  • <code>{p}</code> {tag}\n"
+        if stderr_tail:
+            # html.escape 一下避免 stderr 含 < > 解析錯
+            import html as _html
+            text += f"\n<i>stderr：{_html.escape(stderr_tail)}</i>\n"
+        text += "\n按下方按鈕授權安裝、或改任務避開這個套件。"
+
+        await _tg_send(run.telegram_chat_id, text, _missing_dep_keyboard(run.run_id, pkgs))
+        return
+
+    # 一般失敗
     text = (
         f"⚠️ <b>Pipeline 需要決策</b>\n\n"
         f"📋 {run.pipeline_name}\n"
@@ -1105,16 +1220,24 @@ async def run_pipeline(
             logger.info(f"已重建 {len(completed_outputs)} 個前步驟的輸出資訊：{[o['path'] for o in completed_outputs]}")
 
     no_save_recipe = run.config_dict.get("_no_save_recipe", False)
+    silent_recipe = run.config_dict.get("_silent_recipe", False)
 
-    # ── 自動偵測：工作流含 web_crawler 節點時，自動關閉 recipe 儲存 ──
-    # 理由：爬蟲輸出每次不同（網頁內容 / 抓取時間都會變），下游 skill 步驟
-    # 的 input_fingerprint 永遠不會跟既有 recipe 相符 → 命中率 0、純占空間。
-    # 還會在 UI 顯示「已有 Recipe 快取」假訊號誤導使用者。
-    # 使用者明確要求「跑就跑、不管命不命中」的話可手動 force `_use_recipe=true`。
-    if not no_save_recipe and any(getattr(s, "web_crawler", False) for s in config.steps):
-        no_save_recipe = True
-        logger.info("偵測到 web_crawler 節點 → 自動關閉 recipe 儲存"
-                    "（爬蟲輸出每次不同、recipe 永遠 miss、存了也不會命中）")
+    if silent_recipe:
+        # 無人值守模式（TG / 排程觸發）:
+        # - 有 recipe → 跳過、不覆寫（保護桌面用戶調好的版本）
+        # - 無 recipe → 直接建立（首次跑可以 seed）
+        # - 永不延遲累積 pending_recipes（桌面不會卡 dialog）
+        logger.info("無人值守模式（silent_recipe）:有 recipe 跳過不覆寫、無 recipe 才建立、不彈 dialog")
+    else:
+        # ── 自動偵測：工作流含 web_crawler 節點時，自動關閉 recipe 儲存 ──
+        # 理由：爬蟲輸出每次不同（網頁內容 / 抓取時間都會變），下游 skill 步驟
+        # 的 input_fingerprint 永遠不會跟既有 recipe 相符 → 命中率 0、純占空間。
+        # 還會在 UI 顯示「已有 Recipe 快取」假訊號誤導使用者。
+        # 使用者明確要求「跑就跑、不管命不命中」的話可手動 force `_use_recipe=true`。
+        if not no_save_recipe and any(getattr(s, "web_crawler", False) for s in config.steps):
+            no_save_recipe = True
+            logger.info("偵測到 web_crawler 節點 → 自動關閉 recipe 儲存"
+                        "（爬蟲輸出每次不同、recipe 永遠 miss、存了也不會命中）")
 
     while run.current_step < len(config.steps):
         # ── 每步開始前檢查中止旗標 ──
@@ -1453,6 +1576,33 @@ async def run_pipeline(
                     logger=logger,
                     step_name=step.name,
                 )
+            elif step.subagent:
+                # Subagent 節點：多輪 LLM agent loop、role-based 系統提示、tool 白名單過濾
+                # 跳過 recipe cache（多輪結果非確定性）、跳過 validator（loop 內已自我驗證）
+                from .subagent_runner import run_subagent
+                from .executor import ExecResult as _ExecResult
+                _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                sub_result = await run_subagent(
+                    role_name=step.subagent_role or "data_analyst",
+                    task=step.batch,
+                    max_iter=step.subagent_max_iter or 5,
+                    workflow_dir=wd,
+                    run_id=run.run_id,
+                    step_name=step.name,
+                    output_path=_resolved_out,
+                    prev_outputs=completed_outputs if completed_outputs else None,
+                    timeout=step.timeout,
+                    step_logger=logger,
+                )
+                _tools_used = [tc.get("name", "?") for tc in sub_result.tool_calls_made]
+                exec_result = _ExecResult(
+                    exit_code=0 if sub_result.success else 1,
+                    stdout=(
+                        f"[subagent/{step.subagent_role}] {sub_result.final_message}\n"
+                        f"\n(iters={sub_result.iterations}, tools={_tools_used})"
+                    ),
+                    stderr="" if sub_result.success else (sub_result.error or "subagent 執行失敗"),
+                )
             elif step.skill_mode:
                 # recipe key 使用「索引:名稱」避免同名步驟互相覆蓋
                 recipe_step_key = f"{step_num}:{step.name}"
@@ -1475,6 +1625,7 @@ async def run_pipeline(
                     recipe_step_key=recipe_step_key,
                     skill_name=step.skill,
                     ask_mode=step.ask_mode,
+                    silent_recipe=silent_recipe,
                 )
             else:
                 exec_result = await execute_step(
@@ -1519,6 +1670,16 @@ async def run_pipeline(
                 val = ValidationResult(
                     status=_status,
                     reason=exec_result.stdout.replace("[visual_validation] ", "") or "視覺驗證",
+                    suggestion=exec_result.stderr if _status == "failed" else "",
+                )
+            # subagent 節點：loop 內已自我驗證、不需要再叫 LLM 驗證一次
+            elif step.subagent:
+                _status = "ok" if exec_result.exit_code == 0 else "failed"
+                val = ValidationResult(
+                    status=_status,
+                    reason=(exec_result.stdout or "").splitlines()[0] if exec_result.stdout else (
+                        "subagent 完成" if _status == "ok" else (exec_result.stderr or "subagent 失敗")
+                    ),
                     suggestion=exec_result.stderr if _status == "failed" else "",
                 )
             # web_crawler 節點：成敗已由 crawler tier 結果決定，不需 LLM 驗證
@@ -1657,6 +1818,47 @@ async def run_pipeline(
                 store.save(run)
                 return run.run_id
 
+            # ── Phase B: ask_mode 命令授權拒絕/改任務 → 不 retry、直接 awaiting ──
+            # executor 攔截敏感命令、用戶按拒絕或改任務後 stderr 會帶這些 prefix
+            # 不 retry 因為 LLM 還是會寫同樣的命令 → 反覆觸發授權 = 死結
+            if val.status != "ok":
+                _se = (exec_result.stderr or "").strip()
+                if _se.startswith("使用者拒絕執行敏感命令") or _se.startswith("使用者選擇改任務"):
+                    logger.warning(f"步驟 {step_num} 命令授權:{_se[:80]} → 不 retry、等用戶在 failure awaiting 決策")
+                    run.status = "awaiting_human"
+                    run.awaiting_type = "failure"
+                    run.awaiting_message = _se
+                    run.awaiting_suggestion = val.suggestion or ""
+                    store.save(run)
+                    await _notify_failure(run, val, step.name)
+                    unregister_task(run.run_id)
+                    return run.run_id
+
+            # 缺套件早期攔截：executor 已偵測到 ModuleNotFoundError 且回 missing_packages,
+            # 立刻轉 missing_dependency awaiting_human，**不進 step retry**
+            # （否則 retry 會讓 LLM 改用「不裝套件、用 API 繞」的策略繞過確認對話框）
+            if val.status != "ok":
+                _missing = getattr(exec_result, 'missing_packages', None) or []
+                if _missing:
+                    logger.warning(
+                        f"步驟 {step_num} 缺套件 {_missing} → 立即轉 awaiting_human "
+                        f"(missing_dependency)、跳過 retry"
+                    )
+                    import json as _json
+                    run.status = "awaiting_human"
+                    run.awaiting_type = "missing_dependency"
+                    run.awaiting_message = f"缺少套件:{', '.join(_missing)}"
+                    run.awaiting_suggestion = _json.dumps({
+                        "packages": _missing,
+                        "stderr_tail": (exec_result.stderr or "")[-500:],
+                        "step_name": step.name,
+                        "ai_suggestion": val.suggestion or "",
+                    }, ensure_ascii=False)
+                    store.save(run)
+                    await _notify_failure(run, val, step.name)
+                    unregister_task(run.run_id)
+                    return run.run_id
+
             if val.status == "ok":
                 logger.info(f"步驟 {step_num} ✅ 通過")
                 # 收集延遲儲存的 recipe
@@ -1710,11 +1912,6 @@ async def run_pipeline(
 
             else:
                 # 重試耗盡，暫停等待人為決策
-                logger.warning(f"步驟 {step_num} 失敗且重試次數耗盡，等待人為決策")
-                run.status = "awaiting_human"
-                run.awaiting_type = "failure"
-                run.awaiting_message = val.reason or ""
-
                 # 優先使用 LLM 回報的 missing_packages 建立具體安裝建議
                 missing_pkgs = getattr(exec_result, 'missing_packages', None) or []
                 # 也嘗試從 stderr 偵測 ModuleNotFoundError
@@ -1722,14 +1919,32 @@ async def run_pipeline(
                     import re as _re
                     found = _re.findall(r"ModuleNotFoundError: No module named '([^']+)'", exec_result.stderr)
                     if found:
-                        missing_pkgs = list(dict.fromkeys(found))  # 去重保序
+                        missing_pkgs = [p.split(".")[0] for p in found]  # 取頂層套件名
+                        missing_pkgs = list(dict.fromkeys(missing_pkgs))  # 去重保序
 
+                run.status = "awaiting_human"
+                # ── 缺套件 → 走專屬 awaiting_type=missing_dependency ──
+                # TG / 前端會看到特別的「允許安裝 X / 拒絕 / 改任務」按鈕,而不是
+                # 一般 failure 模板的「重試 / 跳過 / 中止 / 補充指示」
                 if missing_pkgs:
-                    pkgs_str = "、".join(missing_pkgs)
-                    install_hint = f"建議在「設定 → 套件管理」安裝以下套件後再重試：{pkgs_str}"
-                    run.awaiting_suggestion = install_hint + (f"\n\nAI 說明：{val.suggestion}" if val.suggestion else "")
+                    run.awaiting_type = "missing_dependency"
+                    run.awaiting_message = f"缺少套件：{', '.join(missing_pkgs)}"
+                    # awaiting_suggestion 用 JSON 帶結構化資料給 TG / 前端解析
+                    import json as _json
+                    run.awaiting_suggestion = _json.dumps({
+                        "packages": missing_pkgs,
+                        "stderr_tail": (exec_result.stderr or "")[-500:],
+                        "step_name": step.name,
+                        "ai_suggestion": val.suggestion or "",
+                    }, ensure_ascii=False)
+                    logger.warning(
+                        f"步驟 {step_num} 缺套件 {missing_pkgs} → 等待用戶確認安裝"
+                    )
                 else:
+                    run.awaiting_type = "failure"
+                    run.awaiting_message = val.reason or ""
                     run.awaiting_suggestion = val.suggestion or ""
+                    logger.warning(f"步驟 {step_num} 失敗且重試次數耗盡，等待人為決策")
 
                 store.save(run)
                 await _notify_failure(run, val, step.name)
@@ -1855,6 +2070,90 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
 
         asyncio.create_task(_delayed_retry())
         return f"🔄 重試步驟 {step_num}/{total}"
+
+    elif decision == "install_dep":
+        # 用戶從 missing_dependency awaiting_human 按「允許安裝」
+        # hint 帶要安裝的套件名（單一名 or 逗號分隔多個）。
+        # 安裝完同步驟 retry。
+        logger.info(f"用戶允許安裝套件：{hint}")
+        if not hint or not hint.strip():
+            return "⚠️ install_dep 需要 hint 帶套件名"
+        pkgs_to_install = [p.strip() for p in hint.split(",") if p.strip()]
+        if not pkgs_to_install:
+            return "⚠️ 沒有有效套件名"
+
+        # 判斷裝到哪：sandbox 模式裝容器、否則裝 host venv
+        try:
+            import sys as _sys
+            from pathlib import Path as _PI
+            _backend = str(_PI(__file__).parent.parent.absolute())
+            if _backend not in _sys.path:
+                _sys.path.insert(0, _backend)
+            from settings import get_settings as _gs
+            sandbox_mode = _gs().get("skill_sandbox_mode", "host") == "wsl_docker"
+        except Exception:
+            sandbox_mode = False
+
+        from skill_pkg_manager import add_package, add_package_sandbox
+        installer = add_package_sandbox if sandbox_mode else add_package
+        target = "sandbox" if sandbox_mode else "host"
+        results = []
+        for pkg in pkgs_to_install:
+            ok, msg = installer(pkg)
+            results.append((pkg, ok, msg))
+            logger.info(f"[install_dep] {target} pip install {pkg}: ok={ok}, msg={msg}")
+
+        all_ok = all(ok for _, ok, _ in results)
+        if not all_ok:
+            # 安裝失敗 → 回到 awaiting_human、訊息更新（讓用戶看到失敗原因）
+            failed = [(p, m) for p, ok, m in results if not ok]
+            run.awaiting_message = f"安裝失敗：{', '.join(p for p, _ in failed)}"
+            run.awaiting_suggestion = "\n".join(f"• {p}: {m[:200]}" for p, m in failed)
+            # awaiting_type 維持 missing_dependency（讓用戶可以「改任務」或重試）
+            store.save(run)
+            return f"❌ 安裝失敗：{', '.join(p for p, _ in failed)}"
+
+        # 全部 ok → retry 該步驟
+        run.awaiting_type = ""
+        run.awaiting_message = ""
+        run.awaiting_suggestion = ""
+        run.status = "running"
+        store.save(run)
+
+        async def _delayed_install_retry():
+            await asyncio.sleep(0.2)
+            t = asyncio.create_task(run_pipeline(
+                config_dict=run.config_dict,
+                chat_id=run.telegram_chat_id,
+                run_id=run.run_id,
+                start_from_step=run.current_step,
+            ))
+            register_task(run.run_id, t)
+
+        asyncio.create_task(_delayed_install_retry())
+        installed = ", ".join(p for p, _, _ in results)
+        return f"✅ 已在 {target} 安裝：{installed}\n🔄 重試步驟 {step_num}/{total}"
+
+    elif decision in ("approve_command", "deny_command", "hint_command"):
+        # Phase B: ask_mode 命令授權回應。送 event 喚醒 skill agent loop
+        # agent loop 收到後依 decision 決定執行 / 退出 / 改任務
+        from pipeline.executor import deliver_command_approval
+        # decision name → executor 內部 mapping
+        _map = {
+            "approve_command": "allow",
+            "deny_command":    "deny",
+            "hint_command":    "hint",
+        }
+        outcome = _map[decision]
+        ok = deliver_command_approval(run.run_id, outcome)
+        if not ok:
+            return f"⚠️ 沒找到等待中的命令授權（可能已逾時或被其他人處理）"
+        logger.info(f"用戶命令授權決定:{outcome}")
+        return {
+            "approve_command": "✅ 已允許執行命令、繼續...",
+            "deny_command":    "❌ 已拒絕、終止此步驟",
+            "hint_command":    "💬 已退出 step、稍後可在 failure awaiting 按「補充指示」",
+        }[decision]
 
     elif decision == "retry_with_hint":
         import copy

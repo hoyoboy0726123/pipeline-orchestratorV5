@@ -19,6 +19,7 @@ mss
 pywin32
 defusedxml
 lxml
+feedparser
 markitdown[pptx]
 
 # computer_use 節點依賴（純 Python 桌面自動化，V2 新增）

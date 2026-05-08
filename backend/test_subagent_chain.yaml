@@ -1,0 +1,26 @@
+name: subagent-chain-test
+validate: false
+steps:
+  - name: subagent-write-file
+    subagent: true
+    subagent_role: data_analyst
+    subagent_max_iter: 4
+    batch: |
+      Use run_python to write a file at ai_output/sa_chain/result.txt
+      with three lines: "alpha", "beta", "gamma" (one per line).
+      Make sure to mkdir -p the parent dir first.
+      After writing, call done with success=true.
+    output:
+      path: ai_output/sa_chain/result.txt
+    timeout: 300
+    retry: 0
+
+  - name: subagent-read-file
+    subagent: true
+    subagent_role: critic
+    subagent_max_iter: 3
+    batch: |
+      Read the file ai_output/sa_chain/result.txt (the previous step wrote it).
+      Then call done with success=true and a summary that includes the file contents.
+    timeout: 300
+    retry: 0

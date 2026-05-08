@@ -255,7 +255,7 @@ export async function deletePipelineRun(runId: string): Promise<void> {
   if (!res.ok) throw new Error('刪除失敗')
 }
 
-export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer', hint?: string): Promise<{ message: string }> {
+export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command', hint?: string): Promise<{ message: string }> {
   const body: Record<string, string> = { decision }
   if (hint) body.hint = hint
   const res = await fetch(`${BASE}/pipeline/runs/${runId}/resume`, {
@@ -813,10 +813,91 @@ export async function pipelineChat(
     body: JSON.stringify(body),
   })
   if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(detail ? `AI 回應失敗 (${res.status}): ${detail.slice(0, 200)}` : 'AI 回應失敗（請確認後端 uvicorn 在執行）')
+    // 後端走 _friendly_llm_error 翻譯後、HTTPException detail 已是繁中友善訊息
+    let detail = ''
+    try {
+      const j = await res.json()
+      detail = typeof j?.detail === 'string' ? j.detail : JSON.stringify(j?.detail ?? j)
+    } catch {
+      detail = await res.text().catch(() => '')
+    }
+    throw new Error(detail || `AI 回應失敗(HTTP ${res.status})、請確認後端 uvicorn 在執行`)
   }
   return res.json()
+}
+
+
+// ── 串流版 chat:fetch streaming + NDJSON 解析 ──────────────────────
+export type ChatStreamEvent =
+  | { type: 'token'; text: string }
+  | { type: 'tool_start'; name: string; args: Record<string, unknown> }
+  | { type: 'tool_end'; name: string; result_preview: string }
+  | { type: 'done'; reply: string; has_yaml: boolean; yaml_content: string | null; yaml_error: string | null }
+  | { type: 'error'; status_code?: number; detail: string }
+
+/**
+ * 串流呼叫 /pipeline/chat/stream、邊收事件邊 callback。
+ * AbortSignal 可中斷請求(用 AbortController)。
+ *
+ * 行為:
+ *   - token  事件:LLM 即時產出的文字片段、incremental render
+ *   - tool_start / tool_end:tool 呼叫進度
+ *   - done   事件:最終結果(含 has_yaml / yaml_content / yaml_error)
+ *   - error  事件:任何階段失敗(會 throw)
+ */
+export async function pipelineChatStream(
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  workflowId: string | null | undefined,
+  onEvent: (ev: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const body: Record<string, unknown> = { messages }
+  if (workflowId) body.workflow_id = workflowId
+  const res = await fetch(`${DIRECT_BASE}/pipeline/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const j = await res.json()
+      detail = typeof j?.detail === 'string' ? j.detail : JSON.stringify(j?.detail ?? j)
+    } catch {
+      detail = await res.text().catch(() => '')
+    }
+    throw new Error(detail || `AI 串流失敗(HTTP ${res.status})`)
+  }
+  if (!res.body) throw new Error('AI 串流回應沒有 body')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // NDJSON:一行一個 JSON
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        try {
+          const ev = JSON.parse(line) as ChatStreamEvent
+          onEvent(ev)
+          if (ev.type === 'error') {
+            throw new Error(ev.detail || '串流回 error 事件')
+          }
+        } catch (e) {
+          // JSON parse 失敗 → 略過此行(不是合法事件、可能是空行)
+          if (e instanceof Error && e.message.startsWith('串流回')) throw e
+        }
+      }
+      nl = buffer.indexOf('\n')
+    }
+  }
 }
 
 // ── Per-workflow chat history ────────────────────────────────────────────────

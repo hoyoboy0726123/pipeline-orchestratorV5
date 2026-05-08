@@ -11,7 +11,7 @@ import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
 import { useWorkflowStore } from './_store'
 import {
-  pipelineChat, createWorkflowApi, exportWorkflowUrl, importWorkflow,
+  pipelineChatStream, createWorkflowApi, exportWorkflowUrl, importWorkflow,
   getPipelineScheduled, getPipelineRuns, cancelPipelineSchedule,
   getEnvPaths, type EnvPaths,
   getWorkflowChat, appendWorkflowChat, clearWorkflowChat,
@@ -19,12 +19,21 @@ import {
 import type { ScheduledTask } from '@/lib/types'
 
 // ── AI Chat Message Type ─────────────────────────────────────────────────────
+interface ToolBlock {
+  name: string         // tool 名稱(list_workflows / get_run_log 等)
+  args: Record<string, unknown>
+  status: 'running' | 'done'
+  preview?: string     // tool_end 時填、回傳前 200 字
+}
+
 interface ChatMsg {
   role: 'user' | 'assistant'
   content: string
   hasYaml?: boolean
   yaml?: string | null
   yamlError?: string | null
+  toolBlocks?: ToolBlock[]   // 串流時顯示的 tool 呼叫紀錄
+  streaming?: boolean        // 串流中(顯示游標 / 還在打字)
 }
 
 // 根據實際專案路徑組 AI 助手的初始訊息：範例使用真實可執行的腳本路徑，
@@ -37,6 +46,7 @@ function buildWelcomeMessage(env: EnvPaths): string {
 我會用到以下節點（依需要組合）：
 - **腳本節點**：跑你已寫好的 .py / .bat / shell 指令
 - **AI 技能節點**：用自然語言描述任務，LLM 自動寫 Python 跑（可掛 docx / pptx 等 Agent Skill 提升正確率）
+- **多代理節點**：探索式 / 試錯式任務（5 個角色：分析師 / 工程師 / 研究員 / 審稿人 / 規劃師），每次都重新推理、適合「不確定怎麼做、邊想邊改」的任務；日常固定邏輯請用 AI 技能節點（更省 token）
 - **人工確認節點**：暫停等你 Telegram 點頭再續跑（可自動把上一步輸出傳到手機）
 - **網頁爬蟲節點**：丟 URL → markdown，支援 SPA、登入、Cloudflare bypass
 - **影片下載節點**：YouTube / Vimeo / Bilibili 等
@@ -99,11 +109,26 @@ function buildWelcomeMessage(env: EnvPaths): string {
   // 範例 5 補上「需要 vision 模型」的提示，避免新使用者誤用
   const ex5Note = '\n\n> ℹ️ 此範例會用「視覺驗證節點」、需 LLM 模型支援視覺輸入（如 Llama 4 Scout / Gemini 2.5 / GPT-4o）。沒設或不支援會友善提示。'
 
+  // 範例 6：啟動既有 Python 專案 + AI 驗證 + 人工確認（故意不寫專案路徑，逼 AI 助手反問）
+  const ex6 = `**範例 6（啟動既有 Python 專案 + AI 驗證 + 人工確認）**
+我有一個 Python 專案，想接到工作流自動化跑：
+1. 跑專案的 main.py、產出檔案到工作流目錄
+2. AI 驗證一下產出檔內容對不對
+3. 確認沒問題後 Telegram 通知我做最終放行`
+
+  const ex6Note = '\n\n> 📁 **記得把專案放在** `external_projects/<你的專案名>/`（本專案根目錄底下），AI 助手才能找到並改寫。\n> 若你描述時沒提到路徑，AI 助手會反問你。\n> 若 main.py 是 GUI / 含 `input()` 互動阻塞，AI 技能會自動先 read_file 看源碼、把互動點改成命令列參數版本再跑。'
+
   // 用 HTML <details>/<summary> 包每個範例，瀏覽器原生摺疊；ReactMarkdown 開了
   // rehypeRaw 才會 render 這些 HTML 標籤。預設收起，點擊展開、不佔螢幕。
   // summary 用一行有 emoji 的標題，內容用 markdown body（rehype-raw 會繼續解析裡面的 markdown）
   const wrap = (title: string, body: string) =>
     `<details><summary><strong>${title}</strong></summary>\n\n${body}\n\n</details>`
+
+  // 範例 7：subagent — 探索式分析（沒固定流程、要邊想邊改）
+  const ex7 = `**範例 7（多代理 — 探索式分析）**
+任務：「我有 \`sales.xlsx\`，想看看 Q1 哪幾個品類賣最差、找出共通原因」這種「**不確定要看什麼指標、邊看邊找**」的場景。
+單一步驟：用多代理節點、角色挑「**資料分析師（data_analyst）**」、最多輪數設 6-8、任務描述寫清楚目標即可（不用拆步驟）。多代理會自己 read → run_python → 看結果 → 再 read… 直到產出 \`analysis.md\`。`
+  const ex7Note = '\n\n> 🧠 **何時用多代理 vs AI 技能**：每天跑、邏輯固定（讀 X 算 Y 寫 Z）→ 用 **AI 技能 + Recipe**（第二次起零 token）；結構不固定、邊想邊改、要試錯（探索/研究/debug）→ 用 **多代理**（每次重新推理、能根據中間結果調整、token 用量是 skill 的 2-5 倍）。'
 
   const examples = [
     wrap('📋 範例 1：Python 腳本串接', ex1),
@@ -111,6 +136,8 @@ function buildWelcomeMessage(env: EnvPaths): string {
     wrap('📋 範例 3：Python + AI + 人工確認', ex3),
     wrap('📋 範例 4：網頁爬蟲 + AI 摘要 + 人工把關 + Outlook 寄信', ex4),
     wrap('📋 範例 5：AI 技能 + 視覺驗證', ex5 + ex5Note),
+    wrap('📋 範例 6：啟動既有 Python 專案 + AI 驗證 + 人工確認', ex6 + ex6Note),
+    wrap('📋 範例 7：多代理 — 探索式分析', ex7 + ex7Note),
   ]
   const examplesHeader = '\n\n📋 **範例參考**（點任一行展開查看細節，可直接抄走給我作為起點）：'
 
@@ -602,31 +629,124 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
     // 若當前只有 welcome 訊息，送出使用者訊息時把 welcome 丟掉（不存進歷史）
     const baseMsgs = isWelcomeOnly(messages) ? [] : messages
     const newMsgs = [...baseMsgs, userMsg]
-    setMessages(newMsgs)
+    // 立即加入 user msg + 一個空的 assistant streaming bubble、後續 token 邊長邊填
+    const assistantBubble: ChatMsg = {
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      toolBlocks: [],
+    }
+    setMessages([...newMsgs, assistantBubble])
     setInput('')
     setLoading(true)
-    // 先把 user 訊息落地：有 activeId → backend append；沒有 → localStorage
     persistAppend(userMsg).catch(() => {/* 落地失敗不擋 UI */})
+
+    let accumulated = ''
+    let finalHasYaml = false
+    let finalYaml: string | null = null
+    let finalYamlError: string | null = null
     try {
-      // chatUnbound = true 時不把 workflow_id 送出去 — 後端就不會注入 _workflow_state_block
-      const res = await pipelineChat(
+      await pipelineChatStream(
         newMsgs.map(m => ({ role: m.role, content: m.content })),
-        chatUnbound ? undefined : (activeId ?? undefined),
+        chatUnbound ? undefined : (activeId ?? null),
+        (ev) => {
+          if (ev.type === 'token') {
+            accumulated += ev.text
+            setMessages(prev => {
+              const copy = [...prev]
+              const last = copy[copy.length - 1]
+              if (last && last.role === 'assistant' && last.streaming) {
+                copy[copy.length - 1] = { ...last, content: accumulated }
+              }
+              return copy
+            })
+          } else if (ev.type === 'tool_start') {
+            setMessages(prev => {
+              const copy = [...prev]
+              const last = copy[copy.length - 1]
+              if (last && last.role === 'assistant' && last.streaming) {
+                const blocks = [...(last.toolBlocks || [])]
+                blocks.push({ name: ev.name, args: ev.args || {}, status: 'running' })
+                copy[copy.length - 1] = { ...last, toolBlocks: blocks }
+              }
+              return copy
+            })
+          } else if (ev.type === 'tool_end') {
+            setMessages(prev => {
+              const copy = [...prev]
+              const last = copy[copy.length - 1]
+              if (last && last.role === 'assistant' && last.streaming && last.toolBlocks?.length) {
+                const blocks = [...last.toolBlocks]
+                // 找最近一個 running 的 tool block(同名)
+                for (let i = blocks.length - 1; i >= 0; i--) {
+                  if (blocks[i].name === ev.name && blocks[i].status === 'running') {
+                    blocks[i] = { ...blocks[i], status: 'done', preview: ev.result_preview }
+                    break
+                  }
+                }
+                copy[copy.length - 1] = { ...last, toolBlocks: blocks }
+              }
+              return copy
+            })
+          } else if (ev.type === 'done') {
+            finalHasYaml = ev.has_yaml
+            finalYaml = ev.yaml_content
+            finalYamlError = ev.yaml_error
+            // 用 done 事件帶的 reply 覆寫(_clean_latex 處理過的版本、比累積 token 更乾淨)
+            accumulated = ev.reply || accumulated
+          } else if (ev.type === 'error') {
+            throw new Error(ev.detail || '串流錯誤')
+          }
+        },
       )
-      const assistantMsg: ChatMsg = {
-        role: 'assistant',
-        content: res.reply,
-        hasYaml: res.has_yaml,
-        yaml: res.yaml_content,
-        yamlError: res.yaml_error ?? null,
-      }
-      setMessages(prev => [...prev, assistantMsg])
-      persistAppend(assistantMsg).catch(() => {/* 同上 */})
-      if (res.yaml_error) {
-        toast.error(`產生的 YAML 有語法問題：${res.yaml_error.slice(0, 120)}`)
+      // 串流結束、finalize bubble
+      setMessages(prev => {
+        const copy = [...prev]
+        const last = copy[copy.length - 1]
+        if (last && last.role === 'assistant' && last.streaming) {
+          const finalized: ChatMsg = {
+            role: 'assistant',
+            content: accumulated,
+            hasYaml: finalHasYaml,
+            yaml: finalYaml,
+            yamlError: finalYamlError,
+            toolBlocks: last.toolBlocks,
+            streaming: false,
+          }
+          copy[copy.length - 1] = finalized
+          // 只 persist 不含 streaming flag、不含 toolBlocks(toolBlocks 是 ephemeral)
+          persistAppend({
+            role: 'assistant',
+            content: accumulated,
+            hasYaml: finalHasYaml,
+            yaml: finalYaml,
+            yamlError: finalYamlError,
+          }).catch(() => {/* 同上 */})
+        }
+        return copy
+      })
+      if (finalYamlError) {
+        const errStr: string = finalYamlError
+        toast.error(`產生的 YAML 有語法問題：${errStr.slice(0, 120)}`)
       }
     } catch (e) {
-      toast.error('AI 回應失敗')
+      const errMsg = e instanceof Error ? e.message : '未知錯誤'
+      toast.error(`AI 回應失敗:${errMsg.slice(0, 220)}`)
+      // 把錯誤替換到 streaming bubble 上
+      setMessages(prev => {
+        const copy = [...prev]
+        const last = copy[copy.length - 1]
+        if (last && last.role === 'assistant' && last.streaming) {
+          copy[copy.length - 1] = {
+            role: 'assistant',
+            content: `❌ ${errMsg}`,
+            streaming: false,
+          }
+        } else {
+          copy.push({ role: 'assistant', content: `❌ ${errMsg}` })
+        }
+        return copy
+      })
     } finally {
       setLoading(false)
     }
@@ -874,9 +994,49 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
                       ? 'bg-indigo-600 text-white rounded-br-sm'
                       : 'bg-gray-100 text-gray-700 rounded-bl-sm'
                   }`} style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                    {/* Tool blocks（串流時顯示工具呼叫進度）*/}
+                    {msg.role === 'assistant' && msg.toolBlocks && msg.toolBlocks.length > 0 && (
+                      <div className="mb-1.5 space-y-1">
+                        {msg.toolBlocks.map((tb, ti) => (
+                          <div
+                            key={ti}
+                            className={`text-[11px] px-2 py-1 rounded border ${
+                              tb.status === 'running'
+                                ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                                : 'bg-gray-50 border-gray-200 text-gray-600'
+                            }`}
+                          >
+                            {tb.status === 'running' ? (
+                              <span className="flex items-center gap-1.5">
+                                <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                <span className="font-mono">{tb.name}</span>
+                                <span className="text-[10px] text-indigo-500/70 truncate">
+                                  {Object.entries(tb.args).slice(0, 2).map(([k, v]) =>
+                                    `${k}=${typeof v === 'string' ? `"${v.slice(0, 30)}"` : JSON.stringify(v).slice(0, 30)}`
+                                  ).join(', ')}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1.5">
+                                <span className="text-emerald-500 shrink-0">✓</span>
+                                <span className="font-mono">{tb.name}</span>
+                                {tb.preview && (
+                                  <span className="text-[10px] text-gray-500 truncate" title={tb.preview}>
+                                    {tb.preview.slice(0, 60)}
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {msg.role === 'assistant' ? (
                       <div className="prose prose-xs max-w-none prose-p:my-0.5 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-code:break-all">
                         <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n```yaml[\s\S]*?```/g, '（已偵測到 YAML ↓）'))}</ReactMarkdown>
+                        {msg.streaming && (
+                          <span className="inline-block w-1.5 h-3 ml-0.5 bg-indigo-500 animate-pulse align-middle" />
+                        )}
                       </div>
                     ) : (
                       <span className="whitespace-pre-wrap">{msg.content}</span>

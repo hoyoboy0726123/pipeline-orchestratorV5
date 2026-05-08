@@ -1,5 +1,5 @@
 'use client'
-import { X } from 'lucide-react'
+import { X, ShieldCheck } from 'lucide-react'
 import type { AiValidationData } from './_helpers'
 
 interface Props {
@@ -18,10 +18,10 @@ export default function AiValidationPanel({ data, onUpdate, onClose, onDelete }:
     <div className="absolute top-0 right-0 h-full w-[380px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: color, borderTopWidth: 3 }}>
         <span
-          className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
+          className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
           style={{ background: color }}
         >
-          ✓
+          <ShieldCheck className="w-4 h-4" strokeWidth={2.4} />
         </span>
         <div className="flex-1 min-w-0">
           <span className="font-semibold text-gray-800 text-sm block truncate">AI 驗證節點</span>
@@ -43,11 +43,17 @@ export default function AiValidationPanel({ data, onUpdate, onClose, onDelete }:
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">驗證描述</label>
           <textarea
-            rows={4}
+            rows={6}
             value={data.expectText}
             onChange={e => onUpdate({ expectText: e.target.value })}
+            onWheel={(e) => {
+              const el = e.currentTarget
+              const atTop = el.scrollTop === 0
+              const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+              if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+            }}
             placeholder={'用自然語言描述 AI 應該確認什麼…\n例如：確認輸出的 CSV 包含至少 100 筆資料，且欄位 email 格式正確'}
-            className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+            className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[100px]`}
           />
           <p className="text-xs text-gray-400 mt-1.5">AI 會在前一步驟完成後，依據此描述驗證執行結果</p>
         </div>

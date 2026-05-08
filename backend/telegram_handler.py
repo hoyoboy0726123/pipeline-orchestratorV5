@@ -138,6 +138,36 @@ _pending_hints: dict[int, str] = {}
 # 等待用戶輸入 ask_user 自由回答的狀態：chat_id → run_id
 _pending_answers: dict[int, str] = {}
 
+# AI 助手 per-chat 會話歷史（in-memory、process 重啟即清）
+# 格式：chat_id → list[{"role": "user"|"assistant", "content": str}]
+# 用於 TG 自由文字 → AI 助手對話。每個 chat_id 一條歷史
+_tg_chat_history: dict[int, list[dict]] = {}
+_TG_CHAT_HISTORY_CAP = 30  # 一條歷史最多保留 30 則訊息(15 輪對話)
+
+# Per-chat「附加上下文」快取:user 用 /log <run_id> 或 /yaml <name|id> 拉內容後存這
+# 下次 _handle_tg_freeform_chat 會把這些內容 append 到 extra_system、AI 看得到完整脈絡
+# 格式:chat_id → list[(label, content, ts)]、LRU 上限 _TG_CTX_MAX_ITEMS、單筆截長 _TG_CTX_ITEM_MAX
+_tg_loaded_context: dict[int, list[tuple[str, str, float]]] = {}
+_TG_CTX_MAX_ITEMS = 3        # 每 chat 最多 3 筆附加上下文(超過 LRU 踢)
+_TG_CTX_ITEM_MAX = 12000     # 單筆超過 12KB 截掉(防 token 爆)
+
+# Per-chat 最近 AI 對話產生的 YAML(供 /save 用)
+# 格式:chat_id → {"yaml": str, "ts": float}
+_tg_last_ai_yaml: dict[int, dict] = {}
+
+
+def _add_loaded_context(chat_id: int, label: str, content: str) -> None:
+    """加一筆附加上下文。同 label 已存在會被覆寫。"""
+    if not content:
+        return
+    if len(content) > _TG_CTX_ITEM_MAX:
+        content = content[: _TG_CTX_ITEM_MAX] + f"\n\n... (內容超過 {_TG_CTX_ITEM_MAX} 字、後面截掉)"
+    items = _tg_loaded_context.setdefault(chat_id, [])
+    items[:] = [it for it in items if it[0] != label]  # 去重
+    items.append((label, content, time.time()))
+    if len(items) > _TG_CTX_MAX_ITEMS:
+        items[:] = items[-_TG_CTX_MAX_ITEMS:]  # LRU 保留最後 N 筆
+
 # Polling loop 持有的 Bot 實例 — 升到 module scope 讓 _cmd_* 遠端遙控指令也能用
 # （沒升 module scope 之前，_cmd_menu 引用會 NameError）
 _bot_instance = None
@@ -206,6 +236,21 @@ async def _handle_remote_command(chat_id: int, text: str) -> None:
             await _cmd_abort(chat_id, args)
         elif cmd in ("/screenshot", "/截圖", "/screen"):
             await _cmd_screenshot(chat_id)
+        elif cmd in ("/log", "/日誌"):
+            await _cmd_log(chat_id, args)
+        elif cmd in ("/yaml", "/y"):
+            await _cmd_yaml(chat_id, args)
+        elif cmd in ("/save", "/套用"):
+            await _cmd_save_yaml(chat_id, args)
+        elif cmd in ("/run", "/執行", "/啟動"):
+            await _cmd_run_pipeline(chat_id, args)
+        elif cmd in ("/reset", "/重設", "/clear"):
+            _tg_chat_history.pop(chat_id, None)
+            _tg_loaded_context.pop(chat_id, None)
+            _tg_last_ai_yaml.pop(chat_id, None)
+            await _bot_instance.send_message(
+                chat_id=chat_id, text="🧹 AI 助手對話歷史 + 附加上下文 + 緩存 YAML 已清空。"
+            )
         else:
             await _bot_instance.send_message(
                 chat_id=chat_id,
@@ -354,12 +399,25 @@ async def _cmd_status(chat_id: int) -> None:
 async def _cmd_help(chat_id: int) -> None:
     text = (
         "📖 <b>Telegram 遠端遙控指令</b>\n\n"
+        "🚀 <b>啟動 / 修改</b>\n"
         "<code>/menu</code> — 列出工作流（點按鈕啟動）\n"
+        "<code>/run &lt;name|id&gt;</code> — 啟動某工作流\n"
+        "<code>/save &lt;name|id&gt;</code> — 把對話中 AI 產的 YAML 套到指定工作流\n"
+        "<code>/abort &lt;run_id&gt;</code> — 中止某個 run\n\n"
+        "🔍 <b>檢視</b>\n"
         "<code>/status</code> — 查看執行中的 run\n"
-        "<code>/screenshot</code> — 抓 host 桌面即時截圖（看畫面決定要不要開工作流）\n"
-        "<code>/abort &lt;run_id&gt;</code> — 中止某個 run\n"
+        "<code>/log &lt;run_id&gt;</code> — 拉某個 run 的完整 log（支援 8 字前綴）\n"
+        "<code>/yaml &lt;name|id&gt;</code> — 拉某個 workflow 的 YAML\n"
+        "<code>/screenshot</code> — 抓 host 桌面即時截圖\n\n"
+        "🛠 <b>對話</b>\n"
+        "<code>/reset</code> — 清空 AI 助手對話歷史 + 附加上下文\n"
         "<code>/help</code> — 顯示這份說明\n\n"
-        "啟動工作流後進度會自動推送到此對話。"
+        "💬 <b>直接打字（不帶 /）就會跟 AI 助手對話</b>\n"
+        "AI 會自己看 log / YAML、給分析或 patch。要套用 patch:\n"
+        "1. 跟 AI 對話討論修改 → AI 吐 YAML\n"
+        "2. 回 <code>/save &lt;workflow 名稱&gt;</code> 套用(覆蓋前自動備份)\n"
+        "3. 回 <code>/run &lt;workflow 名稱&gt;</code> 啟動\n\n"
+        "歷史 in-memory、process 重啟即清。"
     )
     await _bot_instance.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
 
@@ -417,6 +475,682 @@ async def _cmd_abort(chat_id: int, args: str) -> None:
         )
 
 
+async def _cmd_log(chat_id: int, args: str) -> None:
+    """/log <run_id> — 拉指定 run 的完整 log、分段送 + 快取進 chat 附加上下文。
+    支援 run_id 完整或前綴。"""
+    rid_query = (args or "").strip()
+    if not rid_query:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text="⚠ 用法：/log &lt;run_id&gt;（前綴 8 字也行）",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        log_dir = Path(__file__).parent / "ai_output" / "pipeline_logs"
+        if not log_dir.exists():
+            await _bot_instance.send_message(chat_id=chat_id, text="❌ log 目錄不存在")
+            return
+        # 找最相近的 log 檔（filename 含 run_id 前綴）
+        rid_short = rid_query.split("-")[0][:8]
+        matches = sorted(
+            log_dir.glob(f"*{rid_short}*.log"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if not matches:
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"❌ 找不到 run_id 含 <code>{html.escape(rid_query)}</code> 的 log 檔",
+                parse_mode="HTML",
+            )
+            return
+        log_file = matches[0]
+        log_text = log_file.read_text(encoding="utf-8", errors="replace")
+        # 快取進 chat 附加上下文(給 AI 助手下次對話用)
+        _add_loaded_context(chat_id, f"log of run `{rid_query}` (檔案: {log_file.name})", log_text)
+        # 不 dump 全文到 TG(避免洗版),只回收據。要看 raw 內容跟 AI 說「把 log 內容貼給我看」
+        capped = min(len(log_text), _TG_CTX_ITEM_MAX)
+        receipt = (
+            f"📜 已載入 log of run <code>{html.escape(rid_query)}</code>\n"
+            f"📁 {html.escape(log_file.name)}\n"
+            f"📏 {len(log_text):,} 字元"
+            + (f" (cache 截至 {capped:,} 字)" if capped < len(log_text) else "")
+            + "\n\n💬 直接跟 AI 對話,他會基於這份 log 回答。\n"
+            "想看 raw 內容跟 AI 說「把 log 貼給我看」即可。"
+        )
+        await _bot_instance.send_message(chat_id=chat_id, text=receipt, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[/log] 失敗：{e}", exc_info=True)
+        await _bot_instance.send_message(chat_id=chat_id, text=f"❌ /log 失敗：{str(e)[:200]}")
+
+
+async def _cmd_save_yaml(chat_id: int, args: str) -> None:
+    """/save <name|id> — 把對話中最後一份 AI 產的 YAML 套到指定工作流。
+
+    流程:
+    1. 從 _tg_last_ai_yaml 拿緩存的 YAML(沒有就提示用戶先聊一聊讓 AI 產 YAML)
+    2. 模糊比對找到目標 workflow(name / id 前綴)
+    3. 備份原 YAML 到 _tg_loaded_context(label=「backup of <name>」、走 LRU 踢)
+    4. 用 yaml_to_canvas 重建 canvas
+    5. 寫入 DB(yaml + canvas)
+    """
+    query = (args or "").strip()
+    cached = _tg_last_ai_yaml.get(chat_id)
+    if not cached or not cached.get("yaml"):
+        await _bot_instance.send_message(
+            chat_id=chat_id,
+            text="⚠ 對話中沒有 AI 產生的 YAML 可套用。先跟 AI 討論到他吐 YAML、再 /save。",
+        )
+        return
+    if cached.get("yaml_error"):
+        await _bot_instance.send_message(
+            chat_id=chat_id,
+            text=f"❌ 對話中緩存的 YAML 有 schema 錯誤、不能套:{cached['yaml_error'][:300]}\n"
+                 "請先回去跟 AI 修好。",
+        )
+        return
+    if not query:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text="⚠ 用法:/save &lt;workflow 名稱或 id&gt;",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        from db import list_workflows, update_workflow
+        from yaml_to_canvas import yaml_to_canvas
+        wfs = list_workflows() or []
+        # 模糊比對(同 _cmd_yaml 邏輯)
+        ql = query.lower()
+        matches = [w for w in wfs if (w.get("id") or "").startswith(query) or (w.get("id") or "") == query]
+        if not matches:
+            matches = [w for w in wfs if ql in (w.get("name") or "").lower()]
+        if not matches:
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"❌ 找不到符合 <code>{html.escape(query)}</code> 的 workflow",
+                parse_mode="HTML",
+            )
+            return
+        if len(matches) > 1:
+            lines = [f"⚠ <b>找到多個符合的 workflow、請用更精確的名稱或 id</b>:", ""]
+            for w in matches[:8]:
+                lines.append(f"- <b>{html.escape(w.get('name') or '')}</b> (id=<code>{w.get('id')}</code>)")
+            await _bot_instance.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+            return
+        wf = matches[0]
+        new_yaml = cached["yaml"]
+        old_yaml = wf.get("yaml") or ""
+        # 備份原 YAML 到附加上下文(萬一套錯、用戶可叫 AI 把備份貼出來)
+        if old_yaml.strip():
+            _add_loaded_context(
+                chat_id,
+                f"backup YAML of `{wf.get('name')}` (覆蓋前)",
+                old_yaml,
+            )
+        # YAML → canvas
+        canvas = yaml_to_canvas(new_yaml) or {"nodes": [], "edges": []}
+        # 寫 DB
+        update_workflow(wf.get("id"), {
+            "yaml": new_yaml,
+            "canvas": canvas,
+        })
+        nc = len(canvas.get("nodes") or [])
+        receipt = (
+            f"✅ 已套用 YAML 到 <b>{html.escape(wf.get('name') or '')}</b>\n"
+            f"id: <code>{wf.get('id')}</code>\n"
+            f"📏 新 YAML {len(new_yaml):,} 字、{nc} 個節點\n"
+            f"🔙 原 YAML 已存到此對話的附加上下文(備份),萬一改錯叫 AI 把備份貼給你。\n\n"
+            f"💡 想直接跑:回 <code>/run {html.escape(wf.get('name') or '')}</code>"
+        )
+        await _bot_instance.send_message(chat_id=chat_id, text=receipt, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[/save] 失敗:{e}", exc_info=True)
+        await _bot_instance.send_message(chat_id=chat_id, text=f"❌ /save 失敗:{str(e)[:200]}")
+
+
+async def _cmd_run_pipeline(chat_id: int, args: str) -> None:
+    """/run <name|id> — 啟動指定工作流。"""
+    query = (args or "").strip()
+    if not query:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text="⚠ 用法:/run &lt;workflow 名稱或 id&gt;",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        from db import list_workflows
+        from main import start_pipeline, PipelineRunRequest
+        wfs = list_workflows() or []
+        ql = query.lower()
+        matches = [w for w in wfs if (w.get("id") or "").startswith(query) or (w.get("id") or "") == query]
+        if not matches:
+            matches = [w for w in wfs if ql in (w.get("name") or "").lower()]
+        if not matches:
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"❌ 找不到符合 <code>{html.escape(query)}</code> 的 workflow",
+                parse_mode="HTML",
+            )
+            return
+        if len(matches) > 1:
+            lines = [f"⚠ <b>找到多個符合的 workflow、請用更精確的名稱或 id</b>:", ""]
+            for w in matches[:8]:
+                lines.append(f"- <b>{html.escape(w.get('name') or '')}</b> (id=<code>{w.get('id')}</code>)")
+            await _bot_instance.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+            return
+        wf = matches[0]
+        yaml_text = wf.get("yaml") or ""
+        if not yaml_text.strip():
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"❌ workflow <b>{html.escape(wf.get('name') or '')}</b> 的 YAML 是空的、無法啟動",
+                parse_mode="HTML",
+            )
+            return
+        # 啟動 pipeline(沿用 main.py /pipeline/run 邏輯)
+        try:
+            import yaml as _yaml
+            parsed = _yaml.safe_load(yaml_text) or {}
+            steps = parsed.get("steps") or []
+            needs_validate = bool(parsed.get("validate")) or any(
+                isinstance(s, dict) and s.get("expect") for s in steps
+            )
+        except Exception:
+            needs_validate = False
+        req = PipelineRunRequest(
+            yaml_content=yaml_text,
+            validate=needs_validate,
+            use_recipe=True,
+            workflow_id=wf.get("id"),
+            silent_recipe=True,  # 無人值守:不彈 recipe 確認 dialog
+        )
+        result = await start_pipeline(req)
+        run_id = (result or {}).get("run_id") or "?"
+        receipt = (
+            f"🚀 已啟動 <b>{html.escape(wf.get('name') or '')}</b>\n"
+            f"run_id: <code>{run_id}</code>\n\n"
+            f"📡 進度會自動推送到此對話。\n"
+            f"📜 也可隨時 /log <code>{run_id[:8]}</code> 看細節。\n"
+            f"🛑 想中止:/abort <code>{run_id}</code>"
+        )
+        await _bot_instance.send_message(chat_id=chat_id, text=receipt, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[/run] 失敗:{e}", exc_info=True)
+        await _bot_instance.send_message(chat_id=chat_id, text=f"❌ /run 失敗:{str(e)[:200]}")
+
+
+async def _cmd_yaml(chat_id: int, args: str) -> None:
+    """/yaml <name|id> — 拉指定 workflow 的 YAML、送 + 快取進附加上下文。
+    支援工作流 name(模糊配對)或 id 前綴。"""
+    query = (args or "").strip()
+    if not query:
+        await _bot_instance.send_message(
+            chat_id=chat_id, text="⚠ 用法：/yaml &lt;workflow 名稱或 id&gt;",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        from db import list_workflows
+        wfs = list_workflows() or []
+        # 先試 id 完整或前綴比對
+        matches = [w for w in wfs if (w.get("id") or "").startswith(query) or (w.get("id") or "") == query]
+        if not matches:
+            # 退到 name 包含比對(case-insensitive)
+            ql = query.lower()
+            matches = [w for w in wfs if ql in (w.get("name") or "").lower()]
+        if not matches:
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"❌ 找不到符合 <code>{html.escape(query)}</code> 的 workflow",
+                parse_mode="HTML",
+            )
+            return
+        if len(matches) > 1:
+            lines = [f"⚠ <b>找到多個符合的 workflow、請用更精確的名稱或 id</b>：", ""]
+            for w in matches[:8]:
+                lines.append(f"- <b>{html.escape(w.get('name') or '')}</b> (id=<code>{w.get('id')}</code>)")
+            await _bot_instance.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+            return
+        wf = matches[0]
+        yaml_text = wf.get("yaml") or ""
+        if not yaml_text.strip():
+            await _bot_instance.send_message(
+                chat_id=chat_id,
+                text=f"⚠ workflow <b>{html.escape(wf.get('name') or '')}</b> 的 YAML 是空的",
+                parse_mode="HTML",
+            )
+            return
+        # 快取進 chat 附加上下文
+        label = f"YAML of workflow `{wf.get('name')}` (id: {wf.get('id')})"
+        _add_loaded_context(chat_id, label, yaml_text)
+        # 不 dump 全文到 TG。YAML 一般 < 4KB 不會洗版,但仍走 cache-only 統一行為
+        receipt = (
+            f"📄 已載入 YAML of <code>{html.escape(wf.get('name') or '')}</code>\n"
+            f"id: <code>{wf.get('id')}</code>\n"
+            f"📏 {len(yaml_text):,} 字元\n\n"
+            "💬 直接跟 AI 對話,他會基於這份 YAML 給建議或修改。\n"
+            "想看 raw 內容跟 AI 說「把 YAML 貼給我看」即可。"
+        )
+        await _bot_instance.send_message(chat_id=chat_id, text=receipt, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[/yaml] 失敗：{e}", exc_info=True)
+        await _bot_instance.send_message(chat_id=chat_id, text=f"❌ /yaml 失敗：{str(e)[:200]}")
+
+
+# ── TG 自由文字 → AI 助手 ──────────────────────────────────────────────────
+# Telegram 訊息上限 4096 字元；這裡留 200 字 safety margin 給 markdown 開頭結尾
+_TG_MSG_MAX = 3900
+
+
+def _markdown_to_tg_html(text: str) -> str:
+    """把常見 Markdown 轉成 Telegram HTML parse mode。
+
+    為什麼不用 Markdown V1:LLM 輸出常含 `_` 之類字元(snake_case 變數名)、Markdown V1
+    把 `_` 當斜體標記、不平衡就整個 parse 失敗、TG 退到 plain text 顯示就看到 raw `**` 字面。
+    HTML parse mode 較穩,只需 escape `<` `>` `&`。
+
+    支援:
+    - **粗體** → <b>粗體</b>
+    - ~~刪除~~ → <s>刪除</s>
+    - `inline code` → <code>inline code</code>
+    - ```code block``` → <pre>code block</pre>(語言標記略過)
+    - [文字](url) → <a href="url">文字</a>
+    - # / ## / ### 標題 → <b>標題</b>(TG 沒原生標題)
+    - 不轉斜體(*X*)避免 LLM 偶發單 * 寫法干擾
+    """
+    if not text:
+        return text
+    import re as _re
+    import html as _html
+
+    # 1. 先抽出 ```code block```、用佔位符標記、避免裡面內容被其他規則動到
+    code_blocks: list[str] = []
+    def _save_cb(m):
+        code_blocks.append(m.group(1))
+        return f"\x00CB{len(code_blocks)-1}\x00"
+    text = _re.sub(r"```(?:\w*)?\n?(.*?)\n?```", _save_cb, text, flags=_re.DOTALL)
+
+    # 2. 抽 inline `code`
+    inline_codes: list[str] = []
+    def _save_ic(m):
+        inline_codes.append(m.group(1))
+        return f"\x00IC{len(inline_codes)-1}\x00"
+    text = _re.sub(r"`([^`\n]+)`", _save_ic, text)
+
+    # 3. HTML escape 剩下的(此時 ` 跟 ``` 內容都不在了、不會誤殺)
+    text = _html.escape(text, quote=False)
+
+    # 4. 套 markdown → HTML
+    # 標題 ### → <b>
+    text = _re.sub(r"^#{1,6}\s+(.+?)\s*$", r"<b>\1</b>", text, flags=_re.MULTILINE)
+    # 粗體 **X** / __X__
+    text = _re.sub(r"\*\*([^\*\n]+?)\*\*", r"<b>\1</b>", text)
+    text = _re.sub(r"__([^_\n]+?)__", r"<b>\1</b>", text)
+    # 刪除線 ~~X~~
+    text = _re.sub(r"~~([^~\n]+?)~~", r"<s>\1</s>", text)
+    # 連結 [X](url)
+    text = _re.sub(r"\[([^\]\n]+?)\]\(([^\)\n]+?)\)", r'<a href="\2">\1</a>', text)
+
+    # 5. 還原 code(內容仍要 escape)
+    def _restore_cb(m):
+        idx = int(m.group(1))
+        return f"<pre>{_html.escape(code_blocks[idx], quote=False)}</pre>"
+    text = _re.sub(r"\x00CB(\d+)\x00", _restore_cb, text)
+    def _restore_ic(m):
+        idx = int(m.group(1))
+        return f"<code>{_html.escape(inline_codes[idx], quote=False)}</code>"
+    text = _re.sub(r"\x00IC(\d+)\x00", _restore_ic, text)
+    return text
+
+
+async def _send_long_message(chat_id: int, text: str, parse_mode: str | None = None) -> None:
+    """送長訊息：超過 4096 字元自動分段。盡量在換行處切、避免切到 code block 中間。
+
+    parse_mode 失敗(如 Markdown 不合法、TG BadRequest)會自動退到 plain text 重送、
+    確保使用者一定看到內容、不會因為 markdown 殘缺整個訊息消失。
+    """
+    if not text:
+        return
+
+    async def _send_one(content: str):
+        """單則訊息送出、parse_mode 失敗自動 fallback plain text。"""
+        try:
+            await _bot_instance.send_message(chat_id=chat_id, text=content, parse_mode=parse_mode)
+        except Exception as e:
+            logger.warning(f"_send_long_message parse_mode={parse_mode} failed: {e}; retrying plain")
+            await _bot_instance.send_message(chat_id=chat_id, text=content)
+
+    if len(text) <= _TG_MSG_MAX:
+        await _send_one(text)
+        return
+    # 分段：先試在換行處切
+    parts: list[str] = []
+    remaining = text
+    while len(remaining) > _TG_MSG_MAX:
+        cut = remaining.rfind("\n\n", 0, _TG_MSG_MAX)
+        if cut < 1000:
+            cut = remaining.rfind("\n", 0, _TG_MSG_MAX)
+        if cut < 500:
+            cut = _TG_MSG_MAX
+        parts.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        parts.append(remaining)
+    for i, p in enumerate(parts):
+        prefix = f"({i + 1}/{len(parts)}) " if len(parts) > 1 else ""
+        await _send_one(prefix + p)
+
+
+def _build_tg_state_digest() -> str:
+    """為 TG AI 助手注入「V5 目前狀態」的 markdown 區塊(讓 LLM 不用 tool 也能看到狀態)。
+
+    包含:
+      - 最近 5 個活躍 workflow(id / name / 最後 run 狀態+時間)
+      - 最近一次 run(任何狀態) 的 log 末尾 30 行
+      - 若有最近 24 小時內 failed/awaiting_human 的 run、額外列出
+    """
+    try:
+        from db import list_workflows, list_runs
+    except Exception:
+        return ""
+    try:
+        wfs = list_workflows() or []
+        runs = list_runs(limit=30) or []
+    except Exception as e:
+        return f"## 狀態 digest\n\n(載入失敗:{e})"
+
+    # 索引每個 workflow 的最近一次 run
+    wf_latest: dict[str, dict] = {}
+    for r in runs:
+        wid = r.get("_workflow_id") or ""
+        if wid and wid not in wf_latest:
+            wf_latest[wid] = r
+
+    # 排序 workflow:有 run 的按最近 run 時間倒排排在前、沒 run 的排後
+    have_runs = [w for w in wfs if wf_latest.get(w.get("id") or "")]
+    no_runs = [w for w in wfs if not wf_latest.get(w.get("id") or "")]
+    have_runs.sort(
+        key=lambda w: wf_latest.get(w.get("id") or "", {}).get("started_at") or "",
+        reverse=True,
+    )
+    wfs_sorted = (have_runs + no_runs)[:5]
+
+    lines = ["## V5 目前狀態(自動注入,無須使用者再說一次)", ""]
+    lines.append("### 最近 5 個活躍工作流")
+    for wf in wfs_sorted:
+        wid = wf.get("id") or ""
+        name = wf.get("name") or wid
+        r = wf_latest.get(wid)
+        if r:
+            status = r.get("status") or "?"
+            started = r.get("started_at") or ""
+            try:
+                from datetime import datetime
+                if isinstance(started, str) and started:
+                    ts_str = datetime.fromisoformat(started).strftime("%m/%d %H:%M")
+                elif isinstance(started, (int, float)) and started:
+                    ts_str = datetime.fromtimestamp(started).strftime("%m/%d %H:%M")
+                else:
+                    ts_str = ""
+            except Exception:
+                ts_str = ""
+            run_id = r.get("run_id") or ""
+            lines.append(f"- **{name}** (id=`{wid}`) — 最後 run: `{status}` ({ts_str}) run_id=`{run_id}`")
+        else:
+            lines.append(f"- **{name}** (id=`{wid}`) — 尚未跑過")
+    lines.append("")
+
+    # 最近一次 run 的 log 摘要
+    if runs:
+        latest = runs[0]
+        run_id = latest.get("run_id") or ""
+        wf_name = latest.get("pipeline_name") or ""
+        status = latest.get("status") or "?"
+        lines.append(f"### 最近一次 run:`{wf_name}` ({status})")
+        lines.append(f"- run_id: `{run_id}`")
+        # 找對應 log 檔(filename 含 run_id 後 8 字)
+        try:
+            log_dir = Path(__file__).parent / "ai_output" / "pipeline_logs"
+            tail_text = ""
+            if log_dir.exists() and run_id:
+                rid_short = run_id.split("-")[0][:8]
+                matches = sorted(log_dir.glob(f"*{rid_short}*.log"),
+                                 key=lambda p: p.stat().st_mtime, reverse=True)
+                if matches:
+                    log_text = matches[0].read_text(encoding="utf-8", errors="replace")
+                    tail_lines = log_text.splitlines()[-30:]
+                    tail_text = "\n".join(tail_lines)
+            if tail_text:
+                lines.append("- log 末尾 30 行:")
+                lines.append("```")
+                lines.append(tail_text[-2400:])  # 再截長
+                lines.append("```")
+        except Exception:
+            pass
+        lines.append("")
+
+    lines.append("使用者若提到具體 workflow 或 run、優先用上面資料解答。"
+                 "若資料不夠、請反問使用者(例:「給我那個 run 的詳細錯誤訊息」)、不要編造。")
+    return "\n".join(lines)
+
+
+# LLM agent 整體 timeout(從 user msg 收到到 AI 回覆完整、含多輪 tool call)
+# 300s:給大 model + tool 上限 5 輪場合留充足餘裕
+_TG_AI_RESPONSE_TIMEOUT = 300.0
+_TG_TYPING_REFRESH_INTERVAL = 4.0  # TG typing 動畫只顯示 ~5s、要持續送 keepalive
+
+
+def _tool_progress_text(tool_name: str, tool_args: dict) -> str:
+    """把 tool 呼叫翻成 TG 推送的進度文字(一行、含 emoji)。
+
+    參考 LLM 真的會 call 的 7 個 tool:
+    list_workflows / get_workflow_yaml / get_recent_runs / get_run_log
+    save_workflow_yaml / start_workflow / send_file_to_tg / web_search
+    """
+    a = tool_args or {}
+    if tool_name == "list_workflows":
+        return "🔍 列工作流..."
+    if tool_name == "get_workflow_yaml":
+        q = (a.get("query") or "")[:40]
+        return f"📄 讀「{q}」的 YAML..."
+    if tool_name == "get_recent_runs":
+        q = (a.get("query") or "")[:40]
+        return f"⏱ 看「{q}」最近執行紀錄..."
+    if tool_name == "get_run_log":
+        rid = (a.get("run_id") or "")[:12]
+        return f"📜 讀 run <code>{rid}</code> 的 log..."
+    if tool_name == "save_workflow_yaml":
+        q = (a.get("query") or "")[:40]
+        confirm = bool(a.get("confirm"))
+        return f"💾 套用 YAML 到「{q}」..." if confirm else f"👀 預覽:準備把 YAML 套到「{q}」..."
+    if tool_name == "create_workflow_yaml":
+        n = (a.get("name") or "")[:40]
+        confirm = bool(a.get("confirm"))
+        return f"➕ 建立新工作流「{n}」..." if confirm else f"👀 預覽:準備建新工作流「{n}」..."
+    if tool_name == "start_workflow":
+        q = (a.get("query") or "")[:40]
+        confirm = bool(a.get("confirm"))
+        return f"🚀 啟動「{q}」..." if confirm else f"👀 預覽:準備啟動「{q}」..."
+    if tool_name == "send_file_to_tg":
+        q = (a.get("workflow_query") or "")[:30]
+        fn = (a.get("filename") or "")[:30]
+        confirm = bool(a.get("confirm"))
+        if not fn:
+            return f"📁 列「{q}」的輸出檔..."
+        return f"📎 傳 <code>{fn}</code> 到 TG..." if confirm else f"👀 預覽:準備傳 <code>{fn}</code>..."
+    if tool_name == "web_search":
+        q = (a.get("query") or "")[:60]
+        return f"🌐 搜「{q}」..."
+    if tool_name == "list_schedules":
+        return "📅 列排程..."
+    if tool_name == "schedule_workflow":
+        q = (a.get("query") or "")[:30]
+        cron = (a.get("schedule_expr") or "")[:30]
+        confirm = bool(a.get("confirm"))
+        return f"📅 建排程「{q}」{cron}..." if confirm else f"👀 預覽:準備為「{q}」建排程({cron})..."
+    if tool_name == "cancel_schedule":
+        q = (a.get("task_id_or_name") or "")[:40]
+        confirm = bool(a.get("confirm"))
+        return f"🗑 取消排程「{q}」..." if confirm else f"👀 預覽:準備取消排程「{q}」..."
+    # fallback:未知 tool
+    return f"🔧 {tool_name}..."
+
+
+async def _typing_keepalive(chat_id: int, stop_event: asyncio.Event) -> None:
+    """背景任務:每 4 秒重發 typing action、直到 stop_event 被 set。
+    確保 LLM 跑很久時 TG 上的「正在輸入...」動畫不會中斷。"""
+    while not stop_event.is_set():
+        try:
+            await _bot_instance.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception:
+            pass  # send_chat_action 失敗不影響主流程
+        try:
+            # 等 stop_event 或 timeout、whichever first
+            await asyncio.wait_for(stop_event.wait(), timeout=_TG_TYPING_REFRESH_INTERVAL)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def _handle_tg_freeform_chat(chat_id: int, text: str) -> None:
+    """TG 收到非 slash、非 awaiting state 的自由文字 → 丟給 /pipeline/chat AI 助手。
+
+    每個 chat_id 一條歷史(in-memory),保留最近 _TG_CHAT_HISTORY_CAP 則訊息。
+    LLM 用 _build_pipeline_system_prompt(跟桌面 chat 一致) + TG 狀態 digest。
+    LLM 跑期間用 typing keepalive 持續顯示「輸入中...」動畫;超過 _TG_AI_RESPONSE_TIMEOUT 秒拋友善 timeout。
+    """
+    history = _tg_chat_history.setdefault(chat_id, [])
+    history.append({"role": "user", "content": text})
+
+    # 啟動 typing keepalive(背景任務、跟 LLM call 並行、function 結束時清掉)
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(_typing_keepalive(chat_id, stop_typing))
+
+    async def _cleanup_typing():
+        stop_typing.set()
+        try:
+            await asyncio.wait_for(typing_task, timeout=2.0)
+        except Exception:
+            if not typing_task.done():
+                typing_task.cancel()
+
+    try:
+        # 直接 await main 的 _chat_agent_loop function、避開 HTTP roundtrip
+        # _chat_agent_loop 接受 on_tool_event callback、tool 呼叫前後送進度給 TG
+        from main import _chat_agent_loop, PipelineChatRequest
+        digest = _build_tg_state_digest()
+        # 把使用者用 /log /yaml 載入的附加上下文也注入
+        loaded = _tg_loaded_context.get(chat_id) or []
+        if loaded:
+            ctx_blocks = ["", "## 使用者載入的完整內容(他用 /log 或 /yaml 主動拉的、優先參考)", ""]
+            for label, content, _ts in loaded:
+                ctx_blocks.append(f"### {label}")
+                ctx_blocks.append("```")
+                ctx_blocks.append(content)
+                ctx_blocks.append("```")
+                ctx_blocks.append("")
+            digest = (digest or "") + "\n".join(ctx_blocks)
+        req = PipelineChatRequest(
+            messages=list(history),
+            workflow_id=None,
+            extra_system=digest if digest else None,
+        )
+
+        # Tool 進度 callback:tool 呼叫前送一行進度給 TG、user 知道 AI 在做啥
+        # 只 fire "before"、不送 "after"(避免訊息洪水);
+        # tool 完成的訊號 = 下一個 before 或最終 reply
+        async def _tool_progress(phase: str, tc: dict, result: str | None) -> None:
+            if phase != "before":
+                return
+            try:
+                msg = _tool_progress_text(tc.get("name") or "", tc.get("args") or {})
+                await _bot_instance.send_message(
+                    chat_id=chat_id, text=msg, parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(f"[tool progress] 送進度失敗(忽略):{e}")
+
+        # 包 timeout:_TG_AI_RESPONSE_TIMEOUT 秒沒回 → asyncio.TimeoutError
+        result = await asyncio.wait_for(
+            _chat_agent_loop(req, on_tool_event=_tool_progress),
+            timeout=_TG_AI_RESPONSE_TIMEOUT,
+        )
+        reply = (result or {}).get("reply") or ""
+        # 若 AI 產出 YAML、緩存起來給 /save 用
+        if result and result.get("has_yaml") and result.get("yaml_content"):
+            _tg_last_ai_yaml[chat_id] = {
+                "yaml": result["yaml_content"],
+                "ts": time.time(),
+                "yaml_error": result.get("yaml_error"),
+            }
+    except asyncio.TimeoutError:
+        logger.warning(f"[TG chat] LLM 回應超過 {_TG_AI_RESPONSE_TIMEOUT}s 逾時")
+        await _cleanup_typing()
+        await _bot_instance.send_message(
+            chat_id=chat_id,
+            text=(f"⏱ AI 回應超過 {int(_TG_AI_RESPONSE_TIMEOUT)} 秒沒結果、已自動中止。\n"
+                  "可能網路慢、model 太大、或太複雜。建議:換更快的 model、或拆成小一點的問題重試。"),
+        )
+        if history and history[-1].get("role") == "user":
+            history.pop()
+        return
+    except Exception as e:
+        logger.error(f"[TG chat] AI 助手呼叫失敗：{e}", exc_info=True)
+        await _cleanup_typing()
+        # HTTPException 走 _friendly_llm_error 翻譯後、detail 是繁中友善訊息;
+        # 其他 exception 退回 type+前 200 字
+        try:
+            from fastapi import HTTPException as _HTTPExc
+            friendly = e.detail if isinstance(e, _HTTPExc) and getattr(e, "detail", None) else str(e)
+        except Exception:
+            friendly = str(e)
+        await _bot_instance.send_message(
+            chat_id=chat_id, text=f"❌ AI 助手回應失敗:\n{str(friendly)[:400]}",
+        )
+        # 失敗就把這次 user msg 移除、避免歷史污染
+        if history and history[-1].get("role") == "user":
+            history.pop()
+        return
+
+    # 收到 LLM 回覆 → 清掉 typing(後續送訊息不需要 typing 動畫)
+    await _cleanup_typing()
+
+    if not reply.strip():
+        await _bot_instance.send_message(chat_id=chat_id, text="(AI 助手回覆為空、忽略本次)")
+        return
+
+    # 寫進歷史 + 截長
+    history.append({"role": "assistant", "content": reply})
+    if len(history) > _TG_CHAT_HISTORY_CAP:
+        del history[: len(history) - _TG_CHAT_HISTORY_CAP]
+
+    # 送給 user。先分段(按 markdown 換行)再各段轉 HTML、避免 <pre> 被切到中間
+    # 用 HTML parse mode 比 Markdown V1 穩(後者遇到 `_` snake_case 等容易整個 parse 失敗)
+    if len(reply) <= _TG_MSG_MAX:
+        await _send_long_message(chat_id, _markdown_to_tg_html(reply), parse_mode="HTML")
+    else:
+        # 手動分段:盡量在 \n\n 切、各段獨立 markdown→HTML
+        parts: list[str] = []
+        remaining = reply
+        while len(remaining) > _TG_MSG_MAX:
+            cut = remaining.rfind("\n\n", 0, _TG_MSG_MAX)
+            if cut < 1000:
+                cut = remaining.rfind("\n", 0, _TG_MSG_MAX)
+            if cut < 500:
+                cut = _TG_MSG_MAX
+            parts.append(remaining[:cut])
+            remaining = remaining[cut:].lstrip("\n")
+        if remaining:
+            parts.append(remaining)
+        for i, p in enumerate(parts):
+            prefix = f"({i + 1}/{len(parts)}) " if len(parts) > 1 else ""
+            try:
+                await _bot_instance.send_message(
+                    chat_id=chat_id, text=prefix + _markdown_to_tg_html(p), parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(f"HTML send failed: {e}; retry plain")
+                await _bot_instance.send_message(chat_id=chat_id, text=prefix + p)
+
+
 async def _register_bot_commands(bot) -> None:
     """寫入 TG 客戶端 autocomplete 清單（取代 BotFather 既有設定）。
     這是 bot-global 設定，會覆蓋此 bot token 在其他專案註冊過的 /commands、
@@ -426,9 +1160,14 @@ async def _register_bot_commands(bot) -> None:
     try:
         await bot.set_my_commands([
             BotCommand("menu",       "列工作流並啟動（附執行中／排程徽章）"),
+            BotCommand("run",        "啟動某工作流（用法：/run <name|id>）"),
+            BotCommand("save",       "把對話中 AI 產的 YAML 套到指定工作流"),
             BotCommand("status",     "查看目前執行中的 run"),
+            BotCommand("log",        "拉某個 run 的完整 log（用法：/log <run_id>）"),
+            BotCommand("yaml",       "拉某個 workflow 的 YAML（用法：/yaml <name|id>）"),
             BotCommand("screenshot", "抓 host 桌面即時截圖"),
             BotCommand("abort",      "中止某個 run（用法：/abort <run_id>）"),
+            BotCommand("reset",      "清空 AI 助手對話歷史 + 附加上下文"),
             BotCommand("help",   "顯示指令說明"),
         ])
         logger.info("Telegram bot 指令清單（autocomplete）已更新為 V5 版本")
@@ -660,6 +1399,23 @@ async def _poll_loop():
                                 logger.warning(
                                     f"[遠端遙控] 拒絕 {text} from chat_id={chat_id}："
                                     f"toggle={_enabled}, auth_chat={_auth!r}, match={str(chat_id) == _auth}"
+                                )
+                            except Exception:
+                                pass
+                        continue
+                    # ── 非 slash、非 awaiting：自由文字丟給 AI 助手 ──
+                    # 同樣需要 telegram_remote_control toggle + chat_id 授權
+                    # （避免外人 DM bot 把它變成免費聊天機器人）
+                    if _is_remote_control_authorized(chat_id):
+                        try:
+                            await _handle_tg_freeform_chat(chat_id, text)
+                        except Exception as e:
+                            logger.error(f"[TG chat] freeform 處理失敗：{e}", exc_info=True)
+                            # 通知使用者、避免「沒回應」黑洞體驗
+                            try:
+                                await _bot_instance.send_message(
+                                    chat_id=chat_id,
+                                    text=f"❌ 處理訊息時發生錯誤：{type(e).__name__}: {str(e)[:200]}",
                                 )
                             except Exception:
                                 pass
@@ -1074,6 +1830,81 @@ async def _poll_loop():
                         ),
                         parse_mode="HTML",
                     )
+                    continue
+
+                # ── 缺套件:允許安裝單一套件 ──
+                # callback_data 格式 pipe_install_dep:{run_id}:{pkg_name}
+                if action == "install_dep":
+                    pkg_name = extra
+                    if not pkg_name:
+                        await cb.answer("❌ 缺套件名")
+                        continue
+                    logger.info(f"Telegram: 允許安裝套件 {pkg_name} for run {run_id}")
+                    await cb.answer(f"⏳ 正在安裝 {pkg_name}…")
+                    try:
+                        from pipeline.runner import resume_pipeline
+                        msg = await resume_pipeline(run_id, "install_dep", hint=pkg_name)
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id, text=msg[:600],
+                        )
+                    except Exception as e:
+                        logger.error(f"install_dep failed: {e}", exc_info=True)
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id,
+                            text=f"❌ 安裝失敗：{str(e)[:300]}",
+                        )
+                    continue
+
+                # ── ask_mode 敏感命令授權:允許/拒絕/改任務 ──
+                if action in ("approve_cmd", "deny_cmd", "hint_cmd"):
+                    _map = {
+                        "approve_cmd": "approve_command",
+                        "deny_cmd":    "deny_command",
+                        "hint_cmd":    "hint_command",
+                    }
+                    api_dec = _map[action]
+                    logger.info(f"Telegram: command_approval={api_dec} for run {run_id}")
+                    await cb.answer({"approve_cmd":"✅ 已允許", "deny_cmd":"❌ 已拒絕", "hint_cmd":"💬 改任務"}[action])
+                    try:
+                        from pipeline.runner import resume_pipeline
+                        msg = await resume_pipeline(run_id, api_dec)
+                        await _bot_instance.send_message(chat_id=cb.message.chat_id, text=msg[:300])
+                    except Exception as e:
+                        logger.error(f"{action} failed: {e}", exc_info=True)
+                        await _bot_instance.send_message(chat_id=cb.message.chat_id, text=f"❌ {str(e)[:200]}")
+                    continue
+
+                # ── 缺套件:允許全部安裝 ──
+                if action == "install_all":
+                    logger.info(f"Telegram: 允許全部安裝 for run {run_id}")
+                    await cb.answer("⏳ 全部安裝中…")
+                    try:
+                        from pipeline.store import get_store as _gs
+                        run = _gs().load(run_id)
+                        if not run:
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id, text="❌ 找不到 run",
+                            )
+                            continue
+                        import json as _json
+                        meta = _json.loads(run.awaiting_suggestion or "{}")
+                        pkgs = meta.get("packages") or []
+                        if not pkgs:
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id, text="❌ 找不到套件清單",
+                            )
+                            continue
+                        from pipeline.runner import resume_pipeline
+                        msg = await resume_pipeline(run_id, "install_dep", hint=",".join(pkgs))
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id, text=msg[:600],
+                        )
+                    except Exception as e:
+                        logger.error(f"install_all failed: {e}", exc_info=True)
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id,
+                            text=f"❌ 全部安裝失敗:{str(e)[:300]}",
+                        )
                     continue
 
                 if action not in ("retry", "skip", "abort", "continue"):

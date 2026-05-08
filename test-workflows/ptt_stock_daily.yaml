@@ -1,0 +1,91 @@
+# PTT Stock 板每日討論摘要 — 範例工作流
+#
+# 目的：每天自動抓 PTT Stock 板熱門文章、產出一份摘要報告。
+#
+# 結構（兩個節點）：
+#   1. 網頁爬蟲：抓列表頁、拿到所有當日文章連結
+#   2. AI 技能：自己用 crawl4ai 抓每篇詳細頁、做摘要、彙整成 report
+#
+# 為什麼第二步用 AI 技能而不是另一個爬蟲節點？
+#   爬蟲節點目前不支援「URL 列表動態從上一步檔案讀取」，
+#   所以用 AI 技能直接在 sandbox 內呼叫 crawl4ai、自行處理。
+#   未來若加上 wc_urls_from_file 功能，可改成 3 個爬蟲節點 + 1 個摘要節點。
+#
+# 換抓別站：
+#   - 改第一步 wc_url = 另一個列表頁 URL（如 Reddit / Dcard / Mobile01）
+#   - 改第二步 prompt 內的「URL pattern」（PTT 是 M.\d+.A.\w+；
+#     其他站例如 Dcard 是 /f/.+/p/\d+、Reddit 是 /r/.+/comments/.+）
+
+name: PTT Stock 每日討論摘要
+validate: false
+
+steps:
+  # ── 步驟 1：抓列表頁 ──────────────────────────────────────────
+  - name: 抓 PTT Stock 列表
+    web_crawler: true
+    wc_url: https://www.pttweb.cc/bbs/Stock
+    # 列表頁是 SSR、智慧重試會自動處理 SPA 站的話也通；不需要動其他設定
+    output:
+      path: ai_output/ptt_stock_daily/list.md
+    timeout: 90
+    retry: 1
+
+  # ── 步驟 2：AI 技能 — 提取連結 + 批次抓 + 產摘要 ────────────────
+  - name: 提取連結並產出摘要報告
+    skill_mode: true
+    batch: |
+      讀上一步抓回來的列表頁 markdown，把裡面所有討論串 / 文章的連結抽出來，
+      用 crawl4ai 一篇一篇抓回 markdown，對每篇做摘要 + 留言情緒分析，
+      最後彙整成一份報告寫到 output_path。
+
+      限制：
+      - 最多抓 10 篇（避免 rate limit）
+      - 每篇摘要 80 字內
+      - 你必須**讀懂內文**再寫摘要，不能直接 copy 前 N 字（前面通常是頁首
+        導覽列、不是文章內容；偷懶切前 N 字會抓到一堆 [連結](url) 字串）
+
+      用 crawl4ai 抓的 sample code：
+      ```python
+      import asyncio
+      from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+      async def fetch(url):
+          async with AsyncWebCrawler(config=BrowserConfig(headless=True)) as c:
+              r = await c.arun(url=url, config=CrawlerRunConfig(
+                  cache_mode=CacheMode.BYPASS, page_timeout=60000))
+              return r.markdown if r.success else None
+      ```
+
+      輸出 `daily_report.md` 格式（每篇一塊）：
+
+      ```markdown
+      # 每日摘要
+      > 抓取時間：（datetime.now() 真實時間）
+      > 來源：（步驟 1 的 URL）
+      > 篇數：N
+
+      ---
+
+      ## 1. [文章標題]
+      - 作者：xxx
+      - 統計：（這站有的對應指標，如 PTT 是「N 推 N 噓 N →」、Reddit 是 upvote 數、Dcard 是愛心數）
+      - 連結：URL
+
+      **內容摘要**：80 字內，用你的話描述這篇在講什麼
+
+      **留言情緒**：正面 / 負面 / 中立 / 兩極（一句話補充判斷依據）
+
+      ---
+
+      ## 2. ...
+      ```
+    output:
+      path: ai_output/ptt_stock_daily/daily_report.md
+      ai_validation: true
+      description: |
+        檔案存在且至少包含 5 篇以上的摘要區塊（每塊有「## 數字. 標題」的 heading）。
+        檔案大小應該大於 2KB。
+        每篇的「內容重點」必須是有意義的中文摘要（看得懂這篇在講什麼），
+        絕對不能是「[ 熱門看板  ](url)」這種 PTT 頁首 navigation 連結文字。
+        每篇的「推噓」數字應該存在且非全 0（除非那篇真的沒推文）。
+    timeout: 1200   # 20 分鐘給整個工作（10 篇 × ~5 秒抓 + LLM 摘要）
+    retry: 0

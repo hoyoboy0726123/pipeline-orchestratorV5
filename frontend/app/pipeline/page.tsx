@@ -13,6 +13,7 @@ import InsertableEdge from './_insertableEdge'
 import {
   Play, Clock, Code2, Plus, Sparkles, BookOpen, Zap, Square,
   Loader2, CheckCircle2, XCircle, Workflow, Terminal, X, Hand,
+  Bot, Brain, ShieldCheck, UserCheck, MousePointer2, ScanEye, Mail, Globe,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Toaster } from 'sonner'
@@ -25,6 +26,7 @@ import ComputerUseNodeComponent    from './_computerUseNode'
 import VisualValidationNodeComponent from './_visualValidationNode'
 import OutlookNodeComponent        from './_outlookNode'
 import WebCrawlerNodeComponent     from './_webCrawlerNode'
+import SubagentStepNode             from './_subagentNode'
 import ScriptConfigPanel           from './_scriptPanel'
 import SkillConfigPanel            from './_skillPanel'
 import AiValidationPanel           from './_aiValidationPanel'
@@ -33,14 +35,15 @@ import ComputerUsePanel            from './_computerUsePanel'
 import VisualValidationPanel       from './_visualValidationPanel'
 import OutlookPanel                from './_outlookPanel'
 import WebCrawlerPanel             from './_webCrawlerPanel'
+import SubagentConfigPanel          from './_subagentPanel'
 import Sidebar                from './_sidebar'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
-  type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData,
+  type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData, type SubagentData,
   type ScriptNode, type SkillNode, type HumanConfirmNode, type ComputerUseNode, type VisualValidationNode,
-  type OutlookNode, type WebCrawlerNode,
+  type OutlookNode, type WebCrawlerNode, type SubagentNode,
   newStepData, newSkillData, newAiValidationData, newHumanConfirmData, newComputerUseData,
-  newVisualValidationData, newOutlookData, newWebCrawlerData,
+  newVisualValidationData, newOutlookData, newWebCrawlerData, newSubagentData,
   stepsToFlow, flowToSteps, stepsToYaml, parseYaml,
 } from './_helpers'
 import { useWorkflowStore } from './_store'
@@ -63,6 +66,7 @@ const nodeTypes = {
   visualValidation: VisualValidationNodeComponent,
   outlookAutomation: OutlookNodeComponent,
   webCrawler: WebCrawlerNodeComponent,
+  subagent: SubagentStepNode,
 }
 
 // Edge 類型：全部用 InsertableEdge — hover 出 + / 🗑️ 按鈕（n8n 風格）
@@ -336,7 +340,7 @@ export default function PipelinePage() {
   const runStatusRef = useRef(runStatus)
   const setRunStatus = (v: typeof runStatus) => { runStatusRef.current = v; _setRunStatus(v) }
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
-  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user'>('failure')
+  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval'>('failure')
   const [askUserOptions, setAskUserOptions] = useState<string[]>([])
   const [askUserContext, setAskUserContext] = useState('')
   const [askUserAnswer, setAskUserAnswer] = useState('')
@@ -444,7 +448,7 @@ export default function PipelinePage() {
             setRunStatus('awaiting')
             setAwaitingRunId(active.run_id)
             const at = (active as any).awaiting_type
-            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : 'failure'
+            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
             setAwaitingType(mapped)
             setAwaitingMessage((active as any).awaiting_message || '')
             setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -539,6 +543,7 @@ export default function PipelinePage() {
     if (n.type === 'computerUse') return '#9333ea'
     if (n.type === 'outlookAutomation') return '#0078d4'
     if (n.type === 'webCrawler') return '#0d9488'
+    if (n.type === 'subagent') return '#4f46e5'
     return '#3b82f6'
   }, [])
 
@@ -651,6 +656,17 @@ export default function PipelinePage() {
     setSelectedId(id)
   }, [nodes, setNodes])
 
+  // ── Add 多輪代理（subagent）節點 ──────────────────────────────────────
+  const addSubagent = useCallback(() => {
+    const id = `subagent-${Date.now()}`
+    const data = newSubagentData(nodes.length)
+    const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
+    const x = lastNode ? lastNode.position.x + 320 : 100
+    const y = lastNode ? lastNode.position.y : 160
+    setNodes(ns => [...ns, { id, type: 'subagent', position: { x, y }, data }])
+    setSelectedId(id)
+  }, [nodes, setNodes])
+
   // ── Edge 上的 ➕ 按鈕：在指定 edge 中間插入新節點 ──────────────────────────
   // _insertableEdge.tsx dispatch 'pipeline-insert-node-on-edge' CustomEvent
   // detail = { edgeId, source, target, nodeType, labelX, labelY }
@@ -673,6 +689,7 @@ export default function PipelinePage() {
         case 'visualValidation':   data = newVisualValidationData(0); break
         case 'outlookAutomation':  data = newOutlookData(0); break
         case 'webCrawler':         data = newWebCrawlerData(0); break
+        case 'subagent':           data = newSubagentData(0); break
         default: return
       }
       setNodes(ns => [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }])
@@ -781,7 +798,7 @@ export default function PipelinePage() {
 
   // ── Run pipeline ──────────────────────────────────────────────────────────
   const handleRunClick = async () => {
-    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler')
+    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler' || n.type === 'subagent')
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
     const steps = flowToSteps(nodes, edges)
     // 空步驟檢查：排除有自己 schema 的節點類型（不靠 batch 跑的）
@@ -931,7 +948,7 @@ export default function PipelinePage() {
                 setRunStatus('awaiting')
                 setAwaitingRunId(active.run_id)
                 const at = (active as any).awaiting_type
-                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : 'failure'
+                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
                 setAwaitingType(mapped)
                 setAwaitingMessage((active as any).awaiting_message || '')
                 setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1021,7 +1038,7 @@ export default function PipelinePage() {
           setRunStatus('awaiting')
           setAwaitingRunId(runId)
           const at = data.awaiting_type
-          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : 'failure'
+          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
           setAwaitingType(mapped)
           setAwaitingMessage(data.awaiting_message || '')
           setAwaitingSuggestion(data.awaiting_suggestion || '')
@@ -1103,7 +1120,7 @@ export default function PipelinePage() {
   const [hintText, setHintText] = useState('')
   const [showHintInput, setShowHintInput] = useState(false)
 
-  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer', hint?: string) => {
+  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command', hint?: string) => {
     if (!awaitingRunId) return
     const rid = awaitingRunId
 
@@ -1247,7 +1264,7 @@ export default function PipelinePage() {
         ) : (
           <button
             onClick={handleRunClick}
-            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler').length === 0}
+            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler' || n.type === 'subagent').length === 0}
             className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium shadow-sm"
           >
             <Play className="w-3.5 h-3.5" /> 執行
@@ -1295,56 +1312,63 @@ export default function PipelinePage() {
                 title="新增一個執行 Python 腳本/指令的步驟"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-blue-200 rounded-xl text-sm text-blue-600 hover:border-blue-400 hover:bg-blue-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> Python腳本
+                <Plus className="w-3.5 h-3.5" /> <Code2 className="w-3.5 h-3.5" /> Python腳本
               </button>
               <button
                 onClick={addAiValidation}
                 title="新增 AI 快速驗證節點"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-amber-200 rounded-xl text-sm text-amber-600 hover:border-amber-400 hover:bg-amber-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> AI驗證
+                <Plus className="w-3.5 h-3.5" /> <ShieldCheck className="w-3.5 h-3.5" /> AI驗證
               </button>
               <button
                 onClick={addSkillStep}
                 title="新增 AI 自動化步驟（自動寫程式碼）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-purple-200 rounded-xl text-sm text-purple-600 hover:border-purple-400 hover:bg-purple-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> AI技能
+                <Plus className="w-3.5 h-3.5" /> <Bot className="w-3.5 h-3.5" /> AI技能
               </button>
               <button
                 onClick={addHumanConfirm}
                 title="新增人工確認節點（暫停等待確認後繼續）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-emerald-200 rounded-xl text-sm text-emerald-600 hover:border-emerald-400 hover:bg-emerald-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 人工確認
+                <Plus className="w-3.5 h-3.5" /> <UserCheck className="w-3.5 h-3.5" /> 人工確認
               </button>
               <button
                 onClick={addComputerUse}
                 title="新增桌面自動化節點（錄製滑鼠鍵盤操作後重播）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-fuchsia-200 rounded-xl text-sm text-fuchsia-700 hover:border-fuchsia-400 hover:bg-fuchsia-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 桌面自動化
+                <Plus className="w-3.5 h-3.5" /> <MousePointer2 className="w-3.5 h-3.5" /> 桌面自動化
               </button>
               <button
                 onClick={addVisualValidation}
                 title="新增視覺驗證節點（VLM 看畫面或上一步輸出檔判斷成不成功）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-indigo-200 rounded-xl text-sm text-indigo-600 hover:border-indigo-400 hover:bg-indigo-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 視覺驗證
+                <Plus className="w-3.5 h-3.5" /> <ScanEye className="w-3.5 h-3.5" /> 視覺驗證
               </button>
               <button
                 onClick={addOutlook}
                 title="新增 Outlook 自動化節點（pywin32 + Outlook COM；只在 Windows host 跑）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-sky-200 rounded-xl text-sm text-sky-700 hover:border-sky-400 hover:bg-sky-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> Outlook
+                <Plus className="w-3.5 h-3.5" /> <Mail className="w-3.5 h-3.5" /> Outlook
               </button>
               <button
                 onClick={addWebCrawler}
                 title="新增網頁爬蟲節點（沙盒內 Crawl4AI + Cloudflare fallback；輸出 markdown 給 skill 解析）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-teal-200 rounded-xl text-sm text-teal-700 hover:border-teal-400 hover:bg-teal-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 網頁爬蟲
+                <Plus className="w-3.5 h-3.5" /> <Globe className="w-3.5 h-3.5" /> 網頁爬蟲
+              </button>
+              <button
+                onClick={addSubagent}
+                title="新增 AI 多輪代理節點（指派角色 + 工具白名單；多輪推理直到完成；不存 Recipe）"
+                className="flex items-center gap-1.5 px-3 py-2 bg-white border border-violet-200 rounded-xl text-sm text-violet-700 hover:border-violet-400 hover:bg-violet-50 shadow-sm transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> <Brain className="w-3.5 h-3.5" /> 多輪代理
               </button>
             </div>
           </Panel>
@@ -1481,8 +1505,96 @@ export default function PipelinePage() {
           </div>
         )}
 
+        {/* missing_dependency banner — skill 跑到一半發現缺套件 */}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'missing_dep' && (() => {
+          let meta: { packages?: string[]; stderr_tail?: string } = {}
+          try { meta = awaitingSuggestion ? JSON.parse(awaitingSuggestion) : {} } catch { /* ignore */ }
+          const pkgs = meta.packages || []
+          return (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-blue-50 border border-blue-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-blue-700 font-medium text-sm whitespace-nowrap">📦 需要安裝套件</span>
+                {awaitingMessage && <span className="text-blue-600 text-xs max-w-[260px] truncate">{awaitingMessage}</span>}
+                <div className="flex items-center gap-2 ml-auto">
+                  <button
+                    onClick={() => handleDecision('install_dep', pkgs.join(','))}
+                    disabled={pkgs.length === 0}
+                    className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+                  >✅ 安裝並繼續</button>
+                  <a
+                    href="/settings"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="去設定頁手動安裝"
+                    className="px-3 py-1.5 bg-white border border-blue-200 text-blue-700 rounded-lg text-xs font-medium hover:bg-blue-100 whitespace-nowrap"
+                  >⚙️ 去設定頁</a>
+                  <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
+                </div>
+              </div>
+              {pkgs.length > 0 && (
+                <div className="bg-blue-100 border border-blue-200 rounded-lg px-3 py-2">
+                  <p className="text-xs font-semibold text-blue-700 mb-1">缺少：</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {pkgs.map(p => (
+                      <code key={p} className="text-xs bg-white border border-blue-200 text-blue-800 rounded px-1.5 py-0.5 font-mono">{p}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {meta.stderr_tail && (
+                <details className="text-xs text-blue-700/80">
+                  <summary className="cursor-pointer hover:text-blue-800">stderr 片段</summary>
+                  <pre className="mt-1 bg-white/60 rounded p-2 overflow-auto max-h-32 text-[11px] text-gray-700 whitespace-pre-wrap">{meta.stderr_tail}</pre>
+                </details>
+              )}
+            </div>
+          )
+        })()}
+
+        {/* command_approval banner — ask_mode 攔截敏感命令、需用戶授權 */}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'cmd_approval' && (() => {
+          let meta: { category?: string; label?: string; preview?: string; tool_name?: string; step_name?: string } = {}
+          try { meta = awaitingSuggestion ? JSON.parse(awaitingSuggestion) : {} } catch { /* ignore */ }
+          return (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-rose-50 border border-rose-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[680px] w-[95%]">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-rose-700 font-medium text-sm whitespace-nowrap">⚠️ 敏感操作需授權</span>
+                {meta.category && <span className="text-[11px] px-1.5 py-0.5 rounded bg-rose-200 text-rose-800 font-mono">{meta.category}</span>}
+                <div className="flex items-center gap-2 ml-auto">
+                  <button onClick={() => handleDecision('approve_command')} className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 whitespace-nowrap">✅ 執行</button>
+                  <button onClick={() => setShowHintInput(!showHintInput)} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${showHintInput ? 'bg-purple-700 text-white' : 'bg-purple-600 text-white hover:bg-purple-700'}`}>💬 改任務</button>
+                  <button onClick={() => handleDecision('deny_command')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">❌ 拒絕</button>
+                </div>
+              </div>
+              {meta.preview && (
+                <pre className="bg-rose-100 border border-rose-200 rounded-lg px-3 py-2 text-[11px] font-mono text-rose-900 leading-relaxed whitespace-pre-wrap break-all max-h-40 overflow-auto">{meta.preview}</pre>
+              )}
+              {meta.step_name && (
+                <p className="text-[11px] text-rose-700/80">步驟:<span className="font-mono">{meta.step_name}</span>{meta.tool_name ? ` · ${meta.tool_name}` : ''}</p>
+              )}
+              {showHintInput && (
+                <div className="flex gap-2">
+                  <input
+                    value={hintText}
+                    onChange={e => setHintText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && hintText.trim()) handleDecision('hint_command', hintText.trim()) }}
+                    placeholder="改任務的提示(例如：別用 sudo、改用 conda、跳過這步…)"
+                    className="flex-1 border border-rose-300 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-purple-400 bg-white"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => hintText.trim() && handleDecision('hint_command', hintText.trim())}
+                    disabled={!hintText.trim()}
+                    className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50 whitespace-nowrap"
+                  >送出</button>
+                </div>
+              )}
+            </div>
+          )
+        })()}
+
         {/* Empty state */}
-        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler').length === 0 && <EmptyState onAdd={addScriptStep} />}
+        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler' || n.type === 'subagent').length === 0 && <EmptyState onAdd={addScriptStep} />}
 
         {/* Node config panel */}
         {selectedNode && selectedNode.type === 'computerUse' ? (
@@ -1526,6 +1638,13 @@ export default function PipelinePage() {
           <WebCrawlerPanel
             node={selectedNode as WebCrawlerNode}
             pipelineName={pipelineName}
+            onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
+            onClose={() => setSelectedId(null)}
+            onDelete={() => deleteStep(selectedNode.id)}
+          />
+        ) : selectedNode && selectedNode.type === 'subagent' ? (
+          <SubagentConfigPanel
+            node={selectedNode as SubagentNode}
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
