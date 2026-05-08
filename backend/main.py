@@ -1792,6 +1792,72 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 
 **判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
 
+<!--TG_ONLY_BEGIN-->
+## ⛓️ 派子代理 ad-hoc 執行 vs 建 workflow（重要決策）
+
+當使用者要實際在沙盒內執行：寫程式 / 跑測試 / 處理檔案 / 做分析、有兩條路徑：
+
+### A. 直接派子代理（`dispatch_subagent_async`）
+非同步派出、立即釋放對話、子代理在沙盒(WSL Docker)寫 + 跑、結果之後查。
+適合：單次 ad-hoc 任務、不重複跑、用戶之後不會從畫布手動觸發。
+
+### B. 建 workflow YAML（`create_workflow_yaml` + `start_workflow`）
+正式工作流、畫布上一個或多個節點、可重複跑、能 schedule、從 sidebar 看歷史。
+適合：每天 / 每週重複跑、想 cron 排程、想能停下重跑、想 sidebar 看 run history。
+
+### 何時直接派、何時建 workflow、何時反問
+
+| 使用者描述 | 行為 |
+|---|---|
+| 「我要每天 / 每週自動 X」「能不能排程」「自動化」 | **直接走 workflow 路線**、不反問 |
+| 「幫我建工作流做 X」「在畫布上加 X」「設定一個 pipeline」 | **直接 workflow 路線**(explicit 指定) |
+| 「跑這段試試看」「測試一下這個」「驗證 ...」 | **直接派子代理**(明顯一次性 ad-hoc、不必反問) |
+| 純討論 / 問建議 / 問怎麼寫 | **不派、不建**、直接答 |
+| **「幫我寫個 X 工具/腳本/應用」「分析這份資料找 Y」「處理這檔案」**（沒提自動化 / 排程 / 工作流）| **反問用戶選 A 還 B**(預設不擅自決策) |
+
+### 反問範本（用使用者語氣、不要太正式）
+
+> 這個任務我有兩種做法、看你比較想要哪個:
+>
+> **A. 直接派子代理在沙盒寫 + 跑一次**
+> - 30 秒派出、跑完約 1-3 分鐘、結果回我這裡給你看
+> - 適合「這次寫好就好、之後不一定會再跑」
+>
+> **B. 建一個工作流**
+> - 之後可以從畫布手動跑、能排程定時跑
+> - 適合「會重複用 / 想自動化」
+>
+> 你選哪個？
+
+### 派子代理時細節（A 路徑）
+
+- **role 怎麼選**：寫程式 / debug → `coder`；處理 csv/xlsx 產報表 → `data_analyst`；
+  收料 / 研究 / 摘要 → `researcher`；純唯讀挑問題 → `critic`；
+  純拆步驟、不執行 → `planner`
+- **working_dir**：使用者沒明說 → 留空(系統自動推 `ai_output/chat-adhoc/<timestamp>/`)。
+  使用者說「放在 X」→ 把 X 帶進去
+- **max_iter**：簡單任務 4-5、複雜任務 6-10
+- **派出後**：告訴使用者 task_id、然後**繼續對話**(對話沒卡)
+- **失敗或卡住**：之後 check_subagent_status 拿到結果再決定:再派一次 / 改 prompt / 放棄
+
+### 不要做的事
+
+- 不要每次小事都派子代理(問怎麼寫個 for 迴圈不需要派)
+- 派之前**至少要清楚 working_dir + role 任務描述**、不要 prompt 太籠統("寫個程式")
+- 同時間最多派 3 個子代理(避免沙盒併發過多)— check 一下 in-flight 區段
+
+## 📡 In-flight 子代理狀態主動匯報
+
+System prompt 結尾若有「in-flight 子代理」digest、回應使用者時要主動帶出進度:
+
+- **running 中**：在你訊息**結尾**順帶一句進度。例:
+  > （順便：子代理 abc123 還在跑、剛跑完第 2 輪、用了 run_python）
+- **剛完成（60 秒內）且使用者沒問起**：主動報結果。例:
+  > （✅ 子代理 abc123 跑完了：寫了 sincos.py 在 ai_output/sincos_tool/、test 通過）
+- **已完成且超過 60 秒、使用者沒問**：不再主動提(避免每次都重複報)
+- 想看細節 → 呼叫 `check_subagent_status(task_id)` 拿完整 summary、tool 用量、token 數
+<!--TG_ONLY_END-->
+
 ## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML
 **使用者說**：「自動點按鈕」「UI 自動化」「錄製操作」「滑鼠點擊」
 **你的回應**：
@@ -2093,9 +2159,26 @@ _OUTLOOK_TEMPLATES_FOR_PROMPT = [
 ]
 
 
-def _build_pipeline_system_prompt() -> str:
-    """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills + Outlook 模板清單。"""
-    parts = [_PIPELINE_SYSTEM_BASE]
+def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
+    """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills + Outlook 模板清單。
+
+    channel:
+      - "telegram"：TG bot 通道(手機 / 遠端)、會包含 ad-hoc 派子代理工具與教學
+      - "desktop" (預設):桌面 :3005 chat、聚焦在畫板 / workflow 規劃，
+        把 TG_ONLY 標記之間的 subagent 章節剝掉、節省 token + 避免 LLM 誤呼
+        不存在的工具。
+    """
+    base = _PIPELINE_SYSTEM_BASE
+    if channel != "telegram":
+        # 把 <!--TG_ONLY_BEGIN--> ... <!--TG_ONLY_END--> 之間整塊拿掉(含 marker)
+        import re as _re
+        base = _re.sub(
+            r"<!--TG_ONLY_BEGIN-->.*?<!--TG_ONLY_END-->\s*",
+            "",
+            base,
+            flags=_re.DOTALL,
+        )
+    parts = [base]
     # ── Agent Skills 清單 ──────────────────────────────────────────────
     try:
         from skill_scanner import list_available_skills
@@ -2144,6 +2227,51 @@ def _build_pipeline_system_prompt() -> str:
             f"或「{now.year - 1}-{now.year}」、不要用陳舊年份(例：'2023 best XX')— "
             f"那會搜到過期資訊。"
         )
+    except Exception:
+        pass
+    # ── In-flight 子代理 digest(Phase 2:每次 chat turn 自動匯報) ─────
+    # 只有 TG 通道才注入 — 桌面 AI 助手不派子代理、看到 digest 也沒用、徒增 token
+    # 規範詳見 system prompt 內「In-flight 子代理狀態主動匯報」章節(同樣只有 TG 看得到)
+    try:
+        from chat_tools import _chat_subagents
+        import time as _t
+        snapshot = list(_chat_subagents.items())  # avoid concurrent mutation
+        if snapshot:
+            now_ts = _t.time()
+            running: list[tuple[str, dict, int]] = []
+            recent_done: list[tuple[str, dict, int]] = []
+            for tid, info in snapshot:
+                state = info.get("state")
+                if state == "running":
+                    started = info.get("started_at", now_ts)
+                    running.append((tid, info, int(now_ts - started)))
+                elif state in ("completed", "failed"):
+                    ended = info.get("ended_at") or 0
+                    ago = int(now_ts - ended)
+                    if 0 <= ago <= 60:  # 60s 內才算 "剛完成"、要主動提
+                        recent_done.append((tid, info, ago))
+            if running or recent_done:
+                lines = [
+                    "",
+                    "## 📡 In-flight 子代理（主動匯報；超過 60s 完成的不要重複提）",
+                    "",
+                ]
+                for tid, info, elapsed in running:
+                    role = info.get("role", "?")
+                    preview = (info.get("task") or "")[:80].replace("\n", " ")
+                    lines.append(f"- `{tid}` ({role}) **running** {elapsed}s — {preview}")
+                for tid, info, ago in recent_done:
+                    state = info.get("state")
+                    role = info.get("role", "?")
+                    r = info.get("result") or {}
+                    success_mark = "✅" if r.get("success") else "❌"
+                    summary = (r.get("summary") or "").replace("\n", " ")[:140]
+                    wd = info.get("working_dir", "")
+                    lines.append(
+                        f"- `{tid}` ({role}) **{state}** {ago}s ago {success_mark} — "
+                        f"{summary} (in `{wd}`)"
+                    )
+                parts.append("\n".join(lines))
     except Exception:
         pass
     return "".join(parts)
@@ -2358,7 +2486,12 @@ async def _chat_agent_loop(
         _log.warning(f"[/pipeline/chat] build_llm 失敗:{type(e).__name__}: {e}")
         sc, friendly = _friendly_llm_error(e)
         raise HTTPException(status_code=sc, detail=friendly)
-    system_prompt = _build_pipeline_system_prompt()
+    # 通道偵測：只 _chat_agent_loop 有 on_tool_event 參數(TG handler 才會傳)、
+    # 桌面 chat 走 pipeline_chat_stream / pipeline_chat 都不傳 → 預設 desktop。
+    # TG 通道才放 dispatch_subagent_async / check_subagent_status 兩個 ad-hoc 子代理工具
+    # + 帶 in-flight digest 教學區塊。
+    _channel = "telegram" if on_tool_event is not None else "desktop"
+    system_prompt = _build_pipeline_system_prompt(channel=_channel)
     if req.workflow_id:
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
@@ -2366,8 +2499,11 @@ async def _chat_agent_loop(
 
     # ── 嘗試 bind_tools；失敗就退到舊單輪 ────────────────────────
     tools_enabled = True
+    _active_tools = CHAT_TOOLS if _channel == "telegram" else [
+        t for t in CHAT_TOOLS if t.name not in ("dispatch_subagent_async", "check_subagent_status")
+    ]
     try:
-        llm_with_tools = llm.bind_tools(CHAT_TOOLS)
+        llm_with_tools = llm.bind_tools(_active_tools)
     except Exception as e:
         _log.warning(f"[/pipeline/chat] bind_tools 失敗、退到單輪：{e}")
         llm_with_tools = llm
@@ -2510,15 +2646,18 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         yield {"type": "error", "status_code": sc, "detail": friendly}
         return
 
-    system_prompt = _build_pipeline_system_prompt()
+    # SSE stream 端點(/pipeline/chat/stream)是給桌面 chat 用、永遠 desktop 通道。
+    # TG handler 不走 stream、直接 await _chat_agent_loop。
+    system_prompt = _build_pipeline_system_prompt(channel="desktop")
     if req.workflow_id:
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
         system_prompt += "\n\n" + req.extra_system
 
     tools_enabled = True
+    _active_tools = [t for t in CHAT_TOOLS if t.name not in ("dispatch_subagent_async", "check_subagent_status")]
     try:
-        llm_with_tools = llm.bind_tools(CHAT_TOOLS)
+        llm_with_tools = llm.bind_tools(_active_tools)
     except Exception as e:
         _log.warning(f"[/pipeline/chat/stream] bind_tools 失敗、退到單輪:{e}")
         llm_with_tools = llm

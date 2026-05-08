@@ -978,6 +978,213 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
     return "\n".join(lines)
 
 
+# ─────────────────────────────────────────────────────────────────
+# Subagent 派出 / 查狀態(非同步、in-memory registry)
+# 讓 chat agent 能在對話中派子代理進沙盒寫程式 / 跑測試、立即釋放對話、
+# 之後可隨時查狀態。Phase 1: dispatch + check_status。Phase 2(in-flight digest)
+# 在 main.py 的 _build_pipeline_system_prompt 注入。
+# ─────────────────────────────────────────────────────────────────
+
+# in-memory registry：{task_id: {state, started_at, ended_at, role, task,
+#                                working_dir, run_id, result}}
+# 重啟 backend 會清空(可接受、用戶通常單一 session 內互動)
+_chat_subagents: dict[str, dict] = {}
+
+# 全 registry 上限(避免 in-memory 爆)；超過時把最舊已完成的丟掉
+_SUBAGENT_REGISTRY_CAP = 50
+
+
+def _trim_registry() -> None:
+    if len(_chat_subagents) <= _SUBAGENT_REGISTRY_CAP:
+        return
+    # 保 in-flight + 最近 N 個 done
+    done = [(tid, info) for tid, info in _chat_subagents.items()
+            if info.get("state") in ("completed", "failed")]
+    done.sort(key=lambda x: x[1].get("ended_at", 0))
+    drop = len(_chat_subagents) - _SUBAGENT_REGISTRY_CAP
+    for tid, _ in done[:drop]:
+        _chat_subagents.pop(tid, None)
+
+
+@tool
+async def dispatch_subagent_async(
+    role: str,
+    task: str,
+    working_dir: str = "",
+    max_iter: int = 5,
+) -> str:
+    """派子代理進沙盒 (WSL Docker 內 pipeline-sandbox-v5) 非同步執行 ad-hoc 編碼 /
+    分析任務。立即 return task_id、不等子代理完成、對話可繼續。
+
+    Args:
+        role: 子代理角色。data_analyst(處理 csv/xlsx 產 md/xlsx/png)、
+              coder(寫 / debug Python script)、researcher(收料產摘要)、
+              critic(純唯讀挑問題)、planner(拆任務)
+        task: 自然語言任務描述、給子代理當 prompt
+        working_dir: 工作 / 輸出資料夾、相對路徑會解到 ai_output/<dir>。
+                     留空 → 自動推 ai_output/chat-adhoc/<timestamp>_<id>/
+        max_iter: 子代理最多輪數(預設 5、複雜 8-10)
+
+    Returns:
+        task_id 字串 + 預估時間 + 後續查詢提示。
+
+    使用情境（不限定簡單任務、複雜任務也可派）：
+        - 使用者 chat 中要寫程式 / 跑測試 / 做資料分析、且不指定要用畫布 / 工作流
+        - 不限任務大小：寫整個小應用、debug 多檔程式、跑研究式分析都 OK
+        - 派出 vs 建 workflow 的決策遵守 system prompt「派子代理 vs 建 workflow」段落:
+          使用者沒明說「自動化 / 排程 / 重複跑」時、應該先反問用戶要 A 還 B
+
+    後續：用 check_subagent_status(task_id) 查狀態 / 拿結果。
+    """
+    import asyncio
+    import time as _time
+    import uuid as _uuid
+    from datetime import datetime
+    from pathlib import Path
+    from pipeline.subagent_runner import run_subagent
+    from config import OUTPUT_BASE_PATH
+
+    role = (role or "").strip().lower()
+    if role not in ("data_analyst", "coder", "researcher", "critic", "planner"):
+        return f"❌ 不支援的 role={role!r}。可選:data_analyst / coder / researcher / critic / planner"
+    if not task or not task.strip():
+        return "❌ task 不能為空、請描述要子代理做什麼"
+
+    task_id = _uuid.uuid4().hex[:12]
+    if not working_dir or not working_dir.strip():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        working_dir = f"ai_output/chat-adhoc/{ts}_{task_id[:6]}"
+
+    # 解析絕對路徑(支援相對於 OUTPUT_BASE_PATH 的父目錄、跟 pipeline runner 邏輯一致)
+    wd = Path(working_dir)
+    if not wd.is_absolute():
+        # ai_output 已是 OUTPUT_BASE_PATH、外面包個 ai_output/ prefix 視為相對於 root
+        if working_dir.startswith("ai_output/"):
+            wd = OUTPUT_BASE_PATH.parent / working_dir
+        else:
+            wd = OUTPUT_BASE_PATH / working_dir
+    wd.mkdir(parents=True, exist_ok=True)
+
+    _chat_subagents[task_id] = {
+        "state": "running",
+        "started_at": _time.time(),
+        "ended_at": None,
+        "role": role,
+        "task": task[:500],
+        "working_dir": str(wd),
+        "run_id": f"chat-{task_id}",
+        "max_iter": max_iter,
+        "result": None,
+    }
+    _trim_registry()
+
+    async def _runner():
+        try:
+            result = await run_subagent(
+                role_name=role,
+                task=task,
+                max_iter=max_iter,
+                workflow_dir=str(wd),
+                run_id=f"chat-{task_id}",
+                step_name=f"chat-subagent-{task_id[:6]}",
+                timeout=900,
+            )
+            _chat_subagents[task_id].update({
+                "state": "completed" if result.success else "failed",
+                "ended_at": _time.time(),
+                "result": {
+                    "success": result.success,
+                    "iterations": result.iterations,
+                    "tools": [t.get("name") for t in (result.tool_calls_made or [])],
+                    "token_usage": result.token_usage or {},
+                    "summary": (result.final_message or "")[:1500],
+                    "error": result.error,
+                },
+            })
+        except Exception as e:
+            _chat_subagents[task_id].update({
+                "state": "failed",
+                "ended_at": _time.time(),
+                "result": {"error": f"{type(e).__name__}: {e}"},
+            })
+
+    asyncio.create_task(_runner())
+
+    est = "30-60s" if max_iter <= 4 else "60-180s"
+    return (
+        f"✅ 子代理已派出\n"
+        f"  task_id: {task_id}\n"
+        f"  role:    {role}\n"
+        f"  working_dir: {wd}\n"
+        f"  max_iter: {max_iter}\n"
+        f"  預估: {est}\n\n"
+        f"對話可繼續。要查狀態 → check_subagent_status('{task_id}')。"
+    )
+
+
+@tool
+def check_subagent_status(task_id: str = "") -> str:
+    """查子代理狀態。task_id 留空 → 列最近 5 個(in-flight + completed)摘要。
+
+    Args:
+        task_id: dispatch_subagent_async 回的 ID(12 字 hex)。
+
+    Returns:
+        狀態 + (若已完成)final summary + 工具用量 + token 數。
+    """
+    import time as _time
+
+    if not _chat_subagents:
+        return "(目前沒有任何子代理紀錄)"
+
+    if not task_id or not task_id.strip():
+        items = list(_chat_subagents.items())
+        items.sort(key=lambda x: x[1].get("started_at", 0), reverse=True)
+        items = items[:5]
+        lines = [f"最近 {len(items)} 個子代理:"]
+        now = _time.time()
+        for tid, info in items:
+            elapsed = int(now - info.get("started_at", now))
+            state = info.get("state", "?")
+            role = info.get("role", "?")
+            task_preview = (info.get("task") or "")[:60]
+            lines.append(f"  {tid} [{state}] {elapsed}s {role}: {task_preview}")
+        return "\n".join(lines)
+
+    tid = task_id.strip()
+    info = _chat_subagents.get(tid)
+    if not info:
+        return f"❌ 找不到 task_id={tid!r}"
+
+    state = info.get("state", "?")
+    started = info.get("started_at", 0)
+    ended = info.get("ended_at")
+    elapsed = int((ended or _time.time()) - started)
+
+    out = [
+        f"task_id: {tid}",
+        f"state: {state}",
+        f"role: {info.get('role')}",
+        f"working_dir: {info.get('working_dir')}",
+        f"elapsed: {elapsed}s",
+    ]
+    if state == "running":
+        out.append("(子代理還在跑、再 await 一下、或這次 chat turn 後再查)")
+        return "\n".join(out)
+
+    r = info.get("result") or {}
+    out.append(f"iterations: {r.get('iterations')}")
+    tools = r.get("tools") or []
+    out.append(f"tools used: {tools}")
+    tu = r.get("token_usage") or {}
+    if tu.get("total_tokens"):
+        out.append(f"tokens: input={tu.get('input_tokens', 0)} output={tu.get('output_tokens', 0)} total={tu.get('total_tokens', 0)} model={tu.get('model', '')!r}")
+    if r.get("error"):
+        out.append(f"error: {r['error'][:300]}")
+    out.append(f"\nsummary:\n{r.get('summary', '(空)')}")
+    return "\n".join(out)
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
@@ -985,5 +1192,6 @@ CHAT_TOOLS = [
     send_file_to_tg,                         # 送檔到 TG(走 two-step approval)
     web_search,                              # 網路搜尋(限定工作流相關研究)
     list_schedules, schedule_workflow, cancel_schedule,  # 排程相關(write 走 two-step)
+    dispatch_subagent_async, check_subagent_status,  # 子代理派出 / 查狀態(沙盒隔離、無 confirm)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}
