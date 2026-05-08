@@ -1006,12 +1006,16 @@ def _trim_registry() -> None:
         _chat_subagents.pop(tid, None)
 
 
+VALID_SUBAGENT_ROLES = ("data_analyst", "coder", "researcher", "critic", "planner")
+
+
 @tool
 async def dispatch_subagent_async(
     role: str,
     task: str,
     working_dir: str = "",
     max_iter: int = 8,
+    follow_up: Optional[list] = None,
 ) -> str:
     """派子代理進沙盒 (WSL Docker 內 pipeline-sandbox-v5) 非同步執行 ad-hoc 編碼 /
     分析任務。立即 return task_id、不等子代理完成、對話可繼續。
@@ -1026,6 +1030,14 @@ async def dispatch_subagent_async(
         max_iter: 子代理最多輪數(預設 8、簡單任務 6-8、複雜 10-15)。
                   寫 .py + 跑 + done 至少 3 輪、但 LLM 會繞 read_file / 試錯、
                   通常實際 5-7 輪、給 8 算 safe baseline。降到 5 以下高機率 max_iter 失敗
+        follow_up: (chain 模式)第一階段成功後 backend 自動派下一個、不必使用者手動 trigger。
+                  格式:list[dict] 例如:
+                      [
+                          {"role": "critic", "task": "審查上一階段產物、列 3 個問題"},
+                          {"role": "coder", "task": "根據意見修正", "max_iter": 10},
+                      ]
+                  特性:共用 working_dir、上一階段 summary 自動 prepend 進下個 task、
+                       任一階段失敗就停。每階段完都 push TG。
 
     Returns:
         task_id 字串 + 預估時間 + 後續查詢提示。
@@ -1047,10 +1059,23 @@ async def dispatch_subagent_async(
     from config import OUTPUT_BASE_PATH
 
     role = (role or "").strip().lower()
-    if role not in ("data_analyst", "coder", "researcher", "critic", "planner"):
+    if role not in VALID_SUBAGENT_ROLES:
         return f"❌ 不支援的 role={role!r}。可選:data_analyst / coder / researcher / critic / planner"
     if not task or not task.strip():
         return "❌ task 不能為空、請描述要子代理做什麼"
+
+    # 驗 follow_up 格式
+    follow_up = follow_up or []
+    if not isinstance(follow_up, list):
+        return f"❌ follow_up 必須是 list[dict]、收到 {type(follow_up).__name__}"
+    for i, step in enumerate(follow_up):
+        if not isinstance(step, dict):
+            return f"❌ follow_up[{i}] 必須是 dict 含 role + task、收到 {type(step).__name__}"
+        sr = (step.get("role") or "").strip().lower()
+        if sr not in VALID_SUBAGENT_ROLES:
+            return f"❌ follow_up[{i}].role={sr!r} 不支援。可選:{VALID_SUBAGENT_ROLES}"
+        if not (step.get("task") or "").strip():
+            return f"❌ follow_up[{i}].task 不能為空"
 
     # 並發 cap (#4)：避免使用者一聲令下派 10 個 ad-hoc 子代理擠爆沙盒。
     # 沙盒層另有 SANDBOX_MAX_CONCURRENT semaphore(預設 3)、那是 docker exec 級;
@@ -1085,6 +1110,7 @@ async def dispatch_subagent_async(
     wd = wd.resolve()
     wd.mkdir(parents=True, exist_ok=True)
 
+    chain_total = 1 + len(follow_up)
     _chat_subagents[task_id] = {
         "state": "running",
         "started_at": _time.time(),
@@ -1095,6 +1121,11 @@ async def dispatch_subagent_async(
         "run_id": f"chat-{task_id}",
         "max_iter": max_iter,
         "result": None,
+        # chain metadata（無 follow_up 時 chain_total=1、等同單一 task）
+        "follow_up": list(follow_up),
+        "chain_position": 0,
+        "chain_total": chain_total,
+        "chain_root_id": task_id,
     }
     _trim_registry()
 
@@ -1149,9 +1180,9 @@ async def dispatch_subagent_async(
                 "ended_at": _time.time(),
                 "result": {"error": f"{type(e).__name__}: {e}"},
             })
-        # Phase 3:子代理完成時 push 訊息到使用者 TG(繞過 chat agent、直接 send_message)
+        # chain logic:跑完看有沒 follow_up、有就 spawn 下一個;沒就 push 終結通知
         try:
-            await _push_subagent_done_to_tg(task_id)
+            await _maybe_chain_next(task_id)
         except Exception:
             pass
 
@@ -1160,15 +1191,196 @@ async def dispatch_subagent_async(
     _chat_subagents[task_id]["_task"] = _bg_task
 
     est = "30-60s" if max_iter <= 4 else "60-180s"
+    chain_note = ""
+    if follow_up:
+        chain_note = f"\n  chain: {chain_total} 階段(完成第 1 後自動接力)"
+        for i, step in enumerate(follow_up, start=2):
+            chain_note += f"\n    第 {i} 階段: {step.get('role')} — {(step.get('task') or '')[:60]}"
     return (
         f"✅ 子代理已派出\n"
         f"  task_id: {task_id}\n"
         f"  role:    {role}\n"
         f"  working_dir: {wd}\n"
-        f"  max_iter: {max_iter}\n"
+        f"  max_iter: {max_iter}{chain_note}\n"
         f"  預估: {est}\n\n"
         f"對話可繼續。要查狀態 → check_subagent_status('{task_id}')。"
     )
+
+
+# ── chain 處理：第一階段完→派下一個;最後一階段完→push 終結通知 ──
+async def _maybe_chain_next(prev_task_id: str) -> None:
+    """看 prev task state、若 success + remaining follow_up → spawn 下一個 chain step;
+    否則 push 終結通知。Chain 內每個 step 完都呼叫這個 helper(recursive via _next_runner)。
+    """
+    import asyncio as _aio
+    import time as _time
+    import uuid as _uuid
+    from pathlib import Path
+
+    prev = _chat_subagents.get(prev_task_id)
+    if not prev:
+        return
+
+    prev_result = prev.get("result") or {}
+    success = prev_result.get("success", False)
+    remaining = prev.get("follow_up") or []
+
+    if not success or not remaining:
+        # chain 結束(成功最後一個 / 失敗中斷)、push 最終通知
+        await _push_subagent_done_to_tg(prev_task_id)
+        return
+
+    # 派下一個 chain step
+    next_step = remaining[0]
+    next_role = (next_step.get("role") or "").strip().lower()
+    next_task_str = (next_step.get("task") or "").strip()
+    next_max_iter = int(next_step.get("max_iter", prev.get("max_iter", 8)))
+
+    if next_role not in VALID_SUBAGENT_ROLES or not next_task_str:
+        # follow_up step config 無效、停 chain、把 error 寫進 prev result + push
+        prev["result"]["error"] = (
+            (prev["result"].get("error") or "")
+            + f"\n[chain 中斷] follow_up 第 {prev['chain_position'] + 2} 階段 config 無效"
+        )
+        await _push_subagent_done_to_tg(prev_task_id)
+        return
+
+    next_task_id = _uuid.uuid4().hex[:12]
+    wd = Path(prev["working_dir"])
+    chain_position = prev["chain_position"] + 1
+    chain_total = prev["chain_total"]
+    chain_root = prev.get("chain_root_id", prev_task_id)
+    prev_role = prev.get("role", "?")
+    prev_summary = (prev_result.get("summary") or "").strip()[:1200]
+
+    # WSL path for cwd anchor hint(同 dispatch_subagent_async 內邏輯)
+    try:
+        from pipeline.sandbox import windows_to_wsl_path
+        wd_wsl = windows_to_wsl_path(str(wd)) or str(wd)
+    except Exception:
+        wd_wsl = str(wd)
+
+    chained_task = (
+        f"⚠️ 路徑規則(很重要、優先此規則):\n"
+        f"- 你在 Linux Docker container 內、cwd 已被 docker exec 設為 `{wd_wsl}`\n"
+        f"- 寫檔請用 relative path 直接到 cwd、不要算 absolute、不要用「專案根目錄」當 anchor\n"
+        f"\n"
+        f"## Chain 階段資訊\n"
+        f"你在一個 multi-stage chain、現在是第 {chain_position + 1} / {chain_total} 階段\n"
+        f"\n"
+        f"## 上一階段 ({prev_role}, task_id={prev_task_id[:8]}) 的成果摘要\n"
+        f"{prev_summary or '(空、上階段沒給摘要)'}\n"
+        f"\n"
+        f"## 共用工作目錄(讀寫請用 cwd-relative path)\n"
+        f"{wd_wsl}\n"
+        f"\n"
+        f"## 你的任務\n"
+        f"{next_task_str}"
+    )
+
+    _chat_subagents[next_task_id] = {
+        "state": "running",
+        "started_at": _time.time(),
+        "ended_at": None,
+        "role": next_role,
+        "task": next_task_str[:500],
+        "working_dir": str(wd),
+        "run_id": f"chat-{next_task_id}",
+        "max_iter": next_max_iter,
+        "result": None,
+        "follow_up": remaining[1:],
+        "chain_position": chain_position,
+        "chain_total": chain_total,
+        "chain_root_id": chain_root,
+    }
+    _trim_registry()
+
+    async def _next_runner():
+        from pipeline.subagent_runner import run_subagent
+        try:
+            result = await run_subagent(
+                role_name=next_role,
+                task=chained_task,
+                max_iter=next_max_iter,
+                workflow_dir=str(wd),
+                run_id=f"chat-{next_task_id}",
+                step_name=f"chat-subagent-{next_task_id[:6]}",
+                timeout=900,
+            )
+            _chat_subagents[next_task_id].update({
+                "state": "completed" if result.success else "failed",
+                "ended_at": _time.time(),
+                "result": {
+                    "success": result.success,
+                    "iterations": result.iterations,
+                    "tools": [t.get("name") for t in (result.tool_calls_made or [])],
+                    "token_usage": result.token_usage or {},
+                    "summary": (result.final_message or "")[:1500],
+                    "error": result.error,
+                },
+            })
+        except Exception as e:
+            _chat_subagents[next_task_id].update({
+                "state": "failed",
+                "ended_at": _time.time(),
+                "result": {"error": f"{type(e).__name__}: {e}"},
+            })
+        # 遞迴 chain
+        try:
+            await _maybe_chain_next(next_task_id)
+        except Exception:
+            pass
+
+    next_bg = _aio.create_task(_next_runner())
+    _chat_subagents[next_task_id]["_task"] = next_bg
+
+    # push「第 N 完成、第 N+1 已派出」中間階段通知
+    try:
+        await _push_chain_step_to_tg(prev_task_id, next_task_id)
+    except Exception:
+        pass
+
+
+async def _push_chain_step_to_tg(prev_task_id: str, next_task_id: str) -> None:
+    """chain 中間階段完成的 TG push:✅ 第 N/M 完 → 🔁 第 N+1/M (role) 已派出"""
+    prev = _chat_subagents.get(prev_task_id)
+    nxt = _chat_subagents.get(next_task_id)
+    if not prev or not nxt:
+        return
+    try:
+        from pipeline.runner import _get_tg_token, _get_tg_chat_id
+        from telegram import Bot
+    except Exception:
+        return
+    token = _get_tg_token()
+    chat_id = _get_tg_chat_id()
+    if not token or not chat_id:
+        return
+
+    pos = prev.get("chain_position", 0) + 1  # 1-indexed for display
+    total = prev.get("chain_total", 1)
+    prev_role = prev.get("role", "?")
+    next_role = nxt.get("role", "?")
+    pr = prev.get("result") or {}
+    tu = pr.get("token_usage") or {}
+    summary = (pr.get("summary") or "").replace("\n", " ").strip()[:200]
+
+    msg = (
+        f"✅ 第 {pos}/{total} 階段 ({prev_role}) 完成 → 🔁 派出第 {pos + 1}/{total} ({next_role})\n\n"
+        f"prev: `{prev_task_id}` ({tu.get('total_tokens', 0):,} tok)\n"
+        f"摘要: {summary}\n\n"
+        f"next: `{next_task_id}` ({next_role})\n"
+        f"任務: {(nxt.get('task') or '')[:120]}"
+    )
+    try:
+        async with Bot(token=token) as bot:
+            await bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="Markdown")
+    except Exception:
+        try:
+            async with Bot(token=token) as bot:
+                await bot.send_message(chat_id=int(chat_id), text=msg)
+        except Exception:
+            pass
 
 
 # ── 完成 push 到 TG(任何 channel 派出的 subagent 都能 push、只要有 telegram_chat_id) ──

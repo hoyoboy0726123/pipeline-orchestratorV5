@@ -1841,6 +1841,41 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 - **失敗時不要自動重派同樣 prompt**:看 check_subagent_status 的 error / summary、
   跟使用者說「跑了 N 輪沒完成、原因 X」、讓使用者決定:加 max_iter 重派 / 改任務描述 / 放棄。
   連續派 3 次都 max_iter exceeded 等於白燒 token、要主動 stop
+
+### Chain 模式 — 多階段自動接力(複雜任務強烈推薦)
+
+當任務含「寫 + 審查 + 改進」「規劃 + 執行 + 驗證」這種多階段、用 follow_up 參數
+讓 backend 自動接力、**不要每階段都等使用者再 trigger**(那樣使用者體驗很差、
+chat agent 也沒能力背景監控)。
+
+```python
+dispatch_subagent_async(
+    role="coder",
+    task="寫 calculator.py、加基本 test",
+    working_dir="ai_output/calc/",
+    max_iter=8,
+    follow_up=[
+        {"role": "critic", "task": "審查 calculator.py 列 3 個最重要問題、寫 review.md", "max_iter": 5},
+        {"role": "coder", "task": "讀 review.md、修正 calculator.py、跑 test", "max_iter": 10},
+    ],
+)
+```
+
+特性:
+- 每階段 backend 自動接力(不靠 chat agent)、共用同一個 working_dir
+- 上一階段 summary + cwd 自動 prepend 進下個 task prompt
+- 任一階段失敗整條 chain 停、TG push「失敗在第 N/M 階段」
+- 每階段完都 push TG「✅ N/M 完、N+1 派出」、最後一階段 push「🎉 整條完成」
+
+**何時用 chain vs 單一 dispatch**:
+- 任務含多階段(多 role 配合) → chain
+- 使用者 explicit 說「先 X 再 Y 再 Z」 → chain
+- 任務只是寫個 X / 跑一下 → 單一 dispatch 就好
+
+**典型 chain 配置**:
+- coder → critic → coder fix(寫 + 審 + 改)
+- planner → coder → critic(規劃 + 執行 + 審)
+- researcher → data_analyst(收料 + 整理)
 - **派出後**：告訴使用者 task_id、然後**繼續對話**(對話沒卡)
 - **失敗或卡住**：之後 check_subagent_status 拿到結果再決定:再派一次 / 改 prompt / 放棄
 
