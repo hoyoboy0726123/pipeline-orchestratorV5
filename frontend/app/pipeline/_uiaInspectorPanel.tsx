@@ -396,19 +396,25 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
           <div className="border border-gray-200 rounded-lg bg-white overflow-y-auto max-h-[40vh]">
             {renderNode(tree.tree, '', 0)}
           </div>
+        </div>
+      )}
 
-          {/* 已選 element + 動作選單 */}
-          {picker ? (
-            <UiaActionPicker element={picker.element} onAdd={addAction} />
-          ) : (
-            <p className="text-[11px] text-gray-500 italic px-1">點上方 element 後、下方會顯示可加的動作。</p>
-          )}
+      {/* 已選 element + 動作選單(獨立區塊、Live Picker / tree 都共用) */}
+      {picker && (
+        <div className="rounded-lg border-2 border-emerald-400 bg-emerald-50/40 p-2">
+          <div className="text-[11px] font-semibold text-emerald-700 mb-1.5 flex items-center gap-1">
+            <CheckCircle className="w-3 h-3" /> 已選元素 — 從下面選動作加進序列
+            <button onClick={() => setPicker(null)} className="ml-auto text-gray-400 hover:text-gray-700">
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+          <UiaActionPicker element={picker.element} onAdd={addAction} />
         </div>
       )}
 
       {!tree && !loading && !error && (
         <div className="text-center text-xs text-gray-500 py-6">
-          按「抓取元素」開始;不會碰桌面、純讀 UIA tree。
+          上方「🎯 滑鼠定位元素」直接抓、或按下面「抓取元素」讀整個 UIA tree;不會碰桌面、純讀結構。
         </div>
       )}
     </div>
