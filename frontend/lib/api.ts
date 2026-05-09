@@ -559,6 +559,24 @@ export async function uiaInspect(req: {
   return res.json()
 }
 
+/** 桌面對應位置畫紅框 outline、ttl_ms 後自動消失。 */
+export async function uiaHighlight(req: {
+  x: number; y: number; width: number; height: number; ttl_ms?: number
+}): Promise<void> {
+  await fetch(`${BASE}/computer-use/uia/highlight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...req, ttl_ms: req.ttl_ms ?? 1500 }),
+  }).catch(() => {})  // hover 失敗不打擾使用者
+}
+
+/** 立即清除紅框 outline。 */
+export async function uiaHighlightClear(): Promise<void> {
+  await fetch(`${BASE}/computer-use/uia/highlight/clear`, {
+    method: 'POST',
+  }).catch(() => {})
+}
+
 /** 把 base64 PNG 直接存到 assets_dir(VLM 錨點立即截圖用、瀏覽器內裁切後上傳) */
 export async function saveAnchorPng(req: {
   dir: string

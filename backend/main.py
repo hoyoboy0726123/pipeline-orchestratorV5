@@ -760,6 +760,35 @@ async def uia_inspect(req: UiaInspectRequest):
     return result
 
 
+class UiaHighlightRequest(BaseModel):
+    """在桌面對應位置畫紅框 outline、給 inspector hover 看清楚對應實體 control 用。
+    清除用 ttl_ms=0 或呼 /computer-use/uia/highlight/clear。"""
+    x: int                       # 螢幕絕對 X(虛擬桌面座標、可負)
+    y: int                       # 螢幕絕對 Y
+    width: int                   # 邊框寬
+    height: int                  # 邊框高
+    ttl_ms: int = 1500           # 自動消失時間;0 = 立即清掉
+
+
+@app.post("/computer-use/uia/highlight")
+async def uia_highlight(req: UiaHighlightRequest):
+    """在桌面 (x, y, w, h) 位置畫紅色 outline。
+    透明 topmost、click 穿透不擋滑鼠。"""
+    from pipeline.cu_highlight_overlay import highlight, clear_highlight
+    if req.ttl_ms <= 0:
+        clear_highlight()
+    else:
+        highlight(req.x, req.y, req.width, req.height, req.ttl_ms)
+    return {"ok": True}
+
+
+@app.post("/computer-use/uia/highlight/clear")
+async def uia_highlight_clear():
+    from pipeline.cu_highlight_overlay import clear_highlight
+    clear_highlight()
+    return {"ok": True}
+
+
 @app.delete("/computer-use/assets")
 async def delete_computer_use_assets(dir: str):
     """刪除指定的錨點資料夾（含 PNG、actions.json、meta.json）。

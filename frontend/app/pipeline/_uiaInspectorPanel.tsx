@@ -10,10 +10,10 @@
  *  - 點 action button → 把組好的 ComputerUseAction 加進 actions[](onAddAction)
  *  - 不錄製、不需 assets/、不會碰桌面動作
  */
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChecks, Clock, CheckCircle, RefreshCcw, Search } from 'lucide-react'
 import { toast } from 'sonner'
-import { uiaInspect, type UiaElement, type UiaInspectResult } from '@/lib/api'
+import { uiaInspect, uiaHighlight, uiaHighlightClear, type UiaElement, type UiaInspectResult } from '@/lib/api'
 import type { ComputerUseAction } from './_helpers'
 
 interface Props {
@@ -33,6 +33,9 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set([''])) // root 路徑
   const [picker, setPicker] = useState<PickerState | null>(null)
+  // hover highlight 節流(避免快速滑過 spam backend)
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastHoverPathRef = useRef<string>('')
 
   const inspect = useCallback(async () => {
     setLoading(true)
@@ -78,6 +81,22 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
     toast.success(`已加 ${type}(${el.name || el.type})`)
   }
 
+  // hover highlight 節流 + 觸發
+  const handleHover = useCallback((path: string, el: UiaElement) => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+    if (path === lastHoverPathRef.current) return
+    hoverTimerRef.current = setTimeout(() => {
+      lastHoverPathRef.current = path
+      const [x, y, w, h] = el.rect || [0, 0, 0, 0]
+      if (w > 0 && h > 0) {
+        uiaHighlight({ x, y, width: w, height: h, ttl_ms: 1500 })
+      }
+    }, 80)
+  }, [])
+  const handleHoverEnd = useCallback(() => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+  }, [])
+
   const renderNode = (el: UiaElement, path: string, depth: number = 0) => {
     const hasKids = el.children && el.children.length > 0
     const isOpen = expanded.has(path)
@@ -90,7 +109,14 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
             isSelected ? 'bg-purple-100 border-l-2 border-purple-500' : ''
           } ${dimmed ? 'opacity-50' : ''}`}
           style={{ paddingLeft: 4 + depth * 14 }}
-          onClick={() => setPicker({ element: el, path: path.split('/') })}
+          onMouseEnter={() => handleHover(path, el)}
+          onMouseLeave={handleHoverEnd}
+          onClick={() => {
+            setPicker({ element: el, path: path.split('/') })
+            // 點擊用較長 ttl(3 秒)強調
+            const [x, y, w, h] = el.rect || [0, 0, 0, 0]
+            if (w > 0 && h > 0) uiaHighlight({ x, y, width: w, height: h, ttl_ms: 3000 })
+          }}
         >
           {hasKids ? (
             <button onClick={(e) => { e.stopPropagation(); togglePath(path) }} className="p-0.5 text-gray-400">
