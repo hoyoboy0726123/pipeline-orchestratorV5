@@ -11,6 +11,7 @@
  *  - 不錄製、不需 assets/、不會碰桌面動作
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChecks, Clock, CheckCircle, RefreshCcw, Search, AppWindow, Crosshair, X } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -752,7 +753,7 @@ function UiaActionPicker({
   )
 }
 
-/** Hover 提示框 — 顯示 title / 用途 / 場景 / 範例、0.4s delay */
+/** Hover 提示框 — 用 portal + fixed 位置、自動避開螢幕邊界、不被 panel 切掉 */
 function HelpTooltip({
   children,
   title,
@@ -767,13 +768,56 @@ function HelpTooltip({
   example?: string
 }) {
   const [show, setShow] = useState(false)
+  const [pos, setPos] = useState({ top: 0, left: 0 })
+  const wrapperRef = useRef<HTMLDivElement>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const TIP_W = 280
+  const ESTIMATED_H = 220   // 估值、實際 tooltip 撐多高用 max-content
+  const MARGIN = 8
+
+  const computePosition = () => {
+    const el = wrapperRef.current
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+
+    // 預設浮在按鈕上方、左邊對齊按鈕左
+    let left = rect.left
+    let top = rect.top - ESTIMATED_H - MARGIN
+
+    // 如果上方空間不夠 → 改放下方
+    if (top < MARGIN) {
+      top = rect.bottom + MARGIN
+    }
+    // 如果右邊超出 viewport → 靠右對齊按鈕右
+    if (left + TIP_W > vw - MARGIN) {
+      left = rect.right - TIP_W
+    }
+    // 如果左邊超出 viewport → 貼齊左 8px
+    if (left < MARGIN) {
+      left = MARGIN
+    }
+    // 如果下方也不夠(超大 viewport 邊角)、強制 clamp 進畫面
+    if (top + ESTIMATED_H > vh - MARGIN) {
+      top = Math.max(MARGIN, vh - ESTIMATED_H - MARGIN)
+    }
+    return { top, left }
+  }
 
   return (
     <div
+      ref={wrapperRef}
       className="relative"
       onMouseEnter={() => {
-        timerRef.current = setTimeout(() => setShow(true), 400)
+        timerRef.current = setTimeout(() => {
+          const p = computePosition()
+          if (p) {
+            setPos(p)
+            setShow(true)
+          }
+        }, 400)
       }}
       onMouseLeave={() => {
         if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
@@ -781,8 +825,11 @@ function HelpTooltip({
       }}
     >
       {children}
-      {show && (
-        <div className="absolute z-[60] bottom-full left-0 mb-2 w-72 bg-gray-900 text-white text-[11px] rounded-lg p-3 shadow-2xl pointer-events-none">
+      {show && typeof window !== 'undefined' && createPortal(
+        <div
+          className="fixed z-[100] bg-gray-900 text-white text-[11px] rounded-lg p-3 shadow-2xl pointer-events-none"
+          style={{ top: pos.top, left: pos.left, width: TIP_W }}
+        >
           <div className="font-bold text-emerald-300 mb-1.5 text-xs">{title}</div>
           <div className="mb-2 leading-relaxed">{usage}</div>
           {scenario && (
@@ -797,9 +844,8 @@ function HelpTooltip({
               <div className="bg-black/60 rounded px-1.5 py-1 font-mono text-[10px] leading-tight whitespace-pre-wrap text-gray-200">{example}</div>
             </div>
           )}
-          {/* 小箭頭 */}
-          <div className="absolute top-full left-4 -mt-1 w-2 h-2 bg-gray-900 rotate-45" />
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )
