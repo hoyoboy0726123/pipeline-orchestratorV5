@@ -11,9 +11,9 @@
  *  - 不錄製、不需 assets/、不會碰桌面動作
  */
 import { useState, useCallback, useRef } from 'react'
-import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChecks, Clock, CheckCircle, RefreshCcw, Search } from 'lucide-react'
+import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChecks, Clock, CheckCircle, RefreshCcw, Search, AppWindow } from 'lucide-react'
 import { toast } from 'sonner'
-import { uiaInspect, uiaHighlight, uiaHighlightClear, type UiaElement, type UiaInspectResult } from '@/lib/api'
+import { uiaInspect, uiaHighlight, uiaListWindows, type UiaElement, type UiaInspectResult, type UiaWindowInfo } from '@/lib/api'
 import type { ComputerUseAction } from './_helpers'
 
 interface Props {
@@ -36,6 +36,10 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
   // hover highlight 節流(避免快速滑過 spam backend)
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastHoverPathRef = useRef<string>('')
+  // 「列出視窗」popup
+  const [windowsList, setWindowsList] = useState<UiaWindowInfo[]>([])
+  const [showWindows, setShowWindows] = useState(false)
+  const [loadingWindows, setLoadingWindows] = useState(false)
 
   const inspect = useCallback(async () => {
     setLoading(true)
@@ -53,6 +57,19 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
       setLoading(false)
     }
   }, [uiaWindow])
+
+  const loadWindows = useCallback(async () => {
+    setLoadingWindows(true)
+    try {
+      const r = await uiaListWindows()
+      setWindowsList(r.windows || [])
+      setShowWindows(true)
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setLoadingWindows(false)
+    }
+  }, [])
 
   const togglePath = (path: string) => {
     setExpanded(s => {
@@ -151,9 +168,18 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
           <input
             value={uiaWindow}
             onChange={e => onUpdateWindow(e.target.value)}
-            placeholder="例:公司系統*訂單* 或 留空用 foreground"
+            placeholder="例:*檔案總管* 或 留空用 foreground"
             className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white"
           />
+          <button
+            onClick={loadWindows}
+            disabled={loadingWindows}
+            title="列出當下所有 top-level 視窗、選一個自動填 pattern"
+            className="px-2.5 py-1.5 bg-white border border-purple-300 text-purple-700 rounded-lg text-sm font-medium hover:bg-purple-50 disabled:bg-gray-100 flex items-center gap-1"
+          >
+            {loadingWindows ? <RefreshCcw className="w-3.5 h-3.5 animate-spin" /> : <AppWindow className="w-3.5 h-3.5" />}
+            列視窗
+          </button>
           <button
             onClick={inspect}
             disabled={loading}
@@ -164,9 +190,47 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
           </button>
         </div>
         <p className="text-[10px] text-gray-500 mt-1 leading-relaxed">
-          按下時會把當前 Windows app 的 UIA tree 抓回來、可從中挑要操作的 control。
-          先把目標視窗叫到前景、或填 title pattern 鎖定特定視窗。
+          ⚠ 留空會抓「當前 foreground」、會抓到瀏覽器自身;**用「列視窗」選目標** 才能抓到背景的應用(檔案總管 / 公司系統等不必拉到前景)。
         </p>
+
+        {/* 視窗 list popup */}
+        {showWindows && (
+          <div className="mt-2 rounded-lg border border-purple-300 bg-white max-h-64 overflow-y-auto shadow-md">
+            <div className="sticky top-0 flex items-center justify-between bg-purple-50 px-2 py-1 border-b border-purple-200 text-[11px] text-purple-700">
+              <span>共 {windowsList.length} 個 top-level 視窗、點一個自動填 pattern</span>
+              <button onClick={() => setShowWindows(false)} className="text-purple-500 hover:text-purple-700">關閉</button>
+            </div>
+            {windowsList.length === 0 && <div className="px-3 py-4 text-xs text-gray-400 text-center">沒有可顯示的視窗</div>}
+            {windowsList.map((w, i) => (
+              <button
+                key={i}
+                onClick={() => {
+                  // 把 name 包成 wildcard pattern(取頭尾去 wildcard、避免特殊字元)
+                  // 用「name 的前 30 字 + *」做寬鬆比對
+                  const trimmed = w.name.length > 30 ? w.name.slice(0, 30) + '*' : w.name
+                  onUpdateWindow(trimmed)
+                  setShowWindows(false)
+                  toast.success(`已套用 pattern:${trimmed}`)
+                }}
+                onMouseEnter={() => {
+                  if (w.rect && w.rect.length === 4 && w.rect[2] > 0) {
+                    uiaHighlight({ x: w.rect[0], y: w.rect[1], width: w.rect[2], height: w.rect[3], ttl_ms: 1500 })
+                  }
+                }}
+                className="w-full text-left px-3 py-1.5 hover:bg-purple-50 border-b border-gray-100 last:border-b-0 flex items-start gap-2 text-xs"
+              >
+                <AppWindow className="w-3 h-3 text-purple-500 mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-gray-800 truncate" title={w.name}>{w.name}</div>
+                  <div className="text-[10px] text-gray-400 font-mono truncate">
+                    [{w.class}] {w.rect[0]},{w.rect[1]} {w.rect[2]}×{w.rect[3]}
+                    {w.is_offscreen && <span className="text-amber-500 ml-1">(offscreen)</span>}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && (

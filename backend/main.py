@@ -789,6 +789,41 @@ async def uia_highlight_clear():
     return {"ok": True}
 
 
+@app.get("/computer-use/uia/windows")
+async def uia_list_windows():
+    """列當下所有可見的 top-level 視窗、給 frontend 「📋 列出視窗」選單用。
+    幫使用者解掉「我要的視窗 title 怎麼拼?要填什麼 pattern?」的猜謎。
+    """
+    try:
+        import uiautomation as auto
+        root = auto.GetRootControl()
+        windows = []
+        for w in root.GetChildren():
+            try:
+                name = str(w.Name or "").strip()
+                cls = str(getattr(w, "ClassName", "") or "")
+                rect = w.BoundingRectangle
+                # 過濾:沒名字 + 0 寬高的 = 系統 ghost window、不顯示
+                if not name and (rect.right - rect.left == 0 or rect.bottom - rect.top == 0):
+                    continue
+                if not name:
+                    name = f"(無標題 {cls})"
+                windows.append({
+                    "name": name,
+                    "class": cls,
+                    "rect": [int(rect.left), int(rect.top),
+                             int(rect.right - rect.left), int(rect.bottom - rect.top)],
+                    "is_offscreen": bool(getattr(w, "IsOffscreen", False)),
+                })
+            except Exception:
+                continue
+        # 按可見 + 名字長度排:有名字的 + 在螢幕內的優先
+        windows.sort(key=lambda x: (x["is_offscreen"], -len(x["name"])))
+        return {"ok": True, "windows": windows[:80]}   # 上限 80 防爆
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"list windows 失敗:{e}")
+
+
 @app.delete("/computer-use/assets")
 async def delete_computer_use_assets(dir: str):
     """刪除指定的錨點資料夾（含 PNG、actions.json、meta.json）。

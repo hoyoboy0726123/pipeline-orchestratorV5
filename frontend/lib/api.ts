@@ -577,6 +577,23 @@ export async function uiaHighlightClear(): Promise<void> {
   }).catch(() => {})
 }
 
+export interface UiaWindowInfo {
+  name: string
+  class: string
+  rect: number[]
+  is_offscreen: boolean
+}
+
+/** 列當下所有可見的 top-level 視窗。 */
+export async function uiaListWindows(): Promise<{ ok: boolean; windows: UiaWindowInfo[] }> {
+  const res = await fetch(`${BASE}/computer-use/uia/windows`)
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `列視窗失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
 /** 把 base64 PNG 直接存到 assets_dir(VLM 錨點立即截圖用、瀏覽器內裁切後上傳) */
 export async function saveAnchorPng(req: {
   dir: string
