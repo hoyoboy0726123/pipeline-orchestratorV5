@@ -465,12 +465,12 @@ function UiaActionPicker({
         {element.auto_id && <span className="text-gray-400 font-mono ml-1">[{element.auto_id}]</span>}
       </div>
 
-      {/* 主要動作:點擊(最常用)+ 等 enabled + 讀文字 */}
+      {/* 主要動作:點擊(最常用)+ 等 enabled */}
       <div className="grid grid-cols-2 gap-1.5">
         <BigActionBtn
           icon={MousePointerClick}
           title="點擊"
-          desc="左鍵點中心、用於按鈕 / 連結 / cell"
+          desc="按鈕 / 連結 / cell;優先 InvokePattern(背景 work)"
           onClick={() => onAdd('uia_click')}
         />
         <BigActionBtn
@@ -480,6 +480,14 @@ function UiaActionPicker({
           onClick={() => onAdd('uia_wait_enabled')}
         />
       </div>
+
+      {/* 關閉視窗(WindowPattern.Close、true 背景操作、不必點 X 不必前景) */}
+      <BigActionBtn
+        icon={X}
+        title="關閉視窗"
+        desc="WindowPattern.Close — 不必點 X、不拉前景、被擋住也能關"
+        onClick={() => onAdd('uia_close_window')}
+      />
 
       {/* 輸入文字(只有 Edit/Combo/Document 可編輯類型才有意義、其他用送鍵盤) */}
       {isEditable && (

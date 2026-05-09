@@ -149,7 +149,7 @@ export interface ComputerUseAction {
   type: 'click_image' | 'click_at' | 'type_text' | 'hotkey' | 'wait' | 'wait_image' | 'screenshot' | 'scroll' | 'drag'
       | 'assert_image' | 'assert_text' | 'activate_window' | 'if_image_found' | 'retry_until' | 'vlm_check'
       | 'uia_click' | 'uia_send_keys' | 'uia_get_text' | 'uia_get_table_rowcount' | 'uia_click_cell'
-      | 'uia_wait_enabled' | 'uia_assert_state'
+      | 'uia_wait_enabled' | 'uia_assert_state' | 'uia_close_window'
   image?: string
   image2?: string        // 次錨點（多錨點驗證）
   dx2?: number           // 次錨點相對點擊點的 X 位移

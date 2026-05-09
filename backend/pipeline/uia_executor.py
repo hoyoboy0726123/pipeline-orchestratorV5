@@ -476,6 +476,36 @@ def execute_uia_action(action: dict, step_window: str,
                 time.sleep(0.3)
             return UiaActionResult(False, f"等 {timeout}s 控制項仍未 enabled")
 
+        elif atype == "uia_close_window":
+            # 關閉視窗的「正確」方式:走 WindowPattern.Close()、不靠 title/X 點擊、
+            # 不必把視窗拉前景。控制項可以是視窗本身或視窗內任何元素(會往上找 Window)
+            ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
+            if not ctrl:
+                # 沒指定 control 時用 step 的 window
+                ctrl = win
+            if not ctrl.Exists(2, 0.5):
+                return UiaActionResult(False, "找不到要關的視窗")
+            # 往上找 Window control(WindowPattern 在 WindowControl 才有)
+            target = ctrl
+            for _ in range(20):  # 最多往上 20 層、防 infinite loop
+                try:
+                    if str(target.ControlTypeName or "") == "WindowControl":
+                        break
+                    parent = target.GetParentControl()
+                    if not parent:
+                        break
+                    target = parent
+                except Exception:
+                    break
+            try:
+                wp = target.GetWindowPattern()
+                if wp:
+                    wp.Close()
+                    return UiaActionResult(True, f"已關閉視窗 {target.Name!r:.60} via WindowPattern")
+            except Exception as e:
+                return UiaActionResult(False, f"WindowPattern.Close() 失敗:{e}")
+            return UiaActionResult(False, "目標控制項或父鏈沒 WindowPattern、不能關")
+
         elif atype == "uia_assert_state":
             ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             check = (action.get("check") or "exists").strip()
