@@ -44,6 +44,8 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
   const [windowsList, setWindowsList] = useState<UiaWindowInfo[]>([])
   const [showWindows, setShowWindows] = useState(false)
   const [loadingWindows, setLoadingWindows] = useState(false)
+  // 進階摺疊區(列視窗 + tree 路徑、預設收折、99% 場景用 Live Picker)
+  const [advancedManualOpen, setAdvancedManualOpen] = useState(false)
   // Live Picker(滑鼠 hover 桌面選元素)
   const [pickerActive, setPickerActive] = useState(false)
   const [hoveredEl, setHoveredEl] = useState<UiaElement | null>(null)
@@ -306,8 +308,19 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
         )}
       </div>
 
-      <div className="text-[10px] text-gray-400 text-center">— 或用以下進階方式 —</div>
-
+      {/* 進階區:手動找元素(列視窗 / 填 pattern / tree 結構)、預設收折 */}
+      <div className="rounded-lg border border-gray-300 bg-gray-50 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setAdvancedManualOpen(v => !v)}
+          className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-gray-100 transition-colors text-[12px]"
+        >
+          {advancedManualOpen ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+          <span className="font-semibold text-gray-700 flex-1">🔧 進階(手動找元素)</span>
+          <span className="text-[10px] text-gray-500">列視窗 / tree</span>
+        </button>
+        {advancedManualOpen && (
+          <div className="px-3 pb-3 pt-2 space-y-3 border-t border-gray-300">
       {/* 視窗 pattern 輸入 + 抓取按鈕 */}
       <div>
         <label className="text-xs font-semibold text-purple-700 uppercase tracking-wide block mb-1.5">
@@ -394,13 +407,21 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
             <strong>{tree.window.name || '(foreground)'}</strong>
             {tree.window.class && <span className="ml-2 text-gray-500">[{tree.window.class}]</span>}
           </div>
-
           {/* element tree */}
           <div className="border border-gray-200 rounded-lg bg-white overflow-y-auto max-h-[40vh]">
             {renderNode(tree.tree, '', 0)}
           </div>
         </div>
       )}
+
+      {!tree && !loading && !error && (
+        <div className="text-center text-[11px] text-gray-500 py-3">
+          按「抓取元素」讀視窗 UIA tree(整棵結構)、適合想看完整層級的場景
+        </div>
+      )}
+          </div>
+        )}
+      </div>
 
       {/* 已選 element + 動作選單(獨立區塊、Live Picker / tree 都共用) */}
       {picker && (
@@ -414,17 +435,11 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
           <UiaActionPicker element={picker.element} onAdd={addAction} />
         </div>
       )}
-
-      {!tree && !loading && !error && (
-        <div className="text-center text-xs text-gray-500 py-6">
-          上方「🎯 滑鼠定位元素」直接抓、或按下面「抓取元素」讀整個 UIA tree;不會碰桌面、純讀結構。
-        </div>
-      )}
     </div>
   )
 }
 
-/** 已選 element 的動作選擇器:列各 uia_* type 對應的按鈕 */
+/** 已選 element 的動作選擇器:列各 uia_* type 對應的按鈕 + 場景說明 */
 function UiaActionPicker({
   element,
   onAdd,
@@ -433,54 +448,93 @@ function UiaActionPicker({
   onAdd: (type: ComputerUseAction['type'], extra?: Partial<ComputerUseAction>) => void
 }) {
   const [textInput, setTextInput] = useState('')
+  const [keysInput, setKeysInput] = useState('')
   const [saveAsInput, setSaveAsInput] = useState('')
   const [rowInput, setRowInput] = useState<string>('')
   const [colInput, setColInput] = useState<string>('')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const isGrid = ['DataGrid', 'List', 'Tree', 'Table'].some(s => element.type.includes(s))
   const isEditable = ['Edit', 'Document', 'Combo'].some(s => element.type.includes(s))
 
   return (
-    <div className="border border-purple-200 rounded-lg bg-purple-50/40 p-2 space-y-2">
-      <div className="text-[11px] text-purple-700">
-        <strong>已選:</strong> <span className="font-mono">{element.type}</span>
-        {element.name && <span> · {element.name}</span>}
+    <div className="space-y-2">
+      <div className="text-[11px] text-gray-700 bg-white border border-gray-200 rounded px-2 py-1">
+        <strong>已選:</strong> <span className="font-mono text-purple-700">{element.type}</span>
+        {element.name && <span className="text-gray-600"> · {element.name.slice(0, 60)}</span>}
+        {element.auto_id && <span className="text-gray-400 font-mono ml-1">[{element.auto_id}]</span>}
       </div>
 
-      <div className="grid grid-cols-2 gap-1">
-        <ActionBtn icon={MousePointerClick} label="點擊" onClick={() => onAdd('uia_click')} />
-        <ActionBtn icon={CheckCircle} label="斷言存在" onClick={() => onAdd('uia_assert_state', { check: 'exists' })} />
-        <ActionBtn icon={Clock} label="等 enabled" onClick={() => onAdd('uia_wait_enabled')} />
-        <ActionBtn icon={Eye} label="讀文字" onClick={() => {
-          if (!saveAsInput.trim()) { toast.error('請先填變數名(save_as)'); return }
-          onAdd('uia_get_text', { save_as: saveAsInput.trim() })
-        }} />
+      {/* 主要動作:點擊(最常用)+ 等 enabled + 讀文字 */}
+      <div className="grid grid-cols-2 gap-1.5">
+        <BigActionBtn
+          icon={MousePointerClick}
+          title="點擊"
+          desc="左鍵點中心、用於按鈕 / 連結 / cell"
+          onClick={() => onAdd('uia_click')}
+        />
+        <BigActionBtn
+          icon={Clock}
+          title="等就緒"
+          desc="等控制項出現+enabled、用於 loading 後的按鈕"
+          onClick={() => onAdd('uia_wait_enabled')}
+        />
       </div>
 
+      {/* 輸入文字(只有 Edit/Combo/Document 可編輯類型才有意義、其他用送鍵盤) */}
       {isEditable && (
+        <div className="bg-emerald-50/50 border border-emerald-200 rounded p-2 space-y-1">
+          <div className="text-[11px] font-semibold text-emerald-700">輸入文字到此控制項</div>
+          <div className="flex gap-1">
+            <input
+              value={textInput}
+              onChange={e => setTextInput(e.target.value)}
+              placeholder="文字(可含 {{var}})、例:=SUM(D2:D{{row_count}})"
+              className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
+            />
+            <button
+              onClick={() => {
+                if (!textInput.trim()) { toast.error('請填文字'); return }
+                onAdd('uia_send_keys', { text: textInput })
+                setTextInput('')
+              }}
+              className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1 hover:bg-emerald-700 shrink-0"
+            >
+              <Type className="w-3 h-3" /> 送文字
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 送鍵盤(任何元素都可、focus 該元素再按 keys) */}
+      <div className="bg-blue-50/50 border border-blue-200 rounded p-2 space-y-1">
+        <div className="text-[11px] font-semibold text-blue-700">送鍵盤到此控制項</div>
         <div className="flex gap-1">
           <input
-            value={textInput}
-            onChange={e => setTextInput(e.target.value)}
-            placeholder="輸入文字(可含 {{變數}})"
+            value={keysInput}
+            onChange={e => setKeysInput(e.target.value)}
+            placeholder="按鍵組合、例:enter / ctrl+s / tab / f5"
             className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
           />
           <button
             onClick={() => {
-              if (!textInput.trim()) { toast.error('請填文字'); return }
-              onAdd('uia_send_keys', { text: textInput })
-              setTextInput('')
+              const keys = keysInput.trim().toLowerCase().split('+').map(s => s.trim()).filter(Boolean)
+              if (keys.length === 0) { toast.error('請填按鍵、例 enter 或 ctrl+s'); return }
+              onAdd('uia_send_keys', { keys })
+              setKeysInput('')
             }}
-            className="px-2 py-1 bg-purple-600 text-white rounded text-xs flex items-center gap-1 hover:bg-purple-700"
+            className="px-2 py-1 bg-blue-600 text-white rounded text-xs flex items-center gap-1 hover:bg-blue-700 shrink-0"
           >
-            <Type className="w-3 h-3" /> 送文字
+            ⌨️ 送鍵
           </button>
         </div>
-      )}
+        <div className="text-[10px] text-blue-700/70">用於 enter 確認 / Ctrl+S 存檔 / F5 重整 / Tab 切焦點</div>
+      </div>
 
+      {/* 表格動作(讀列數 + 點 cell):只有 DataGrid/List/Tree 才出 */}
       {isGrid && (
-        <div className="space-y-1 border-t border-purple-200/50 pt-2">
-          <div className="text-[10px] text-purple-700 font-semibold">表格動作</div>
+        <div className="bg-amber-50/50 border border-amber-200 rounded p-2 space-y-1.5">
+          <div className="text-[11px] font-semibold text-amber-700">表格 / 列表動作</div>
           <div className="flex gap-1">
             <input
               value={saveAsInput}
@@ -493,23 +547,24 @@ function UiaActionPicker({
                 if (!saveAsInput.trim()) { toast.error('請填變數名'); return }
                 onAdd('uia_get_table_rowcount', { save_as: saveAsInput.trim() })
               }}
-              className="px-2 py-1 bg-purple-600 text-white rounded text-xs flex items-center gap-1 hover:bg-purple-700"
+              className="px-2 py-1 bg-amber-600 text-white rounded text-xs flex items-center gap-1 hover:bg-amber-700 shrink-0"
             >
               <Hash className="w-3 h-3" /> 讀列數
             </button>
           </div>
+          <div className="text-[10px] text-amber-700/70">把表格目前列數存進變數、後續 row 用 {`{{變數}}`} 動態算</div>
           <div className="flex gap-1">
             <input
               value={rowInput}
               onChange={e => setRowInput(e.target.value)}
-              placeholder="row(可填 {{var}} 或 {{var + 1}})"
+              placeholder="row(數字或 {{var + 1}})"
               className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
             />
             <input
               value={colInput}
               onChange={e => setColInput(e.target.value)}
               placeholder="column"
-              className="w-20 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
+              className="w-16 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
             />
             <button
               onClick={() => {
@@ -519,7 +574,7 @@ function UiaActionPicker({
                   column: /\D/.test(colInput) ? colInput : Number(colInput),
                 })
               }}
-              className="px-2 py-1 bg-purple-600 text-white rounded text-xs flex items-center gap-1 hover:bg-purple-700"
+              className="px-2 py-1 bg-amber-600 text-white rounded text-xs flex items-center gap-1 hover:bg-amber-700 shrink-0"
             >
               <ListChecks className="w-3 h-3" /> 點 cell
             </button>
@@ -527,28 +582,88 @@ function UiaActionPicker({
         </div>
       )}
 
-      {!isEditable && !isGrid && (
-        <p className="text-[10px] text-gray-500">
-          (此元素 type 沒有「送文字 / 表格動作」可選;選 DataGrid 會出表格選項、選 Edit 會出送文字)
-        </p>
-      )}
+      {/* 進階區:讀文字(存變數)+ 4 種斷言 */}
+      <div className="rounded-lg border border-gray-200 bg-gray-50/50 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen(v => !v)}
+          className="w-full flex items-center gap-2 px-2 py-1.5 text-left hover:bg-gray-100 transition-colors text-[11px]"
+        >
+          {advancedOpen ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
+          <span className="font-semibold text-gray-600 flex-1">進階動作</span>
+          <span className="text-gray-400 text-[10px]">讀文字 / 斷言狀態</span>
+        </button>
+        {advancedOpen && (
+          <div className="px-2 pb-2 space-y-1.5 border-t border-gray-200">
+            <div className="pt-2 flex gap-1">
+              <input
+                value={saveAsInput}
+                onChange={e => setSaveAsInput(e.target.value)}
+                placeholder="變數名(例 user_name)"
+                className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
+              />
+              <button
+                onClick={() => {
+                  if (!saveAsInput.trim()) { toast.error('請填變數名'); return }
+                  onAdd('uia_get_text', { save_as: saveAsInput.trim() })
+                }}
+                className="px-2 py-1 bg-gray-700 text-white rounded text-xs flex items-center gap-1 hover:bg-gray-800 shrink-0"
+              >
+                <Eye className="w-3 h-3" /> 讀文字
+              </button>
+            </div>
+            <div className="text-[10px] text-gray-500">把控制項顯示文字 / value 存進變數、後續用 {`{{變數}}`}</div>
+
+            <div className="text-[10px] text-gray-600 font-semibold pt-1">斷言狀態(失敗 = 整步 fail):</div>
+            <div className="grid grid-cols-2 gap-1">
+              <SmallActionBtn label="存在" onClick={() => onAdd('uia_assert_state', { check: 'exists' })} />
+              <SmallActionBtn label="enabled" onClick={() => onAdd('uia_assert_state', { check: 'enabled' })} />
+              <SmallActionBtn label="focused" onClick={() => onAdd('uia_assert_state', { check: 'focused' })} />
+              <SmallActionBtn label="checked" onClick={() => onAdd('uia_assert_state', { check: 'checked' })} />
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
-function ActionBtn({
-  icon: Icon, label, onClick,
+/** 大按鈕:標題 + 一行 desc */
+function BigActionBtn({
+  icon: Icon, title, desc, onClick,
 }: {
   icon: typeof MousePointerClick
+  title: string
+  desc: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="text-left px-2.5 py-2 bg-white border border-purple-300 rounded hover:bg-purple-50 hover:border-purple-400 transition-colors"
+    >
+      <div className="flex items-center gap-1.5 text-purple-700 font-semibold text-xs">
+        <Icon className="w-3.5 h-3.5" /> {title}
+      </div>
+      <div className="text-[10px] text-gray-500 mt-0.5">{desc}</div>
+    </button>
+  )
+}
+
+/** 小按鈕:斷言狀態用、純 label */
+function SmallActionBtn({
+  label, onClick,
+}: {
   label: string
   onClick: () => void
 }) {
   return (
     <button
       onClick={onClick}
-      className="px-2 py-1.5 bg-white border border-purple-300 rounded text-xs hover:bg-purple-100 flex items-center gap-1.5 text-purple-700"
+      className="px-2 py-1 bg-white border border-gray-300 rounded text-[11px] hover:bg-gray-100 text-gray-700"
     >
-      <Icon className="w-3 h-3" /> {label}
+      {label}
     </button>
   )
 }
+
