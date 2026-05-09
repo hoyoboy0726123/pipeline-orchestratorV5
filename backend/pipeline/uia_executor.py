@@ -157,20 +157,39 @@ def inspect_window(window_pattern: str = "", max_depth: int = 6,
         return {"ok": False, "error": f"uiautomation 套件未安裝:{e}"}
 
     try:
+        import re
         # 取得 window control
         if not window_pattern.strip():
             win = auto.GetForegroundControl()
         else:
-            has_star = "*" in window_pattern
-            if has_star:
-                import re
-                regex = "^" + re.escape(window_pattern).replace(r"\*", ".*") + "$"
-                win = auto.WindowControl(searchDepth=1, RegexName=regex)
+            pat = window_pattern.strip()
+            # 第一線:RegexName 比對(支援 * wildcard、預設視為 substring)
+            if "*" in pat:
+                regex = "^" + re.escape(pat).replace(r"\*", ".*") + "$"
             else:
-                win = auto.WindowControl(searchDepth=1, Name=window_pattern)
+                regex = "^.*" + re.escape(pat) + ".*$"
+            win = auto.WindowControl(searchDepth=1, RegexName=regex)
 
-        if not win.Exists(0, 0):
-            return {"ok": False, "error": f"找不到視窗:{window_pattern or '(foreground)'}"}
+            # 第二線:RegexName 萬一沒命中(uiautomation 對某些 shell window 如
+            # Program Manager 的 RegexName 比對不穩)、改用 root.GetChildren() 在 Python 層手動比對
+            if not win.Exists(2, 0.5):
+                pat_lower = pat.lower().replace("*", "")
+                root = auto.GetRootControl()
+                matched = None
+                for child in root.GetChildren():
+                    try:
+                        cname = (child.Name or "").strip()
+                        if not cname:
+                            continue
+                        if pat_lower in cname.lower():
+                            matched = child
+                            break
+                    except Exception:
+                        continue
+                if matched is not None:
+                    win = matched
+                else:
+                    return {"ok": False, "error": f"找不到視窗:{window_pattern or '(foreground)'}"}
 
         # 元數據
         rect = win.BoundingRectangle

@@ -792,36 +792,102 @@ async def uia_highlight_clear():
 @app.get("/computer-use/uia/windows")
 async def uia_list_windows():
     """列當下所有可見的 top-level 視窗、給 frontend 「📋 列出視窗」選單用。
-    幫使用者解掉「我要的視窗 title 怎麼拼?要填什麼 pattern?」的猜謎。
+
+    用 uiautomation 為主(File Explorer / TeamsWebView 等 shell-hosted window
+    EnumWindows 抓不到)、win32 EnumWindows 為輔(catch cloaked / 邊角 cases)。
+    去重 by name+class、合併兩路結果。
     """
     try:
         import uiautomation as auto
+    except ImportError:
+        raise HTTPException(status_code=500, detail="uiautomation 未安裝")
+
+    seen: set[tuple[str, str]] = set()
+    windows: list[dict] = []
+
+    # Pass 1: uiautomation(看 shell-hosted / 看標準 GUI app)
+    try:
         root = auto.GetRootControl()
-        windows = []
         for w in root.GetChildren():
             try:
                 name = str(w.Name or "").strip()
                 cls = str(getattr(w, "ClassName", "") or "")
                 rect = w.BoundingRectangle
-                # 過濾:沒名字 + 0 寬高的 = 系統 ghost window、不顯示
-                if not name and (rect.right - rect.left == 0 or rect.bottom - rect.top == 0):
+                rw = int(rect.right - rect.left)
+                rh = int(rect.bottom - rect.top)
+                if not name and (rw == 0 or rh == 0):
                     continue
                 if not name:
                     name = f"(無標題 {cls})"
+                key = (name, cls)
+                if key in seen:
+                    continue
+                seen.add(key)
                 windows.append({
                     "name": name,
                     "class": cls,
-                    "rect": [int(rect.left), int(rect.top),
-                             int(rect.right - rect.left), int(rect.bottom - rect.top)],
+                    "rect": [int(rect.left), int(rect.top), rw, rh],
                     "is_offscreen": bool(getattr(w, "IsOffscreen", False)),
                 })
             except Exception:
                 continue
-        # 按可見 + 名字長度排:有名字的 + 在螢幕內的優先
-        windows.sort(key=lambda x: (x["is_offscreen"], -len(x["name"])))
-        return {"ok": True, "windows": windows[:80]}   # 上限 80 防爆
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"list windows 失敗:{e}")
+    except Exception:
+        pass
+
+    # Pass 2: win32 EnumWindows(補 cloaked / hidden ApplicationFrameWindow)
+    try:
+        import win32gui  # type: ignore
+        import ctypes
+
+        def _enum_cb(hwnd, _ignored):
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+                title = win32gui.GetWindowText(hwnd) or ""
+                cls = win32gui.GetClassName(hwnd) or ""
+                rect = win32gui.GetWindowRect(hwnd)
+                w = rect[2] - rect[0]
+                h = rect[3] - rect[1]
+                if w < 50 or h < 50:
+                    return True
+                # 系統殼有名字才補(避免一堆 noise)
+                if not title:
+                    return True
+                key = (title, cls)
+                if key in seen:
+                    return True
+                seen.add(key)
+                # 偵測 cloaked
+                is_cloaked = False
+                try:
+                    DWMWA_CLOAKED = 14
+                    cloaked = ctypes.c_int(0)
+                    res = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                        hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+                    )
+                    is_cloaked = (res == 0 and cloaked.value != 0)
+                except Exception:
+                    pass
+                windows.append({
+                    "name": title, "class": cls,
+                    "rect": [rect[0], rect[1], w, h],
+                    "is_offscreen": is_cloaked,
+                })
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(_enum_cb, None)
+    except Exception:
+        pass
+
+    # 排序:非 cloaked + 有真正 title 優先
+    windows.sort(key=lambda x: (
+        x["is_offscreen"],
+        x["name"].startswith("(無標題"),
+        -len(x["name"]),
+    ))
+    return {"ok": True, "windows": windows[:80]}
 
 
 @app.delete("/computer-use/assets")
