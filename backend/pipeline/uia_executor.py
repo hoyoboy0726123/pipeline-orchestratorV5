@@ -283,8 +283,49 @@ def execute_uia_action(action: dict, step_window: str,
             ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             if not ctrl or not ctrl.Exists(2, 0.5):
                 return UiaActionResult(False, f"找不到控制項:{action.get('control')}")
-            ctrl.Click()
-            return UiaActionResult(True, f"已點擊 {action.get('control', {}).get('name', '?')}")
+            # 優先用 UIA pattern 互動(不必把視窗拉到前景、真正背景操作);
+            # pattern 都不支援才退回 ctrl.Click()(那個會 SetActive 把視窗叫到前景再用滑鼠點)
+            method_used = ""
+            try:
+                ip = ctrl.GetInvokePattern()
+                if ip:
+                    ip.Invoke()
+                    method_used = "InvokePattern"
+            except Exception:
+                pass
+            if not method_used:
+                try:
+                    tp = ctrl.GetTogglePattern()
+                    if tp:
+                        tp.Toggle()
+                        method_used = "TogglePattern"
+                except Exception:
+                    pass
+            if not method_used:
+                try:
+                    sp = ctrl.GetSelectionItemPattern()
+                    if sp:
+                        sp.Select()
+                        method_used = "SelectionItemPattern"
+                except Exception:
+                    pass
+            if not method_used:
+                try:
+                    ep = ctrl.GetExpandCollapsePattern()
+                    if ep:
+                        # 展開 / 收合切換(menu / tree node 用)
+                        if ep.ExpandCollapseState in (0, 2):  # collapsed / partial
+                            ep.Expand()
+                        else:
+                            ep.Collapse()
+                        method_used = "ExpandCollapsePattern"
+                except Exception:
+                    pass
+            if not method_used:
+                # fallback:退回滑鼠點(會叫前景、影響其他工作流)
+                ctrl.Click()
+                method_used = "Click(mouse, 視窗會被拉到前景)"
+            return UiaActionResult(True, f"已點擊 {action.get('control', {}).get('name', '?')} via {method_used}")
 
         elif atype == "uia_send_keys":
             ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
@@ -295,8 +336,19 @@ def execute_uia_action(action: dict, step_window: str,
             if text:
                 # variable 替換
                 text = _substitute_vars(text, variables)
-                ctrl.SendKeys(text)
-                return UiaActionResult(True, f"已輸入 {text[:60]!r}")
+                # 優先 ValuePattern.SetValue(背景 work、瞬時、不用敲鍵盤)
+                via_pattern = False
+                try:
+                    vp = ctrl.GetValuePattern()
+                    if vp and not vp.IsReadOnly:
+                        vp.SetValue(text)
+                        via_pattern = True
+                except Exception:
+                    pass
+                if not via_pattern:
+                    # fallback:模擬鍵盤打字、需要 focus(可能拉前景)
+                    ctrl.SendKeys(text)
+                return UiaActionResult(True, f"已輸入 {text[:60]!r} via {'ValuePattern' if via_pattern else 'SendKeys(keyboard sim)'}")
             elif keys:
                 # 把 ["ctrl","s"] 之類轉 uiautomation 格式 "{Ctrl}s"
                 # 簡化版:單一鍵(含特殊)直接 SendKeys、組合用 {Ctrl} 之類
@@ -392,8 +444,27 @@ def execute_uia_action(action: dict, step_window: str,
                     pass
             if cell is None:
                 return UiaActionResult(False, f"找不到 cell ({row}, {col})")
-            cell.Click()
-            return UiaActionResult(True, f"已點 cell ({row}, {col})")
+            # 優先 SelectionItemPattern.Select(cell 通常是可選元素、不必滑鼠點)
+            method_used = ""
+            try:
+                sp = cell.GetSelectionItemPattern()
+                if sp:
+                    sp.Select()
+                    method_used = "SelectionItemPattern"
+            except Exception:
+                pass
+            if not method_used:
+                try:
+                    ip = cell.GetInvokePattern()
+                    if ip:
+                        ip.Invoke()
+                        method_used = "InvokePattern"
+                except Exception:
+                    pass
+            if not method_used:
+                cell.Click()
+                method_used = "Click(mouse、視窗會拉前景)"
+            return UiaActionResult(True, f"已點 cell ({row}, {col}) via {method_used}")
 
         elif atype == "uia_wait_enabled":
             ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
