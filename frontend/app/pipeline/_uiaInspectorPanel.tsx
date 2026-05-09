@@ -10,10 +10,14 @@
  *  - 點 action button → 把組好的 ComputerUseAction 加進 actions[](onAddAction)
  *  - 不錄製、不需 assets/、不會碰桌面動作
  */
-import { useState, useCallback, useRef } from 'react'
-import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChecks, Clock, CheckCircle, RefreshCcw, Search, AppWindow } from 'lucide-react'
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChecks, Clock, CheckCircle, RefreshCcw, Search, AppWindow, Crosshair, X } from 'lucide-react'
 import { toast } from 'sonner'
-import { uiaInspect, uiaHighlight, uiaListWindows, type UiaElement, type UiaInspectResult, type UiaWindowInfo } from '@/lib/api'
+import {
+  uiaInspect, uiaHighlight, uiaListWindows,
+  uiaPickerStart, uiaPickerPoll, uiaPickerConsume, uiaPickerStop,
+  type UiaElement, type UiaInspectResult, type UiaWindowInfo
+} from '@/lib/api'
 import type { ComputerUseAction } from './_helpers'
 
 interface Props {
@@ -40,6 +44,10 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
   const [windowsList, setWindowsList] = useState<UiaWindowInfo[]>([])
   const [showWindows, setShowWindows] = useState(false)
   const [loadingWindows, setLoadingWindows] = useState(false)
+  // Live Picker(滑鼠 hover 桌面選元素)
+  const [pickerActive, setPickerActive] = useState(false)
+  const [hoveredEl, setHoveredEl] = useState<UiaElement | null>(null)
+  const pickerPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const inspect = useCallback(async () => {
     setLoading(true)
@@ -70,6 +78,60 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
       setLoadingWindows(false)
     }
   }, [])
+
+  // Live Picker:啟動 + 輪詢 + 確認後 reset、停止 picker
+  const startPicker = useCallback(async () => {
+    if (pickerActive) return
+    try {
+      await uiaPickerStart()
+      setPickerActive(true)
+      setHoveredEl(null)
+      toast.success('🎯 移動滑鼠到目標、按 F8 確認、F9 取消', { duration: 4000 })
+      // 輪詢:每 250ms 拿狀態
+      pickerPollRef.current = setInterval(async () => {
+        try {
+          const s = await uiaPickerPoll()
+          setHoveredEl(s.hovered)
+          if (s.confirmed) {
+            const consumed = await uiaPickerConsume()
+            if (consumed.element) {
+              setPicker({ element: consumed.element, path: ['picked'] })
+              toast.success(`已選 ${consumed.element.type}${consumed.element.name ? ': ' + consumed.element.name.slice(0, 40) : ''}`)
+            }
+            // 確認後 picker 已自停;清 polling
+            if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
+            setPickerActive(false)
+            setHoveredEl(null)
+          } else if (!s.running) {
+            // F9 取消或 picker 自停
+            if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
+            setPickerActive(false)
+            setHoveredEl(null)
+            if (s.error) toast.error(s.error)
+          }
+        } catch {
+          // 失敗不打擾、下次再 poll
+        }
+      }, 250)
+    } catch (e) {
+      toast.error((e as Error).message)
+      setPickerActive(false)
+    }
+  }, [pickerActive])
+
+  const stopPicker = useCallback(async () => {
+    if (!pickerActive) return
+    try { await uiaPickerStop() } catch {}
+    if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
+    setPickerActive(false)
+    setHoveredEl(null)
+  }, [pickerActive])
+
+  // unmount cleanup
+  useEffect(() => () => {
+    if (pickerPollRef.current) clearInterval(pickerPollRef.current)
+    if (pickerActive) uiaPickerStop().catch(() => {})
+  }, [pickerActive])
 
   const togglePath = (path: string) => {
     setExpanded(s => {
@@ -159,6 +221,56 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
 
   return (
     <div className="rounded-xl border border-purple-200 bg-purple-50/30 p-3 space-y-3">
+      {/* 🎯 Live Picker — 推薦主要路徑、滑鼠移到桌面選元素 */}
+      <div className={`rounded-lg border-2 ${pickerActive ? 'border-emerald-400 bg-emerald-50' : 'border-emerald-200 bg-white'} p-3`}>
+        {!pickerActive ? (
+          <div>
+            <button
+              onClick={startPicker}
+              className="w-full px-3 py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
+            >
+              <Crosshair className="w-4 h-4" />
+              🎯 滑鼠定位元素(推薦、滑到哪選哪)
+            </button>
+            <p className="text-[11px] text-emerald-700 mt-1.5 leading-relaxed">
+              啟動後:**滑鼠移到桌面任意 UI 元素**、紅框會跟隨。
+              按 <span className="font-mono font-bold">F8</span> 確認當前 hover 元素、
+              按 <span className="font-mono font-bold">F9</span> 取消。
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="font-semibold text-emerald-700 text-sm">🎯 定位中…</span>
+              <span className="text-[11px] text-gray-600 ml-auto">F8 確認、F9 取消</span>
+              <button onClick={stopPicker} className="text-emerald-700 hover:text-emerald-900 p-0.5">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {hoveredEl ? (
+              <div className="bg-white border border-emerald-200 rounded p-2 text-[11px]">
+                <div className="flex items-center gap-1 mb-0.5">
+                  <span className="font-mono text-purple-700 font-semibold">{hoveredEl.type || '?'}</span>
+                  {!hoveredEl.enabled && <span className="text-amber-600 ml-1">(disabled)</span>}
+                </div>
+                {hoveredEl.name && <div className="text-gray-700 truncate"><strong>name:</strong> {hoveredEl.name.slice(0, 80)}</div>}
+                {hoveredEl.auto_id && <div className="text-gray-500 font-mono truncate"><strong>auto_id:</strong> {hoveredEl.auto_id}</div>}
+                {hoveredEl.rect && hoveredEl.rect.length === 4 && (
+                  <div className="text-gray-400 font-mono">
+                    rect: {hoveredEl.rect[0]},{hoveredEl.rect[1]} {hoveredEl.rect[2]}×{hoveredEl.rect[3]}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-[11px] text-gray-500 italic px-1">移動滑鼠到桌面元素…</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="text-[10px] text-gray-400 text-center">— 或用以下進階方式 —</div>
+
       {/* 視窗 pattern 輸入 + 抓取按鈕 */}
       <div>
         <label className="text-xs font-semibold text-purple-700 uppercase tracking-wide block mb-1.5">

@@ -594,6 +594,35 @@ export async function uiaListWindows(): Promise<{ ok: boolean; windows: UiaWindo
   return res.json()
 }
 
+/** UIA Live Picker — 滑鼠 hover 桌面選元素 + F8 確認、F9 取消 */
+export interface UiaPickerStatus {
+  running: boolean
+  hovered: UiaElement | null
+  confirmed: UiaElement | null
+  error: string | null
+}
+
+export async function uiaPickerStart(): Promise<{ ok: boolean; started: boolean; running: boolean }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/start`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function uiaPickerPoll(): Promise<UiaPickerStatus> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/poll`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function uiaPickerConsume(): Promise<{ ok: boolean; element: UiaElement | null }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/consume`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function uiaPickerStop(): Promise<{ ok: boolean; was_running: boolean }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 /** 把 base64 PNG 直接存到 assets_dir(VLM 錨點立即截圖用、瀏覽器內裁切後上傳) */
 export async function saveAnchorPng(req: {
   dir: string

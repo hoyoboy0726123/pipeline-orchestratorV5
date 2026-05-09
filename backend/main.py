@@ -789,6 +789,37 @@ async def uia_highlight_clear():
     return {"ok": True}
 
 
+@app.post("/computer-use/uia/picker/start")
+async def uia_picker_start():
+    """啟動 Live Picker:滑鼠 hover 桌面 → UIA 元素跟隨紅框 + F8 確認 / F9 取消。"""
+    from pipeline.uia_picker import get_picker
+    p = get_picker()
+    started = p.start()
+    return {"ok": True, "started": started, "running": p.is_running}
+
+
+@app.get("/computer-use/uia/picker/poll")
+async def uia_picker_poll():
+    """frontend 輪詢:當下 hover element + 是否 confirmed。"""
+    from pipeline.uia_picker import get_picker
+    return get_picker().poll()
+
+
+@app.post("/computer-use/uia/picker/consume")
+async def uia_picker_consume():
+    """拿完 confirmed 後 reset、避免重複處理。"""
+    from pipeline.uia_picker import get_picker
+    el = get_picker().consume_confirmed()
+    return {"ok": True, "element": el}
+
+
+@app.post("/computer-use/uia/picker/stop")
+async def uia_picker_stop():
+    from pipeline.uia_picker import get_picker
+    was_running = get_picker().stop()
+    return {"ok": True, "was_running": was_running}
+
+
 @app.get("/computer-use/uia/windows")
 async def uia_list_windows():
     """列當下所有可見的 top-level 視窗、給 frontend 「📋 列出視窗」選單用。
