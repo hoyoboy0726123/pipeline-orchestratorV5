@@ -471,14 +471,24 @@ function UiaActionPicker({
         <BigActionBtn
           icon={MousePointerClick}
           title="點擊"
-          desc="按鈕 / 連結 / cell;優先 InvokePattern(背景 work)"
+          desc="按鈕 / 連結 / cell"
           onClick={() => onAdd('uia_click')}
+          help={{
+            usage: '點任何可互動元素;優先走 InvokePattern / TogglePattern 等程式介面、視窗在背景也能點、不會搶前景',
+            scenario: '點企業系統的「儲存」「送出」「下一步」按鈕、點 checkbox、點 list 項目',
+            example: '選 [Save Button] → 點擊\n背景觸發、不必把視窗叫到前面',
+          }}
         />
         <BigActionBtn
           icon={Clock}
           title="等就緒"
-          desc="等控制項出現+enabled、用於 loading 後的按鈕"
+          desc="等元素出現 + enabled"
           onClick={() => onAdd('uia_wait_enabled')}
+          help={{
+            usage: '輪詢元素直到 IsEnabled=True 或 timeout;loading 結束後 race condition 防呆',
+            scenario: '點完「載入」按鈕、要等下一步按鈕變藍才能繼續;網路慢時尤其重要',
+            example: '步驟 1: 點「載入」\n步驟 2: 等就緒(目標:「下一步」按鈕)\n步驟 3: 點「下一步」',
+          }}
         />
       </div>
 
@@ -486,8 +496,13 @@ function UiaActionPicker({
       <BigActionBtn
         icon={X}
         title="關閉視窗"
-        desc="WindowPattern.Close — 不必點 X、不拉前景、被擋住也能關"
+        desc="不必點 X、不拉前景、被擋住也能關"
         onClick={() => onAdd('uia_close_window')}
+        help={{
+          usage: '走 WindowPattern.Close()、Windows 程式介面層級、等同送 WM_CLOSE;不靠滑鼠 / 鍵盤、不必前景',
+          scenario: '工作流跑完關掉企業系統視窗;或關掉跳出的 popup;或關閉檔案總管',
+          example: '選 [視窗任一元素] → 關閉視窗\nbackend 自動往上找 WindowControl 並 Close()',
+        }}
       />
 
       {/* 輸入文字(只有 Edit/Combo/Document 可編輯類型才有意義、其他用送鍵盤) */}
@@ -501,16 +516,23 @@ function UiaActionPicker({
               placeholder="文字(可含 {{var}})、例:=SUM(D2:D{{row_count}})"
               className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
             />
-            <button
-              onClick={() => {
-                if (!textInput.trim()) { toast.error('請填文字'); return }
-                onAdd('uia_send_keys', { text: textInput })
-                setTextInput('')
-              }}
-              className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1 hover:bg-emerald-700 shrink-0"
+            <HelpTooltip
+              title="送文字"
+              usage="把文字塞進此 Edit/Combo/Document 控制項;優先 ValuePattern.SetValue() 瞬時、不模擬鍵盤、不影響 focus、背景 work"
+              scenario="在 Excel cell 寫公式、填表單欄位、貼貼上想要的內容"
+              example={'text="=SUM(D2:D{{row_count}})"\n→ 公式自動算對範圍'}
             >
-              <Type className="w-3 h-3" /> 送文字
-            </button>
+              <button
+                onClick={() => {
+                  if (!textInput.trim()) { toast.error('請填文字'); return }
+                  onAdd('uia_send_keys', { text: textInput })
+                  setTextInput('')
+                }}
+                className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1 hover:bg-emerald-700 shrink-0"
+              >
+                <Type className="w-3 h-3" /> 送文字
+              </button>
+            </HelpTooltip>
           </div>
         </div>
       )}
@@ -525,17 +547,24 @@ function UiaActionPicker({
             placeholder="按鍵組合、例:enter / ctrl+s / tab / f5"
             className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
           />
-          <button
-            onClick={() => {
-              const keys = keysInput.trim().toLowerCase().split('+').map(s => s.trim()).filter(Boolean)
-              if (keys.length === 0) { toast.error('請填按鍵、例 enter 或 ctrl+s'); return }
-              onAdd('uia_send_keys', { keys })
-              setKeysInput('')
-            }}
-            className="px-2 py-1 bg-blue-600 text-white rounded text-xs flex items-center gap-1 hover:bg-blue-700 shrink-0"
+          <HelpTooltip
+            title="送鍵"
+            usage="送鍵盤事件(快捷鍵 / 特殊鍵)到此控制項;模擬鍵盤、需該元素 focus(focus 不在可能搶前景)"
+            scenario="enter 確認 / Ctrl+S 存檔 / Ctrl+V 貼上剪貼簿 / F5 重整 / Tab 切下個焦點"
+            example={'enter → 送 Enter\nctrl+s → 送 Ctrl+S 存檔\nctrl+shift+s → 多修飾鍵組合'}
           >
-            ⌨️ 送鍵
-          </button>
+            <button
+              onClick={() => {
+                const keys = keysInput.trim().toLowerCase().split('+').map(s => s.trim()).filter(Boolean)
+                if (keys.length === 0) { toast.error('請填按鍵、例 enter 或 ctrl+s'); return }
+                onAdd('uia_send_keys', { keys })
+                setKeysInput('')
+              }}
+              className="px-2 py-1 bg-blue-600 text-white rounded text-xs flex items-center gap-1 hover:bg-blue-700 shrink-0"
+            >
+              ⌨️ 送鍵
+            </button>
+          </HelpTooltip>
         </div>
         <div className="text-[10px] text-blue-700/70">用於 enter 確認 / Ctrl+S 存檔 / F5 重整 / Tab 切焦點</div>
       </div>
@@ -550,16 +579,23 @@ function UiaActionPicker({
             placeholder="例:{{order_id}}、{{logged_user}}、固定文字"
             className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
           />
-          <button
-            onClick={() => {
-              if (!clipboardInput.trim()) { toast.error('請填內容'); return }
-              onAdd('uia_set_clipboard', { text: clipboardInput })
-              setClipboardInput('')
-            }}
-            className="px-2 py-1 bg-cyan-600 text-white rounded text-xs flex items-center gap-1 hover:bg-cyan-700 shrink-0"
+          <HelpTooltip
+            title="寫剪貼簿"
+            usage="把文字 / 變數值塞進 Windows 剪貼簿、後續用 Ctrl+V 貼出來"
+            scenario="跨應用 / 跨節點傳值;同節點:讀文字 → 寫剪貼簿 → 切到目標 → Ctrl+V 貼;跨節點:剪貼簿是 OS 全域、下個節點 Ctrl+V 仍取得到"
+            example={'text="{{logged_user}}"\n→ 把上一步抓到的使用者名寫進剪貼簿'}
           >
-            📋 寫入
-          </button>
+            <button
+              onClick={() => {
+                if (!clipboardInput.trim()) { toast.error('請填內容'); return }
+                onAdd('uia_set_clipboard', { text: clipboardInput })
+                setClipboardInput('')
+              }}
+              className="px-2 py-1 bg-cyan-600 text-white rounded text-xs flex items-center gap-1 hover:bg-cyan-700 shrink-0"
+            >
+              📋 寫入
+            </button>
+          </HelpTooltip>
         </div>
         <div className="text-[10px] text-cyan-700/70">
           配合「讀文字」用:讀取 → 寫剪貼簿 → 後續 Ctrl+V 貼到目標應用。{`{{變數}}`} 會被當下 step 變數值替換。
@@ -577,15 +613,22 @@ function UiaActionPicker({
               placeholder="變數名(例 row_count)"
               className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
             />
-            <button
-              onClick={() => {
-                if (!saveAsInput.trim()) { toast.error('請填變數名'); return }
-                onAdd('uia_get_table_rowcount', { save_as: saveAsInput.trim() })
-              }}
-              className="px-2 py-1 bg-amber-600 text-white rounded text-xs flex items-center gap-1 hover:bg-amber-700 shrink-0"
+            <HelpTooltip
+              title="讀列數"
+              usage="讀此 DataGrid / List / Tree 目前共幾列、存進變數;後續可用 {{變數}} 動態算 row"
+              scenario="每天行數不同的訂單表;想點最後一筆下方空白格寫公式"
+              example={'save_as="rows"\n→ 之後 row="{{rows + 1}}" 點下一個空白格'}
             >
-              <Hash className="w-3 h-3" /> 讀列數
-            </button>
+              <button
+                onClick={() => {
+                  if (!saveAsInput.trim()) { toast.error('請填變數名'); return }
+                  onAdd('uia_get_table_rowcount', { save_as: saveAsInput.trim() })
+                }}
+                className="px-2 py-1 bg-amber-600 text-white rounded text-xs flex items-center gap-1 hover:bg-amber-700 shrink-0"
+              >
+                <Hash className="w-3 h-3" /> 讀列數
+              </button>
+            </HelpTooltip>
           </div>
           <div className="text-[10px] text-amber-700/70">把表格目前列數存進變數、後續 row 用 {`{{變數}}`} 動態算</div>
           <div className="flex gap-1">
@@ -601,18 +644,25 @@ function UiaActionPicker({
               placeholder="column"
               className="w-16 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
             />
-            <button
-              onClick={() => {
-                if (!rowInput.trim() || !colInput.trim()) { toast.error('row / column 都要填'); return }
-                onAdd('uia_click_cell', {
-                  row: /\D/.test(rowInput) ? rowInput : Number(rowInput),
-                  column: /\D/.test(colInput) ? colInput : Number(colInput),
-                })
-              }}
-              className="px-2 py-1 bg-amber-600 text-white rounded text-xs flex items-center gap-1 hover:bg-amber-700 shrink-0"
+            <HelpTooltip
+              title="點 cell"
+              usage="點 DataGrid / List / Tree 第 N 列第 M 欄;優先 SelectionItemPattern.Select(背景 work)、退到 Click"
+              scenario="點動態算出來的 cell(配合「讀列數」用);ERP 訂單表點某筆訂單看 detail"
+              example={'row="{{rows + 1}}" column=4\n→ 動態定位到最後資料下方空白格、第 4 欄'}
             >
-              <ListChecks className="w-3 h-3" /> 點 cell
-            </button>
+              <button
+                onClick={() => {
+                  if (!rowInput.trim() || !colInput.trim()) { toast.error('row / column 都要填'); return }
+                  onAdd('uia_click_cell', {
+                    row: /\D/.test(rowInput) ? rowInput : Number(rowInput),
+                    column: /\D/.test(colInput) ? colInput : Number(colInput),
+                  })
+                }}
+                className="px-2 py-1 bg-amber-600 text-white rounded text-xs flex items-center gap-1 hover:bg-amber-700 shrink-0"
+              >
+                <ListChecks className="w-3 h-3" /> 點 cell
+              </button>
+            </HelpTooltip>
           </div>
         </div>
       )}
@@ -637,24 +687,63 @@ function UiaActionPicker({
                 placeholder="變數名(例 user_name)"
                 className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
               />
-              <button
-                onClick={() => {
-                  if (!saveAsInput.trim()) { toast.error('請填變數名'); return }
-                  onAdd('uia_get_text', { save_as: saveAsInput.trim() })
-                }}
-                className="px-2 py-1 bg-gray-700 text-white rounded text-xs flex items-center gap-1 hover:bg-gray-800 shrink-0"
+              <HelpTooltip
+                title="讀文字"
+                usage="把此控制項的文字 / value 讀出來、存進變數;優先 ValuePattern.Value、退到 Name"
+                scenario="抓登入後「歡迎 王小明」、抓訂單編號「ORD-2024-0507」、抓 status bar 訊息"
+                example={'save_as="user"\n→ 後續 text="{{user}}" 引用、寫剪貼簿、傳給其他應用'}
               >
-                <Eye className="w-3 h-3" /> 讀文字
-              </button>
+                <button
+                  onClick={() => {
+                    if (!saveAsInput.trim()) { toast.error('請填變數名'); return }
+                    onAdd('uia_get_text', { save_as: saveAsInput.trim() })
+                  }}
+                  className="px-2 py-1 bg-gray-700 text-white rounded text-xs flex items-center gap-1 hover:bg-gray-800 shrink-0"
+                >
+                  <Eye className="w-3 h-3" /> 讀文字
+                </button>
+              </HelpTooltip>
             </div>
             <div className="text-[10px] text-gray-500">把控制項顯示文字 / value 存進變數、後續用 {`{{變數}}`}</div>
 
             <div className="text-[10px] text-gray-600 font-semibold pt-1">斷言狀態(失敗 = 整步 fail):</div>
             <div className="grid grid-cols-2 gap-1">
-              <SmallActionBtn label="存在" onClick={() => onAdd('uia_assert_state', { check: 'exists' })} />
-              <SmallActionBtn label="enabled" onClick={() => onAdd('uia_assert_state', { check: 'enabled' })} />
-              <SmallActionBtn label="focused" onClick={() => onAdd('uia_assert_state', { check: 'focused' })} />
-              <SmallActionBtn label="checked" onClick={() => onAdd('uia_assert_state', { check: 'checked' })} />
+              <SmallActionBtn
+                label="存在"
+                onClick={() => onAdd('uia_assert_state', { check: 'exists' })}
+                help={{
+                  usage: '驗元素必須存在、不存在 → 整步 fail',
+                  scenario: '點完「儲存」後驗成功訊息有跳出、防止「按了但沒反應」一路錯下去',
+                  example: '步驟 1: 點儲存\n步驟 2: 等就緒(成功訊息)\n步驟 3: 斷言 存在',
+                }}
+              />
+              <SmallActionBtn
+                label="enabled"
+                onClick={() => onAdd('uia_assert_state', { check: 'enabled' })}
+                help={{
+                  usage: '驗元素必須是 enabled(可按)、disabled → 整步 fail',
+                  scenario: '表單填完才該能按「送出」、用此驗證表單真的填完整、防 race / 防遺漏必填',
+                  example: '填完所有欄位 → 斷言「送出」按鈕 enabled',
+                }}
+              />
+              <SmallActionBtn
+                label="focused"
+                onClick={() => onAdd('uia_assert_state', { check: 'focused' })}
+                help={{
+                  usage: '驗鍵盤焦點目前在此元素、不在 → 整步 fail',
+                  scenario: 'Tab 切下個欄位後驗焦點真的切到「電話」欄;UI 改版常見 tab order 偷偷換',
+                  example: '送鍵 tab → 斷言「電話」欄位 focused',
+                }}
+              />
+              <SmallActionBtn
+                label="checked"
+                onClick={() => onAdd('uia_assert_state', { check: 'checked' })}
+                help={{
+                  usage: '驗 checkbox / radio 已打勾、沒勾 → 整步 fail',
+                  scenario: '註冊流程驗「同意條款」勾了;ERP 驗「啟用通知」開了',
+                  example: '走過註冊流程 → 斷言「同意條款」checked',
+                }}
+              />
             </div>
           </div>
         )}
@@ -663,19 +752,73 @@ function UiaActionPicker({
   )
 }
 
-/** 大按鈕:標題 + 一行 desc */
+/** Hover 提示框 — 顯示 title / 用途 / 場景 / 範例、0.4s delay */
+function HelpTooltip({
+  children,
+  title,
+  usage,
+  scenario,
+  example,
+}: {
+  children: React.ReactNode
+  title: string
+  usage: string
+  scenario?: string
+  example?: string
+}) {
+  const [show, setShow] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => {
+        timerRef.current = setTimeout(() => setShow(true), 400)
+      }}
+      onMouseLeave={() => {
+        if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
+        setShow(false)
+      }}
+    >
+      {children}
+      {show && (
+        <div className="absolute z-[60] bottom-full left-0 mb-2 w-72 bg-gray-900 text-white text-[11px] rounded-lg p-3 shadow-2xl pointer-events-none">
+          <div className="font-bold text-emerald-300 mb-1.5 text-xs">{title}</div>
+          <div className="mb-2 leading-relaxed">{usage}</div>
+          {scenario && (
+            <div className="mb-2">
+              <div className="text-yellow-300 font-semibold text-[10px] mb-0.5">場景</div>
+              <div className="text-gray-200 text-[10.5px] leading-relaxed">{scenario}</div>
+            </div>
+          )}
+          {example && (
+            <div>
+              <div className="text-cyan-300 font-semibold text-[10px] mb-0.5">範例</div>
+              <div className="bg-black/60 rounded px-1.5 py-1 font-mono text-[10px] leading-tight whitespace-pre-wrap text-gray-200">{example}</div>
+            </div>
+          )}
+          {/* 小箭頭 */}
+          <div className="absolute top-full left-4 -mt-1 w-2 h-2 bg-gray-900 rotate-45" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 大按鈕:標題 + 一行 desc + hover tooltip */
 function BigActionBtn({
-  icon: Icon, title, desc, onClick,
+  icon: Icon, title, desc, onClick, help,
 }: {
   icon: typeof MousePointerClick
   title: string
   desc: string
   onClick: () => void
+  help?: { usage: string; scenario?: string; example?: string }
 }) {
-  return (
+  const button = (
     <button
       onClick={onClick}
-      className="text-left px-2.5 py-2 bg-white border border-purple-300 rounded hover:bg-purple-50 hover:border-purple-400 transition-colors"
+      className="text-left px-2.5 py-2 bg-white border border-purple-300 rounded hover:bg-purple-50 hover:border-purple-400 transition-colors w-full"
     >
       <div className="flex items-center gap-1.5 text-purple-700 font-semibold text-xs">
         <Icon className="w-3.5 h-3.5" /> {title}
@@ -683,22 +826,27 @@ function BigActionBtn({
       <div className="text-[10px] text-gray-500 mt-0.5">{desc}</div>
     </button>
   )
+  if (!help) return button
+  return <HelpTooltip title={title} usage={help.usage} scenario={help.scenario} example={help.example}>{button}</HelpTooltip>
 }
 
-/** 小按鈕:斷言狀態用、純 label */
+/** 小按鈕:斷言狀態用、純 label + hover tooltip */
 function SmallActionBtn({
-  label, onClick,
+  label, onClick, help,
 }: {
   label: string
   onClick: () => void
+  help?: { usage: string; scenario?: string; example?: string }
 }) {
-  return (
+  const button = (
     <button
       onClick={onClick}
-      className="px-2 py-1 bg-white border border-gray-300 rounded text-[11px] hover:bg-gray-100 text-gray-700"
+      className="px-2 py-1 bg-white border border-gray-300 rounded text-[11px] hover:bg-gray-100 text-gray-700 w-full"
     >
       {label}
     </button>
   )
+  if (!help) return button
+  return <HelpTooltip title={`斷言:${label}`} usage={help.usage} scenario={help.scenario} example={help.example}>{button}</HelpTooltip>
 }
 
