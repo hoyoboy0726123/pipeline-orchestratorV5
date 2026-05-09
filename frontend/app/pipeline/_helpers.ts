@@ -189,6 +189,7 @@ export interface ComputerUseAction {
   column?: number | string
   check?: 'exists' | 'enabled' | 'focused' | 'checked'
   window?: string                                          // action 層級 window 覆寫(空 → 用 step.uiaWindow)
+  rect?: number[]                                          // UIA picker 抓到的 element rect[x,y,w,h]、給 backend ControlFromPoint fallback 用
   anchor_off_x?: number // 點擊相對錨點影像中心的偏移 x
   anchor_off_y?: number // 點擊相對錨點影像中心的偏移 y
   full_image?: string   // 全螢幕截圖檔名（手動圈選編輯錨點時用）

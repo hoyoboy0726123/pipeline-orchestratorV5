@@ -95,19 +95,35 @@ def _resolve_window(auto, action: dict, step_window: str = ""):
         return auto.WindowControl(searchDepth=1, Name=win_pattern)
 
 
-def _find_control(auto, parent, control_def: dict):
+def _find_control(auto, parent, control_def: dict, fallback_rect: Optional[list] = None):
     """在 parent 控制項下找符合 control_def 的子控制項。
 
     control_def 例:
       {"type": "Button", "name": "儲存"}
       {"type": "DataGrid", "auto_id": "main-grid"}
       {"name": "OK"}    # 沒指定 type、找任何 control
+
+    fallback_rect: 當 control_def 沒 Name 也沒 AutomationId(純 type 搜尋
+    uiautomation 會拒、丟 LookupError "searchProperties must not be empty")、
+    用 ControlFromPoint(rect 中心)當 fallback。是 picker 抓到的當下 rect、
+    對 PaneControl / GroupControl 等沒 name 的 generic 容器特別有用。
     """
     if not isinstance(control_def, dict):
         return None
     ctype = (control_def.get("type") or "").strip()
     name = (control_def.get("name") or "").strip()
     auto_id = (control_def.get("auto_id") or control_def.get("automation_id") or "").strip()
+
+    # 沒任何識別資訊 → 走 rect fallback
+    if not name and not auto_id:
+        if fallback_rect and len(fallback_rect) == 4 and fallback_rect[2] > 0 and fallback_rect[3] > 0:
+            cx = int(fallback_rect[0] + fallback_rect[2] // 2)
+            cy = int(fallback_rect[1] + fallback_rect[3] // 2)
+            try:
+                return auto.ControlFromPoint(cx, cy)
+            except Exception:
+                return None
+        return None
 
     # 組 kwargs
     kwargs = {"searchDepth": control_def.get("depth", 10)}
@@ -264,14 +280,14 @@ def execute_uia_action(action: dict, step_window: str,
             return UiaActionResult(False, f"找不到視窗(action={atype})")
 
         if atype == "uia_click":
-            ctrl = _find_control(auto, win, action.get("control") or {})
+            ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             if not ctrl or not ctrl.Exists(2, 0.5):
                 return UiaActionResult(False, f"找不到控制項:{action.get('control')}")
             ctrl.Click()
             return UiaActionResult(True, f"已點擊 {action.get('control', {}).get('name', '?')}")
 
         elif atype == "uia_send_keys":
-            ctrl = _find_control(auto, win, action.get("control") or {})
+            ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             if not ctrl or not ctrl.Exists(2, 0.5):
                 return UiaActionResult(False, f"找不到控制項:{action.get('control')}")
             text = action.get("text", "")
@@ -300,7 +316,7 @@ def execute_uia_action(action: dict, step_window: str,
                 return UiaActionResult(False, "uia_send_keys 缺 text 或 keys")
 
         elif atype == "uia_get_text":
-            ctrl = _find_control(auto, win, action.get("control") or {})
+            ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             if not ctrl or not ctrl.Exists(2, 0.5):
                 return UiaActionResult(False, f"找不到控制項:{action.get('control')}")
             # 優先取 Value pattern、退到 Name
@@ -319,7 +335,7 @@ def execute_uia_action(action: dict, step_window: str,
             return UiaActionResult(True, f"讀到 {text[:60]!r}(沒設 save_as)")
 
         elif atype == "uia_get_table_rowcount":
-            grid = _find_control(auto, win, action.get("control") or {})
+            grid = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             if not grid or not grid.Exists(2, 0.5):
                 return UiaActionResult(False, f"找不到表格:{action.get('control')}")
             # GridPattern 是標準介面;沒實作就退到子元素數
@@ -344,7 +360,7 @@ def execute_uia_action(action: dict, step_window: str,
             return UiaActionResult(True, f"表格列數 {n}(沒設 save_as)")
 
         elif atype == "uia_click_cell":
-            grid = _find_control(auto, win, action.get("control") or {})
+            grid = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             if not grid or not grid.Exists(2, 0.5):
                 return UiaActionResult(False, f"找不到表格:{action.get('control')}")
             row = action.get("row", 0)
@@ -380,7 +396,7 @@ def execute_uia_action(action: dict, step_window: str,
             return UiaActionResult(True, f"已點 cell ({row}, {col})")
 
         elif atype == "uia_wait_enabled":
-            ctrl = _find_control(auto, win, action.get("control") or {})
+            ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             timeout = float(action.get("timeout_sec", 10))
             t_start = time.time()
             while time.time() - t_start < timeout:
@@ -390,7 +406,7 @@ def execute_uia_action(action: dict, step_window: str,
             return UiaActionResult(False, f"等 {timeout}s 控制項仍未 enabled")
 
         elif atype == "uia_assert_state":
-            ctrl = _find_control(auto, win, action.get("control") or {})
+            ctrl = _find_control(auto, win, action.get("control") or {}, fallback_rect=action.get("rect"))
             check = (action.get("check") or "exists").strip()
             if check == "exists":
                 ok = bool(ctrl and ctrl.Exists(2, 0.5))

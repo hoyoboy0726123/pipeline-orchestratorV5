@@ -135,6 +135,9 @@ class ComputerUseAction(BaseModel):
     column: int | str = 0        # uia_click_cell 用
     check: str = ""              # uia_assert_state 用:exists / enabled / focused / checked
     window: str = ""              # action 層級 window 覆寫(無填走 step.uia_window)、支援 wildcard *
+    rect: list[int] = []         # UIA picker 抓到的 element rect[x,y,w,h]、絕對桌面座標
+                                  # control 沒 Name 也沒 AutomationId(如 generic PaneControl/GroupControl)時、
+                                  # 用 ControlFromPoint(rect 中心)當 fallback 找元素
 
     # ── VLM 把關 Phase 1:每動作執行後驗證(跟 vlm_check 不同) ──────────
     # vlm_check 是「動作序列裡的 explicit 檢查步」、不點擊純判斷;

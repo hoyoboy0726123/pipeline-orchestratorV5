@@ -160,6 +160,9 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
     const action: ComputerUseAction = {
       type,
       control,
+      // 帶上 picker 抓到的 rect、給 backend 在沒 Name/auto_id(generic Pane/GroupControl)時
+      // 用 ControlFromPoint(rect 中心)當 fallback、避免 LookupError "searchProperties must not be empty"
+      ...(el.rect && el.rect.length === 4 ? { rect: el.rect } : {}),
       description: `${type} ${el.type}${el.name ? `:${el.name}` : ''}`,
       ...extra,
     }
