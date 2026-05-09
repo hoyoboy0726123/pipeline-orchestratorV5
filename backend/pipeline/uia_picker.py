@@ -1,13 +1,13 @@
 """UIA Live Picker — 滑鼠 hover 到的 UI 元素自動抓 + 紅框跟隨 + F8 確認。
 
-設計參照 Microsoft Inspect.exe 的 Live Inspect 模式:
-- 進入 picker 後、滑鼠移到桌面任意 UI 元素、後台輪詢 cursor 位置 →
-  uiautomation.ControlFromPoint() → 在該元素 rect 畫紅框
-- 按 F8 確認:把當下 hover 元素資訊鎖進 confirmed、停止 picker
-- 按 F9 取消:不確認、停止 picker
-- frontend 用輪詢拿狀態(running / hovered / confirmed)、確認後用該元素加 action
+設計參照 Microsoft Inspect.exe 的 Live Inspect 模式。
 
-跟原本「樹狀挑」並用、不衝突;純加便利路徑、現有 inspect / list windows 仍 work。
+實作細節:
+- 用 win32 GetCursorPos 讀滑鼠、GetAsyncKeyState 直接 poll F8/F9 狀態
+  (一開始用 pynput.keyboard.Listener、實測 hook 起不來 / 跟其他 listener 衝突
+  導致 F8/F9 沒反應、改 GetAsyncKeyState 在同一 loop 內 poll 最穩)
+- 紅框靠 cu_highlight_overlay、每輪都 refresh TTL 避免靜止時消失
+- 同 element handle 跳過 UIA 重 query 但仍 refresh 紅框、效能 + 視覺都顧到
 """
 from __future__ import annotations
 import logging
@@ -17,6 +17,9 @@ from typing import Optional
 
 _log = logging.getLogger(__name__)
 
+VK_F8 = 0x77
+VK_F9 = 0x78
+
 
 class _UiaPicker:
     """單例:只允許同時一個 picker session。"""
@@ -24,9 +27,9 @@ class _UiaPicker:
     def __init__(self):
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._hotkey_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._last_element: Optional[dict] = None
+        self._last_rect: Optional[tuple[int, int, int, int]] = None  # cache 給靜止時 refresh 紅框
         self._confirmed: Optional[dict] = None
         self._error: Optional[str] = None
 
@@ -35,22 +38,19 @@ class _UiaPicker:
         return self._running
 
     def start(self) -> bool:
-        """啟動 picker thread + 全域 F8/F9 hotkey listener。"""
         with self._lock:
             if self._running:
                 return False
             self._running = True
             self._last_element = None
+            self._last_rect = None
             self._confirmed = None
             self._error = None
             self._thread = threading.Thread(target=self._run_loop, daemon=True, name="uia-picker")
             self._thread.start()
-            self._hotkey_thread = threading.Thread(target=self._hotkey_loop, daemon=True, name="uia-picker-hotkey")
-            self._hotkey_thread.start()
             return True
 
     def stop(self):
-        """停 picker、清紅框、保留 confirmed 給 frontend 拿一次。"""
         was_running = self._running
         self._running = False
         try:
@@ -61,7 +61,6 @@ class _UiaPicker:
         return was_running
 
     def poll(self) -> dict:
-        """frontend 輪詢:拿當下 hover 元素 + 是否確認。"""
         with self._lock:
             return {
                 "running": self._running,
@@ -71,14 +70,13 @@ class _UiaPicker:
             }
 
     def consume_confirmed(self) -> Optional[dict]:
-        """frontend 拿完 confirmed 之後 reset、避免重複處理。"""
         with self._lock:
             c = self._confirmed
             self._confirmed = None
             return c
 
     def _run_loop(self):
-        """背景 loop:輪詢滑鼠 → ControlFromPoint → 紅框。"""
+        """背景 loop:輪詢滑鼠 + key state、UIA query、紅框 refresh。"""
         try:
             import uiautomation as auto
             from ctypes import windll, Structure, c_long, byref
@@ -86,60 +84,87 @@ class _UiaPicker:
             class POINT(Structure):
                 _fields_ = [("x", c_long), ("y", c_long)]
 
-            from .cu_highlight_overlay import highlight as draw_highlight
+            from .cu_highlight_overlay import highlight as draw_highlight, clear_highlight
         except Exception as e:
             self._error = f"picker 初始化失敗:{e}"
             self._running = False
             return
 
         last_pos = (-99999, -99999)
-        last_handle = None
+        last_handle_key = None
         consecutive_fail = 0
+        # 上次 key state、用來偵測「從沒按到按下」的瞬間(避免 F8 一直按住觸發多次)
+        f8_was_down = False
+        f9_was_down = False
 
         while self._running:
             try:
+                # ── poll F8/F9 ──────────────────────────────────────
+                f8_now = bool(windll.user32.GetAsyncKeyState(VK_F8) & 0x8000)
+                f9_now = bool(windll.user32.GetAsyncKeyState(VK_F9) & 0x8000)
+                # 偵測上升緣
+                if f8_now and not f8_was_down:
+                    with self._lock:
+                        if self._last_element:
+                            self._confirmed = dict(self._last_element)
+                            _log.info(f"[uia-picker] F8 確認 {self._confirmed.get('type')}:{self._confirmed.get('name', '')[:60]}")
+                            self._running = False
+                            break
+                        else:
+                            _log.info("[uia-picker] F8 按下但 _last_element=None、忽略")
+                if f9_now and not f9_was_down:
+                    _log.info("[uia-picker] F9 取消")
+                    self._running = False
+                    break
+                f8_was_down = f8_now
+                f9_was_down = f9_now
+
+                # ── poll 滑鼠位置 ───────────────────────────────────
                 p = POINT()
                 windll.user32.GetCursorPos(byref(p))
                 pos = (p.x, p.y)
 
-                # 滑鼠沒動 → 不重 query(避免 spam UIA)
-                if pos == last_pos:
-                    time.sleep(0.07)
-                    continue
-                last_pos = pos
+                if pos != last_pos:
+                    # 滑鼠移動 → 重 query UIA element
+                    try:
+                        ctrl = auto.ControlFromPoint(pos[0], pos[1])
+                    except Exception:
+                        ctrl = None
+                    if ctrl is not None:
+                        try:
+                            handle = getattr(ctrl, "NativeWindowHandle", 0) or 0
+                            key = (handle, ctrl.ControlTypeName, ctrl.Name)
+                            # 同 element 不重 update info(but rect 仍可能在外層 refresh 紅框)
+                            if key != last_handle_key:
+                                rect = ctrl.BoundingRectangle
+                                rw = int(rect.right - rect.left)
+                                rh = int(rect.bottom - rect.top)
+                                el_info = {
+                                    "type": str(ctrl.ControlTypeName or ""),
+                                    "name": str(ctrl.Name or "")[:200],
+                                    "auto_id": str(getattr(ctrl, "AutomationId", "") or ""),
+                                    "rect": [int(rect.left), int(rect.top), rw, rh],
+                                    "enabled": bool(getattr(ctrl, "IsEnabled", True)),
+                                }
+                                with self._lock:
+                                    self._last_element = el_info
+                                    self._last_rect = (int(rect.left), int(rect.top), rw, rh)
+                                last_handle_key = key
+                        except Exception:
+                            pass
+                    last_pos = pos
 
-                ctrl = auto.ControlFromPoint(pos[0], pos[1])
-                if ctrl is None:
-                    time.sleep(0.1)
-                    continue
-
-                # 同一個 element handle → 跳過(只更新時不重 highlight)
-                handle = getattr(ctrl, "NativeWindowHandle", 0) or 0
-                key = (handle, ctrl.ControlTypeName, ctrl.Name)
-                if key == last_handle:
-                    time.sleep(0.07)
-                    continue
-                last_handle = key
-
-                rect = ctrl.BoundingRectangle
-                rw = int(rect.right - rect.left)
-                rh = int(rect.bottom - rect.top)
-                el_info = {
-                    "type": str(ctrl.ControlTypeName or ""),
-                    "name": str(ctrl.Name or "")[:200],
-                    "auto_id": str(getattr(ctrl, "AutomationId", "") or ""),
-                    "rect": [int(rect.left), int(rect.top), rw, rh],
-                    "enabled": bool(getattr(ctrl, "IsEnabled", True)),
-                }
+                # ── 每輪都 refresh 紅框(TTL 不會因為滑鼠靜止就消失)──────
                 with self._lock:
-                    self._last_element = el_info
-
-                if rw > 0 and rh > 0:
-                    # 短 TTL 讓紅框跟隨滑鼠、不要殘留
-                    draw_highlight(int(rect.left), int(rect.top), rw, rh, ttl_ms=400)
+                    rect = self._last_rect
+                if rect and rect[2] > 10 and rect[3] > 10:
+                    try:
+                        draw_highlight(rect[0], rect[1], rect[2], rect[3], ttl_ms=600)
+                    except Exception:
+                        pass
 
                 consecutive_fail = 0
-                time.sleep(0.07)
+                time.sleep(0.08)
             except Exception as e:
                 consecutive_fail += 1
                 if consecutive_fail > 5:
@@ -150,50 +175,9 @@ class _UiaPicker:
 
         # 結束:清紅框
         try:
-            from .cu_highlight_overlay import clear_highlight
             clear_highlight()
         except Exception:
             pass
-
-    def _hotkey_loop(self):
-        """全域 F8 = 確認、F9 = 取消。用 pynput.keyboard listener。"""
-        try:
-            from pynput import keyboard
-        except ImportError:
-            self._error = "pynput 未安裝、不能監聽 F8/F9"
-            return
-
-        def on_press(key):
-            if not self._running:
-                return False
-            try:
-                if key == keyboard.Key.f8:
-                    with self._lock:
-                        if self._last_element:
-                            self._confirmed = dict(self._last_element)
-                            self._log_confirm()
-                            self._running = False
-                            return False
-                elif key == keyboard.Key.f9:
-                    _log.info("[uia-picker] 使用者按 F9 取消")
-                    self._running = False
-                    return False
-            except Exception:
-                pass
-
-        try:
-            with keyboard.Listener(on_press=on_press) as listener:
-                # 等到 picker 結束才退;listener.stop() 也會結束
-                while self._running:
-                    time.sleep(0.1)
-                listener.stop()
-        except Exception as e:
-            _log.warning(f"[uia-picker] hotkey listener 失敗(可能已被其他 process 佔用):{e}")
-
-    def _log_confirm(self):
-        if self._confirmed:
-            el = self._confirmed
-            _log.info(f"[uia-picker] F8 確認 type={el.get('type')!r} name={el.get('name', '')[:60]!r} rect={el.get('rect')}")
 
 
 _picker_singleton: Optional[_UiaPicker] = None
