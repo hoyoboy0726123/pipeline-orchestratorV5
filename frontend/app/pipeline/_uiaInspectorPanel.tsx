@@ -452,6 +452,7 @@ function UiaActionPicker({
   const [saveAsInput, setSaveAsInput] = useState('')
   const [rowInput, setRowInput] = useState<string>('')
   const [colInput, setColInput] = useState<string>('')
+  const [clipboardInput, setClipboardInput] = useState<string>('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const isGrid = ['DataGrid', 'List', 'Tree', 'Table'].some(s => element.type.includes(s))
@@ -537,6 +538,32 @@ function UiaActionPicker({
           </button>
         </div>
         <div className="text-[10px] text-blue-700/70">用於 enter 確認 / Ctrl+S 存檔 / F5 重整 / Tab 切焦點</div>
+      </div>
+
+      {/* 寫剪貼簿(任何元素都可、用於把上一步 save 的變數塞進剪貼簿、後續 Ctrl+V 貼用) */}
+      <div className="bg-cyan-50/50 border border-cyan-200 rounded p-2 space-y-1">
+        <div className="text-[11px] font-semibold text-cyan-700">📋 寫剪貼簿(同節點內)</div>
+        <div className="flex gap-1">
+          <input
+            value={clipboardInput}
+            onChange={e => setClipboardInput(e.target.value)}
+            placeholder="例:{{order_id}}、{{logged_user}}、固定文字"
+            className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
+          />
+          <button
+            onClick={() => {
+              if (!clipboardInput.trim()) { toast.error('請填內容'); return }
+              onAdd('uia_set_clipboard', { text: clipboardInput })
+              setClipboardInput('')
+            }}
+            className="px-2 py-1 bg-cyan-600 text-white rounded text-xs flex items-center gap-1 hover:bg-cyan-700 shrink-0"
+          >
+            📋 寫入
+          </button>
+        </div>
+        <div className="text-[10px] text-cyan-700/70">
+          配合「讀文字」用:讀取 → 寫剪貼簿 → 後續 Ctrl+V 貼到目標應用。{`{{變數}}`} 會被當下 step 變數值替換。
+        </div>
       </div>
 
       {/* 表格動作(讀列數 + 點 cell):只有 DataGrid/List/Tree 才出 */}

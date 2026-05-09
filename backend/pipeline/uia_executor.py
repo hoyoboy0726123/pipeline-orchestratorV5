@@ -476,6 +476,25 @@ def execute_uia_action(action: dict, step_window: str,
                 time.sleep(0.3)
             return UiaActionResult(False, f"等 {timeout}s 控制項仍未 enabled")
 
+        elif atype == "uia_set_clipboard":
+            # 把文字塞進 Windows 剪貼簿、給後續 Ctrl+V 用、跨步驟 / 跨節點傳值用
+            # 文字支援 {{變數}} 替換(get_text / get_table_rowcount 存的變數都能用)
+            raw = action.get("text", "")
+            text = _substitute_vars(raw, variables) if isinstance(raw, str) else str(raw)
+            try:
+                import win32clipboard  # type: ignore
+                win32clipboard.OpenClipboard()
+                try:
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+                finally:
+                    win32clipboard.CloseClipboard()
+            except ImportError:
+                return UiaActionResult(False, "pywin32 (win32clipboard) 未安裝、無法寫剪貼簿")
+            except Exception as e:
+                return UiaActionResult(False, f"寫剪貼簿失敗:{type(e).__name__}: {e}")
+            return UiaActionResult(True, f"已寫剪貼簿 {text[:60]!r}({len(text)} 字)")
+
         elif atype == "uia_close_window":
             # 關閉視窗的「正確」方式:走 WindowPattern.Close()、不靠 title/X 點擊、
             # 不必把視窗拉前景。控制項可以是視窗本身或視窗內任何元素(會往上找 Window)
