@@ -35,3 +35,4 @@ python-pptx
 jinja2
 markdown
 tabulate
+uiautomation

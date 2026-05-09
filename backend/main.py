@@ -735,6 +735,31 @@ async def save_png_to_assets(req: SavePngRequest):
     }
 
 
+class UiaInspectRequest(BaseModel):
+    """檢視指定視窗(或 foreground)的 UIA element tree。"""
+    window: str = ""             # 視窗 title pattern(支援 wildcard *)、空字串 = 當前 foreground
+    max_depth: int = 6           # tree 深度上限(避免某些 app 上千層)
+    max_children_per_node: int = 50  # 每節點子元素上限(避免大表格 1 萬列展開)
+
+
+@app.post("/computer-use/uia/inspect")
+async def uia_inspect(req: UiaInspectRequest):
+    """檢視 UIA element tree、給 frontend tree picker 用。
+    詳見 docs/uia-feature-evaluation.md。
+    """
+    from pipeline.uia_executor import inspect_window
+    import logging as _log
+    result = inspect_window(
+        window_pattern=req.window,
+        max_depth=req.max_depth,
+        max_children_per_node=req.max_children_per_node,
+        logger=_log.getLogger("uia_inspect"),
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "inspect 失敗"))
+    return result
+
+
 @app.delete("/computer-use/assets")
 async def delete_computer_use_assets(dir: str):
     """刪除指定的錨點資料夾（含 PNG、actions.json、meta.json）。

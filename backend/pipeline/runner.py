@@ -1514,6 +1514,7 @@ async def run_pipeline(
                         cu_vlm_check_strategy=step.cu_vlm_check_strategy,
                         cu_on_mismatch=step.cu_on_mismatch,
                         cu_vlm_max_retries=step.cu_vlm_max_retries,
+                        uia_window=step.uia_window,
                     ),
                 )
                 # 映射回 ExecResult 讓後續驗證/重試邏輯通用

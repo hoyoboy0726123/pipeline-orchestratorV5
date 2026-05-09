@@ -519,6 +519,46 @@ export async function cropAnchorFromFull(req: CropAnchorReq): Promise<{
   return res.json()
 }
 
+/** UIA element tree 節點(遞迴)。給 frontend tree picker 用。 */
+export interface UiaElement {
+  type: string                 // ControlType 名(Button / Edit / DataGrid 等)
+  name: string
+  auto_id: string              // AutomationId(可能是空)
+  rect: number[]               // [x, y, w, h] 絕對桌面座標
+  enabled: boolean
+  offscreen: boolean
+  children: UiaElement[]
+}
+
+export interface UiaInspectResult {
+  ok: boolean
+  window: { name: string; class: string; rect: number[]; process_id: number }
+  tree: UiaElement
+  error?: string
+}
+
+/** 檢視指定視窗的 UIA element tree(空 window = 當前 foreground)。 */
+export async function uiaInspect(req: {
+  window?: string
+  max_depth?: number
+  max_children_per_node?: number
+}): Promise<UiaInspectResult> {
+  const res = await fetch(`${BASE}/computer-use/uia/inspect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      window: req.window ?? '',
+      max_depth: req.max_depth ?? 6,
+      max_children_per_node: req.max_children_per_node ?? 50,
+    }),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `UIA inspect 失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
 /** 把 base64 PNG 直接存到 assets_dir(VLM 錨點立即截圖用、瀏覽器內裁切後上傳) */
 export async function saveAnchorPng(req: {
   dir: string

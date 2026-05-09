@@ -40,6 +40,9 @@ export interface StepData extends Record<string, unknown> {
   cuVlmCheckStrategy?: 'off' | 'after_each' | 'critical_only'   // 預設 off
   cuOnMismatch?: 'stop_notify' | 'retry_once' | 'skip_and_continue'  // 預設 stop_notify
   cuVlmMaxRetries?: number                // retry_once 模式重試上限（預設 1）
+  // UIA 模式
+  cuMode?: 'pixel' | 'uia'                // 預設 pixel
+  uiaWindow?: string                       // 視窗 title pattern(支援 *)
   // 視覺驗證節點（visual_validation）
   visualValidation?: boolean             // optional — 視覺驗證步驟
   vvSource?: 'prev_output' | 'current_screen'
@@ -145,6 +148,8 @@ export interface HumanConfirmData extends Record<string, unknown> {
 export interface ComputerUseAction {
   type: 'click_image' | 'click_at' | 'type_text' | 'hotkey' | 'wait' | 'wait_image' | 'screenshot' | 'scroll' | 'drag'
       | 'assert_image' | 'assert_text' | 'activate_window' | 'if_image_found' | 'retry_until' | 'vlm_check'
+      | 'uia_click' | 'uia_send_keys' | 'uia_get_text' | 'uia_get_table_rowcount' | 'uia_click_cell'
+      | 'uia_wait_enabled' | 'uia_assert_state'
   image?: string
   image2?: string        // 次錨點（多錨點驗證）
   dx2?: number           // 次錨點相對點擊點的 X 位移
@@ -177,6 +182,13 @@ export interface ComputerUseAction {
   // VLM 把關 Phase 1：動作後預期狀態（自然語言）+ 是否標記為 critical（critical_only 模式下才驗）
   expected?: string
   verify_critical?: boolean
+  // UIA action 專用(uia_click / uia_send_keys / uia_get_text / uia_get_table_rowcount / uia_click_cell / uia_wait_enabled / uia_assert_state)
+  control?: { type?: string; name?: string; auto_id?: string; depth?: number }
+  save_as?: string
+  row?: number | string                                    // 字串支援 {{var}} 替換
+  column?: number | string
+  check?: 'exists' | 'enabled' | 'focused' | 'checked'
+  window?: string                                          // action 層級 window 覆寫(空 → 用 step.uiaWindow)
   anchor_off_x?: number // 點擊相對錨點影像中心的偏移 x
   anchor_off_y?: number // 點擊相對錨點影像中心的偏移 y
   full_image?: string   // 全螢幕截圖檔名（手動圈選編輯錨點時用）
@@ -219,6 +231,9 @@ export interface ComputerUseData extends Record<string, unknown> {
   cuVlmCheckStrategy: 'off' | 'after_each' | 'critical_only'        // 預設 off
   cuOnMismatch: 'stop_notify' | 'retry_once' | 'skip_and_continue'  // 預設 stop_notify
   cuVlmMaxRetries: number   // retry_once 重試上限（預設 1）
+  // UIA 模式(預設 pixel、向後相容)
+  cuMode: 'pixel' | 'uia'   // 'pixel' = 錄製座標(現況);'uia' = UIA tree 控制
+  uiaWindow: string         // UIA 模式視窗 title pattern(支援 *)、空字串 = foreground
   timeout: number           // 秒（執行上限）
   retry: number
   index: number
@@ -430,6 +445,8 @@ export function newComputerUseData(index = 0): ComputerUseData {
     cuVlmCheckStrategy: 'off',
     cuOnMismatch: 'stop_notify',
     cuVlmMaxRetries: 1,
+    cuMode: 'pixel',
+    uiaWindow: '',
     timeout: 300,
     retry: 0,
     index,
@@ -526,6 +543,8 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           cuVlmCheckStrategy: s.cuVlmCheckStrategy ?? 'off',
           cuOnMismatch: s.cuOnMismatch ?? 'stop_notify',
           cuVlmMaxRetries: s.cuVlmMaxRetries ?? 1,
+          cuMode: s.cuMode ?? 'pixel',
+          uiaWindow: s.uiaWindow ?? '',
           timeout: s.timeout,
           retry: s.retry,
           index: i,
@@ -796,6 +815,8 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         cuVlmCheckStrategy: d.cuVlmCheckStrategy,
         cuOnMismatch: d.cuOnMismatch,
         cuVlmMaxRetries: d.cuVlmMaxRetries,
+        cuMode: d.cuMode,
+        uiaWindow: d.uiaWindow,
         timeout: d.timeout,
         retry: d.retry,
         index: i,
@@ -1140,6 +1161,9 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.cuVlmCheckStrategy && s.cuVlmCheckStrategy !== 'off') lines.push(`    cu_vlm_check_strategy: ${s.cuVlmCheckStrategy}`)
       if (s.cuOnMismatch && s.cuOnMismatch !== 'stop_notify') lines.push(`    cu_on_mismatch: ${s.cuOnMismatch}`)
       if (s.cuVlmMaxRetries !== undefined && s.cuVlmMaxRetries !== 1) lines.push(`    cu_vlm_max_retries: ${s.cuVlmMaxRetries}`)
+      // UIA 模式 — 預設 pixel、空 window
+      if (s.cuMode && s.cuMode !== 'pixel') lines.push(`    cu_mode: ${s.cuMode}`)
+      if (s.uiaWindow) lines.push(`    uia_window: ${JSON.stringify(s.uiaWindow)}`)
       if (s.computerUseActions && s.computerUseActions.length > 0) {
         // 以 JSON 陣列寫入 actions（一行一動作，夠精簡又能 yaml parse）
         lines.push(`    actions:`)

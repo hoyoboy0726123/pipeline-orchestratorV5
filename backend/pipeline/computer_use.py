@@ -17,7 +17,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -1521,6 +1521,8 @@ def execute_computer_use_step(
     cu_vlm_check_strategy: str = "off",     # off / after_each / critical_only
     cu_on_mismatch: str = "stop_notify",    # stop_notify / retry_once / skip_and_continue
     cu_vlm_max_retries: int = 1,
+    # UIA 模式相關(action.type 是 uia_* 時用)
+    uia_window: str = "",                   # 視窗 title pattern(可含 *)、空字串 = foreground
 ) -> StepResult:
     """執行一整個 computer_use 步驟。
 
@@ -1574,6 +1576,9 @@ def execute_computer_use_step(
     succeeded = 0
     failed_at = -1
     messages: list[str] = []
+    # 跨 action 變數儲存(uia_get_text / uia_get_table_rowcount 用 save_as 存的)
+    # 後續 action 內 {{var_name}} 替換靠這個
+    step_variables: dict[str, Any] = {}
 
     # VLM 把關 Phase 1 開關:strategy != off 才啟動驗證 loop;否則整段邏輯跳過、不影響舊行為
     _vlm_active = (cu_vlm_check_strategy or "off").lower() != "off"
@@ -1678,6 +1683,45 @@ def execute_computer_use_step(
     for i, action in enumerate(actions):
         do_verify = _should_verify(action)
         before_path = _capture_to_png("before", i) if do_verify else ""
+
+        # 路由:uia_* type 走 uia_executor、其他 type 走原 pixel-based execute_action
+        atype = action.get("type", "")
+        if atype.startswith("uia_"):
+            try:
+                from .uia_executor import execute_uia_action
+                uia_res = execute_uia_action(action, uia_window, step_variables, logger)
+                # 把結果包成 ActionResult 兼容後續流程
+                res = ActionResult(
+                    ok=uia_res.ok,
+                    action_index=i,
+                    action_type=atype,
+                    message=uia_res.message,
+                    duration_ms=0,
+                )
+                # 收集 save_as 變數
+                if uia_res.saved_var:
+                    var_name, var_value = uia_res.saved_var
+                    step_variables[var_name] = var_value
+                    logger.info(f"[computer_use] 變數 {var_name} = {var_value!r:.80}")
+            except Exception as e:
+                logger.exception(f"[computer_use] uia action {atype} 例外")
+                res = ActionResult(ok=False, action_index=i, action_type=atype,
+                                   message=f"{type(e).__name__}: {e}")
+            messages.append(f"#{i+1} [{res.action_type}] {'OK' if res.ok else 'FAIL'}: {res.message}")
+            if res.ok:
+                succeeded += 1
+            else:
+                if failed_at < 0:
+                    failed_at = i
+                if fail_fast:
+                    return StepResult(
+                        success=False, total_actions=len(actions),
+                        succeeded=succeeded, failed_at=i,
+                        stdout="\n".join(messages),
+                        stderr=f"動作 #{i+1} ({atype}) 失敗:{res.message}",
+                        exit_code=1,
+                    )
+            continue  # uia 動作不走 VLM 把關(它本來就讀結構、漂移免疫)
 
         try:
             res = execute_action(action, assets, i, logger, run_id,

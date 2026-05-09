@@ -42,6 +42,7 @@ import {
 } from '@/lib/api'
 import AnchorEditorModal from './_anchorEditorModal'
 import VlmAnchorPicker from './_vlmAnchorPicker'
+import UiaInspectorPanel from './_uiaInspectorPanel'
 import { assetImageUrl } from '@/lib/api'
 
 const NODE_COLOR = '#9333ea'
@@ -228,7 +229,11 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           style={{ background: NODE_COLOR }}><MousePointer2 className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
           <span className="font-semibold text-gray-800 text-sm block truncate">桌面自動化節點</span>
-          <span className="text-xs text-gray-400">錄製滑鼠/鍵盤操作，以圖像錨點穩定回放</span>
+          <span className="text-xs text-gray-400">
+            {(data.cuMode || 'pixel') === 'uia'
+              ? 'UIA 控制(讀 GUI 結構、不靠座標)'
+              : '錄製滑鼠/鍵盤操作，以圖像錨點穩定回放'}
+          </span>
         </div>
         <button onClick={onDelete} title="刪除" className="text-gray-300 hover:text-red-400 transition-colors p-1">🗑</button>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors"><X className="w-4 h-4" /></button>
@@ -242,7 +247,46 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           <input value={data.name} onChange={e => onUpdate({ name: e.target.value })} className={`${inputCls} font-mono`} />
         </div>
 
-        {/* 錄製按鈕 */}
+        {/* 模式切換:Pixel(錄製座標) vs UIA(讀 GUI 結構) */}
+        <div className="rounded-xl border border-gray-200 overflow-hidden flex">
+          <button
+            type="button"
+            onClick={() => onUpdate({ cuMode: 'pixel' })}
+            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+              (data.cuMode || 'pixel') === 'pixel'
+                ? 'bg-purple-600 text-white'
+                : 'bg-white text-gray-600 hover:bg-purple-50'
+            }`}
+          >
+            🎯 Pixel 模式<span className="text-[10px] block mt-0.5 opacity-80">錄製座標 + CV/OCR/VLM</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onUpdate({ cuMode: 'uia' })}
+            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+              data.cuMode === 'uia'
+                ? 'bg-purple-600 text-white'
+                : 'bg-white text-gray-600 hover:bg-purple-50'
+            }`}
+          >
+            🪟 UIA 模式<span className="text-[10px] block mt-0.5 opacity-80">讀 GUI 結構、座標漂免疫</span>
+          </button>
+        </div>
+
+        {/* UIA 模式:走 inspector 抓元素、選元素、加動作 */}
+        {data.cuMode === 'uia' && (
+          <UiaInspectorPanel
+            uiaWindow={data.uiaWindow || ''}
+            onUpdateWindow={(w) => onUpdate({ uiaWindow: w })}
+            onAddAction={(action) => {
+              const next = [...(data.actions || []), action]
+              onUpdate({ actions: next })
+            }}
+          />
+        )}
+
+        {/* 錄製按鈕 — 只 Pixel 模式才顯示 */}
+        {(data.cuMode || 'pixel') === 'pixel' && (
         <div className="p-3 rounded-lg border border-purple-200 bg-purple-50/50 space-y-2">
           <div className="flex items-center gap-2">
             {!recording ? (
@@ -269,6 +313,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
             按下開始後切換到要自動化的應用操作即可。點擊時會擷取周圍 240×80 的錨點 + 整個螢幕截圖（存在 <code className="font-mono text-purple-700">assets_dir</code> 中，日後可點「✏️ 編輯錨點」手動調整範圍）。按 F9 或這個按鈕可停止。
           </p>
         </div>
+        )}
 
         {/* 動作列表 */}
         <div>

@@ -127,6 +127,15 @@ class ComputerUseAction(BaseModel):
     # 不是讓 VLM 決定座標、不是讓它執行動作；只回傳 {"pass": bool, "reason": str}
     # 模型本身不支援視覺時，呼叫會直接報錯（不靜默 fallback）
     vlm_prompt: str = ""
+    # ── UIA action 專用欄位(uia_click / uia_send_keys / uia_get_text 等用)──
+    # control 識別:by Name / AutomationId / ControlType、可組合
+    control: dict = {}           # {"type": "Button", "name": "儲存", "auto_id": "save-btn", "depth": 10}
+    save_as: str = ""            # uia_get_text / uia_get_table_rowcount 把值存到此變數名、後續 step 可用 {{...}}
+    row: int | str = 0           # uia_click_cell 用、可填字串(如 "{{row_count + 1}}")延後解析
+    column: int | str = 0        # uia_click_cell 用
+    check: str = ""              # uia_assert_state 用:exists / enabled / focused / checked
+    window: str = ""              # action 層級 window 覆寫(無填走 step.uia_window)、支援 wildcard *
+
     # ── VLM 把關 Phase 1:每動作執行後驗證(跟 vlm_check 不同) ──────────
     # vlm_check 是「動作序列裡的 explicit 檢查步」、不點擊純判斷;
     # 這兩個欄位是「click/type/hotkey 等動作執行**之後**自動把前後截圖送 VLM 看
@@ -178,6 +187,10 @@ class PipelineStep(BaseModel):
     # 當 computer_use=True 時，runner 走桌面自動化引擎（pyautogui + cv2 比對），
     # 完全跳過 LLM 與 recipe 系統。
     computer_use: bool = False   # True = 桌面自動化節點
+    cu_mode: str = "pixel"       # "pixel" = 錄製座標 + CV/OCR/VLM(現況、預設);"uia" = UIA 控制
+                                  # 兩種模式 actions[] 共用、實際分派依 action.type 走
+                                  # 詳見 docs/uia-feature-evaluation.md
+    uia_window: str = ""         # cu_mode=uia 時用、視窗 title 比對(支援 wildcard *)、空字串 = foreground
     actions: list[ComputerUseAction] = []  # 錄製/手編的動作序列
     assets_dir: str = ""         # 錨點圖片資料夾（相對路徑掛到工作流目錄下）
     fail_fast: bool = True       # True = 任一動作失敗立即中止；False = 警告後繼續
