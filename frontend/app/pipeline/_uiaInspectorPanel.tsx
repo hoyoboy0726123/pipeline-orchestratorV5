@@ -15,7 +15,7 @@ import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChec
 import { toast } from 'sonner'
 import {
   uiaInspect, uiaHighlight, uiaListWindows,
-  uiaPickerStart, uiaPickerPoll, uiaPickerConsume, uiaPickerStop,
+  uiaPickerStart, uiaPickerPoll, uiaPickerConsume, uiaPickerStop, uiaPickerConfirm,
   type UiaElement, type UiaInspectResult, type UiaWindowInfo
 } from '@/lib/api'
 import type { ComputerUseAction } from './_helpers'
@@ -243,10 +243,7 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
             <div className="flex items-center gap-2">
               <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span className="font-semibold text-emerald-700 text-sm">🎯 定位中…</span>
-              <span className="text-[11px] text-gray-600 ml-auto">F8 確認、F9 取消</span>
-              <button onClick={stopPicker} className="text-emerald-700 hover:text-emerald-900 p-0.5">
-                <X className="w-4 h-4" />
-              </button>
+              <span className="text-[10px] text-gray-500 ml-auto">F8/F9 或下方按鈕</span>
             </div>
             {hoveredEl ? (
               <div className="bg-white border border-emerald-200 rounded p-2 text-[11px]">
@@ -265,6 +262,36 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
             ) : (
               <div className="text-[11px] text-gray-500 italic px-1">移動滑鼠到桌面元素…</div>
             )}
+            {/* 按鈕保險(F8/F9 失靈時用)*/}
+            <div className="flex gap-2">
+              <button
+                onClick={async () => {
+                  try {
+                    const r = await uiaPickerConfirm()
+                    if (r.ok && r.element) {
+                      // picker backend 已停、frontend 也要 sync
+                      if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
+                      setPickerActive(false)
+                      setHoveredEl(null)
+                      setPicker({ element: r.element, path: ['picked'] })
+                      toast.success(`已選 ${r.element.type}${r.element.name ? ': ' + r.element.name.slice(0, 40) : ''}`)
+                    } else {
+                      toast.error(r.error || '目前沒 hover 任何元素')
+                    }
+                  } catch (e) { toast.error((e as Error).message) }
+                }}
+                disabled={!hoveredEl}
+                className="flex-1 px-2 py-1.5 bg-emerald-600 text-white rounded text-xs font-medium hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+              >
+                <CheckCircle className="w-3.5 h-3.5" /> 確認(F8)
+              </button>
+              <button
+                onClick={stopPicker}
+                className="flex-1 px-2 py-1.5 bg-white border border-gray-300 text-gray-700 rounded text-xs font-medium hover:bg-gray-50 flex items-center justify-center gap-1"
+              >
+                <X className="w-3.5 h-3.5" /> 取消(F9)
+              </button>
+            </div>
           </div>
         )}
       </div>

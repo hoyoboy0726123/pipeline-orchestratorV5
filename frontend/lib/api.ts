@@ -622,6 +622,11 @@ export async function uiaPickerStop(): Promise<{ ok: boolean; was_running: boole
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
+export async function uiaPickerConfirm(): Promise<{ ok: boolean; element?: UiaElement; error?: string }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/confirm`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
 
 /** 把 base64 PNG 直接存到 assets_dir(VLM 錨點立即截圖用、瀏覽器內裁切後上傳) */
 export async function saveAnchorPng(req: {

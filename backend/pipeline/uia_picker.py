@@ -60,6 +60,17 @@ class _UiaPicker:
             pass
         return was_running
 
+    def confirm_current(self) -> Optional[dict]:
+        """frontend 按「確認」按鈕呼這個、把當下 hover 元素鎖進 confirmed、停 picker。
+        F8 hotkey 走另一條 GetAsyncKeyState 路徑、兩個都可用。"""
+        with self._lock:
+            if self._last_element:
+                self._confirmed = dict(self._last_element)
+                _log.info(f"[uia-picker] frontend 按鈕確認 {self._confirmed.get('type')}:{self._confirmed.get('name', '')[:60]}")
+                self._running = False
+                return dict(self._confirmed)
+            return None
+
     def poll(self) -> dict:
         with self._lock:
             return {
@@ -79,10 +90,16 @@ class _UiaPicker:
         """背景 loop:輪詢滑鼠 + key state、UIA query、紅框 refresh。"""
         try:
             import uiautomation as auto
-            from ctypes import windll, Structure, c_long, byref
+            from ctypes import windll, Structure, c_long, c_short, byref
 
             class POINT(Structure):
                 _fields_ = [("x", c_long), ("y", c_long)]
+
+            # 明確設 GetAsyncKeyState 回傳型別為 c_short(原始 SHORT)、避免 ctypes 預設 c_int
+            # 在某些 Win64 環境下解 SHORT 出怪值
+            get_key = windll.user32.GetAsyncKeyState
+            get_key.restype = c_short
+            get_key.argtypes = [c_long]
 
             from .cu_highlight_overlay import highlight as draw_highlight, clear_highlight
         except Exception as e:
@@ -96,14 +113,23 @@ class _UiaPicker:
         # 上次 key state、用來偵測「從沒按到按下」的瞬間(避免 F8 一直按住觸發多次)
         f8_was_down = False
         f9_was_down = False
+        loop_count = 0
 
         while self._running:
             try:
                 # ── poll F8/F9 ──────────────────────────────────────
-                f8_now = bool(windll.user32.GetAsyncKeyState(VK_F8) & 0x8000)
-                f9_now = bool(windll.user32.GetAsyncKeyState(VK_F9) & 0x8000)
-                # 偵測上升緣
-                if f8_now and not f8_was_down:
+                # GetAsyncKeyState 回 c_short:bit 15 = 當前是否按下、bit 0 = 自上次 query 以來是否按過
+                # 用 (raw & 0x8000) != 0 偵測現在是否按下、 raw & 1 偵測按過(更敏感、適合短按)
+                f8_raw = get_key(VK_F8)
+                f9_raw = get_key(VK_F9)
+                f8_now = bool(f8_raw & 0x8000)
+                f9_now = bool(f9_raw & 0x8000)
+                # 第一次按過自上次 query 以來(catch fast tap)、避免 80ms poll 間隔錯失短按
+                f8_pressed_since = bool(f8_raw & 1)
+                f9_pressed_since = bool(f9_raw & 1)
+
+                # 偵測「按下事件」:目前按著(was_down=False, now=True)、或自上次 query 起按過
+                if (f8_now and not f8_was_down) or f8_pressed_since:
                     with self._lock:
                         if self._last_element:
                             self._confirmed = dict(self._last_element)
@@ -111,13 +137,18 @@ class _UiaPicker:
                             self._running = False
                             break
                         else:
-                            _log.info("[uia-picker] F8 按下但 _last_element=None、忽略")
-                if f9_now and not f9_was_down:
+                            _log.info("[uia-picker] F8 按下但 _last_element=None、忽略(請先把滑鼠移到目標元素)")
+                if (f9_now and not f9_was_down) or f9_pressed_since:
                     _log.info("[uia-picker] F9 取消")
                     self._running = False
                     break
                 f8_was_down = f8_now
                 f9_was_down = f9_now
+
+                # 每 50 輪(~4 秒)log 一次 picker 還活著、debug 用
+                loop_count += 1
+                if loop_count % 50 == 0:
+                    _log.debug(f"[uia-picker] alive iter={loop_count} f8_raw={f8_raw} hovered={'yes' if self._last_element else 'no'}")
 
                 # ── poll 滑鼠位置 ───────────────────────────────────
                 p = POINT()

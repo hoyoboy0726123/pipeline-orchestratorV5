@@ -820,6 +820,17 @@ async def uia_picker_stop():
     return {"ok": True, "was_running": was_running}
 
 
+@app.post("/computer-use/uia/picker/confirm")
+async def uia_picker_confirm():
+    """frontend 按鈕「確認當前 hover」走這個、不靠 F8 hotkey。"""
+    from pipeline.uia_picker import get_picker
+    p = get_picker()
+    el = p.confirm_current()
+    if not el:
+        return {"ok": False, "error": "目前沒 hover 任何元素、移動滑鼠到目標再確認"}
+    return {"ok": True, "element": el}
+
+
 @app.get("/computer-use/uia/windows")
 async def uia_list_windows():
     """列當下所有可見的 top-level 視窗、給 frontend 「📋 列出視窗」選單用。
