@@ -48,6 +48,8 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
   const [pickerActive, setPickerActive] = useState(false)
   const [hoveredEl, setHoveredEl] = useState<UiaElement | null>(null)
   const pickerPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pickerActiveRef = useRef(false)   // unmount cleanup 用、避免 useEffect deps=[pickerActive]
+                                          // 在 state 改變時誤觸發 cleanup 把 setInterval 砍掉
 
   const inspect = useCallback(async () => {
     setLoading(true)
@@ -81,9 +83,10 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
 
   // Live Picker:啟動 + 輪詢 + 確認後 reset、停止 picker
   const startPicker = useCallback(async () => {
-    if (pickerActive) return
+    if (pickerActiveRef.current) return
     try {
       await uiaPickerStart()
+      pickerActiveRef.current = true
       setPickerActive(true)
       setHoveredEl(null)
       toast.success('🎯 移動滑鼠到目標、按 F8 確認、F9 取消', { duration: 4000 })
@@ -100,11 +103,13 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
             }
             // 確認後 picker 已自停;清 polling
             if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
+            pickerActiveRef.current = false
             setPickerActive(false)
             setHoveredEl(null)
           } else if (!s.running) {
             // F9 取消或 picker 自停
             if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
+            pickerActiveRef.current = false
             setPickerActive(false)
             setHoveredEl(null)
             if (s.error) toast.error(s.error)
@@ -115,23 +120,25 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
       }, 250)
     } catch (e) {
       toast.error((e as Error).message)
+      pickerActiveRef.current = false
       setPickerActive(false)
     }
-  }, [pickerActive])
+  }, [])
 
   const stopPicker = useCallback(async () => {
-    if (!pickerActive) return
+    if (!pickerActiveRef.current) return
     try { await uiaPickerStop() } catch {}
     if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
+    pickerActiveRef.current = false
     setPickerActive(false)
     setHoveredEl(null)
-  }, [pickerActive])
+  }, [])
 
-  // unmount cleanup
+  // unmount cleanup(deps 空、只在 component 真的 unmount 時跑、避免每次 pickerActive 變動誤觸發)
   useEffect(() => () => {
     if (pickerPollRef.current) clearInterval(pickerPollRef.current)
-    if (pickerActive) uiaPickerStop().catch(() => {})
-  }, [pickerActive])
+    if (pickerActiveRef.current) uiaPickerStop().catch(() => {})
+  }, [])
 
   const togglePath = (path: string) => {
     setExpanded(s => {
