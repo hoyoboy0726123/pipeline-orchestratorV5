@@ -20,11 +20,13 @@ import {
   type UiaElement, type UiaInspectResult, type UiaWindowInfo
 } from '@/lib/api'
 import type { ComputerUseAction } from './_helpers'
+import { VariableButton } from './_variablePicker'
 
 interface Props {
   uiaWindow: string
   onUpdateWindow: (w: string) => void
   onAddAction: (action: ComputerUseAction) => void
+  workflowId?: string
 }
 
 interface PickerState {
@@ -32,7 +34,7 @@ interface PickerState {
   path: string[]   // 從 root 來的描述路徑(顯示用、不送 backend)
 }
 
-export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddAction }: Props) {
+export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddAction, workflowId }: Props) {
   const [tree, setTree] = useState<UiaInspectResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -331,8 +333,12 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
           <input
             value={uiaWindow}
             onChange={e => onUpdateWindow(e.target.value)}
-            placeholder="例:*檔案總管* 或 留空用 foreground"
+            placeholder="例:*檔案總管* / *{{ input.app }}* / 留空用 foreground"
             className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white"
+          />
+          <VariableButton
+            workflowId={workflowId}
+            onPick={(p) => onUpdateWindow(`${uiaWindow || ''}{{ ${p} }}`)}
           />
           <button
             onClick={loadWindows}
@@ -433,7 +439,7 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
               <X className="w-3 h-3" />
             </button>
           </div>
-          <UiaActionPicker element={picker.element} onAdd={addAction} />
+          <UiaActionPicker element={picker.element} onAdd={addAction} workflowId={workflowId} />
         </div>
       )}
     </div>
@@ -444,9 +450,11 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
 function UiaActionPicker({
   element,
   onAdd,
+  workflowId,
 }: {
   element: UiaElement
   onAdd: (type: ComputerUseAction['type'], extra?: Partial<ComputerUseAction>) => void
+  workflowId?: string
 }) {
   const [textInput, setTextInput] = useState('')
   const [keysInput, setKeysInput] = useState('')
@@ -510,12 +518,16 @@ function UiaActionPicker({
       {isEditable && (
         <div className="bg-emerald-50/50 border border-emerald-200 rounded p-2 space-y-1">
           <div className="text-[11px] font-semibold text-emerald-700">輸入文字到此控制項</div>
-          <div className="flex gap-1">
+          <div className="flex gap-1 items-center">
             <input
               value={textInput}
               onChange={e => setTextInput(e.target.value)}
-              placeholder="文字(可含 {{var}})、例:=SUM(D2:D{{row_count}})"
+              placeholder="文字(可含 {{var}} 或 {{ steps.X.output.Y }})"
               className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
+            />
+            <VariableButton
+              workflowId={workflowId}
+              onPick={(p) => setTextInput(`${textInput}{{ ${p} }}`)}
             />
             <HelpTooltip
               title="送文字"
@@ -573,12 +585,16 @@ function UiaActionPicker({
       {/* 寫剪貼簿(任何元素都可、用於把上一步 save 的變數塞進剪貼簿、後續 Ctrl+V 貼用) */}
       <div className="bg-cyan-50/50 border border-cyan-200 rounded p-2 space-y-1">
         <div className="text-[11px] font-semibold text-cyan-700">📋 寫剪貼簿(同節點內)</div>
-        <div className="flex gap-1">
+        <div className="flex gap-1 items-center">
           <input
             value={clipboardInput}
             onChange={e => setClipboardInput(e.target.value)}
-            placeholder="例:{{order_id}}、{{logged_user}}、固定文字"
+            placeholder="例:{{order_id}}、{{ steps.X.output.Y }}、固定文字"
             className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
+          />
+          <VariableButton
+            workflowId={workflowId}
+            onPick={(p) => setClipboardInput(`${clipboardInput}{{ ${p} }}`)}
           />
           <HelpTooltip
             title="寫剪貼簿"

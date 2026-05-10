@@ -130,6 +130,17 @@ function buildWelcomeMessage(env: EnvPaths): string {
 單一步驟：用多代理節點、角色挑「**資料分析師（data_analyst）**」、最多輪數設 6-8、任務描述寫清楚目標即可（不用拆步驟）。多代理會自己 read → run_python → 看結果 → 再 read… 直到產出 \`analysis.md\`。`
   const ex7Note = '\n\n> 🧠 **何時用多代理 vs AI 技能**：每天跑、邏輯固定（讀 X 算 Y 寫 Z）→ 用 **AI 技能 + Recipe**（第二次起零 token）；結構不固定、邊想邊改、要試錯（探索/研究/debug）→ 用 **多代理**（每次重新推理、能根據中間結果調整、token 用量是 skill 的 2-5 倍）。'
 
+  // 範例 8:變數系統 — 動態日期 / 跨節點傳值(讓 workflow 可重用、配 cron 跑一輩子)
+  const ex8 = `**範例 8(動態啟動參數 + 跨節點傳值)**
+任務:「我想讓某個爬蟲每天自動跑、檔名帶日期、結果寄給老闆」、或「UIA 從 ERP 抓到的訂單號要餵給後面所有節點用」。
+
+兩種變數寫法:
+1. **啟動參數**:YAML 寫 \`{{ input.date }}\`、跑的時候帶值(\`/run daily date=today\` 或前端 Run 對話框填),一條 YAML 配 cron 跑一輩子
+2. **跨節點傳值**:UIA 抓欄位用 \`save_as: order_id\`、後面節點寫 \`{{ steps.uia_step.output.order_id }}\` 直接拿
+
+效益:不用每天進來改死值、同一條流程能服務多客戶、抓到的值不必繞剪貼簿。`
+  const ex8Note = '\n\n> 💡 **何時該用變數**:看到「每天 / 每週」「不同客戶」「上一步抓到的 X 餵給下一步」就用 \`{{ }}\`;一次性寫死腳本不用。\n> 📚 變數來源三種:\`{{ steps.X.output.Y }}\`(上游節點輸出)/ \`{{ input.X }}\`(啟動參數)/ \`{{ env.X }}\`(環境變數)。'
+
   const examples = [
     wrap('📋 範例 1：Python 腳本串接', ex1),
     wrap('📋 範例 2：Python 腳本 + AI 技能', ex2),
@@ -138,6 +149,7 @@ function buildWelcomeMessage(env: EnvPaths): string {
     wrap('📋 範例 5：AI 技能 + 視覺驗證', ex5 + ex5Note),
     wrap('📋 範例 6：啟動既有 Python 專案 + AI 驗證 + 人工確認', ex6 + ex6Note),
     wrap('📋 範例 7：多代理 — 探索式分析', ex7 + ex7Note),
+    wrap('📋 範例 8：動態啟動參數 + 跨節點傳值(變數系統)', ex8 + ex8Note),
   ]
   const examplesHeader = '\n\n📋 **範例參考**（點任一行展開查看細節，可直接抄走給我作為起點）：'
 

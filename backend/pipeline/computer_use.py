@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1434,6 +1434,10 @@ class StepResult:
     stdout: str = ""
     stderr: str = ""
     exit_code: int = 0
+    # UIA / Computer Use 透過 save_as 累積的步驟變數(uia_get_text 等存入)。
+    # runner 拿到後寫進 PipelineRun.step_results[i].step_vars,後續 step 可用
+    # `{{ steps.<name>.output.<key> }}` 引用。
+    step_variables: dict = field(default_factory=dict)
 
 
 MAX_ACTIONS_PER_STEP = 500  # 單步動作數上限，防止失控腳本無限循環
@@ -1720,6 +1724,7 @@ def execute_computer_use_step(
                         stdout="\n".join(messages),
                         stderr=f"動作 #{i+1} ({atype}) 失敗:{res.message}",
                         exit_code=1,
+                        step_variables=dict(step_variables),
                     )
             continue  # uia 動作不走 VLM 把關(它本來就讀結構、漂移免疫)
 
@@ -1744,6 +1749,7 @@ def execute_computer_use_step(
                 stdout="\n".join(messages),
                 stderr=str(abort_err),
                 exit_code=130,  # SIGINT-ish
+                step_variables=dict(step_variables),
             )
         messages.append(f"#{i+1} [{res.action_type}] {'OK' if res.ok else 'FAIL'}: {res.message}")
 
@@ -1788,6 +1794,7 @@ def execute_computer_use_step(
                                 succeeded=succeeded, failed_at=i,
                                 stdout="\n".join(messages), stderr=str(abort_err),
                                 exit_code=130,
+                                step_variables=dict(step_variables),
                             )
                         if not res.ok:
                             messages.append(f"  ⚠ retry {_retry_count} 動作直接失敗: {res.message}")
@@ -1807,6 +1814,7 @@ def execute_computer_use_step(
                         stdout="\n".join(messages),
                         stderr=f"VLM 把關失敗(動作 #{i+1} {res.action_type}): {verdict['reason'][:200]}",
                         exit_code=2,  # 區別動作 fail (=1) 和 VLM mismatch (=2)
+                        step_variables=dict(step_variables),
                     )
 
         if res.ok:
@@ -1823,6 +1831,7 @@ def execute_computer_use_step(
                     stdout="\n".join(messages),
                     stderr=f"動作 #{i + 1} ({res.action_type}) 失敗：{res.message}",
                     exit_code=1,
+                    step_variables=dict(step_variables),
                 )
 
     all_ok = (failed_at < 0)
@@ -1835,4 +1844,5 @@ def execute_computer_use_step(
         stdout="\n".join(messages),
         stderr="" if all_ok else f"失敗動作數：{len(actions) - succeeded}",
         exit_code=0 if all_ok else 1,
+        step_variables=dict(step_variables),
     )

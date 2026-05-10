@@ -1,6 +1,7 @@
 'use client'
 import { X, UserCheck } from 'lucide-react'
 import type { HumanConfirmData, HumanConfirmNode } from './_helpers'
+import { VariableButton } from './_variablePicker'
 
 const CONFIRM_COLOR = '#10b981'
 
@@ -9,9 +10,10 @@ interface Props {
   onUpdate: (data: Partial<HumanConfirmData>) => void
   onClose: () => void
   onDelete: () => void
+  workflowId?: string
 }
 
-export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete }: Props) {
+export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete, workflowId }: Props) {
   const data = node.data
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400/20 bg-white'
 
@@ -39,7 +41,13 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete }:
 
         {/* Message */}
         <div>
-          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">確認訊息</label>
+          <div className="flex items-end justify-between mb-2">
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">確認訊息</label>
+            <VariableButton
+              workflowId={workflowId}
+              onPick={(p) => onUpdate({ message: `${data.message || ''}{{ ${p} }}` })}
+            />
+          </div>
           <textarea
             rows={6}
             value={data.message}
@@ -50,10 +58,10 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete }:
               const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
               if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
             }}
-            placeholder={'（選填）自訂確認提示…\n例如：請確認抓取的資料筆數正確，再繼續進行分析'}
+            placeholder={'(選填)自訂確認提示…\n例如:請確認 {{ steps.crawl.output.path }} 是否正確'}
             className={`${inputCls} resize-y text-xs leading-relaxed min-h-[100px]`}
           />
-          <p className="text-xs text-gray-400 mt-1.5">留空則顯示預設訊息：「請確認上一步結果是否正確」</p>
+          <p className="text-xs text-gray-400 mt-1.5">支援 <code className="bg-gray-100 px-1 rounded font-mono">{`{{ steps.X.output.Y }}`}</code> 等變數;留空 = 預設「請確認上一步結果是否正確」</p>
         </div>
 
         {/* Telegram toggle */}

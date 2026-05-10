@@ -4,6 +4,7 @@ import { X, FolderOpen, ChevronDown, ChevronUp, Brain } from 'lucide-react'
 import type { SubagentData, SubagentNode } from './_helpers'
 import { fsBrowse } from '@/lib/api'
 import { toast } from 'sonner'
+import { VariableButton } from './_variablePicker'
 
 // ── File Browser Modal（沿用 skillPanel 的設計）────────────────────────────────
 interface BrowseItem { name: string; is_dir: boolean; path: string }
@@ -108,9 +109,10 @@ interface Props {
   onUpdate: (data: Partial<SubagentData>) => void
   onClose: () => void
   onDelete: () => void
+  workflowId?: string
 }
 
-export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete }: Props) {
+export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete, workflowId }: Props) {
   const data = node.data
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [browserTarget, setBrowserTarget] = useState<'output' | 'workingDir' | null>(null)
@@ -177,7 +179,13 @@ export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete 
 
           {/* Task Description */}
           <div>
-            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">任務描述</label>
+            <div className="flex items-end justify-between mb-2">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">任務描述</label>
+              <VariableButton
+                workflowId={workflowId}
+                onPick={(p) => onUpdate({ taskDescription: `${data.taskDescription || ''}{{ ${p} }}` })}
+              />
+            </div>
             <textarea
               rows={7}
               value={data.taskDescription}
@@ -188,11 +196,11 @@ export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete 
                 const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
                 if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
               }}
-              placeholder={'用自然語言描述任務、subagent 會自主決定如何用工具完成…\n例如：讀 sales.xlsx、找出 Q1 環比下滑最嚴重的 3 個品類、\n畫趨勢折線圖存成 trend.png、產出分析報告 analysis.md'}
+              placeholder={'用自然語言描述任務、subagent 會自主決定如何用工具完成…\n例如:讀 {{ steps.fetch.output.path }}、找出 Q1 環比下滑最嚴重的 3 個品類'}
               className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[120px]`}
             />
             <p className="text-xs text-gray-400 mt-1.5">
-              Subagent 會多輪推理、按需使用配發的工具完成任務
+              Subagent 會多輪推理、按需使用配發的工具完成任務(支援 <code className="bg-gray-100 px-1 rounded font-mono">{`{{ }}`}</code> 變數)
             </p>
           </div>
 

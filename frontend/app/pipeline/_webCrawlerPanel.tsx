@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { X, Plus, Trash2, GripVertical, Info, ChevronDown, ChevronRight, Globe, Film } from 'lucide-react'
 import type { WebCrawlerData, WebCrawlerNode, WebCrawlerAction } from './_helpers'
+import { VariableButton } from './_variablePicker'
 
 const NODE_COLOR = '#0d9488'
 
@@ -11,6 +12,7 @@ interface Props {
   onUpdate: (data: Partial<WebCrawlerData>) => void
   onClose: () => void
   onDelete: () => void
+  workflowId?: string
 }
 
 const ACTION_LABEL: Record<WebCrawlerAction['type'], string> = {
@@ -21,7 +23,7 @@ const ACTION_LABEL: Record<WebCrawlerAction['type'], string> = {
   type: '⌨ 輸入文字',
 }
 
-export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: Props) {
+export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete, workflowId }: Props) {
   const data = node.data
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500/20 bg-white'
 
@@ -193,7 +195,7 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: P
               <textarea
                 className={`${inputCls} font-mono text-xs resize-y min-h-[60px]`}
                 rows={isMulti ? 7 : 4}
-                placeholder={'https://example.com/article/...\n# 多 URL 一行一個（# 開頭視為註解、跳過）\nhttps://another-site.com/page'}
+                placeholder={'https://example.com/article/{{ input.slug }}\n# 多 URL 一行一個(# 開頭視為註解、跳過)\nhttps://another-site.com/page'}
                 value={urlsText}
                 onChange={e => handleChange(e.target.value)}
                 onWheel={(e) => {
@@ -203,6 +205,12 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: P
                   if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
                 }}
               />
+              <div className="flex justify-end mt-1">
+                <VariableButton
+                  workflowId={workflowId}
+                  onPick={(p) => handleChange(`${urlsText}{{ ${p} }}`)}
+                />
+              </div>
               <p className="text-[10px] text-gray-400 mt-0.5">
                 {isMulti ? (
                   <>
@@ -232,9 +240,15 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: P
                 value={data.videoUrl}
                 onChange={e => onUpdate({ videoUrl: e.target.value })}
               />
+              <div className="flex justify-end mt-1">
+                <VariableButton
+                  workflowId={workflowId}
+                  onPick={(p) => onUpdate({ videoUrl: `${data.videoUrl || ''}{{ ${p} }}` })}
+                />
+              </div>
               <p className="text-[10px] text-gray-400 mt-0.5">
                 <Info className="w-3 h-3 inline align-text-top mr-0.5" />
-                yt-dlp 支援的所有站都可以（playlist 只抓第一個影片）
+                yt-dlp 支援的所有站都可以(playlist 只抓第一個影片)
               </p>
             </div>
 

@@ -1261,7 +1261,50 @@ async def run_pipeline(
         # 表示這步沒有 LLM 多輪推理可記。step_result 結尾再寫進 StepResult.token_usage / tool_calls。
         step_token_usage: dict = {}
         step_tool_calls: list = []
+        # 該步驟匯出的變數(UIA/Computer Use 的 save_as 累積)。執行完寫進 StepResult.step_vars
+        # 供下游 step 用 `{{ steps.<name>.output.<key> }}` 引用
+        step_step_vars: dict = {}
         step_started_at = datetime.now().isoformat()
+
+        # ── 變數 / 表達式系統:render 該步所有 {{ }} 欄位 ──
+        # 沒寫 {{ }} 的欄位完全不動(舊 workflow 行為不變)
+        # render 用的 context = run.step_results(已完成) + run.input_params + os.environ
+        try:
+            from .expression import (
+                build_context as _build_var_context,
+                render_step as _render_var_step,
+                ExpressionError as _VarExpressionError,
+            )
+            _var_ctx = _build_var_context(
+                step_results=run.step_results,
+                input_params=getattr(run, "input_params", None) or {},
+            )
+            _render_var_step(step, _var_ctx)
+        except _VarExpressionError as _var_exc:
+            logger.error(f"[{step.name}] 變數展開失敗:{_var_exc}")
+            step_result = StepResult(
+                step_index=run.current_step,
+                step_name=step.name,
+                exit_code=1,
+                stdout_tail="",
+                stderr_tail=str(_var_exc),
+                validation_status="failed",
+                validation_reason=f"變數展開失敗:{_var_exc}",
+                validation_suggestion="檢查 {{ }} 內變數是否拼錯、或啟動 workflow 時是否漏帶 input_params",
+                retries_used=0,
+                started_at=step_started_at,
+                ended_at=datetime.now().isoformat(),
+            )
+            if len(run.step_results) > run.current_step:
+                run.step_results[run.current_step] = step_result
+            else:
+                run.step_results.append(step_result)
+            run.status = "failed"
+            run.ended_at = datetime.now().isoformat()
+            store.save(run)
+            await _notify_final(run, config)
+            unregister_task(run.run_id)
+            return run.run_id
 
         # 步驟開始前 snapshot workflow 輸出資料夾（mtime 比對用）
         # 步驟結束後 _diff_snapshot_pick_main 找新增/修改的檔，存進 StepResult.actual_output_path
@@ -1523,6 +1566,10 @@ async def run_pipeline(
                     stdout=_cu_result.stdout,
                     stderr=_cu_result.stderr,
                 )
+                # 把 UIA / Computer Use 透過 save_as 累積的變數帶到 step_result.step_vars,
+                # 後續 step 可用 `{{ steps.<name>.output.<key> }}` 引用。
+                if getattr(_cu_result, "step_variables", None):
+                    step_step_vars.update(_cu_result.step_variables)
             elif step.outlook_automation:
                 # Outlook 自動化節點：永遠跑 host（pywin32），跳過 sandbox / recipe 路徑
                 if step.output and step.output.path:
@@ -1822,6 +1869,7 @@ async def run_pipeline(
                 tool_calls=step_tool_calls,
                 started_at=step_started_at,
                 ended_at=datetime.now().isoformat(),
+                step_vars=dict(step_step_vars),
             )
 
             # 更新或追加步驟結果

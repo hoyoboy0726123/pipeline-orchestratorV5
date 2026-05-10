@@ -5,6 +5,7 @@ import type { SkillData, SkillNode } from './_helpers'
 import { fsBrowse, listAvailableSkills, type AvailableSkill } from '@/lib/api'
 import { toast } from 'sonner'
 import { useRunStatusStore } from './_runStatus'
+import { VariableButton } from './_variablePicker'
 
 // ── File Browser Modal ────────────────────────────────────────────────────────
 interface BrowseItem { name: string; is_dir: boolean; path: string }
@@ -81,9 +82,10 @@ interface Props {
   onUpdate: (data: Partial<SkillData>) => void
   onClose: () => void
   onDelete: () => void
+  workflowId?: string
 }
 
-export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: Props) {
+export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete, workflowId }: Props) {
   const data = node.data
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [browserTarget, setBrowserTarget] = useState<'output' | 'workingDir' | null>(null)
@@ -150,7 +152,13 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
 
           {/* Task Description */}
           <div>
-            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">任務描述</label>
+            <div className="flex items-end justify-between mb-2">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">任務描述</label>
+              <VariableButton
+                workflowId={workflowId}
+                onPick={(p) => onUpdate({ taskDescription: `${data.taskDescription || ''}{{ ${p} }}` })}
+              />
+            </div>
             <textarea
               rows={7}
               value={data.taskDescription}
@@ -162,10 +170,10 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
                 const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
                 if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
               }}
-              placeholder={'用自然語言描述 AI 應該做什麼…\n例如：到 Yahoo Finance 抓取台積電（2330.TW）最近 30 天的收盤價，存成 CSV 檔案，欄位包含日期和收盤價'}
+              placeholder={'用自然語言描述 AI 應該做什麼…\n例如：到 Yahoo Finance 抓取台積電（2330.TW）最近 30 天的收盤價,存成 CSV 檔案;支援 {{ input.date }} 等變數'}
               className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[120px]`}
             />
-            <p className="text-xs text-gray-400 mt-1.5">AI 會根據描述自動撰寫 Python 程式碼並執行（拖右下角可拉高）</p>
+            <p className="text-xs text-gray-400 mt-1.5">AI 會根據描述自動撰寫 Python 程式碼並執行(拖右下角可拉高)。支援 <code className="bg-gray-100 px-1 rounded font-mono">{`{{ steps.X.output.Y }}`}</code> 等變數</p>
           </div>
 
           {/* Claude Code Skill mount */}
@@ -224,10 +232,16 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">輸出路徑</label>
             <div className="flex gap-1.5">
               <input value={data.outputPath} onChange={e => onUpdate({ outputPath: e.target.value })}
-                placeholder="~/ai_output/..." className={`${inputCls} font-mono flex-1`} />
+                placeholder="~/ai_output/...、可含 {{ input.date }}" className={`${inputCls} font-mono flex-1`} />
               <button onClick={() => setBrowserTarget('output')}
                 className="shrink-0 w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg hover:bg-purple-50 text-gray-400 hover:text-purple-600 transition-colors">
                 <FolderOpen className="w-3.5 h-3.5" /></button>
+            </div>
+            <div className="flex justify-end mt-1">
+              <VariableButton
+                workflowId={workflowId}
+                onPick={(p) => onUpdate({ outputPath: `${data.outputPath || ''}{{ ${p} }}` })}
+              />
             </div>
             <p className="text-xs text-gray-400 mt-1">AI 會將結果寫入此路徑</p>
           </div>

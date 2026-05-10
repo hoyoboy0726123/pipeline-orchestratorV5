@@ -4,6 +4,7 @@ import { X, FolderOpen, ChevronDown, ChevronUp, Code2 } from 'lucide-react'
 import type { StepData, ScriptNode } from './_helpers'
 import { fsBrowse, fsCheckVenv } from '@/lib/api'
 import { toast } from 'sonner'
+import { VariableButton } from './_variablePicker'
 
 // ── 執行前綴 ─────────────────────────────────────────────────────────────────
 // 下拉顯示用的選項（命名以 Windows 慣例的 `venv/` 為主；勾選虛擬環境時會依
@@ -116,9 +117,10 @@ interface Props {
   onClose: () => void
   onDelete: () => void
   aiExpectText?: string
+  workflowId?: string
 }
 
-export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, aiExpectText }: Props) {
+export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, aiExpectText, workflowId }: Props) {
   const data = node.data
   const color = '#3b82f6'
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -229,10 +231,20 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
             <div className="flex gap-1.5 mb-1.5">
               <input value={splitBatch(data.batch).filePath}
                 onChange={e => { const fp = e.target.value; upd({ batch: selectedPrefix ? `${selectedPrefix} ${fp}` : fp }) }}
-                placeholder="選擇或輸入腳本路徑" className={`${inputCls} flex-1`} />
+                placeholder="選擇或輸入腳本路徑、可含 {{ input.X }}" className={`${inputCls} flex-1`} />
               <button onClick={() => setBrowserTarget('batch')}
                 className="shrink-0 w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 transition-colors">
                 <FolderOpen className="w-3.5 h-3.5" /></button>
+            </div>
+            <div className="flex justify-end mb-1">
+              <VariableButton
+                workflowId={workflowId}
+                onPick={(p) => {
+                  const fp = splitBatch(data.batch).filePath
+                  const insertion = `{{ ${p} }}`
+                  upd({ batch: selectedPrefix ? `${selectedPrefix} ${fp}${fp ? ' ' : ''}${insertion}` : `${fp}${fp ? ' ' : ''}${insertion}` })
+                }}
+              />
             </div>
             {data.batch && (
               <div className="text-xs text-gray-400 font-mono bg-gray-50 rounded-lg px-2.5 py-1.5 break-all">▶ {data.batch}</div>
@@ -251,10 +263,16 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">輸出路徑</label>
             <div className="flex gap-1.5">
               <input value={data.outputPath} onChange={e => upd({ outputPath: e.target.value })}
-                placeholder="~/ai_output/..." className={`${inputCls} flex-1`} />
+                placeholder="~/ai_output/...、可含 {{ input.date }}" className={`${inputCls} flex-1`} />
               <button onClick={() => setBrowserTarget('output')}
                 className="shrink-0 w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 transition-colors">
                 <FolderOpen className="w-3.5 h-3.5" /></button>
+            </div>
+            <div className="flex justify-end mt-1">
+              <VariableButton
+                workflowId={workflowId}
+                onPick={(p) => upd({ outputPath: `${data.outputPath || ''}{{ ${p} }}` })}
+              />
             </div>
             <p className="text-xs text-gray-400 mt-1">Pipeline 用此路徑確認步驟是否成功執行</p>
           </div>

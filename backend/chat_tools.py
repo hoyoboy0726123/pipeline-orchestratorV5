@@ -1776,9 +1776,150 @@ def read_help_doc(topic: str = "") -> str:
     return get_help_doc(topic)
 
 
+@tool
+def list_workflow_variables(query: str) -> str:
+    """列出某工作流的可用變數(steps output / input / env)+ 上次跑出來的實際值。
+
+    使用時機:
+    - 使用者要規劃 / 修改某工作流、需要知道下游 step 可以引用哪些上游 output
+    - 使用者問「step1 抓到的 X 怎麼餵給 step2?」
+    - 你想建議使用者用 `{{ }}` 變數化某個欄位前、先確認該變數真的存在
+
+    Args:
+        query: 工作流名稱或 id 前綴(模糊比對)
+
+    Returns:
+        JSON 字串、含:
+          available.steps: 每個非 human_confirm step 提供的 output 欄位 + 上次值
+            (path / stdout / exit_code / status,以及該 step UIA save_as 的所有 key)
+          available.input: 此 workflow 引用到的 input.X + 上次傳入值
+          available.env:  常用環境變數(KEY/TOKEN/SECRET 已過濾)
+          referenced:     整份 YAML 引用到的所有 dotted-path
+    """
+    wf, msg = _resolve_workflow(query)
+    if not wf:
+        return msg
+
+    import yaml as _yaml
+    import os as _os
+    from pipeline.models import PipelineConfig
+    from pipeline.expression import find_referenced_vars
+    from pipeline.store import get_store
+
+    yaml_str = wf.get("yaml") or ""
+    if not yaml_str.strip():
+        return json.dumps({
+            "workflow_id": wf.get("id"),
+            "workflow_name": wf.get("name"),
+            "available": {"steps": [], "input": [], "env": []},
+            "referenced": [],
+            "note": "workflow YAML 為空、沒有可用變數",
+        }, ensure_ascii=False, indent=2)
+
+    try:
+        data = _yaml.safe_load(yaml_str) or {}
+        config_dict = data.get("pipeline", data)
+        config_dict["validate"] = config_dict.get("validate", True)
+        config = PipelineConfig(**config_dict)
+    except Exception as e:
+        return f"workflow YAML 解析失敗:{e}"
+
+    last_step_by_name: dict = {}
+    last_input_params: dict = {}
+    try:
+        for r in get_store().list_recent(20):
+            if r.workflow_id == wf.get("id"):
+                last_input_params = getattr(r, "input_params", None) or {}
+                for sr in r.step_results:
+                    last_step_by_name[sr.step_name] = sr
+                break
+    except Exception:
+        pass
+
+    referenced: set[str] = set()
+    for step in config.steps:
+        for fname in ("batch", "message", "uia_window", "vv_prompt", "working_dir"):
+            v = getattr(step, fname, "")
+            if isinstance(v, str) and v:
+                referenced.update(find_referenced_vars(v))
+        if step.output and step.output.path:
+            referenced.update(find_referenced_vars(step.output.path))
+        if step.actions:
+            for a in step.actions:
+                for fname in ("text", "title", "vlm_prompt", "expected"):
+                    v = getattr(a, fname, "")
+                    if isinstance(v, str) and v:
+                        referenced.update(find_referenced_vars(v))
+
+    avail_steps: list[dict] = []
+    for step in config.steps:
+        if step.human_confirm:
+            continue
+        sr = last_step_by_name.get(step.name)
+        fields: list[dict] = []
+        if step.output and step.output.path:
+            fields.append({"key": "path", "type": "string",
+                           "last_value": (sr.actual_output_path if sr else "") or step.output.path})
+        if sr:
+            fields.append({"key": "stdout", "type": "string", "last_value": (sr.stdout_tail or "")[:120]})
+            fields.append({"key": "exit_code", "type": "number", "last_value": sr.exit_code})
+            fields.append({"key": "status", "type": "string", "last_value": sr.validation_status})
+        if step.actions:
+            seen: set[str] = set()
+            for a in step.actions:
+                if a.save_as and a.save_as not in seen:
+                    seen.add(a.save_as)
+                    last_v = ""
+                    if sr and getattr(sr, "step_vars", None):
+                        last_v = sr.step_vars.get(a.save_as, "")
+                    fields.append({
+                        "key": a.save_as, "type": "string",
+                        "last_value": str(last_v) if last_v else "",
+                        "source": f"save_as ({a.type})",
+                    })
+        avail_steps.append({
+            "name": step.name,
+            "fields": fields,
+        })
+
+    input_keys = sorted({
+        ref.split(".", 1)[1] for ref in referenced
+        if ref.startswith("input.") and "." in ref
+    })
+    avail_input = [
+        {"key": k, "last_value": last_input_params.get(k, "")}
+        for k in input_keys
+    ]
+
+    common_env = ["OUTPUT_BASE_PATH", "PIPELINE_DIR", "HOME", "USERPROFILE", "TIMEZONE"]
+    env_keys: set[str] = set(common_env)
+    for ref in referenced:
+        if ref.startswith("env.") and "." in ref:
+            env_keys.add(ref.split(".", 1)[1])
+    def _is_secret(k: str) -> bool:
+        u = k.upper()
+        return any(t in u for t in ("KEY", "TOKEN", "SECRET", "PASSWORD", "PWD"))
+    avail_env = [
+        {"key": k, "last_value": _os.environ.get(k, "")}
+        for k in sorted(env_keys) if not _is_secret(k) and _os.environ.get(k)
+    ]
+
+    return json.dumps({
+        "workflow_id": wf.get("id"),
+        "workflow_name": wf.get("name"),
+        "available": {
+            "steps": avail_steps,
+            "input": avail_input,
+            "env": avail_env,
+        },
+        "referenced": sorted(referenced),
+    }, ensure_ascii=False, indent=2)
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
+    list_workflow_variables,                 # 列工作流可用變數(規劃 / 修改用)
     save_workflow_yaml, create_workflow_yaml, start_workflow,    # 寫工具(走 two-step approval)
     send_file_to_tg,                         # 送檔到 TG(走 two-step approval)
     web_search,                              # 網路搜尋(限定工作流相關研究)
