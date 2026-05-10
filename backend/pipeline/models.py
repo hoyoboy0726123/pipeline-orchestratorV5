@@ -185,7 +185,37 @@ class PipelineStep(BaseModel):
     # 人工確認節點：抵達時自動把上一步的輸出檔案傳到 Telegram（手機可下載）
     # False（預設）= 不自動傳；但 inline keyboard 仍有「📎 上一步輸出」按鈕、需要時點來抓
     send_prev_output: bool = False
-    # ── 桌面自動化節點（computer_use）────────────────────────────────
+    # ── 控制流:任意 step 用 next 顯式跳到下一個 step ── Ticket 2 ───
+    # 一般 step 跑完依 YAML 順序前進;設了 next 就改跳到指定 step name。
+    # 特殊值 "end" / "__end__" / "" → 結束流程(預設行為:空字串 = 線性下一個)
+    # 主要用途:condition 節點分支 A、B 各自跑完後跳到 "end" 避免再跑到對方 branch:
+    #   - name: branch_true
+    #     batch: ...
+    #     next: end          ← 跑完直接結束、不會線性掉到 branch_false
+    next: str = ""
+
+    # ── 控制流節點:condition(IF / Switch)── Ticket 2 ────────────────
+    # 純 metadata 節點、不執行任何命令。runner 求值 expression / switch、
+    # 根據結果跳到指定的下游 step。MAX_VISITS=1000 防無限迴圈。
+    #
+    # IF 模式(填 expression + on_true / on_false):
+    #   expression: "{{ steps.X.output.rows | int > 100 }}"   ← Jinja2 boolean 表達式
+    #   on_true: bulk_step    ← 條件成立時跳到的 step name
+    #   on_false: single_step ← 條件不成立時跳到的 step name(留空 = 流程結束)
+    #
+    # Switch 模式(填 switch + cases、忽略 expression):
+    #   switch: "{{ steps.api.output.status }}"
+    #   cases: { "200": ok_step, "404": retry_step, "500": fail_step }
+    #   default: fail_step    ← 沒命中任何 case 時的 fallback(留空 = 流程結束)
+    condition: bool = False        # True = 此節點為 condition 節點
+    expression: str = ""           # IF 模式:Jinja2 boolean expression
+    on_true: str = ""              # IF 模式:條件成立要跳的 step name
+    on_false: str = ""             # IF 模式:條件不成立要跳的 step name(留空 = end)
+    switch: str = ""               # Switch 模式:Jinja2 expression、求值後 str() 比對 cases keys
+    cases: dict = {}               # Switch 模式:{case_value: step_name}
+    default: str = ""              # Switch 模式:沒命中時跳的 step name(留空 = end)
+
+    # ── 桌面自動化節點(computer_use)────────────────────────────────
     # 此為獨立第 4 種節點，不與 skill / script / human_confirm 混用。
     # 當 computer_use=True 時，runner 走桌面自動化引擎（pyautogui + cv2 比對），
     # 完全跳過 LLM 與 recipe 系統。

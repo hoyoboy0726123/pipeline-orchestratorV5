@@ -235,6 +235,55 @@ def build_context(*, step_results=None, input_params=None,
     return ctx
 
 
+def eval_condition(expression: str, context: dict) -> bool:
+    """求值 Jinja2 boolean expression、回傳 Python truthy/falsy。
+
+    用於 condition 節點的 IF 模式。例:
+        {{ steps.x.output.rows | int > 100 }}  → True / False
+        {{ input.flag }}                        → 取決於 input.flag 是 truthy / falsy
+        {{ "ok" in steps.api.output.stdout }}   → in 比對
+
+    Args:
+        expression: Jinja2 expression(可含 {{ }} 包覆、也可不包)
+        context: 跟 render() 同份的 {steps, input, env}
+
+    Raises:
+        ExpressionError: 表達式語法錯 / 引用未定義變數
+    """
+    if not expression or not expression.strip():
+        raise ExpressionError("condition expression 為空")
+
+    # 容許使用者寫 `{{ x > 1 }}` 或純 `x > 1`,統一包成 `{{ ... }}` 給 Jinja2
+    expr = expression.strip()
+    if not expr.startswith("{{"):
+        expr = "{{ " + expr + " }}"
+
+    rendered = render(expr, context)
+    # Jinja2 render 把 True/False/数值 都會轉字串(例 "True" / "0" / "")
+    # 用 Python 標準的 truthiness 規則:"True" / "true" / 非空非零字串 → True
+    s = (rendered or "").strip()
+    if s.lower() in ("true", "1", "yes", "y", "on"):
+        return True
+    if s.lower() in ("false", "0", "no", "n", "off", "", "none"):
+        return False
+    # 其他非空字串視為 True(跟 Python `bool(non_empty_str) is True` 行為一致)
+    return True
+
+
+def eval_value(expression: str, context: dict) -> str:
+    """求值 Jinja2 expression、回傳字串(用於 Switch 節點的 switch 比對 key)。
+
+    跟 eval_condition 不同:這裡保留原始 render 字串、不轉 bool。
+    用於 Switch 節點:expression 求值後 str(value),用來比對 cases keys。
+    """
+    if not expression or not expression.strip():
+        raise ExpressionError("switch expression 為空")
+    expr = expression.strip()
+    if not expr.startswith("{{"):
+        expr = "{{ " + expr + " }}"
+    return render(expr, context).strip()
+
+
 def find_referenced_vars(s: str) -> list[str]:
     """掃字串裡所有 Jinja2 變數引用、回傳 dotted-path list。
 

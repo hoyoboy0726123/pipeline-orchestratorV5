@@ -1673,6 +1673,7 @@ async def api_pipeline_dryrun(req: DryRunRequest):
 
 def _classify_node_type(step) -> str:
     """從 PipelineStep 的旗標判斷實際 node 類型(給前端 / dry-run 顯示用)。"""
+    if step.condition: return "condition"
     if step.human_confirm: return "human_confirm"
     if step.computer_use: return "computer_use"
     if step.skill_mode: return "skill"

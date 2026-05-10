@@ -1184,6 +1184,12 @@ async def run_pipeline(
 
     # ── Step loop ────────────────────────────────────────────
     completed_outputs: list[dict] = []  # 收集前步驟的輸出資訊
+    # ── 控制流 dispatcher(Ticket 2)──────────────────────────
+    # condition 節點可跳到任意 step name → 用 name_to_index 索引
+    # visit_count 防無限迴圈(同一 step 訪問超過 MAX_VISITS = 1000 → abort)
+    name_to_index: dict[str, int] = {s.name: i for i, s in enumerate(config.steps)}
+    visit_count: dict[int, int] = {}
+    MAX_VISITS_PER_STEP = 1000
 
     # 恢復執行時，重建已完成步驟的輸出資訊（供後續步驟參考）
     if start_from_step > 0:
@@ -1305,6 +1311,115 @@ async def run_pipeline(
             await _notify_final(run, config)
             unregister_task(run.run_id)
             return run.run_id
+
+        # ── 控制流節點:condition(Ticket 2)─────────────────────
+        # 不執行任何命令、純求值 + 跳轉。寫個 step_result(stdout 記錄決策)、
+        # 跳到目標 step name 對應的 index、continue outer loop(不走後面 retry 邏輯)
+        if step.condition:
+            from .expression import (
+                eval_condition as _eval_cond,
+                eval_value as _eval_val,
+                ExpressionError as _CondError,
+            )
+            # 訪問次數上限保護
+            visit_count[run.current_step] = visit_count.get(run.current_step, 0) + 1
+            if visit_count[run.current_step] > MAX_VISITS_PER_STEP:
+                logger.error(f"[{step.name}] condition 訪問超過 {MAX_VISITS_PER_STEP} 次、判定無限迴圈、中止")
+                step_result = StepResult(
+                    step_index=run.current_step, step_name=step.name,
+                    exit_code=1, stdout_tail="",
+                    stderr_tail=f"訪問超過 {MAX_VISITS_PER_STEP} 次、可能無限迴圈",
+                    validation_status="failed",
+                    validation_reason=f"condition 節點被訪問 > {MAX_VISITS_PER_STEP} 次",
+                    validation_suggestion="檢查 on_true/on_false 是否導致循環",
+                    retries_used=0,
+                    started_at=step_started_at,
+                    ended_at=datetime.now().isoformat(),
+                )
+                if len(run.step_results) > run.current_step:
+                    run.step_results[run.current_step] = step_result
+                else:
+                    run.step_results.append(step_result)
+                run.status = "failed"
+                run.ended_at = datetime.now().isoformat()
+                store.save(run)
+                await _notify_final(run, config)
+                unregister_task(run.run_id)
+                return run.run_id
+
+            decision_msg = ""
+            target_name = ""
+            try:
+                if step.switch:
+                    # Switch 模式
+                    val = _eval_val(step.switch, _var_ctx)
+                    target_name = step.cases.get(val, "") or step.default
+                    decision_msg = f"switch 求值={val!r} → 跳到 {target_name or '(end)'}"
+                elif step.expression:
+                    # IF 模式
+                    cond = _eval_cond(step.expression, _var_ctx)
+                    target_name = step.on_true if cond else step.on_false
+                    decision_msg = f"IF 求值={cond} → 跳到 {target_name or '(end)'}"
+                else:
+                    raise _CondError("condition 節點需填 expression(IF)或 switch(Switch)")
+            except _CondError as _ce:
+                logger.error(f"[{step.name}] condition 求值失敗:{_ce}")
+                step_result = StepResult(
+                    step_index=run.current_step, step_name=step.name,
+                    exit_code=1, stdout_tail="",
+                    stderr_tail=str(_ce),
+                    validation_status="failed",
+                    validation_reason=f"condition 求值失敗:{_ce}",
+                    validation_suggestion="檢查 expression / switch 表達式是否合法、引用變數是否存在",
+                    retries_used=0,
+                    started_at=step_started_at,
+                    ended_at=datetime.now().isoformat(),
+                )
+                if len(run.step_results) > run.current_step:
+                    run.step_results[run.current_step] = step_result
+                else:
+                    run.step_results.append(step_result)
+                run.status = "failed"
+                run.ended_at = datetime.now().isoformat()
+                store.save(run)
+                await _notify_final(run, config)
+                unregister_task(run.run_id)
+                return run.run_id
+
+            logger.info(f"[{step.name}] 🔀 {decision_msg}")
+            # 寫 step_result 記錄決策
+            step_result = StepResult(
+                step_index=run.current_step, step_name=step.name,
+                exit_code=0, stdout_tail=decision_msg, stderr_tail="",
+                validation_status="ok", validation_reason="condition 求值成功",
+                validation_suggestion="", retries_used=0,
+                started_at=step_started_at,
+                ended_at=datetime.now().isoformat(),
+            )
+            if len(run.step_results) > run.current_step:
+                run.step_results[run.current_step] = step_result
+            else:
+                run.step_results.append(step_result)
+
+            # 決定下一步:目標名稱 → index;留空或找不到 → 流程結束
+            if not target_name:
+                logger.info(f"[{step.name}] 跳轉目標為空、結束流程")
+                run.current_step = len(config.steps)
+            elif target_name not in name_to_index:
+                logger.error(f"[{step.name}] 跳轉目標 step '{target_name}' 不存在")
+                step_result.validation_status = "failed"
+                step_result.validation_reason = f"跳轉目標 '{target_name}' 不存在於 workflow"
+                step_result.stderr_tail = step_result.validation_reason
+                run.status = "failed"
+                run.ended_at = datetime.now().isoformat()
+                store.save(run)
+                await _notify_final(run, config)
+                unregister_task(run.run_id)
+                return run.run_id
+            else:
+                run.current_step = name_to_index[target_name]
+            store.save(run)
+            continue  # 跳過後面所有 step 執行邏輯、回 while 頂端
 
         # 步驟開始前 snapshot workflow 輸出資料夾（mtime 比對用）
         # 步驟結束後 _diff_snapshot_pick_main 找新增/修改的檔，存進 StepResult.actual_output_path
@@ -1967,7 +2082,18 @@ async def run_pipeline(
                     except Exception:
                         pass
                     completed_outputs.append(out_info)
-                run.current_step += 1
+                # 一般情況線性前進;若 step.next 有設就改跳到指定 step
+                # ("end" / "__end__" → 結束流程;step name → 跳到該 step)
+                _next_target = (getattr(step, "next", "") or "").strip()
+                if _next_target in ("end", "__end__"):
+                    run.current_step = len(config.steps)
+                elif _next_target and _next_target in name_to_index:
+                    run.current_step = name_to_index[_next_target]
+                elif _next_target:
+                    logger.warning(f"[{step.name}] next='{_next_target}' 不存在於 workflow、改線性前進")
+                    run.current_step += 1
+                else:
+                    run.current_step += 1
                 store.save(run)
                 break  # 進入下一步
 
