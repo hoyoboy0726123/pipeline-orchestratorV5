@@ -1736,6 +1736,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'humanConfirmation' ? (
           <HumanConfirmPanel
@@ -1743,6 +1744,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'aiValidation' ? (
           <AiValidationPanel
@@ -1757,6 +1759,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'outlookAutomation' ? (
           <OutlookPanel
@@ -1765,6 +1768,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'webCrawler' ? (
           <WebCrawlerPanel
@@ -1773,6 +1777,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'subagent' ? (
           <SubagentConfigPanel
@@ -1780,6 +1785,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'skillStep' ? (
           <SkillConfigPanel

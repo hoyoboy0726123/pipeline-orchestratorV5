@@ -53,9 +53,10 @@ interface Props {
   onUpdate: (data: Partial<ComputerUseData>) => void
   onClose: () => void
   onDelete: () => void
+  workflowId?: string
 }
 
-export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose, onDelete }: Props) {
+export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose, onDelete, workflowId }: Props) {
   const data = node.data
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white'
 
@@ -282,6 +283,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               const next = [...(data.actions || []), action]
               onUpdate({ actions: next })
             }}
+            workflowId={workflowId}
           />
         )}
 

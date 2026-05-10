@@ -3551,6 +3551,7 @@ def _run_to_dict(r):
         "awaiting_type": getattr(r, 'awaiting_type', '') or '',
         "awaiting_message": getattr(r, 'awaiting_message', '') or '',
         "awaiting_suggestion": getattr(r, 'awaiting_suggestion', '') or '',
+        "input_params": getattr(r, 'input_params', None) or {},
     }
 
 

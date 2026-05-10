@@ -1,0 +1,44 @@
+pipeline:
+  name: 變數系統 demo
+  validate: false
+  # ──────────────────────────────────────────────────────────────
+  # Ticket 1 端對端示範:
+  #   - input.X 啟動參數(Run 對話框 / TG /run / 排程帶值)
+  #   - steps.X.output.path 跨節點傳值(下游引用上游輸出檔)
+  #   - env.X 環境變數
+  #
+  # 跑法:
+  #   1. UI → 載入此 YAML → 按執行 → 對話框會跳出來叫你填 date / customer
+  #   2. TG → /run 變數系統 demo date=today customer=ASUS
+  #
+  # 觀察重點:
+  #   - 第 2 步的 batch 命令會看到第 1 步 render 出來的路徑(不是 {{ }}原樣)
+  #   - 第 4 步的 message 會看到完整的 input + steps 變數展開
+  #   - 沒寫 {{ }} 的 step(第 3 步)行為跟以前一樣
+  # ──────────────────────────────────────────────────────────────
+  steps:
+    # 第 1 步:用啟動參數動態決定輸出檔名
+    - name: fetch_data
+      batch: "echo 抓 {{ input.customer }} 在 {{ input.date }} 的資料"
+      output:
+        path: "ai_output/{{ input.customer }}_{{ input.date }}/raw.csv"
+
+    # 第 2 步:用 steps.X.output.path 引用上一步 render 出的路徑
+    - name: process
+      batch: "echo 處理 {{ steps.fetch_data.output.path }} → 產 final.xlsx"
+      output:
+        path: "ai_output/{{ input.customer }}_{{ input.date }}/final.xlsx"
+
+    # 第 3 步:沒寫任何 {{ }} → 完全照舊跑、不受變數系統影響
+    - name: plain_step
+      batch: "echo 寫死的命令、不需變數"
+
+    # 第 4 步:human_confirm 訊息也吃變數
+    - name: confirm
+      human_confirm: true
+      message: |
+        客戶 {{ input.customer }} 的 {{ input.date }} 資料已產出:
+        - 原始: {{ steps.fetch_data.output.path }}
+        - 處理: {{ steps.process.output.path }}
+
+        確認沒問題再放行。

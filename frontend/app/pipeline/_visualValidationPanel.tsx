@@ -3,17 +3,19 @@ import { useState } from 'react'
 import { X, MousePointerSquareDashed, Trash2, ScanEye } from 'lucide-react'
 import type { VisualValidationData } from './_helpers'
 import ScreenRegionPicker from './_screenRegionPicker'
+import { VariableButton } from './_variablePicker'
 
 interface Props {
   data: VisualValidationData
   onUpdate: (patch: Partial<VisualValidationData>) => void
   onClose: () => void
   onDelete: () => void
+  workflowId?: string
 }
 
 const NODE_COLOR = '#6366f1'
 
-export default function VisualValidationPanel({ data, onUpdate, onClose, onDelete }: Props) {
+export default function VisualValidationPanel({ data, onUpdate, onClose, onDelete, workflowId }: Props) {
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/20 bg-white'
   const [showPicker, setShowPicker] = useState(false)
   const hasRegion = data.searchRegion && data.searchRegion.length === 4 && data.searchRegion[2] > 0 && data.searchRegion[3] > 0
@@ -98,9 +100,15 @@ export default function VisualValidationPanel({ data, onUpdate, onClose, onDelet
 
         {/* 判斷條件 prompt */}
         <div>
-          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
-            判斷條件（給 VLM 的 prompt）
-          </label>
+          <div className="flex items-end justify-between mb-1.5">
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+              判斷條件(給 VLM 的 prompt)
+            </label>
+            <VariableButton
+              workflowId={workflowId}
+              onPick={(p) => onUpdate({ prompt: `${data.prompt || ''}{{ ${p} }}` })}
+            />
+          </div>
           <textarea
             rows={7}
             value={data.prompt}
