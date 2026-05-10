@@ -1494,6 +1494,9 @@ class PipelineRunRequest(BaseModel):
     no_save_recipe: bool = False  # True = 延遲 recipe 儲存，等用戶確認（桌面手動勾「skill workflow」用）
     silent_recipe: bool = False  # True = 「無人值守」模式：直接覆寫 recipe、永不延遲、不彈確認
                                    # （TG 遠端遙控 / 排程觸發用、避免桌面卡在 pending dialog）
+    # 啟動時傳入的參數，runner render 階段以 `{{ input.<key> }}` 引用。
+    # workflow YAML 寫死的欄位仍照舊用,只有寫了 {{ input.X }} 的欄位才需要這裡帶值。
+    input_params: dict = {}
 
 
 class PipelineDecisionRequest(BaseModel):
@@ -1536,6 +1539,7 @@ async def start_pipeline(req: PipelineRunRequest):
         telegram_chat_id=0,
         log_path=log_path,
         workflow_id=req.workflow_id,
+        input_params=req.input_params or {},
     )
     get_store().save(run)
 

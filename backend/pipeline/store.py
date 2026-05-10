@@ -38,6 +38,9 @@ class StepResult:
     # ISO 時間戳（給 trace 算 step 耗時、subagent / skill loop 第一輪 LLM call 前 / 最後 done 後）。
     started_at: str = ""
     ended_at: str = ""
+    # 該步驟匯出的變數（UIA save_as / Computer Use save_as / Skill 顯式 export 等）。
+    # 之後 step 可用 `{{ steps.<name>.output.<key> }}` 引用（pipeline.expression 會 promote 到 output namespace）。
+    step_vars: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -57,6 +60,9 @@ class PipelineRun:
     awaiting_type: str = ""       # "" | "failure" | "human_confirm"
     awaiting_message: str = ""    # 人工確認節點的自訂訊息 / 失敗原因
     awaiting_suggestion: str = "" # 失敗時的解決建議（套件安裝、工具選擇等）
+    # 啟動 workflow 時傳入的參數（POST /pipeline/run 的 input_params body）。
+    # 在 Jinja2 render 階段以 `{{ input.<key> }}` 引用。沒傳就空 dict、舊 workflow 不受影響。
+    input_params: dict = field(default_factory=dict)
 
 
 class RunStore:
