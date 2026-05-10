@@ -29,6 +29,7 @@ import WebCrawlerNodeComponent     from './_webCrawlerNode'
 import SubagentStepNode             from './_subagentNode'
 import ScriptConfigPanel           from './_scriptPanel'
 import SkillConfigPanel            from './_skillPanel'
+import DryRunModal                 from './_dryRunModal'
 import AiValidationPanel           from './_aiValidationPanel'
 import HumanConfirmPanel           from './_humanConfirmPanel'
 import ComputerUsePanel            from './_computerUsePanel'
@@ -333,6 +334,7 @@ export default function PipelinePage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [pipelineName, setPipelineName] = useState('my-pipeline')
   const [showYaml, setShowYaml]   = useState(false)
+  const [showDryRun, setShowDryRun] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
   const [showRunDialog, setShowRunDialog] = useState(false)
   const [recipeStatus, setRecipeStatus]   = useState<RecipeStatus | null>(null)
@@ -1268,6 +1270,15 @@ export default function PipelinePage() {
         {RunStatusIcon && <span>{RunStatusIcon}</span>}
         <div className="flex-1" />
 
+        {/* 預覽渲染 (dry-run) */}
+        <button
+          onClick={() => setShowDryRun(true)}
+          title="不執行、只顯示變數展開後的最終命令"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+        >
+          👁️ 預覽渲染
+        </button>
+
         {/* YAML */}
         <button
           onClick={() => setShowYaml(!showYaml)}
@@ -1707,6 +1718,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'scriptStep' ? (
           <ScriptConfigPanel
@@ -1714,6 +1726,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateStep(selectedNode.id, patch)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
             aiExpectText={
               (() => {
                 const outEdge = edges.find(e => e.source === selectedNode.id)
@@ -1733,6 +1746,15 @@ export default function PipelinePage() {
             yaml={getYaml()}
             onImport={importYaml}
             onClose={() => setShowYaml(false)}
+          />
+        )}
+
+        {/* Dry-run 預覽 modal */}
+        {showDryRun && (
+          <DryRunModal
+            yamlContent={getYaml()}
+            workflowId={activeId ?? undefined}
+            onClose={() => setShowDryRun(false)}
           />
         )}
 

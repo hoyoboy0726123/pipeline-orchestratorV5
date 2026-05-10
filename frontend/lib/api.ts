@@ -1144,3 +1144,73 @@ export async function testOutlookConnection(): Promise<OutlookConnectionTest> {
   }
   return res.json()
 }
+
+// ── 變數系統(Ticket 1):dry-run + workflow variables ────────────────────────
+
+export interface VariableField {
+  key: string
+  type: string
+  last_value: string | number
+  source?: string
+}
+
+export interface VariableStepInfo {
+  name: string
+  node_type: string
+  fields: VariableField[]
+}
+
+export interface WorkflowVariablesResult {
+  available: {
+    steps: VariableStepInfo[]
+    input: { key: string; last_value: string; required: boolean }[]
+    env: { key: string; last_value: string; is_secret: boolean }[]
+  }
+  referenced: string[]
+  last_run_id: string | null
+}
+
+export interface DryRunStepResult {
+  index: number
+  name: string
+  node_type: string
+  rendered: Record<string, string>
+  referenced_vars: string[]
+  errors: string[]
+}
+
+export interface DryRunResult {
+  ok: boolean
+  workflow_name: string
+  input_params: Record<string, string>
+  steps: DryRunStepResult[]
+}
+
+/** 列出 workflow 可用變數 + 上次跑出來的實際值(給「插入變數」modal 用)。 */
+export async function getWorkflowVariables(wfId: string): Promise<WorkflowVariablesResult> {
+  const res = await fetchWithRetry(`${BASE}/workflows/${wfId}/variables`)
+  if (!res.ok) throw new Error(`getWorkflowVariables 失敗:${res.status}`)
+  return res.json()
+}
+
+/** 不執行、只 render 各 step 的 {{ }} → 預覽渲染後的命令。 */
+export async function dryRunPipeline(req: {
+  yaml_content: string
+  input_params?: Record<string, string>
+  workflow_id?: string
+}): Promise<DryRunResult> {
+  const res = await fetch(`${BASE}/pipeline/dry-run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      yaml_content: req.yaml_content,
+      input_params: req.input_params || {},
+      workflow_id: req.workflow_id,
+    }),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `dryRunPipeline 失敗 (${res.status})`)
+  }
+  return res.json()
+}
