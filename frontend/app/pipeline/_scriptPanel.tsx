@@ -317,6 +317,15 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
                   <input value={data.workingDir} onChange={e => upd({ workingDir: e.target.value })}
                     placeholder="（留空 = 使用預設目錄）" className={inputCls} />
                 </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">跑完跳到(next)</label>
+                  <input value={data.next || ''} onChange={e => upd({ next: e.target.value })}
+                    placeholder="留空=線性下一個 / end=結束 / step name=指定跳"
+                    className={`${inputCls} font-mono`} />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    用於 condition 分支:branch 跑完寫 <code className="bg-gray-100 px-1 rounded font-mono">end</code> 結束流程、避免線性掉到下個 branch
+                  </p>
+                </div>
               </div>
             )}
           </div>

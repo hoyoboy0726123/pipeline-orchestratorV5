@@ -124,9 +124,10 @@ export interface SkillData extends Record<string, unknown> {
   expectedOutput: string
   readonly: boolean
   skill: string         // 掛載的 Claude Code skill 名稱（空字串 = 不掛載）
-  askMode: boolean      // 詢問模式：LLM 遇到任何不確定就主動 ask_user 問用戶
+  askMode: boolean      // 詢問模式:LLM 遇到任何不確定就主動 ask_user 問用戶
   timeout: number
   retry: number
+  next?: string         // 跳轉:跑完跳指定 step name(end / 留空 = 線性、用於 condition 分支)
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -1030,6 +1031,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         askMode: d.askMode || false,
         timeout: d.timeout,
         retry: d.retry,
+        next: d.next || '',
         index: i,
         status: d.status,
         errorMsg: d.errorMsg,
@@ -1067,6 +1069,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       expectSkillMode: !!aiData?.skillMode,
       timeout: d.timeout,
       retry: d.retry,
+      next: d.next || '',
       index: i,
       status: d.status,
       errorMsg: d.errorMsg,
@@ -1202,6 +1205,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       }
       if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
       if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
+      if (s.next) lines.push(`    next: ${s.next}`)
       continue
     }
     if (s.subagent) {
@@ -1229,6 +1233,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       }
       if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
       if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
+      if (s.next) lines.push(`    next: ${s.next}`)
       continue
     }
     if (s.outlookAutomation) {
@@ -1324,6 +1329,8 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
     if (s.timeout !== 300) lines.push(`    timeout: ${s.timeout}`)
     // retry 的後端 default 是 1，只要不等於 1 都得寫出來（包含使用者明確設 0）
     if (s.retry !== 1)     lines.push(`    retry: ${s.retry}`)
+    // next 跳轉(condition 分支用、空字串 = 線性、不寫)
+    if (s.next)            lines.push(`    next: ${s.next}`)
   }
   return lines.join('\n')
 }

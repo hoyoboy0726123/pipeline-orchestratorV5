@@ -355,6 +355,15 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete, wo
                       <FolderOpen className="w-3.5 h-3.5" /></button>
                   </div>
                 </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">跑完跳到(next)</label>
+                  <input value={(data as any).next || ''} onChange={e => onUpdate({ next: e.target.value } as any)}
+                    placeholder="留空=線性下一個 / end=結束 / step name=指定跳"
+                    className={`${inputCls} font-mono`} />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    condition 分支用:branch 跑完寫 <code className="bg-gray-100 px-1 rounded font-mono">end</code> 結束流程
+                  </p>
+                </div>
               </div>
             )}
           </div>
