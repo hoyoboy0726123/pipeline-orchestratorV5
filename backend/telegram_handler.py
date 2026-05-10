@@ -607,12 +607,110 @@ async def _cmd_save_yaml(chat_id: int, args: str) -> None:
         await _bot_instance.send_message(chat_id=chat_id, text=f"❌ /save 失敗:{str(e)[:200]}")
 
 
+def _parse_run_args(args: str) -> tuple[str, dict]:
+    """把 /run 的 args 切成「workflow query」+「input_params dict」。
+
+    支援格式:
+      /run daily_report                              → ("daily_report", {})
+      /run daily_report date=2026-05-10              → ("daily_report", {"date": "2026-05-10"})
+      /run daily_report date=today customer=ASUS     → today 自動轉今天日期
+      /run daily_report customer="ASUS Inc"          → 支援雙引號值
+
+    特殊值:date 類欄位帶 "today" / "yesterday" / "tomorrow" 會自動轉 ISO 日期。
+    """
+    import shlex
+    from datetime import datetime, timedelta
+    try:
+        tokens = shlex.split(args or "", posix=True)
+    except ValueError:
+        # shlex 解不開引號就退回單純空白切
+        tokens = (args or "").split()
+    if not tokens:
+        return "", {}
+
+    # 第一個 token 可能就是 workflow query;找第一個含 "=" 的 token 作為 input 起點
+    split_idx = None
+    for i, t in enumerate(tokens):
+        if "=" in t and not t.startswith("="):
+            split_idx = i
+            break
+    if split_idx is None:
+        query = " ".join(tokens).strip()
+        return query, {}
+
+    query = " ".join(tokens[:split_idx]).strip()
+    params: dict = {}
+    for tok in tokens[split_idx:]:
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            continue
+        # 特殊日期值
+        if v.lower() in ("today", "now"):
+            v = datetime.now().strftime("%Y-%m-%d")
+        elif v.lower() == "yesterday":
+            v = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        elif v.lower() == "tomorrow":
+            v = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        params[k] = v
+    return query, params
+
+
+def _scan_required_inputs(yaml_text: str) -> list[str]:
+    """掃 workflow YAML 找所有 {{ input.X }} 引用、回 sorted unique key list。
+
+    給 TG /run 反問用 — 缺了哪些 input 就列出來。
+    """
+    try:
+        import yaml as _yaml
+        from pipeline.models import PipelineConfig
+        from pipeline.expression import find_referenced_vars
+        data = _yaml.safe_load(yaml_text) or {}
+        config_dict = data.get("pipeline", data)
+        config_dict["validate"] = config_dict.get("validate", True)
+        config = PipelineConfig(**config_dict)
+    except Exception:
+        return []
+
+    refs: set[str] = set()
+    for step in config.steps:
+        for fname in ("batch", "message", "uia_window", "vv_prompt", "working_dir"):
+            v = getattr(step, fname, "")
+            if isinstance(v, str) and v:
+                refs.update(find_referenced_vars(v))
+        if step.output and step.output.path:
+            refs.update(find_referenced_vars(step.output.path))
+        if step.actions:
+            for a in step.actions:
+                for fname in ("text", "title", "vlm_prompt", "expected"):
+                    v = getattr(a, fname, "")
+                    if isinstance(v, str) and v:
+                        refs.update(find_referenced_vars(v))
+    return sorted({r.split(".", 1)[1] for r in refs if r.startswith("input.") and "." in r})
+
+
 async def _cmd_run_pipeline(chat_id: int, args: str) -> None:
-    """/run <name|id> — 啟動指定工作流。"""
-    query = (args or "").strip()
+    """/run <name|id> [k=v k=v ...] — 啟動指定工作流。
+
+    支援:
+      /run daily_report
+      /run daily_report date=2026-05-10 customer=ASUS
+      /run daily_report date=today                      ← today/yesterday/tomorrow 自動轉日期
+
+    若 workflow 引用了 {{ input.X }} 但 args 沒帶該 key、bot 會反問必填欄位。
+    """
+    query, input_params = _parse_run_args(args or "")
     if not query:
         await _bot_instance.send_message(
-            chat_id=chat_id, text="⚠ 用法:/run &lt;workflow 名稱或 id&gt;",
+            chat_id=chat_id,
+            text=("⚠ 用法:\n"
+                  "<code>/run &lt;workflow 名稱或 id&gt;</code>\n"
+                  "<code>/run &lt;workflow&gt; key=value key=value</code>\n\n"
+                  "範例:<code>/run daily_report date=today customer=ASUS</code>\n"
+                  "特殊值:<code>today</code> / <code>yesterday</code> / <code>tomorrow</code> 自動轉日期"),
             parse_mode="HTML",
         )
         return
@@ -646,6 +744,28 @@ async def _cmd_run_pipeline(chat_id: int, args: str) -> None:
                 parse_mode="HTML",
             )
             return
+
+        # 必填 input 反問:workflow 寫了 {{ input.X }} 但 args 沒帶
+        required_inputs = _scan_required_inputs(yaml_text)
+        missing = [k for k in required_inputs if k not in input_params]
+        if missing:
+            wf_name = wf.get("name") or ""
+            lines = [
+                f"⚠ workflow <b>{html.escape(wf_name)}</b> 需要以下啟動參數:",
+                "",
+            ]
+            for k in missing:
+                lines.append(f"  • <code>{html.escape(k)}</code>")
+            example = " ".join(f"{k}=值" for k in missing[:3])
+            lines.extend([
+                "",
+                f"請改用:<code>/run {html.escape(wf_name)} {html.escape(example)}</code>",
+                "",
+                "💡 日期欄位可用 <code>today</code> / <code>yesterday</code> / <code>tomorrow</code>",
+            ])
+            await _bot_instance.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+            return
+
         # 啟動 pipeline(沿用 main.py /pipeline/run 邏輯)
         try:
             import yaml as _yaml
@@ -662,12 +782,20 @@ async def _cmd_run_pipeline(chat_id: int, args: str) -> None:
             use_recipe=True,
             workflow_id=wf.get("id"),
             silent_recipe=True,  # 無人值守:不彈 recipe 確認 dialog
+            input_params=input_params,
         )
         result = await start_pipeline(req)
         run_id = (result or {}).get("run_id") or "?"
+        param_lines = ""
+        if input_params:
+            param_lines = "\n參數:\n" + "\n".join(
+                f"  • <code>{html.escape(k)}</code> = <code>{html.escape(str(v))}</code>"
+                for k, v in input_params.items()
+            ) + "\n"
         receipt = (
             f"🚀 已啟動 <b>{html.escape(wf.get('name') or '')}</b>\n"
-            f"run_id: <code>{run_id}</code>\n\n"
+            f"run_id: <code>{run_id}</code>"
+            f"{param_lines}\n"
             f"📡 進度會自動推送到此對話。\n"
             f"📜 也可隨時 /log <code>{run_id[:8]}</code> 看細節。\n"
             f"🛑 想中止:/abort <code>{run_id}</code>"
