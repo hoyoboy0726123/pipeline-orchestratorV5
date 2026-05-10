@@ -67,6 +67,19 @@ export interface OpenCLIStatus {
 export type AgentMode = 'auto' | 'opencli' | 'camoufox'
 
 // ── Pipeline ──────────────────────────────────────────────
+export interface ToolCall {
+  name: string                  // run_python / run_shell / read_file / web_search / done / ...
+  input_preview: string         // 前 200 字
+  result_preview: string        // 前 300 字
+}
+
+export interface TokenUsage {
+  input_tokens?: number
+  output_tokens?: number
+  total_tokens?: number
+  model?: string
+}
+
 export interface StepResult {
   step_index: number
   step_name: string
@@ -77,6 +90,12 @@ export interface StepResult {
   validation_reason: string
   validation_suggestion: string
   retries_used: number
+  // 以下為 trace / token tracking 加上的欄位（subagent / skill 才會填）
+  actual_output_path?: string
+  token_usage?: TokenUsage
+  tool_calls?: ToolCall[]
+  started_at?: string
+  ended_at?: string
 }
 
 export interface PipelineRun {
@@ -99,7 +118,7 @@ export interface PipelineRun {
     }>
   }
   pending_recipes?: Array<{ step_name: string }>
-  awaiting_type?: 'failure' | 'human_confirm' | 'ask_user'
+  awaiting_type?: 'failure' | 'human_confirm' | 'ask_user' | 'missing_dependency' | 'command_approval'
   awaiting_message?: string
   awaiting_suggestion?: string
 }

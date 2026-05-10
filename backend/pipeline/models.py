@@ -127,6 +127,30 @@ class ComputerUseAction(BaseModel):
     # 不是讓 VLM 決定座標、不是讓它執行動作；只回傳 {"pass": bool, "reason": str}
     # 模型本身不支援視覺時，呼叫會直接報錯（不靜默 fallback）
     vlm_prompt: str = ""
+    # ── UIA action 專用欄位(uia_click / uia_send_keys / uia_get_text 等用)──
+    # control 識別:by Name / AutomationId / ControlType、可組合
+    control: dict = {}           # {"type": "Button", "name": "儲存", "auto_id": "save-btn", "depth": 10}
+    save_as: str = ""            # uia_get_text / uia_get_table_rowcount 把值存到此變數名、後續 step 可用 {{...}}
+    row: int | str = 0           # uia_click_cell 用、可填字串(如 "{{row_count + 1}}")延後解析
+    column: int | str = 0        # uia_click_cell 用
+    check: str = ""              # uia_assert_state 用:exists / enabled / focused / checked
+    window: str = ""              # action 層級 window 覆寫(無填走 step.uia_window)、支援 wildcard *
+    rect: list[int] = []         # UIA picker 抓到的 element rect[x,y,w,h]、絕對桌面座標
+                                  # control 沒 Name 也沒 AutomationId(如 generic PaneControl/GroupControl)時、
+                                  # 用 ControlFromPoint(rect 中心)當 fallback 找元素
+
+    # ── VLM 把關 Phase 1:每動作執行後驗證(跟 vlm_check 不同) ──────────
+    # vlm_check 是「動作序列裡的 explicit 檢查步」、不點擊純判斷;
+    # 這兩個欄位是「click/type/hotkey 等動作執行**之後**自動把前後截圖送 VLM 看
+    # 是否符合 expected」、用來抓「點空了」「對話框沒開」等錄製座標漂移問題。
+    # 觸發條件由 expected(有沒填) + step.cu_vlm_check_strategy + verify_critical 三個一起決定:
+    #   strategy=off          → 永遠不驗
+    #   strategy=after_each   → 每個 expected 非空的動作都驗
+    #   strategy=critical_only → 只驗 expected 非空 AND verify_critical=True 的動作
+    expected: str = ""           # 動作後預期狀態的自然語言描述(例「另存新檔對話框已開啟」)
+                                  # 空字串 = 不對此動作做 VLM 驗證
+    verify_critical: bool = False # True = strategy=critical_only 時也會驗
+                                  # (讓使用者錄製時標出哪幾步絕對不能漂)
     # ── click_image 專用：VLM 輔助模式 ─────────────────────────────
     # 設計核心：永遠不讓 VLM 給座標 — 它只負責「決定要找的東西」，
     # 真正的點擊位置由既有的確定性管線（OCR / CV）算出
@@ -166,6 +190,10 @@ class PipelineStep(BaseModel):
     # 當 computer_use=True 時，runner 走桌面自動化引擎（pyautogui + cv2 比對），
     # 完全跳過 LLM 與 recipe 系統。
     computer_use: bool = False   # True = 桌面自動化節點
+    cu_mode: str = "pixel"       # "pixel" = 錄製座標 + CV/OCR/VLM(現況、預設);"uia" = UIA 控制
+                                  # 兩種模式 actions[] 共用、實際分派依 action.type 走
+                                  # 詳見 docs/uia-feature-evaluation.md
+    uia_window: str = ""         # cu_mode=uia 時用、視窗 title 比對(支援 wildcard *)、空字串 = foreground
     actions: list[ComputerUseAction] = []  # 錄製/手編的動作序列
     assets_dir: str = ""         # 錨點圖片資料夾（相對路徑掛到工作流目錄下）
     fail_fast: bool = True       # True = 任一動作失敗立即中止；False = 警告後繼續
@@ -176,6 +204,20 @@ class PipelineStep(BaseModel):
     cv_trigger_hover: bool = True  # True = 比對前先把游標移到錄製座標並等，讓 Windows hover 效果出現
     cv_hover_wait_ms: int = 200    # hover 等待時間：200（快）/ 400（保險，Windows 部分動畫較慢）
     cv_coord_fallback: bool = False # True = CV 完全找不到時退回錄製座標硬點下去；False（預設）= 失敗就 FAIL 不亂點
+    # ── VLM 把關 Phase 1:節點層級設定(每動作 expected 走 ComputerUseAction.verify_after)──
+    # 設計目的:錄製座標確定性主路徑 + AI 驗證層、99% 失敗從「整套悶著錯」變「立刻發現+人介入」
+    # 詳見 docs/computer-use-vlm-verifier-plan.md
+    cu_vlm_check_strategy: str = "off"   # off / after_each / critical_only
+                                          # off          = 完全關 VLM 驗證(現況、預設)
+                                          # after_each   = 每個有 expected 的動作都驗
+                                          # critical_only = 只驗 verify_critical=True 的動作
+    cu_on_mismatch: str = "stop_notify"  # stop_notify / retry_once / skip_and_continue
+                                          # stop_notify       = 立即停 + push TG + pipeline awaiting_human(預設、最安全)
+                                          # retry_once        = 重試一次同動作、仍失敗才 stop_notify
+                                          # skip_and_continue = 警告但繼續(用於非關鍵步、容忍偏離)
+    cu_vlm_provider: str = ""            # 空字串 = 跟 settings.model 同(自動推斷);
+                                          # 也可指定 "anthropic" / "openai"
+    cu_vlm_max_retries: int = 1          # retry_once 模式下最多重試幾次
     # ── OCR 比對設定 ──────────────────────────────────────────────────
     ocr_threshold: float = 0.6     # OCR 最小 confidence：低於這數字視為沒匹配到
                                    # 分級: 1.0 精確 / 0.9 target⊆word / 0.8 跨詞行層級 / 0.6 模糊
@@ -205,6 +247,18 @@ class PipelineStep(BaseModel):
     # 執行流程：Tier 1 = 沙盒內 Crawl4AI（Playwright + Chromium）；偵測到 Cloudflare
     # 擋下時 fallback Tier 2 = host 端打 FlareSolverr（port 8191、用 Puppeteer 解 CF challenge）。
     # 不進 LLM、不進 recipe；輸出格式為 LLM-friendly markdown，下個 skill 節點直接讀 outputPath。
+    # ── Subagent 節點（subagent）────────────────────────────────────
+    # 獨立節點類型：跟 skill 一樣是 agent loop（多輪 LLM + tool call），但：
+    #   1. system prompt 由 subagent_role 決定（data_analyst / coder / researcher / critic / planner）
+    #   2. 工具白名單按 role 過濾（critic 只能 read_file、planner 只能 done）
+    #   3. 跳過 recipe cache（多輪結果非確定性、cache 命中率低）
+    #   4. 跳過 AI validator（loop 內已自我驗證）
+    # 適合：探索性、結構不固定的任務（研究 / debug / 寫稿）
+    # 不適合：每天跑相同邏輯的固定任務（用 skill 節點 + recipe 即可、零 token）
+    subagent: bool = False
+    subagent_role: str = "data_analyst"   # data_analyst | coder | researcher | critic | planner
+    subagent_max_iter: int = 10            # 最多 LLM 輪數上限(含 tool call 來回);實測 5 對非簡單任務太低
+
     web_crawler: bool = False          # True = 網頁爬蟲節點
     # 模式由前端明確選擇（不自動偵測），決定走哪條路徑：
     #   "web"   → Crawl4AI（網頁 → markdown）；填 wc_url + wc_* 欄位

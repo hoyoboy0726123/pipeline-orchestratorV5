@@ -162,6 +162,20 @@ POST /pipeline/run (YAML payload)
 - 單步動作數上限 `MAX_ACTIONS_PER_STEP = 500`
 - 支援執行中 `force_abort()`：後端 `/pipeline/runs/<id>/abort` 會呼叫 `computer_use.request_abort()` 讓引擎在下個 action 間隙中斷
 
+**🛡 VLM 把關 Phase 1**(可選、預設關):
+錄製座標主路徑 + AI 驗證者、每動作後送前後截圖給 VLM 比對 expected outcome、
+偏離立刻停 + push TG 通知。99% 失敗模式從「整套悶著錯」變「立刻發現+人介入」。
+
+啟用方式:節點面板「🛡 VLM 把關」摺疊區、設 `cu_vlm_check_strategy`(off/after_each/critical_only)
++ `cu_on_mismatch`(stop_notify/retry_once/skip_and_continue)、然後在每個 action 寫 `expected` 描述。
+
+詳見 `docs/computer-use-vlm-verifier-plan.md`。Phase 2(LLM 自主生座標)延後到 OmniParser /
+Anthropic computer_use 模型成熟度更高再做(預估 2026 Q4)。
+
+`pipeline/cu_vlm_verifier.py` — VLM 驗證器(送前後圖 + expected → verdict)
+`backend/_test_cu_vlm_verifier.py` — 4 case e2e 測試(verdict 準確度)
+`backend/_test_cu_integration.py` — 6 case 整合測試(execute_computer_use_step 完整流程)
+
 **依賴**（預載於 `backend/skill_packages.txt`）：
 - `pyautogui` — 滑鼠/鍵盤驅動
 - `opencv-python` — template matching

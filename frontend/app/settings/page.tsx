@@ -1185,13 +1185,13 @@ function SandboxSection() {
 export default function SettingsPage() {
   const [current, setCurrent] = useState<ModelSettings | null>(null)
   const [available, setAvailable] = useState<AvailableModels | null>(null)
-  const [provider, setProvider] = useState<'groq' | 'ollama' | 'gemini' | 'openrouter'>('groq')
+  const [provider, setProvider] = useState<'groq' | 'ollama' | 'gemini' | 'openai' | 'anthropic'>('groq')
   const [model, setModel] = useState('')
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
   const [thinking, setThinking] = useState<'auto' | 'on' | 'off'>('off')
   const [numCtx, setNumCtx] = useState<number>(16384)
   const [geminiThinking, setGeminiThinking] = useState<'off' | 'auto' | 'low' | 'medium' | 'high'>('off')
-  const [orThinking, setOrThinking] = useState<'off' | 'on'>('off')
+  const [antThinking, setAntThinking] = useState<'off' | 'on'>('off')
   const [loading, setLoading] = useState(true)
   const [availableError, setAvailableError] = useState<string | null>(null)
   const [reloadingModels, setReloadingModels] = useState(false)
@@ -1228,7 +1228,7 @@ export default function SettingsPage() {
       setThinking(cur.ollama_thinking || 'off')
       setNumCtx(cur.ollama_num_ctx || 16384)
       setGeminiThinking(cur.gemini_thinking || 'off')
-      setOrThinking(cur.openrouter_thinking || 'off')
+      setAntThinking(cur.anthropic_thinking || 'off')
     } catch (e) {
       toast.error((e as Error).message)
     } finally {
@@ -1250,7 +1250,7 @@ export default function SettingsPage() {
       const saved = await saveModelSettings({
         provider, model,
         ollama_base_url: ollamaUrl, ollama_thinking: thinking, ollama_num_ctx: numCtx,
-        gemini_thinking: geminiThinking, openrouter_thinking: orThinking,
+        gemini_thinking: geminiThinking, anthropic_thinking: antThinking,
       })
       setCurrent(saved)
       toast.success(`已儲存：${saved.provider} / ${saved.model}`)
@@ -1265,12 +1265,15 @@ export default function SettingsPage() {
     ? (available?.groq ?? [])
     : provider === 'gemini'
     ? (available?.gemini ?? [])
-    : provider === 'openrouter'
-    ? (available?.openrouter ?? [])
+    : provider === 'openai'
+    ? (available?.openai ?? [])
+    : provider === 'anthropic'
+    ? (available?.anthropic ?? [])
     : (available?.ollama ?? [])
   const providerError = provider === 'groq' ? available?.groq_error
     : provider === 'gemini' ? available?.gemini_error
-    : provider === 'openrouter' ? available?.openrouter_error
+    : provider === 'openai' ? available?.openai_error
+    : provider === 'anthropic' ? available?.anthropic_error
     : available?.ollama_error
   const dirty = current && (
     provider !== current.provider ||
@@ -1279,7 +1282,7 @@ export default function SettingsPage() {
     thinking !== current.ollama_thinking ||
     numCtx !== current.ollama_num_ctx ||
     geminiThinking !== (current.gemini_thinking || 'off') ||
-    orThinking !== (current.openrouter_thinking || 'off')
+    antThinking !== (current.anthropic_thinking || 'off')
   )
 
   return (
@@ -1362,7 +1365,8 @@ export default function SettingsPage() {
                 {([
                   { v: 'groq' as const, icon: Cloud, name: 'Groq Cloud', desc: '雲端 API，速度快', fallbackModel: '' },
                   { v: 'gemini' as const, icon: Sparkles, name: 'Google Gemini', desc: '支援思考模式', fallbackModel: 'gemma-4-31b-it' },
-                  { v: 'openrouter' as const, icon: Cloud, name: 'OpenRouter', desc: '免費模型，多供應商', fallbackModel: '' },
+                  { v: 'openai' as const, icon: Cloud, name: 'OpenAI', desc: 'GPT 系列、官方 API', fallbackModel: 'gpt-4o-mini' },
+                  { v: 'anthropic' as const, icon: Cloud, name: 'Anthropic', desc: 'Claude 系列、支援延伸思考', fallbackModel: 'claude-sonnet-4-6-20250929' },
                   { v: 'ollama' as const, icon: HardDrive, name: 'Ollama 本地', desc: '離線運行，無配額', fallbackModel: '' },
                 ]).map(p => (
                   <button
@@ -1371,7 +1375,8 @@ export default function SettingsPage() {
                       setProvider(p.v)
                       const list = p.v === 'groq' ? available?.groq
                         : p.v === 'gemini' ? available?.gemini
-                        : p.v === 'openrouter' ? available?.openrouter
+                        : p.v === 'openai' ? available?.openai
+                        : p.v === 'anthropic' ? available?.anthropic
                         : available?.ollama
                       setModel(list?.[0]?.id ?? p.fallbackModel)
                     }}
@@ -1491,27 +1496,27 @@ export default function SettingsPage() {
               </div>
             )}
 
-            {/* 思考模式 — OpenRouter */}
-            {provider === 'openrouter' && (
+            {/* 延伸思考 — Anthropic Claude Opus 4 系列 */}
+            {provider === 'anthropic' && (
               <div className="p-6 border-b border-gray-100">
                 <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-2">
                   <Brain className="w-4 h-4" />
-                  思考模式
+                  延伸思考（Extended Thinking）
                 </label>
                 <p className="text-xs text-gray-500 mb-3">
-                  DeepSeek R1 等推理模型會在回答前輸出思考過程。選擇不支援思考的模型時自動以普通模式運行。
+                  Claude Opus 4 系列在回答前會輸出思考過程、適合複雜推理。Sonnet / Haiku 開了沒效果（自動忽略）。
                 </p>
                 <div className="grid grid-cols-2 gap-2">
                   {([
-                    { v: 'off', label: '關閉思考', desc: '普通輸出' },
-                    { v: 'on',  label: '開啟思考', desc: '推理模型會先思考' },
+                    { v: 'off', label: '關閉思考', desc: '直接回答' },
+                    { v: 'on',  label: '開啟思考', desc: 'Opus 會先推理再答' },
                   ] as const).map(opt => (
                     <button
                       key={opt.v}
-                      onClick={() => setOrThinking(opt.v)}
+                      onClick={() => setAntThinking(opt.v)}
                       className={cn(
                         'p-3 rounded-lg border-2 transition-all text-left',
-                        orThinking === opt.v
+                        antThinking === opt.v
                           ? 'border-brand-600 bg-brand-50'
                           : 'border-gray-200 hover:border-gray-300'
                       )}
@@ -1568,7 +1573,8 @@ export default function SettingsPage() {
                 {provider === 'ollama' && <span className="text-xs text-gray-400 ml-2">（讀取自 ollama list）</span>}
                 {provider === 'groq' && <span className="text-xs text-gray-400 ml-2">（從 Groq API 動態取得）</span>}
                 {provider === 'gemini' && <span className="text-xs text-gray-400 ml-2">（從 Google API 動態取得）</span>}
-                {provider === 'openrouter' && <span className="text-xs text-gray-400 ml-2">（僅列出免費模型）</span>}
+                {provider === 'openai' && <span className="text-xs text-gray-400 ml-2">（從 OpenAI API 動態取得）</span>}
+                {provider === 'anthropic' && <span className="text-xs text-gray-400 ml-2">（從 Anthropic API 動態取得）</span>}
                 {reloadingModels && <span className="text-xs text-indigo-500 ml-2"><Loader2 className="w-3 h-3 animate-spin inline mr-1" />載入中…</span>}
               </label>
               {availableError ? (

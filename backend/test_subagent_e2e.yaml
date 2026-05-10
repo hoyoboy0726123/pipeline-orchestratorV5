@@ -1,0 +1,12 @@
+name: subagent-e2e-test
+validate: false
+steps:
+  - name: fibonacci-test
+    subagent: true
+    subagent_role: data_analyst
+    subagent_max_iter: 5
+    batch: |
+      Use run_python in the sandbox to compute fibonacci(1) through fibonacci(10),
+      print each value on its own line, then call done with a short summary.
+    timeout: 300
+    retry: 0

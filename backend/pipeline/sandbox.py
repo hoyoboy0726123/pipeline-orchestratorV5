@@ -36,6 +36,31 @@ SANDBOX_TOOL_TIMEOUT = 60  # 秒；對齊 executor.SKILL_TOOL_TIMEOUT
 # Docker CLI 呼叫習慣：優先嘗試 plain `docker`（使用者已 `usermod -aG docker` + 重啟 WSL），
 # 失敗再 fallback `sudo docker`。快取結果避免每次都試。
 _DOCKER_PREFIX_CACHE: dict = {"prefix": None}
+
+# ── 並發護欄(2026-05 加) ────────────────────────────────────────────
+# #1 同時 docker exec 上限：避免兩個 workflow + ad-hoc subagent 同時併發跑、
+#    讓 docker daemon 變慢、container 內 CPU/RAM 互搶。可用 env var 調(預設 3)
+# #2 pip install global lock：兩個 task 同時 pip install 不同 pkg 會撞 dpkg lock /
+#    .pyc cache、最易壞。任何 cmd 含 'pip install' 字眼一律序列化。
+import os as _os
+_SANDBOX_MAX_CONCURRENT = max(1, int(_os.getenv("SANDBOX_MAX_CONCURRENT", "3") or 3))
+_SANDBOX_EXEC_SEMA = threading.Semaphore(_SANDBOX_MAX_CONCURRENT)
+_PIP_INSTALL_LOCK = threading.Lock()
+
+
+def _is_pip_install_cmd(cmd: list[str]) -> bool:
+    """Detect cmd 內是否含 pip install 操作(序列化用)。
+    cmd 通常是 ['docker', 'exec', ..., 'sh', '-c', '<shell-cmd>'] 或 python script。
+    sh -c 的 arg 內若有 pip install / pip3 install / python -m pip install / uv pip install
+    都算。Python 程式內透過 subprocess 呼 pip 抓不到、那場景少且 LLM 通常會被
+    runner 早期 ModuleNotFoundError 攔截、不會走 runtime pip install。"""
+    blob = " ".join(str(c) for c in cmd).lower()
+    if "pip install" in blob or "pip3 install" in blob or "uv pip install" in blob:
+        return True
+    # python -m pip install / python3 -m pip install
+    if "-m pip" in blob and "install" in blob:
+        return True
+    return False
 _DOCKER_PREFIX_LOCK = threading.Lock()
 
 
@@ -316,7 +341,28 @@ def _run_subprocess(
     """執行指令，串 I/O 回來。對齊 executor._skill_run_python 的行為：
     - encoding='utf-8', errors='replace'
     - timeout → kill + 返回 timed_out=True
-    - register_cb / unregister_cb 讓 executor 可以中止"""
+    - register_cb / unregister_cb 讓 executor 可以中止
+    - 並發護欄: _SANDBOX_EXEC_SEMA(預設 3)、pip install 額外 _PIP_INSTALL_LOCK"""
+    is_pip = _is_pip_install_cmd(cmd)
+    if is_pip:
+        log.info(f"[sandbox] 偵測到 pip install、走全域 _PIP_INSTALL_LOCK 序列化(避免 dpkg/cache race)")
+    # 用 ExitStack 串多個 lock(sema 必拿、pip 才額外拿)
+    import contextlib as _ctx
+    with _ctx.ExitStack() as stack:
+        stack.enter_context(_SANDBOX_EXEC_SEMA)
+        if is_pip:
+            stack.enter_context(_PIP_INSTALL_LOCK)
+        return _run_subprocess_inner(cmd, timeout, run_id, register_cb, unregister_cb)
+
+
+def _run_subprocess_inner(
+    cmd: list[str],
+    timeout: float,
+    run_id: str,
+    register_cb: Optional[Callable],
+    unregister_cb: Optional[Callable],
+) -> SandboxResult:
+    """實際 spawn subprocess(原 _run_subprocess 邏輯)。並發鎖在外面 _run_subprocess 包好。"""
     proc = None
     try:
         # 沙盒執行時 stdin 關掉，避免子指令等輸入卡死

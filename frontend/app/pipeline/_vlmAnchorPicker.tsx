@@ -13,9 +13,10 @@
  * 漏副檔名、不會搞混 _manual 後綴。
  */
 import { useEffect, useState } from 'react'
-import { X, RefreshCcw, Check } from 'lucide-react'
+import { X, RefreshCcw, Check, Camera } from 'lucide-react'
 import { toast } from 'sonner'
 import { listAssetFiles, assetImageUrl, type AssetFileEntry } from '@/lib/api'
+import CaptureAnchorModal from './_captureAnchorModal'
 
 interface Props {
   assetsDir: string                // 該動作所在節點的 assets_dir（相對或絕對）
@@ -29,6 +30,8 @@ export default function VlmAnchorPicker({ assetsDir, initialSelected, onApply, o
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<string[]>(initialSelected || [])
+  // 立即截圖 modal 開關(允許使用者不用先把圖放好就能加新錨點變體)
+  const [captureOpen, setCaptureOpen] = useState(false)
 
   const fetchList = async () => {
     setLoading(true)
@@ -77,6 +80,11 @@ export default function VlmAnchorPicker({ assetsDir, initialSelected, onApply, o
           <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700">
             已選 {selected.length}
           </span>
+          <button onClick={() => setCaptureOpen(true)}
+                  title="立即截圖加新變體錨點(例 hover 變色狀態)"
+                  className="px-2.5 py-1.5 text-xs font-medium bg-emerald-600 text-white rounded hover:bg-emerald-700 flex items-center gap-1">
+            <Camera className="w-3.5 h-3.5" /> 立即截圖
+          </button>
           <button onClick={fetchList} title="重新讀取資料夾"
                   className="p-2 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
             <RefreshCcw className="w-4 h-4" />
@@ -100,7 +108,7 @@ export default function VlmAnchorPicker({ assetsDir, initialSelected, onApply, o
           )}
           {!loading && !error && files.length === 0 && (
             <div className="text-center py-12 text-gray-500 text-sm">
-              這個資料夾沒有錨點 PNG。先在動作上點「✏️ 編輯錨點」存幾張不同變體再來這選。
+              這個資料夾沒有錨點 PNG。可以按右上角「📷 立即截圖」直接擷取一張、或先在動作上點「✏️ 編輯錨點」存幾張不同變體再來這選。
             </div>
           )}
           {!loading && !error && files.length > 0 && (
@@ -160,6 +168,18 @@ export default function VlmAnchorPicker({ assetsDir, initialSelected, onApply, o
           </div>
         </div>
       </div>
+
+      {/* 立即截圖 modal、儲存後自動加進 selected + 重抓檔案清單 */}
+      {captureOpen && (
+        <CaptureAnchorModal
+          assetsDir={assetsDir}
+          onApply={(filename) => {
+            setSelected(s => s.includes(filename) ? s : [...s, filename])
+            fetchList()
+          }}
+          onClose={() => setCaptureOpen(false)}
+        />
+      )}
     </div>
   )
 }

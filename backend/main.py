@@ -94,7 +94,7 @@ class ModelSettingsRequest(BaseModel):
     ollama_thinking: Optional[str] = None   # "auto" | "on" | "off"
     ollama_num_ctx: Optional[int] = None
     gemini_thinking: Optional[str] = None   # "off" | "auto" | "low" | "medium" | "high"
-    openrouter_thinking: Optional[str] = None  # "off" | "on"
+    anthropic_thinking: Optional[str] = None  # "off" | "on" — Claude Opus 4 extended thinking
 
 
 @app.put("/settings/model")
@@ -103,7 +103,7 @@ async def put_model_settings(req: ModelSettingsRequest):
     try:
         return update_settings(
             req.provider, req.model, req.ollama_base_url, req.ollama_thinking, req.ollama_num_ctx,
-            req.gemini_thinking, req.openrouter_thinking,
+            req.gemini_thinking, req.anthropic_thinking,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -120,7 +120,7 @@ async def get_available_models(refresh: bool = False):
     import time as _time
     import asyncio as _asyncio
     import httpx
-    from config import GROQ_API_KEY as _groq_key, GEMINI_API_KEY as _gemini_key, OPENROUTER_API_KEY as _or_key
+    from config import GROQ_API_KEY as _groq_key, GEMINI_API_KEY as _gemini_key, OPENAI_API_KEY as _oai_key, ANTHROPIC_API_KEY as _ant_key
 
     # 命中快取直接回，~5ms
     if not refresh and _MODELS_CACHE["data"] and (_time.time() - _MODELS_CACHE["ts"]) < _MODELS_CACHE_TTL:
@@ -132,8 +132,10 @@ async def get_available_models(refresh: bool = False):
     groq_error: Optional[str] = None
     gemini_models: list[dict] = []
     gemini_error: Optional[str] = None
-    openrouter_models: list[dict] = []
-    openrouter_error: Optional[str] = None
+    openai_models: list[dict] = []
+    openai_error: Optional[str] = None
+    anthropic_models: list[dict] = []
+    anthropic_error: Optional[str] = None
 
     base_url = "http://localhost:11434"
     try:
@@ -200,26 +202,51 @@ async def get_available_models(refresh: bool = False):
             except Exception as e:
                 return [], f"Gemini API 錯誤：{e}"
 
-        async def fetch_openrouter() -> tuple[list[dict], Optional[str]]:
+        async def fetch_openai() -> tuple[list[dict], Optional[str]]:
+            if not _oai_key:
+                return [], "未設定 OPENAI_API_KEY"
             try:
-                r = await client.get("https://openrouter.ai/api/v1/models")
+                r = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {_oai_key}"},
+                )
                 r.raise_for_status()
+                # OpenAI list 含很多 embedding / audio / image / fine-tune 模型、過濾出 chat 用的
+                _CHAT_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
+                _EXCLUDE = ("audio", "transcribe", "tts", "embed", "moderation", "realtime",
+                            "instruct", "vision-preview", "search-preview")
                 models = []
                 for m in r.json().get("data", []):
-                    pricing = m.get("pricing", {})
-                    if str(pricing.get("prompt", "1")) != "0" or str(pricing.get("completion", "1")) != "0":
-                        continue
                     mid = m.get("id", "")
-                    ctx = m.get("context_length", 0)
-                    name = m.get("name", mid)
-                    label = name
-                    if ctx:
-                        label += f"（ctx={ctx // 1024}K）"
-                    models.append({"id": mid, "label": label, "context_length": ctx})
+                    if not any(mid.startswith(p) for p in _CHAT_PREFIXES):
+                        continue
+                    if any(kw in mid for kw in _EXCLUDE):
+                        continue
+                    models.append({"id": mid, "label": mid})
                 models.sort(key=lambda x: x["id"])
                 return models, None
             except Exception as e:
-                return [], f"OpenRouter API 錯誤：{e}"
+                return [], f"OpenAI API 錯誤：{e}"
+
+        async def fetch_anthropic() -> tuple[list[dict], Optional[str]]:
+            if not _ant_key:
+                return [], "未設定 ANTHROPIC_API_KEY"
+            try:
+                r = await client.get(
+                    "https://api.anthropic.com/v1/models",
+                    headers={"x-api-key": _ant_key, "anthropic-version": "2023-06-01"},
+                )
+                r.raise_for_status()
+                models = []
+                for m in r.json().get("data", []):
+                    mid = m.get("id", "")
+                    display = m.get("display_name") or mid
+                    label = f"{display}（{mid}）" if display != mid else mid
+                    models.append({"id": mid, "label": label})
+                models.sort(key=lambda x: x["id"])
+                return models, None
+            except Exception as e:
+                return [], f"Anthropic API 錯誤：{e}"
 
         async def fetch_ollama() -> tuple[list[dict], Optional[str]]:
             try:
@@ -237,18 +264,25 @@ async def get_available_models(refresh: bool = False):
             except Exception as e:
                 return [], f"無法連線 Ollama（{base_url}）：{e}"
 
-        # 四條 coroutine 一口氣併發執行，總時間 ≈ max 而不是 sum
+        # 五條 coroutine 一口氣併發執行，總時間 ≈ max 而不是 sum
         (groq_models, groq_error), (gemini_models, gemini_error), \
-        (openrouter_models, openrouter_error), (ollama_models, ollama_error) = \
-            await _asyncio.gather(fetch_groq(), fetch_gemini(), fetch_openrouter(), fetch_ollama())
+        (openai_models, openai_error), (anthropic_models, anthropic_error), \
+        (ollama_models, ollama_error) = \
+            await _asyncio.gather(
+                fetch_groq(), fetch_gemini(),
+                fetch_openai(), fetch_anthropic(),
+                fetch_ollama(),
+            )
 
     payload = {
         "groq": groq_models,
         "groq_error": groq_error,
         "gemini": gemini_models,
         "gemini_error": gemini_error,
-        "openrouter": openrouter_models,
-        "openrouter_error": openrouter_error,
+        "openai": openai_models,
+        "openai_error": openai_error,
+        "anthropic": anthropic_models,
+        "anthropic_error": anthropic_error,
         "ollama": ollama_models,
         "ollama_base_url": base_url,
         "ollama_error": ollama_error,
@@ -630,6 +664,272 @@ async def crop_anchor_from_full(req: CropRequest):
         "height": actual_h,
         "variance": round(variance, 1),
     }
+
+
+class SavePngRequest(BaseModel):
+    """前端裁切完直接送 base64 PNG 存到 assets_dir、給 VLM 錨點立即截圖用。
+    跟 crop_anchor_from_full 不同:那個要先有 full_image 在磁碟、這個直接收 base64。"""
+    dir: str                 # assets 資料夾
+    name: str                # 檔名(可不含 .png、會自動補)
+    png_b64: str             # 純 PNG base64(不含 data: prefix)
+
+
+@app.post("/computer-use/assets/save-png")
+async def save_png_to_assets(req: SavePngRequest):
+    """把前端 canvas.toBlob() 出來的 PNG bytes 存進 assets_dir。
+    用途:VLM 錨點立即截圖功能 — 使用者按下截圖、瀏覽器內裁切、再回傳裁好的圖。
+    跟 crop_anchor_from_full 互補(那個吃磁碟上的 full_image、這個吃 base64)。
+    """
+    import base64
+    target_dir = _validate_assets_path(req.dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    save_name = req.name.strip()
+    if not save_name:
+        raise HTTPException(status_code=400, detail="name 為空")
+    # 過濾路徑符號(防 .. / 等跳出資料夾)
+    if "/" in save_name or "\\" in save_name or save_name.startswith("."):
+        raise HTTPException(status_code=400, detail=f"name 含非法字元:{save_name!r}")
+    if not save_name.lower().endswith(".png"):
+        save_name += ".png"
+
+    try:
+        # 容忍前端有沒帶 data:image/png;base64, prefix
+        b64 = req.png_b64.split(",", 1)[-1] if "," in req.png_b64 else req.png_b64
+        data = base64.b64decode(b64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"base64 解碼失敗:{e}")
+
+    if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise HTTPException(status_code=400, detail="不是有效 PNG bytes")
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"PNG 太大({len(data)} bytes、上限 5MB)")
+
+    out_path = target_dir / save_name
+    try:
+        out_path.write_bytes(data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"寫檔失敗:{e}")
+
+    # 跟 crop 同步回 metadata、讓前端 UI 顯示一致
+    try:
+        import cv2
+        import numpy as np
+        arr = np.frombuffer(data, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is not None:
+            h, w = img.shape[:2]
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            variance = float(np.var(gray))
+        else:
+            h, w, variance = 0, 0, 0.0
+    except Exception:
+        h, w, variance = 0, 0, 0.0
+
+    return {
+        "image": save_name,
+        "width": w,
+        "height": h,
+        "variance": round(variance, 1),
+        "size_bytes": len(data),
+    }
+
+
+class UiaInspectRequest(BaseModel):
+    """檢視指定視窗(或 foreground)的 UIA element tree。"""
+    window: str = ""             # 視窗 title pattern(支援 wildcard *)、空字串 = 當前 foreground
+    max_depth: int = 6           # tree 深度上限(避免某些 app 上千層)
+    max_children_per_node: int = 50  # 每節點子元素上限(避免大表格 1 萬列展開)
+
+
+@app.post("/computer-use/uia/inspect")
+async def uia_inspect(req: UiaInspectRequest):
+    """檢視 UIA element tree、給 frontend tree picker 用。
+    詳見 docs/uia-feature-evaluation.md。
+    """
+    from pipeline.uia_executor import inspect_window
+    import logging as _log
+    result = inspect_window(
+        window_pattern=req.window,
+        max_depth=req.max_depth,
+        max_children_per_node=req.max_children_per_node,
+        logger=_log.getLogger("uia_inspect"),
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "inspect 失敗"))
+    return result
+
+
+class UiaHighlightRequest(BaseModel):
+    """在桌面對應位置畫紅框 outline、給 inspector hover 看清楚對應實體 control 用。
+    清除用 ttl_ms=0 或呼 /computer-use/uia/highlight/clear。"""
+    x: int                       # 螢幕絕對 X(虛擬桌面座標、可負)
+    y: int                       # 螢幕絕對 Y
+    width: int                   # 邊框寬
+    height: int                  # 邊框高
+    ttl_ms: int = 1500           # 自動消失時間;0 = 立即清掉
+
+
+@app.post("/computer-use/uia/highlight")
+async def uia_highlight(req: UiaHighlightRequest):
+    """在桌面 (x, y, w, h) 位置畫紅色 outline。
+    透明 topmost、click 穿透不擋滑鼠。"""
+    from pipeline.cu_highlight_overlay import highlight, clear_highlight
+    if req.ttl_ms <= 0:
+        clear_highlight()
+    else:
+        highlight(req.x, req.y, req.width, req.height, req.ttl_ms)
+    return {"ok": True}
+
+
+@app.post("/computer-use/uia/highlight/clear")
+async def uia_highlight_clear():
+    from pipeline.cu_highlight_overlay import clear_highlight
+    clear_highlight()
+    return {"ok": True}
+
+
+@app.post("/computer-use/uia/picker/start")
+async def uia_picker_start():
+    """啟動 Live Picker:滑鼠 hover 桌面 → UIA 元素跟隨紅框 + F8 確認 / F9 取消。"""
+    from pipeline.uia_picker import get_picker
+    p = get_picker()
+    started = p.start()
+    return {"ok": True, "started": started, "running": p.is_running}
+
+
+@app.get("/computer-use/uia/picker/poll")
+async def uia_picker_poll():
+    """frontend 輪詢:當下 hover element + 是否 confirmed。"""
+    from pipeline.uia_picker import get_picker
+    return get_picker().poll()
+
+
+@app.post("/computer-use/uia/picker/consume")
+async def uia_picker_consume():
+    """拿完 confirmed 後 reset、避免重複處理。"""
+    from pipeline.uia_picker import get_picker
+    el = get_picker().consume_confirmed()
+    return {"ok": True, "element": el}
+
+
+@app.post("/computer-use/uia/picker/stop")
+async def uia_picker_stop():
+    from pipeline.uia_picker import get_picker
+    was_running = get_picker().stop()
+    return {"ok": True, "was_running": was_running}
+
+
+@app.post("/computer-use/uia/picker/confirm")
+async def uia_picker_confirm():
+    """frontend 按鈕「確認當前 hover」走這個、不靠 F8 hotkey。"""
+    from pipeline.uia_picker import get_picker
+    p = get_picker()
+    el = p.confirm_current()
+    if not el:
+        return {"ok": False, "error": "目前沒 hover 任何元素、移動滑鼠到目標再確認"}
+    return {"ok": True, "element": el}
+
+
+@app.get("/computer-use/uia/windows")
+async def uia_list_windows():
+    """列當下所有可見的 top-level 視窗、給 frontend 「📋 列出視窗」選單用。
+
+    用 uiautomation 為主(File Explorer / TeamsWebView 等 shell-hosted window
+    EnumWindows 抓不到)、win32 EnumWindows 為輔(catch cloaked / 邊角 cases)。
+    去重 by name+class、合併兩路結果。
+    """
+    try:
+        import uiautomation as auto
+    except ImportError:
+        raise HTTPException(status_code=500, detail="uiautomation 未安裝")
+
+    seen: set[tuple[str, str]] = set()
+    windows: list[dict] = []
+
+    # Pass 1: uiautomation(看 shell-hosted / 看標準 GUI app)
+    try:
+        root = auto.GetRootControl()
+        for w in root.GetChildren():
+            try:
+                name = str(w.Name or "").strip()
+                cls = str(getattr(w, "ClassName", "") or "")
+                rect = w.BoundingRectangle
+                rw = int(rect.right - rect.left)
+                rh = int(rect.bottom - rect.top)
+                if not name and (rw == 0 or rh == 0):
+                    continue
+                if not name:
+                    name = f"(無標題 {cls})"
+                key = (name, cls)
+                if key in seen:
+                    continue
+                seen.add(key)
+                windows.append({
+                    "name": name,
+                    "class": cls,
+                    "rect": [int(rect.left), int(rect.top), rw, rh],
+                    "is_offscreen": bool(getattr(w, "IsOffscreen", False)),
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Pass 2: win32 EnumWindows(補 cloaked / hidden ApplicationFrameWindow)
+    try:
+        import win32gui  # type: ignore
+        import ctypes
+
+        def _enum_cb(hwnd, _ignored):
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+                title = win32gui.GetWindowText(hwnd) or ""
+                cls = win32gui.GetClassName(hwnd) or ""
+                rect = win32gui.GetWindowRect(hwnd)
+                w = rect[2] - rect[0]
+                h = rect[3] - rect[1]
+                if w < 50 or h < 50:
+                    return True
+                # 系統殼有名字才補(避免一堆 noise)
+                if not title:
+                    return True
+                key = (title, cls)
+                if key in seen:
+                    return True
+                seen.add(key)
+                # 偵測 cloaked
+                is_cloaked = False
+                try:
+                    DWMWA_CLOAKED = 14
+                    cloaked = ctypes.c_int(0)
+                    res = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                        hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+                    )
+                    is_cloaked = (res == 0 and cloaked.value != 0)
+                except Exception:
+                    pass
+                windows.append({
+                    "name": title, "class": cls,
+                    "rect": [rect[0], rect[1], w, h],
+                    "is_offscreen": is_cloaked,
+                })
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(_enum_cb, None)
+    except Exception:
+        pass
+
+    # 排序:非 cloaked + 有真正 title 優先
+    windows.sort(key=lambda x: (
+        x["is_offscreen"],
+        x["name"].startswith("(無標題"),
+        -len(x["name"]),
+    ))
+    return {"ok": True, "windows": windows[:80]}
 
 
 @app.delete("/computer-use/assets")
@@ -1191,7 +1491,9 @@ class PipelineRunRequest(BaseModel):
     validate: bool = True
     use_recipe: bool = False  # True = 快速模式：recipe 命中時跳過 LLM 驗證
     workflow_id: Optional[str] = None  # 關聯工作流 ID
-    no_save_recipe: bool = False  # True = 延遲 recipe 儲存，等用戶確認
+    no_save_recipe: bool = False  # True = 延遲 recipe 儲存，等用戶確認（桌面手動勾「skill workflow」用）
+    silent_recipe: bool = False  # True = 「無人值守」模式：直接覆寫 recipe、永不延遲、不彈確認
+                                   # （TG 遠端遙控 / 排程觸發用、避免桌面卡在 pending dialog）
 
 
 class PipelineDecisionRequest(BaseModel):
@@ -1226,6 +1528,7 @@ async def start_pipeline(req: PipelineRunRequest):
     config_d["_use_recipe"] = req.use_recipe  # 傳遞快速模式旗標
     config_d["_workflow_id"] = req.workflow_id  # 關聯工作流
     config_d["_no_save_recipe"] = req.no_save_recipe  # 延遲 recipe 儲存
+    config_d["_silent_recipe"] = req.silent_recipe    # 無人值守模式（TG/排程）→ 直接覆寫
     run = PRun(
         run_id=run_id,
         pipeline_name=config.name,
@@ -1270,8 +1573,8 @@ async def delete_pipeline_run(run_id: str):
 
 @app.post("/pipeline/runs/{run_id}/resume")
 async def resume_pipeline_run(run_id: str, req: PipelineDecisionRequest):
-    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer"):
-        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer")
+    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer", "install_dep", "approve_command", "deny_command", "hint_command"):
+        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer / install_dep / approve_command / deny_command / hint_command")
     from pipeline.runner import resume_pipeline
     msg = await resume_pipeline(run_id, req.decision, hint=req.hint or "")
     return {"message": msg}
@@ -1401,6 +1704,121 @@ async def delete_pipeline_schedule(task_id: str):
 # ── Pipeline YAML Chat Assistant ─────────────────────────────
 _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用自然語言描述需求，你引導他釐清細節後產出可執行的 YAML。
 
+# 你能呼叫的工具
+
+當使用者問起特定工作流 / run / log 細節、且資訊不在你目前看到的脈絡裡 → **主動呼叫工具拉資料**、不要編造、也不要叫使用者再說一次。
+
+## 讀工具（read-only、隨意呼叫）
+
+| Tool | 用途 |
+|---|---|
+| `list_workflows()` | 列所有工作流（id, name, 最近一次 run 狀態）。模糊問題優先用這個摸清狀態 |
+| `get_workflow_yaml(query)` | 拿某工作流的 YAML（query 用 name 或 id 前綴）|
+| `get_recent_runs(query, limit=5)` | 拿某工作流最近 N 筆 run（含 run_id, status, 時間）|
+| `get_run_log(run_id, max_chars=12000)` | 拿某 run 的 log 內容（從末段截、log 末尾通常是錯誤訊息）|
+
+## 寫工具（destructive、必走兩步協議）
+
+| Tool | 用途 |
+|---|---|
+| `save_workflow_yaml(query, yaml_content, confirm)` | **更新既有** workflow 的 YAML（query 找名/id、會覆蓋原 YAML）|
+| `create_workflow_yaml(name, yaml_content, confirm)` | **建立全新** workflow（同名已存在會拒絕）|
+| `start_workflow(query, confirm)` | 啟動指定 workflow |
+| `send_file_to_tg(workflow_query, filename, confirm)` | 從 workflow 輸出資料夾抓檔送到使用者 TG |
+| `schedule_workflow(query, schedule_expr, confirm)` | 為某 workflow 建立 cron 排程（每天/每週固定時間自動跑）|
+| `cancel_schedule(task_id_or_name, confirm)` | 取消（刪除）某個 cron 排程 |
+| `list_schedules()` | 列出所有 cron 排程任務（read-only、隨意呼叫）|
+
+### 排程使用情境
+- 使用者說「每天早上 9 點跑」「每週一定時跑」「自動化」→ `schedule_workflow(query, schedule_expr)`
+- 常見 cron 範例：`0 9 * * *`（每天 9:00）、`0 9 * * 1-5`（週一至五 9:00）、`0 */2 * * *`（每 2 小時）、`30 18 * * 1`（週一 18:30）
+- 使用者說「取消那個定時任務」→ 先 `list_schedules()` 看清單、再 `cancel_schedule(name)`
+
+### 何時 save vs create
+- 使用者說「修這個 / 改那個」「把 X 改成」→ `save_workflow_yaml`（更新既有）
+- 使用者說「建一個新工作流」「再開一個叫 X 的」「設定成新 YAML」→ `create_workflow_yaml`（建新的）
+- 對話脈絡剛規劃好新流程、要落地 → 預設 `create_workflow_yaml`（除非使用者指定要套到既有的某個）
+
+## 網路搜尋（限定工作流相關研究）
+
+| Tool | 用途 |
+|---|---|
+| `web_search(query, max_results, full_content)` | 用 Tavily 搜網。**只在規劃 / debug 工作流需要外部資訊時用** |
+
+### 何時 call `web_search`（要 call）
+- 使用者要抓某站點、但你不知道它的 URL 結構 / RSS / API endpoint（例：「ithome 的 RSS 在哪？」「PTT 看板 URL 規則」）
+- 你不確定某 Python 套件的最新版本 / 新 API / 替代品（例：「crawl4ai 0.8 怎麼用」「opencv 4.x 跟 4.5 差別」）
+- 使用者要的功能你想不出來怎麼裝（例：「pdf 加密怎麼搞」→ search 一下找出推薦套件再規劃）
+- 工作流邏輯需要的具體外部知識（網站反爬機制、登入流程等）
+
+### 何時**不要** call（避免漂題 + 浪費 quota）
+- 使用者閒聊：天氣、股價、新聞、八卦、笑話 → **不 search**、簡短禮貌回 + 引導回主題
+- 已是你 LLM 常識的事（Python 基本語法、HTTP 概念、git 基本命令）→ **不 search**、直接答
+- 使用者問你身分 / 你是誰 / 你能做什麼 → **不 search**、直接介紹
+
+### 離題處理範例
+
+> 👤 今天天氣怎樣？
+>
+> 🤖 我是 Pipeline 工作流設定助手、不太查天氣這類即時資訊。我能幫你的是：規劃自動化工作流、debug 跑失敗的 run、改 YAML、傳檔到 TG 等。你有想自動化的事嗎？
+
+> 👤 AAPL 股價多少？
+>
+> 🤖 一般股價我不適合查（不是我本職、也容易給過時資訊）。但如果你要建一個「**每天自動抓股價、寄日報**」的工作流、我可以幫你規劃 — 要試試嗎？
+
+### 🛑 兩步協議（必須遵守、違反等於擅自寫資料）
+
+寫工具呼叫**永遠分兩步**：
+
+**第一次：confirm=False（預覽、不寫）**
+- 工具回 `[PREVIEW]` 結果（只是看、沒動 DB）
+- 你用純文字向使用者明確確認，例：
+  > 「我準備把新版 YAML 套到「PPT PC版輿情分析」、原 4 節點變 5 節點。要套用嗎？回 yes 確認、no 取消」
+
+**第二次：confirm=True（實寫）**
+- 等使用者**明確**同意（例：「yes」「OK」「套用」「好」「跑吧」「是」）才呼叫
+- 使用者語意模糊（「再看看」「好像」「也許」）= 沒同意 → 繼續確認、不要寫
+- 使用者沒明確說過同意就 confirm=True = 你違反協議、擅自寫資料
+
+### 寫工具情境流程
+
+| 使用者意圖 | 你的動作 |
+|---|---|
+| 「幫我加一步 X」 | get_workflow_yaml → 改好 → save_workflow_yaml(confirm=False) → 文字確認 |
+| 「OK 套用吧」（在你已詢問後）| save_workflow_yaml(confirm=True) |
+| 「跑這個 workflow」 | start_workflow(confirm=False) → 文字確認 → 等同意 → start_workflow(confirm=True) |
+| 「套用後直接跑」 | save(confirm=False) → 確認 → save(confirm=True) → start(confirm=False) → 確認 → start(confirm=True) |
+
+## 工具使用原則
+
+- 使用者問「最近哪個失敗了」→ 先 `list_workflows()` 看狀態 → 如有 failed/aborted → `get_run_log()` 看細節再回答
+- 使用者貼 run_id（含完整或前 8 字前綴）→ 直接 `get_run_log(run_id)`、不要先問「是哪個工作流」
+- 使用者要求看某工作流 YAML → 直接 `get_workflow_yaml(query)`
+- 使用者要修 YAML → 先 `get_workflow_yaml` 拿原 YAML、再針對性給 patch
+- 連續呼叫上限 5 次／chat turn、超過 = 用現有資料回答、不再呼叫
+- **不要為了「保險」一口氣呼叫 4 個 tool**，按需呼叫、節省 latency
+- **寫工具必走兩步協議、不要省略確認**
+
+## ⚠️ 修改既有 YAML 時的「個人化欄位」鐵律（很重要、違反算嚴重 bug）
+
+當你透過 `get_workflow_yaml` 拿到某工作流的 YAML、要產出修改版時，**不要默默沿用原 YAML 裡的「個人化／使用者特定欄位」**。原 YAML 那些欄位是上一位設定者填的、新使用者可能完全不一樣。
+
+| 個人化欄位（不要沿用） | 你應該做的 |
+|---|---|
+| `to` / `cc` / `bcc`（收件人 email） | **反問使用者**「要寄給誰？」 |
+| 主旨 / 內文（含具體公司、人名、產品名） | 用通用敘述、或反問 |
+| Windows 絕對路徑（如 `C:/Users/xxx/...` 或 `D:/...`） | 反問或改用相對 `ai_output/<workflow>/` |
+| `cookies` / API token / login 憑證 | 不寫 YAML、提醒走 `.env` 或 settings |
+| 個人 chat_id / phone / Slack channel | 反問 |
+
+**判斷原則**：這個欄位是「**會跟著個人變、不能 reuse 別人的**」嗎？是 → 反問；不是（如 `timeout`、`validate`、`scroll_count`、節點類型等通用設定）→ 沿用原值即可。
+
+**例外**：使用者明確說「沿用原本的收件人」「跟之前一樣寄給 X」時、才照原 YAML 填。否則預設反問。
+
+**處理方式 2 選 1**：
+1. **反問**：「我看到原 YAML 是寄給 `wilson_bai@asus.com`，要繼續寄給他、還是換別人？」（推薦）
+2. **佔位符**：在 YAML 裡寫 `to: "<請填收件人 email>"` 並提醒使用者：「YAML 裡的 `to` 我留空、請套用後到 Outlook 節點 panel 填上你的收件人」
+
 # 對話流程（很重要 — 不要跳階段直接吐 YAML）
 
 ## 1. Discovery — 先判定要不要進（很重要！）
@@ -1471,6 +1889,7 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 | `skill` | `skill_mode: true` + `batch`（任務描述） | batch 寫太短 LLM 看不懂 |
 | `script` | `batch`（指令） | — |
 | `visual_validation` | `visual_validation: true` + `vv_prompt` | vv_prompt 必填 |
+| `subagent` | `subagent: true` + `subagent_role` + `batch` | role 沒填走 data_analyst 預設;batch 太籠統 LLM 多輪推理也走不出來 |
 
 3. **特別針對 `outlook_automation`：使用者給的 email 必填到 `outlook_params.to`**。沒有 email 不要產 YAML、回去問。
 4. **`outlook_params` 一律用 inline JSON 一行寫**（不要多行 YAML 格式 — 前端解析器只認 inline JSON）：
@@ -1482,7 +1901,7 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 
 ---
 
-# 七種節點類型（節點全集）
+# 八種節點類型（節點全集）
 
 ## 1. 腳本節點（script）
 **使用者說**：「我的 xxx.py 腳本」「執行 xxx 指令」「跑這個批次檔」
@@ -1594,6 +2013,131 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
   timeout: 120
 ```
 
+## 8. 多輪代理節點（subagent）— 探索式 / 試錯式任務
+**使用者說**：「研究 / 探索」「邊想邊做」「不確定怎麼做、試試看」「debug 到通」「結構不固定」
+**跟 AI 技能的差別**：每次都 LLM 多輪推理（無 Recipe、無外部驗證）、token 成本是 skill 的 2-5 倍、但能根據中間結果調整。
+
+**5 個內建角色**（`subagent_role` 欄位、各自的工具白名單不同）：
+
+| role | 職責 | 工具白名單 |
+|---|---|---|
+| `data_analyst` | 處理 csv/xlsx、產 markdown/xlsx/png | run_python, read_file, web_search |
+| `coder` | 寫 / debug Python script 到通 | run_python, run_shell, read_file, web_search |
+| `researcher` | 收料、產 markdown 摘要、列來源、不下決策 | web_search, read_file, run_python |
+| `critic` | 純唯讀、挑 3 個最重要問題、不建議補強 | read_file（**沒 run_python，不能改檔**）|
+| `planner` | 純推理、拆模糊大任務成步驟、不執行 | （無工具，只能 done）|
+
+```yaml
+- name: 探索式財務分析
+  subagent: true
+  subagent_role: data_analyst
+  subagent_max_iter: 5            # 預設 5、複雜任務 8-10
+  batch: |
+    讀 sales.xlsx、找出 Q1 環比下滑最嚴重的 3 個品類、
+    畫趨勢折線圖、產出分析報告 analysis.md
+  timeout: 600
+```
+
+### ⚠️ 何時用 subagent vs AI 技能（**重要決策、不要選錯**）
+
+**預設用 AI 技能 + Recipe**。出現以下訊號才升級用 subagent：
+
+| 訊號 | 用什麼 |
+|---|---|
+| 每天 / 每週重複跑、邏輯固定 | **AI 技能 + Recipe**（第 1 次 LLM 寫 code、之後零 token 直接 replay）|
+| 結構不固定、邊想邊改、可能要試錯 | **subagent**（每次重新推理、能根據中間結果調整）|
+| 純拿意見 / 審稿 / 挑問題 | **subagent + critic**（只讀檔挑錯、不會改）|
+| 純拆任務、規劃步驟 | **subagent + planner**（純推理、不執行任何工具）|
+| 收料 + 整理摘要、要列來源 | **subagent + researcher**（研究式收料、不下決策）|
+| 寫 / debug Python 到通 | **subagent + coder**（多輪試錯改 code）|
+
+**不要用 subagent 的徵兆**（勸使用者改用 AI 技能）：
+- 每天 / 每週重複跑（→ Recipe 更省錢、第二次起零 token）
+- 流程明確固定（→ 寫死成 skill 邏輯更穩、不會每次結果不一樣）
+- 對成本敏感（→ subagent token 用量是 skill 的 2-5 倍）
+
+**判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
+
+<!--TG_ONLY_BEGIN-->
+## ⛓️ 派子代理 ad-hoc 執行 vs 建 workflow（重要決策）
+
+當使用者要實際在沙盒內執行：寫程式 / 跑測試 / 處理檔案 / 做分析、有兩條路徑：
+
+### A. 直接派子代理（`dispatch_subagent_async`）
+非同步派出、立即釋放對話、子代理在沙盒(WSL Docker)寫 + 跑、結果之後查。
+適合：單次 ad-hoc 任務、不重複跑、用戶之後不會從畫布手動觸發。
+
+### B. 建 workflow YAML（`create_workflow_yaml` + `start_workflow`）
+正式工作流、畫布上一個或多個節點、可重複跑、能 schedule、從 sidebar 看歷史。
+適合：每天 / 每週重複跑、想 cron 排程、想能停下重跑、想 sidebar 看 run history。
+
+### 何時直接派、何時建 workflow、何時反問
+
+| 使用者描述 | 行為 |
+|---|---|
+| 「我要每天 / 每週自動 X」「能不能排程」「自動化」 | **直接走 workflow 路線**、不反問 |
+| 「幫我建工作流做 X」「在畫布上加 X」「設定一個 pipeline」 | **直接 workflow 路線**(explicit 指定) |
+| 「跑這段試試看」「測試一下這個」「驗證 ...」 | **直接派子代理**(明顯一次性 ad-hoc、不必反問) |
+| 純討論 / 問建議 / 問怎麼寫 | **不派、不建**、直接答 |
+| **「幫我寫個 X 工具/腳本/應用」「分析這份資料找 Y」「處理這檔案」**（沒提自動化 / 排程 / 工作流）| **反問用戶選 A 還 B**(預設不擅自決策) |
+
+### 反問範本（用使用者語氣、不要太正式）
+
+> 這個任務我有兩種做法、看你比較想要哪個:
+>
+> **A. 直接派子代理在沙盒寫 + 跑一次**
+> - 30 秒派出、跑完約 1-3 分鐘、結果回我這裡給你看
+> - 適合「這次寫好就好、之後不一定會再跑」
+>
+> **B. 建一個工作流**
+> - 之後可以從畫布手動跑、能排程定時跑
+> - 適合「會重複用 / 想自動化」
+>
+> 你選哪個？
+
+### 派子代理時細節（A 路徑）
+
+- **role 怎麼選**：寫程式 / debug → `coder`；處理 csv/xlsx 產報表 → `data_analyst`；
+  收料 / 研究 / 摘要 → `researcher`；純唯讀挑問題 → `critic`；
+  純拆步驟、不執行 → `planner`
+- **working_dir**：使用者沒明說 → 留空(系統自動推 `ai_output/chat-adhoc/<timestamp>/`)。
+  使用者說「放在 X」→ 把 X 帶進去
+- **max_iter**：簡單任務 6-8、複雜任務 10-15。**不要設 5 以下**:寫 .py + 跑 + done
+  最少 3 輪、LLM 多繞 read_file / 試錯就 5-7 輪、設 5 高機率 max_iter exceeded 失敗
+- **失敗時不要自動重派同樣 prompt**:看 check_subagent_status 的 error / summary、
+  跟使用者說「跑了 N 輪沒完成、原因 X」、讓使用者決定:加 max_iter 重派 / 改任務描述 / 放棄。
+  連續派 3 次都 max_iter exceeded 等於白燒 token、要主動 stop
+
+### Chain 模式(多階段自動接力)
+複雜任務含「寫 + 審 + 改」「規劃 + 執行 + 驗證」、用 dispatch_subagent_async 的
+follow_up 參數讓 backend 自動接力、不必每階段再 trigger。**格式 / max_iter 建議 /
+典型配置請 call `read_help_doc('chain')`**。
+
+### 不要做的事
+
+- 不要每次小事都派子代理(問怎麼寫個 for 迴圈不需要派)
+- 派之前**至少要清楚 working_dir + role 任務描述**、不要 prompt 太籠統("寫個程式")
+- 同時間最多派 3 個子代理(避免沙盒併發過多)— check 一下 in-flight 區段
+
+## 📡 In-flight 子代理狀態主動匯報
+
+System prompt 結尾若有「in-flight 子代理」digest、回應使用者時要主動帶出進度:
+
+- **running 中**：在你訊息**結尾**順帶一句進度。例:
+  > （順便：子代理 abc123 還在跑、剛跑完第 2 輪、用了 run_python）
+- **剛完成（60 秒內）且使用者沒問起**：主動報結果。例:
+  > （✅ 子代理 abc123 跑完了：寫了 sincos.py 在 ai_output/sincos_tool/、test 通過）
+- **已完成且超過 60 秒、使用者沒問**：不再主動提(避免每次都重複報)
+- 想看細節 → 呼叫 `check_subagent_status(task_id)` 拿完整 summary、tool 用量、token 數
+
+## 📂 子代理產物 / ⏹ 中止子代理(細節 lazy load)
+- 使用者問「貼程式給我」「下載」「傳檔」 → call `read_help_doc('files')` 看
+  read_subagent_file / send_subagent_file_to_tg 用法(子代理產物**不能**用
+  send_file_to_tg、那個是 workflow 用的)
+- 使用者說「停止」「中斷」「不要跑了」 → call `read_help_doc('cancel')` 看
+  cancel_subagent_task 規則(完成 / 失敗的不用 cancel)
+<!--TG_ONLY_END-->
+
 ## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML
 **使用者說**：「自動點按鈕」「UI 自動化」「錄製操作」「滑鼠點擊」
 **你的回應**：
@@ -1679,6 +2223,51 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 | 已有腳本 + AI 後處理 | `script → skill` |
 | 視覺驗證 | `skill → visual_validation` |
 | YouTube 影片摘要 | `web_crawler(video) → skill(轉文字+摘要)` |
+| **RSS / Atom feed 抓取**（重要、不要用 web_crawler）| `skill(用 `feedparser` 解 RSS) → skill(摘要)` |
+| **啟動既有 Python 專案 + 驗證 + 確認** | `skill(啟動 main.py、必要時改 CLI 版) → ai_validation 或 visual_validation → human_confirm` |
+| **探索式分析 / debug / 研究式收料**（不固定流程）| `subagent(role + batch)` ← 單節點多輪推理、不要拆成多個 skill |
+| **拆任務 + 跑** | `subagent(planner) → skill 或 subagent` ← planner 先拆步驟、後續按步跑 |
+| **寫 + 審稿循環** | `subagent(coder) → subagent(critic)` ← coder 寫到通、critic 唯讀挑 3 個問題 |
+
+# ⚠️ RSS / Atom Feed 不要用 web_crawler 節點（重要、之前踩過）
+
+當使用者要抓 RSS / Atom feed（URL 含 `/rss/`、`/feed`、`.xml`、`.atom`）：
+
+**❌ 不要用 `web_crawler` 節點**：
+- web_crawler 走 Playwright/Chromium、Chrome 不渲染 XML、會回 `net::ERR_HTTP_RESPONSE_CODE_FAILURE`
+- 真實踩過：theverge.com/rss/ai-artificial-intelligence 用 web_crawler → Tier 1 失敗
+- Tier 2 FlareSolverr 也是 Puppeteer、同樣不適合 XML
+
+**✅ 改用 `skill_mode` 節點**：
+```yaml
+- name: 抓 RSS
+  skill_mode: true
+  batch: |
+    抓取 RSS feed: https://www.theverge.com/rss/index.xml
+    用 feedparser 解析、產出最新 10 篇的標題、連結、發布時間、摘要、
+    寫到 ai_output/<workflow>/rss_items.md
+  timeout: 60
+```
+
+**判斷原則**：
+- URL 是 RSS / Atom XML → skill 節點 + feedparser
+- URL 是 HTML 頁面（首頁、列表頁、文章頁）→ web_crawler 節點
+- 不確定？反問使用者「這是 RSS 還是一般網頁？」
+
+**feedparser 已預裝在沙盒**(skill_packages.txt 含)、skill 節點直接用。
+
+# 啟動既有 Python 專案的特別規則（重要）
+
+當使用者描述含「我有 Python 專案 / GUI / main.py / 既有專案 / 啟動我的程式」這類用語時：
+
+1. **沒給專案路徑 → 必須先反問**：「你的 Python 專案放在哪個資料夾？」
+   - **同時主動告知標準位置**：「建議放在本專案根目錄底下的 `external_projects/<你的專案名>/`，AI 技能才能讀寫該專案內容並修改。」
+   - 確認路徑後再進 Plan、不要先猜路徑跳到 Emit
+2. **GUI / 含 `input()` 互動 → 用 skill 節點而非 script 節點**：
+   - script 節點直接 subprocess 跑 GUI 會被 input() 阻塞（直到 timeout），體驗很差
+   - skill 節點會自動 read_file 源碼、找出互動點、改寫成 CLI 參數版本再跑
+   - Plan 中要明說「AI 技能會先讀 main.py、把 GUI / input() 改成 CLI 版本」
+3. **若使用者明確說「不要改原檔」**：skill 走 `readonly: true` 並且生成 `main_cli.py` 副本；否則預設會直接 in-place 改寫 main.py（並 git diff 可追溯）。
 
 # 互動原則（記在心裡）
 
@@ -1850,9 +2439,26 @@ _OUTLOOK_TEMPLATES_FOR_PROMPT = [
 ]
 
 
-def _build_pipeline_system_prompt() -> str:
-    """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills + Outlook 模板清單。"""
-    parts = [_PIPELINE_SYSTEM_BASE]
+def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
+    """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills + Outlook 模板清單。
+
+    channel:
+      - "telegram"：TG bot 通道(手機 / 遠端)、會包含 ad-hoc 派子代理工具與教學
+      - "desktop" (預設):桌面 :3005 chat、聚焦在畫板 / workflow 規劃，
+        把 TG_ONLY 標記之間的 subagent 章節剝掉、節省 token + 避免 LLM 誤呼
+        不存在的工具。
+    """
+    base = _PIPELINE_SYSTEM_BASE
+    if channel != "telegram":
+        # 把 <!--TG_ONLY_BEGIN--> ... <!--TG_ONLY_END--> 之間整塊拿掉(含 marker)
+        import re as _re
+        base = _re.sub(
+            r"<!--TG_ONLY_BEGIN-->.*?<!--TG_ONLY_END-->\s*",
+            "",
+            base,
+            flags=_re.DOTALL,
+        )
+    parts = [base]
     # ── Agent Skills 清單 ──────────────────────────────────────────────
     try:
         from skill_scanner import list_available_skills
@@ -1884,6 +2490,70 @@ def _build_pipeline_system_prompt() -> str:
         parts.append("\n".join(lines))
     except Exception:
         pass
+    # ── 今日日期(讓 web_search query 能用最新年份)──────────────────
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            now = datetime.now(ZoneInfo("Asia/Taipei"))
+        except Exception:
+            now = datetime.now()
+        ymd = now.strftime("%Y-%m-%d")
+        weekday_zh = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"][now.weekday()]
+        parts.append(
+            f"\n\n## 📅 今日日期\n\n"
+            f"**現在是 {ymd}（{weekday_zh}）、{now.strftime('%H:%M')}**(Asia/Taipei)\n\n"
+            f"**重要**：使用 `web_search` 時、query 含年份請用「{now.year}」"
+            f"或「{now.year - 1}-{now.year}」、不要用陳舊年份(例：'2023 best XX')— "
+            f"那會搜到過期資訊。"
+        )
+    except Exception:
+        pass
+    # ── In-flight 子代理 digest(Phase 2:每次 chat turn 自動匯報) ─────
+    # 只有 TG 通道才注入 — 桌面 AI 助手不派子代理、看到 digest 也沒用、徒增 token
+    # 規範詳見 system prompt 內「In-flight 子代理狀態主動匯報」章節(同樣只有 TG 看得到)
+    try:
+        from chat_tools import _chat_subagents
+        import time as _t
+        snapshot = list(_chat_subagents.items())  # avoid concurrent mutation
+        if snapshot:
+            now_ts = _t.time()
+            running: list[tuple[str, dict, int]] = []
+            recent_done: list[tuple[str, dict, int]] = []
+            for tid, info in snapshot:
+                state = info.get("state")
+                if state == "running":
+                    started = info.get("started_at", now_ts)
+                    running.append((tid, info, int(now_ts - started)))
+                elif state in ("completed", "failed"):
+                    ended = info.get("ended_at") or 0
+                    ago = int(now_ts - ended)
+                    if 0 <= ago <= 60:  # 60s 內才算 "剛完成"、要主動提
+                        recent_done.append((tid, info, ago))
+            if running or recent_done:
+                lines = [
+                    "",
+                    "## 📡 In-flight 子代理（主動匯報；超過 60s 完成的不要重複提）",
+                    "",
+                ]
+                for tid, info, elapsed in running:
+                    role = info.get("role", "?")
+                    preview = (info.get("task") or "")[:80].replace("\n", " ")
+                    lines.append(f"- `{tid}` ({role}) **running** {elapsed}s — {preview}")
+                for tid, info, ago in recent_done:
+                    state = info.get("state")
+                    role = info.get("role", "?")
+                    r = info.get("result") or {}
+                    success_mark = "✅" if r.get("success") else "❌"
+                    summary = (r.get("summary") or "").replace("\n", " ")[:140]
+                    wd = info.get("working_dir", "")
+                    lines.append(
+                        f"- `{tid}` ({role}) **{state}** {ago}s ago {success_mark} — "
+                        f"{summary} (in `{wd}`)"
+                    )
+                parts.append("\n".join(lines))
+    except Exception:
+        pass
     return "".join(parts)
 
 
@@ -1891,6 +2561,8 @@ class PipelineChatRequest(BaseModel):
     messages: list[dict]
     workflow_id: Optional[str] = None  # 若帶，會把該工作流當前 canvas/YAML 注入 system prompt，
                                        # 讓 AI 能理解「在現有工作流加步驟」的增量需求
+    extra_system: Optional[str] = None  # 額外 system 段落、會 append 到 system prompt 末尾。
+                                        # TG 通道用來注入「目前狀態 digest」(最近工作流/run/log 摘要)
 
 
 # 送 LLM 前保留最近多少則訊息（避免對話太長 token 爆炸 / 花錢）
@@ -1945,27 +2617,9 @@ def _workflow_state_block(workflow_id: str) -> str:
         return ""
 
 
-@app.post("/pipeline/chat")
-async def pipeline_chat(req: PipelineChatRequest):
-    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-    from llm_factory import build_llm
-    import re
-
-    llm = build_llm(temperature=0.3)
-    system_prompt = _build_pipeline_system_prompt()
-    if req.workflow_id:
-        system_prompt += _workflow_state_block(req.workflow_id)
-    lc_messages = [SystemMessage(content=system_prompt)]
-    # 只取最近 _CHAT_HISTORY_CAP 則訊息送進 LLM，避免對話太長 token 爆炸
-    # （訊息仍全部保存在 DB，只是不全部餵給模型）
-    recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
-    for m in recent:
-        cls = HumanMessage if m["role"] == "user" else AIMessage
-        lc_messages.append(cls(content=m["content"]))
-
-    response = llm.invoke(lc_messages)
-    raw = response.content
-    # Gemini/Gemma 可能回傳 list of content blocks（含 thinking + text）→ 抽出 text
+def _extract_text_content(raw) -> str:
+    """從 LLM response.content 抽出純文字
+    （Gemini/Gemma 可能回傳 list of content blocks 含 thinking + text）。"""
     if isinstance(raw, list):
         parts = []
         for block in raw:
@@ -1974,9 +2628,253 @@ async def pipeline_chat(req: PipelineChatRequest):
                     parts.append(block["text"])
             elif isinstance(block, str):
                 parts.append(block)
-        content = "".join(parts)
+        return "".join(parts)
+    return str(raw) if raw is not None else ""
+
+
+# ── LaTeX → Unicode 清洗（與 frontend cleanLatexInChat 邏輯一致）─────────────
+# LLM 偶爾違反「不要用 LaTeX」規則、輸出 $\rightarrow$ 等。
+# TG 沒像 frontend 有 ReactMarkdown 後處理、會直接顯示字面亂碼。
+# 故在 backend 統一清洗、桌面 / TG 都拿到乾淨輸出。
+_LATEX_CMD_TO_UNICODE: dict[str, str] = {
+    "rightarrow": "→", "leftarrow": "←", "Rightarrow": "⇒", "Leftarrow": "⇐",
+    "to": "→", "gets": "←", "leftrightarrow": "↔", "Leftrightarrow": "⇔",
+    "uparrow": "↑", "downarrow": "↓", "updownarrow": "↕",
+    "times": "×", "div": "÷", "pm": "±", "mp": "∓",
+    "cdot": "·", "cdots": "⋯", "ldots": "…", "dots": "…",
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
+    "approx": "≈", "equiv": "≡",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "theta": "θ", "lambda": "λ", "mu": "μ", "pi": "π", "sigma": "σ", "tau": "τ",
+    "phi": "φ", "omega": "ω",
+    "infty": "∞", "forall": "∀", "exists": "∃", "in": "∈", "notin": "∉",
+    "subset": "⊂", "supset": "⊃", "cup": "∪", "cap": "∩",
+    "text": "", "mathrm": "", "mathbf": "", "mathit": "",
+}
+
+
+def _clean_latex(text: str) -> str:
+    """把常見 LaTeX 命令換成 Unicode、剝掉錢字號。
+    沒覆蓋的命令至少把 \\ 跟 $ 拿掉、不影響可讀性。
+    跟 frontend cleanLatexInChat 行為一致。"""
+    if not text or ("$" not in text and "\\" not in text):
+        return text
+    import re as _re
+
+    def _replace_cmd(match):
+        cmd = match.group(1)
+        return _LATEX_CMD_TO_UNICODE.get(cmd, cmd)
+
+    # 1. inline math $...$ → 內容(剝錢字號 + 解析命令)
+    def _replace_inline_math(m):
+        body = m.group(1)
+        return _re.sub(r"\\([a-zA-Z]+)", _replace_cmd, body).strip()
+    out = _re.sub(r"\$([^\$\n]+?)\$", _replace_inline_math, text)
+
+    # 2. $ 外裸命令(例 \rightarrow 沒包 $)
+    def _replace_bare_cmd(m):
+        cmd = m.group(1)
+        if cmd in _LATEX_CMD_TO_UNICODE:
+            return _LATEX_CMD_TO_UNICODE[cmd]
+        return m.group(0)  # 不認識就保留原樣
+    out = _re.sub(r"\\([a-zA-Z]+)", _replace_bare_cmd, out)
+
+    return out
+
+
+# 單次 chat turn 內最多幾輪 tool calling iteration（防無限迴圈、防 token 爆）
+_CHAT_MAX_TOOL_ITERATIONS = 5
+
+
+def _friendly_llm_error(e: Exception) -> tuple[int, str]:
+    """把 LLM build / invoke 階段的常見 exception 翻譯成繁中友善訊息。
+    回傳 (HTTP status code, 訊息)。
+
+    這是給 chat / agent 用的 error wrapper、讓桌面 + TG 都看到一致的原因說明
+    （而非 raw stack trace）。
+    """
+    name = type(e).__name__
+    msg = str(e) or ""
+    msg_lc = msg.lower()
+
+    # 1. 未設定 provider / model
+    if isinstance(e, KeyError) and "provider" in msg.lower():
+        return 400, "未設定 LLM。請到設定頁選 provider（Groq / Gemini / Ollama / OpenRouter）+ model"
+    if isinstance(e, ValueError) and msg_lc.startswith("unknown provider"):
+        return 400, f"LLM provider 設定有誤：{msg}。請到設定頁重選 provider"
+
+    # 2. API key 缺
+    if "api_key" in msg_lc and ("missing" in msg_lc or "not provided" in msg_lc or "required" in msg_lc):
+        return 400, f"LLM API Key 缺：{msg[:200]}。到 backend/.env 填、或設定頁設定"
+    if "googleapierror" in msg_lc and "api key" in msg_lc:
+        return 400, "Gemini API Key 無效或未設定、請到 backend/.env 填 GEMINI_API_KEY"
+    if name == "AuthenticationError" or "401" in msg or "unauthorized" in msg_lc or "invalid api key" in msg_lc:
+        return 401, f"LLM API Key 無效：{msg[:200]}。請更新 .env 或設定頁的 key"
+
+    # 3. 配額 / rate limit
+    if "rate" in msg_lc and "limit" in msg_lc:
+        return 429, f"LLM API 觸發 rate limit、請稍後再試或換 model：{msg[:200]}"
+    if "quota" in msg_lc or "exceeded" in msg_lc or "429" in msg:
+        return 429, f"LLM API 配額用完、請換 model 或等配額重置：{msg[:200]}"
+
+    # 4. 網路 / 連線
+    if name in ("ConnectionError", "ConnectError", "ConnectTimeout"):
+        return 503, f"連不上 LLM API（{name}）：{msg[:200]}。檢查網路或 API endpoint 設定"
+    if ("timeout" in msg_lc or "timed out" in msg_lc
+        or name in ("ReadTimeout", "Timeout", "TimeoutError")):
+        return 504, f"LLM API 逾時：{msg[:200]}。可能網路慢或 model 太大、可換更快的 model 試試"
+    if name == "APIConnectionError":
+        return 503, f"無法連到 LLM API：{msg[:200]}"
+
+    # 5. 模型不認得
+    if "model" in msg_lc and ("not found" in msg_lc or "does not exist" in msg_lc or "404" in msg):
+        return 400, f"LLM model 名稱無效：{msg[:200]}。請到設定頁挑現有 model"
+
+    # 6. 未指定提供商支援
+    if isinstance(e, ImportError):
+        if "groq" in msg_lc or "gemini" in msg_lc or "ollama" in msg_lc or "openai" in msg_lc:
+            return 500, f"缺套件無法用此 provider：{msg[:200]}。pip install 對應套件再試"
+
+    # 7. 其他 — 給原始 type + 前 200 字
+    return 500, f"LLM 呼叫失敗（{name}）：{msg[:300]}"
+
+
+async def _chat_agent_loop(
+    req: PipelineChatRequest,
+    on_tool_event=None,
+):
+    """AI 助手 agent loop 核心。
+
+    on_tool_event:Optional[Awaitable callable]
+        簽名:async def cb(phase: "before" | "after", tool_call: dict, result: str | None)
+        - phase="before":在 tool 呼叫前 fire(result=None)
+        - phase="after":tool 回傳後 fire(result=tool 回值字串)
+        TG handler 用這個推進度訊息。
+
+    跟 pipeline_chat 一致回 dict {reply, has_yaml, yaml_content, yaml_error}。
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+    from llm_factory import build_llm
+    from chat_tools import CHAT_TOOLS, CHAT_TOOLS_BY_NAME
+    import re
+    import logging as _log
+
+    # build_llm 失敗:provider/key 沒設、套件缺 → 翻譯成友善訊息
+    try:
+        llm = build_llm(temperature=0.3)
+    except Exception as e:
+        _log.warning(f"[/pipeline/chat] build_llm 失敗:{type(e).__name__}: {e}")
+        sc, friendly = _friendly_llm_error(e)
+        raise HTTPException(status_code=sc, detail=friendly)
+    # 通道偵測：只 _chat_agent_loop 有 on_tool_event 參數(TG handler 才會傳)、
+    # 桌面 chat 走 pipeline_chat_stream / pipeline_chat 都不傳 → 預設 desktop。
+    # TG 通道才放 dispatch_subagent_async / check_subagent_status 兩個 ad-hoc 子代理工具
+    # + 帶 in-flight digest 教學區塊。
+    _channel = "telegram" if on_tool_event is not None else "desktop"
+    system_prompt = _build_pipeline_system_prompt(channel=_channel)
+    if req.workflow_id:
+        system_prompt += _workflow_state_block(req.workflow_id)
+    if req.extra_system:
+        system_prompt += "\n\n" + req.extra_system
+
+    # ── 嘗試 bind_tools；失敗就退到舊單輪 ────────────────────────
+    tools_enabled = True
+    # desktop 不做 ad-hoc 子代理(那是 TG 專用)、把整套 subagent admin tools 拿掉
+    # 省 6 個 tool schema(每個 ~400-600 tok)、desktop 每輪節省 ~2-3K token
+    _TG_ONLY_TOOLS = {
+        "dispatch_subagent_async", "check_subagent_status",
+        "read_subagent_file", "send_subagent_file_to_tg",
+        "cancel_subagent_task", "read_help_doc",
+    }
+    _active_tools = CHAT_TOOLS if _channel == "telegram" else [
+        t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS
+    ]
+    try:
+        llm_with_tools = llm.bind_tools(_active_tools)
+    except Exception as e:
+        _log.warning(f"[/pipeline/chat] bind_tools 失敗、退到單輪：{e}")
+        llm_with_tools = llm
+        tools_enabled = False
+
+    lc_messages: list = [SystemMessage(content=system_prompt)]
+    # 只取最近 _CHAT_HISTORY_CAP 則訊息送進 LLM，避免對話太長 token 爆炸
+    recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
+    for m in recent:
+        cls = HumanMessage if m["role"] == "user" else AIMessage
+        lc_messages.append(cls(content=m["content"]))
+
+    # ── Agent loop：最多 _CHAT_MAX_TOOL_ITERATIONS 輪 ─────────────
+    # 用 ainvoke (async) 讓 event loop 不被 LLM call 阻塞、
+    # 上層 (TG handler) 才能在等待時跑 typing keepalive
+    final_response = None
+    for iteration in range(_CHAT_MAX_TOOL_ITERATIONS):
+        try:
+            if hasattr(llm_with_tools, "ainvoke"):
+                response = await llm_with_tools.ainvoke(lc_messages)
+            else:
+                response = llm_with_tools.invoke(lc_messages)
+        except Exception as e:
+            _log.warning(f"[/pipeline/chat] LLM invoke 失敗(iter {iteration}):{type(e).__name__}: {e}")
+            sc, friendly = _friendly_llm_error(e)
+            raise HTTPException(status_code=sc, detail=friendly)
+        lc_messages.append(response)
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if not tool_calls or not tools_enabled:
+            final_response = response
+            break
+        # 跑每個 tool call、把結果加進對話
+        for tc in tool_calls:
+            tname = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            targs = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+            tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "tc")
+            # 統一成 dict 形式給 callback、callback 失敗不影響主流程
+            tc_dict = {"name": tname, "args": targs or {}, "id": tid}
+            if on_tool_event:
+                try:
+                    await on_tool_event("before", tc_dict, None)
+                except Exception as cb_e:
+                    _log.warning(f"[/pipeline/chat] on_tool_event before 失敗(忽略):{cb_e}")
+            tool_obj = CHAT_TOOLS_BY_NAME.get(tname)
+            if not tool_obj:
+                tool_result = f"[Unknown tool: {tname}]"
+            else:
+                try:
+                    # 用 ainvoke、async tool(如 start_workflow)才能正確 await
+                    # sync tool 也有 ainvoke、會自動跑 sync 邏輯、不會壞
+                    if hasattr(tool_obj, "ainvoke"):
+                        tool_result = await tool_obj.ainvoke(targs or {})
+                    else:
+                        tool_result = tool_obj.invoke(targs or {})
+                except Exception as e:
+                    tool_result = f"[Tool error: {type(e).__name__}: {str(e)[:300]}]"
+            # Cap 單個 tool result（避免 token 爆）
+            if isinstance(tool_result, str) and len(tool_result) > 16000:
+                tool_result = tool_result[:16000] + f"\n... (回傳超過 16000 字、後面截掉)"
+            lc_messages.append(ToolMessage(content=str(tool_result), tool_call_id=tid))
+            _log.info(f"[/pipeline/chat] tool={tname} args={targs} result_len={len(str(tool_result))}")
+            if on_tool_event:
+                try:
+                    await on_tool_event("after", tc_dict, str(tool_result))
+                except Exception as cb_e:
+                    _log.warning(f"[/pipeline/chat] on_tool_event after 失敗(忽略):{cb_e}")
     else:
-        content = str(raw) if raw is not None else ""
+        # for-else：迴圈正常結束（沒 break）→ 達上限沒收到純文字回覆
+        _log.warning(f"[/pipeline/chat] 達 tool iteration 上限 {_CHAT_MAX_TOOL_ITERATIONS}、強制結束")
+        # 最後再 invoke 一次叫 LLM 給純文字總結
+        try:
+            lc_messages.append(HumanMessage(content="(系統:已達工具呼叫上限、請現在用純文字回答使用者、不要再呼叫工具)"))
+            if hasattr(llm_with_tools, "ainvoke"):
+                final_response = await llm_with_tools.ainvoke(lc_messages)
+            else:
+                final_response = llm_with_tools.invoke(lc_messages)
+        except Exception:
+            final_response = lc_messages[-1] if lc_messages else None
+
+    raw = final_response.content if final_response else ""
+    content = _extract_text_content(raw)
+    # LaTeX 清洗：LLM 偶發違規寫 $\rightarrow$,後端統一清理(桌面 + TG 都受惠)
+    content = _clean_latex(content)
+
     has_yaml = "YAML_READY" in content
     yaml_content = None
     yaml_error = None
@@ -1995,6 +2893,203 @@ async def pipeline_chat(req: PipelineChatRequest):
                 yaml_error = f"YAML 語法/結構錯誤：{type(e).__name__}：{str(e)[:300]}"
 
     return {"reply": content, "has_yaml": has_yaml, "yaml_content": yaml_content, "yaml_error": yaml_error}
+
+
+@app.post("/pipeline/chat")
+async def pipeline_chat(req: PipelineChatRequest):
+    """AI 助手聊天 endpoint。包薄殼、實際邏輯在 _chat_agent_loop。
+
+    LLM 看到 chat_tools 裡定義的 7 個 tool(read + write + send_file + web_search)、
+    自己決定何時 call。bind_tools 失敗(model 不支援)時退到單輪。
+
+    on_tool_event callback 留給內部呼叫者用(例 TG handler 推進度訊息)、
+    HTTP 端點不傳 callback。
+    """
+    return await _chat_agent_loop(req)
+
+
+async def _chat_agent_stream(req: "PipelineChatRequest"):
+    """串流版 chat agent loop。yield NDJSON 事件供 SSE 端點。
+
+    事件種類:
+    - {"type": "token", "text": "..."}            # LLM 串流的文字片段
+    - {"type": "tool_start", "name": "X", "args": {...}}
+    - {"type": "tool_end", "name": "X", "result_preview": "...(前 200 字)"}
+    - {"type": "done", "reply": "...", "has_yaml": bool, "yaml_content": str|None, "yaml_error": str|None}
+    - {"type": "error", "detail": "..."}          # 任何階段失敗
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+    from langchain_core.messages import AIMessageChunk
+    from llm_factory import build_llm
+    from chat_tools import CHAT_TOOLS, CHAT_TOOLS_BY_NAME
+    import re
+    import logging as _log
+
+    # build_llm 失敗 → emit error event
+    try:
+        llm = build_llm(temperature=0.3)
+    except Exception as e:
+        sc, friendly = _friendly_llm_error(e)
+        yield {"type": "error", "status_code": sc, "detail": friendly}
+        return
+
+    # SSE stream 端點(/pipeline/chat/stream)是給桌面 chat 用、永遠 desktop 通道。
+    # TG handler 不走 stream、直接 await _chat_agent_loop。
+    system_prompt = _build_pipeline_system_prompt(channel="desktop")
+    if req.workflow_id:
+        system_prompt += _workflow_state_block(req.workflow_id)
+    if req.extra_system:
+        system_prompt += "\n\n" + req.extra_system
+
+    tools_enabled = True
+    # stream 端點永遠 desktop、把整套 subagent admin tools 拿掉(同 _chat_agent_loop)
+    _TG_ONLY_TOOLS = {
+        "dispatch_subagent_async", "check_subagent_status",
+        "read_subagent_file", "send_subagent_file_to_tg",
+        "cancel_subagent_task", "read_help_doc",
+    }
+    _active_tools = [t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS]
+    try:
+        llm_with_tools = llm.bind_tools(_active_tools)
+    except Exception as e:
+        _log.warning(f"[/pipeline/chat/stream] bind_tools 失敗、退到單輪:{e}")
+        llm_with_tools = llm
+        tools_enabled = False
+
+    lc_messages: list = [SystemMessage(content=system_prompt)]
+    recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
+    for m in recent:
+        cls = HumanMessage if m["role"] == "user" else AIMessage
+        lc_messages.append(cls(content=m["content"]))
+
+    full_content_parts: list[str] = []  # 累積整輪 chat 看到的純文字 content
+
+    for iteration in range(_CHAT_MAX_TOOL_ITERATIONS):
+        # 用 astream 拿 chunks(token + tool calls 都會以 chunk 形式來)
+        accumulated: AIMessageChunk | None = None
+        try:
+            async for chunk in llm_with_tools.astream(lc_messages):
+                # chunk.content:這次的 token(text)
+                ctext = chunk.content if isinstance(chunk.content, str) else ""
+                if not ctext and isinstance(chunk.content, list):
+                    # Gemini list-of-blocks 形式、抽 text block
+                    parts = []
+                    for b in chunk.content:
+                        if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+                            parts.append(b["text"])
+                    ctext = "".join(parts)
+                if ctext:
+                    full_content_parts.append(ctext)
+                    yield {"type": "token", "text": ctext}
+                # 累積整體 chunk(用 + 操作符;AIMessageChunk 支援 merge)
+                accumulated = chunk if accumulated is None else accumulated + chunk
+        except Exception as e:
+            _log.warning(f"[/pipeline/chat/stream] astream 失敗(iter {iteration}):{type(e).__name__}: {e}")
+            sc, friendly = _friendly_llm_error(e)
+            yield {"type": "error", "status_code": sc, "detail": friendly}
+            return
+
+        if accumulated is None:
+            yield {"type": "error", "detail": "LLM 沒回任何 chunk"}
+            return
+
+        # 把 accumulated 轉成 AIMessage 加進 messages、看有沒有 tool_calls
+        # AIMessageChunk 有 .tool_calls 屬性、merge 後的 chunk 也帶 tool_calls 完整資訊
+        lc_messages.append(accumulated)
+        tool_calls = getattr(accumulated, "tool_calls", None) or []
+
+        if not tool_calls or not tools_enabled:
+            # 這輪沒 tool、結束 agent loop
+            break
+
+        # 執行 tools
+        for tc in tool_calls:
+            tname = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            targs = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+            tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "tc")
+            yield {"type": "tool_start", "name": tname, "args": targs or {}}
+            tool_obj = CHAT_TOOLS_BY_NAME.get(tname)
+            if not tool_obj:
+                tool_result = f"[Unknown tool: {tname}]"
+            else:
+                try:
+                    if hasattr(tool_obj, "ainvoke"):
+                        tool_result = await tool_obj.ainvoke(targs or {})
+                    else:
+                        tool_result = tool_obj.invoke(targs or {})
+                except Exception as e:
+                    tool_result = f"[Tool error: {type(e).__name__}: {str(e)[:300]}]"
+            tool_result_str = str(tool_result)
+            if len(tool_result_str) > 16000:
+                tool_result_str = tool_result_str[:16000] + "\n... (回傳超過 16000 字、後面截掉)"
+            lc_messages.append(ToolMessage(content=tool_result_str, tool_call_id=tid))
+            preview = tool_result_str[:200]
+            yield {"type": "tool_end", "name": tname, "result_preview": preview}
+    else:
+        # 達上限、再 invoke 一次叫 LLM 給純文字
+        yield {"type": "tool_end", "name": "(達工具呼叫上限)", "result_preview": "強制結束"}
+        try:
+            lc_messages.append(HumanMessage(content="(系統:已達工具呼叫上限、請現在用純文字回答使用者、不要再呼叫工具)"))
+            async for chunk in llm_with_tools.astream(lc_messages):
+                ctext = chunk.content if isinstance(chunk.content, str) else ""
+                if ctext:
+                    full_content_parts.append(ctext)
+                    yield {"type": "token", "text": ctext}
+        except Exception as e:
+            _log.warning(f"[/pipeline/chat/stream] 強制結束 LLM call 失敗:{e}")
+
+    # 整合最終回覆 + LaTeX 清洗 + YAML 解析
+    content = _clean_latex("".join(full_content_parts))
+    has_yaml = "YAML_READY" in content
+    yaml_content = None
+    yaml_error = None
+    if has_yaml:
+        match = re.search(r"```yaml\n([\s\S]+?)```", content)
+        if match:
+            yaml_content = match.group(1).strip()
+            try:
+                import yaml as _yaml
+                from pipeline.models import PipelineConfig
+                parsed = _yaml.safe_load(yaml_content) or {}
+                raw_cfg = parsed.get("pipeline", parsed)
+                PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
+            except Exception as e:
+                yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
+
+    yield {
+        "type": "done",
+        "reply": content,
+        "has_yaml": has_yaml,
+        "yaml_content": yaml_content,
+        "yaml_error": yaml_error,
+    }
+
+
+@app.post("/pipeline/chat/stream")
+async def pipeline_chat_stream(req: PipelineChatRequest):
+    """AI 助手聊天 SSE 串流端點。回 NDJSON(每行一個 JSON event)。
+
+    前端可用 fetch streaming + ReadableStream reader 一行一行讀。
+    比 /pipeline/chat 多:即時 token / tool_start / tool_end 事件、體驗類似 ChatGPT。
+    """
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    async def _ndjson_gen():
+        try:
+            async for ev in _chat_agent_stream(req):
+                yield _json.dumps(ev, ensure_ascii=False) + "\n"
+        except Exception as e:
+            yield _json.dumps({"type": "error", "detail": f"stream 內部錯誤:{type(e).__name__}: {str(e)[:300]}"}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        _ndjson_gen(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # 防 nginx / proxy buffer
+        },
+    )
 
 
 # ── Workflow Chat History（per-workflow AI 助手對話紀錄）─────────────────────
@@ -2068,7 +3163,12 @@ def _run_to_dict(r):
             {"step_index": s.step_index, "step_name": s.step_name, "exit_code": s.exit_code,
              "validation_status": s.validation_status, "validation_reason": s.validation_reason,
              "validation_suggestion": s.validation_suggestion, "retries_used": s.retries_used,
-             "stdout_tail": s.stdout_tail, "stderr_tail": s.stderr_tail}
+             "stdout_tail": s.stdout_tail, "stderr_tail": s.stderr_tail,
+             "actual_output_path": getattr(s, 'actual_output_path', '') or '',
+             "token_usage": getattr(s, 'token_usage', {}) or {},
+             "tool_calls": getattr(s, 'tool_calls', []) or [],
+             "started_at": getattr(s, 'started_at', '') or '',
+             "ended_at": getattr(s, 'ended_at', '') or ''}
             for s in r.step_results
         ],
         "config_dict": r.config_dict,

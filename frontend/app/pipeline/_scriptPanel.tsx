@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { X, FolderOpen, ChevronDown, ChevronUp } from 'lucide-react'
+import { X, FolderOpen, ChevronDown, ChevronUp, Code2 } from 'lucide-react'
 import type { StepData, ScriptNode } from './_helpers'
 import { fsBrowse, fsCheckVenv } from '@/lib/api'
 import { toast } from 'sonner'
@@ -192,8 +192,8 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
       <div className="absolute top-0 right-0 h-full w-[380px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
         {/* Header */}
         <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: color, borderTopWidth: 3 }}>
-          <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-            style={{ background: color }}>▶</span>
+          <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
+            style={{ background: color }}><Code2 className="w-4 h-4" strokeWidth={2.4} /></span>
           <div className="flex-1 min-w-0">
             <span className="font-semibold text-gray-800 text-sm block truncate">Python腳本節點</span>
             <span className="text-xs text-gray-400">執行你寫好的腳本或 Shell 指令</span>

@@ -17,7 +17,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -1517,6 +1517,12 @@ def execute_computer_use_step(
     cv_coord_fallback: bool = False,
     ocr_threshold: float = 0.6,
     ocr_cv_fallback: bool = False,
+    # VLM 把關 Phase 1 參數(預設 off、不影響舊行為):
+    cu_vlm_check_strategy: str = "off",     # off / after_each / critical_only
+    cu_on_mismatch: str = "stop_notify",    # stop_notify / retry_once / skip_and_continue
+    cu_vlm_max_retries: int = 1,
+    # UIA 模式相關(action.type 是 uia_* 時用)
+    uia_window: str = "",                   # 視窗 title pattern(可含 *)、空字串 = foreground
 ) -> StepResult:
     """執行一整個 computer_use 步驟。
 
@@ -1570,8 +1576,153 @@ def execute_computer_use_step(
     succeeded = 0
     failed_at = -1
     messages: list[str] = []
+    # 跨 action 變數儲存(uia_get_text / uia_get_table_rowcount 用 save_as 存的)
+    # 後續 action 內 {{var_name}} 替換靠這個
+    step_variables: dict[str, Any] = {}
+
+    # VLM 把關 Phase 1 開關:strategy != off 才啟動驗證 loop;否則整段邏輯跳過、不影響舊行為
+    _vlm_active = (cu_vlm_check_strategy or "off").lower() != "off"
+    if _vlm_active:
+        logger.info(f"[computer_use] 🛡 VLM 把關啟用 strategy={cu_vlm_check_strategy} on_mismatch={cu_on_mismatch}")
+
+    def _should_verify(action: dict) -> bool:
+        """依 strategy + action 欄位決定是否要送 VLM 驗。"""
+        if not _vlm_active:
+            return False
+        expected = (action.get("expected") or "").strip()
+        if not expected:
+            return False
+        if cu_vlm_check_strategy == "after_each":
+            return True
+        if cu_vlm_check_strategy == "critical_only":
+            return bool(action.get("verify_critical", False))
+        return False
+
+    def _capture_to_png(prefix: str, idx: int) -> str:
+        """抓螢幕、寫 PNG、回路徑;失敗回空字串。"""
+        try:
+            import cv2 as _cv
+            img, _w, _h = _capture_screen()
+            out_path = assets / f"_vlm_{prefix}_{idx:03d}.png"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            ok, buf = _cv.imencode(".png", img)
+            if not ok:
+                return ""
+            out_path.write_bytes(buf.tobytes())
+            return str(out_path)
+        except Exception as e:
+            logger.warning(f"[computer_use] _capture_to_png 失敗 ({prefix}_{idx:03d}): {e}")
+            return ""
+
+    def _run_vlm_verify(before: str, after: str, expected: str) -> dict:
+        """同步包裝 async verify_action_outcome、給 sync loop 內呼叫。"""
+        from .cu_vlm_verifier import verify_action_outcome
+        import asyncio as _aio
+        try:
+            # execute_computer_use_step 在 run_in_executor 內、無 event loop、可直接 asyncio.run
+            return _aio.run(verify_action_outcome(
+                before_path=before,
+                after_path=after,
+                expected=expected,
+                logger=logger,
+                timeout_sec=30.0,
+            ))
+        except RuntimeError as e:
+            # 萬一被誤從 async context 呼叫(不該發生、但保險)、退到 new loop
+            if "event loop" in str(e).lower():
+                _loop = _aio.new_event_loop()
+                try:
+                    return _loop.run_until_complete(verify_action_outcome(
+                        before_path=before, after_path=after,
+                        expected=expected, logger=logger, timeout_sec=30.0,
+                    ))
+                finally:
+                    _loop.close()
+            raise
+
+    def _push_mismatch_to_tg(action_idx: int, action: dict, verdict: dict, after_path: str) -> None:
+        """VLM 驗證失敗時 push TG 截圖 + verdict、不繞 chat agent(直接走 telegram Bot)。"""
+        try:
+            from pipeline.runner import _get_tg_token, _get_tg_chat_id
+            from telegram import Bot
+            import asyncio as _aio2
+        except Exception as e:
+            logger.debug(f"[computer_use] TG push import 失敗、跳過: {e}")
+            return
+        token = _get_tg_token()
+        chat_id = _get_tg_chat_id()
+        if not token or not chat_id:
+            logger.debug("[computer_use] TG token / chat_id 未設、跳過 push")
+            return
+
+        action_type = action.get("type", "?")
+        expected = action.get("expected", "")
+        caption = (
+            f"❌ Computer use 步驟 {action_idx+1}/{len(actions)} 偏離預期\n\n"
+            f"動作: {action_type}\n"
+            f"預期: {expected[:200]}\n\n"
+            f"VLM 判定: 不符合 ({verdict.get('mismatch_type', '?')})\n"
+            f"原因: {verdict.get('reason', '')[:300]}"
+        )
+        if verdict.get("unexpected"):
+            caption += f"\n意外元素: {verdict['unexpected'][:200]}"
+
+        async def _send():
+            async with Bot(token=token) as bot:
+                if after_path and Path(after_path).exists():
+                    with open(after_path, "rb") as f:
+                        await bot.send_photo(chat_id=int(chat_id), photo=f, caption=caption[:1024])
+                else:
+                    await bot.send_message(chat_id=int(chat_id), text=caption)
+
+        try:
+            _aio2.run(_send())
+        except Exception as e:
+            logger.warning(f"[computer_use] TG push 失敗(忽略): {e}")
 
     for i, action in enumerate(actions):
+        do_verify = _should_verify(action)
+        before_path = _capture_to_png("before", i) if do_verify else ""
+
+        # 路由:uia_* type 走 uia_executor、其他 type 走原 pixel-based execute_action
+        atype = action.get("type", "")
+        if atype.startswith("uia_"):
+            try:
+                from .uia_executor import execute_uia_action
+                uia_res = execute_uia_action(action, uia_window, step_variables, logger)
+                # 把結果包成 ActionResult 兼容後續流程
+                res = ActionResult(
+                    ok=uia_res.ok,
+                    action_index=i,
+                    action_type=atype,
+                    message=uia_res.message,
+                    duration_ms=0,
+                )
+                # 收集 save_as 變數
+                if uia_res.saved_var:
+                    var_name, var_value = uia_res.saved_var
+                    step_variables[var_name] = var_value
+                    logger.info(f"[computer_use] 變數 {var_name} = {var_value!r:.80}")
+            except Exception as e:
+                logger.exception(f"[computer_use] uia action {atype} 例外")
+                res = ActionResult(ok=False, action_index=i, action_type=atype,
+                                   message=f"{type(e).__name__}: {e}")
+            messages.append(f"#{i+1} [{res.action_type}] {'OK' if res.ok else 'FAIL'}: {res.message}")
+            if res.ok:
+                succeeded += 1
+            else:
+                if failed_at < 0:
+                    failed_at = i
+                if fail_fast:
+                    return StepResult(
+                        success=False, total_actions=len(actions),
+                        succeeded=succeeded, failed_at=i,
+                        stdout="\n".join(messages),
+                        stderr=f"動作 #{i+1} ({atype}) 失敗:{res.message}",
+                        exit_code=1,
+                    )
+            continue  # uia 動作不走 VLM 把關(它本來就讀結構、漂移免疫)
+
         try:
             res = execute_action(action, assets, i, logger, run_id,
                                  allow_coord_fallback=layout_ok,
@@ -1595,6 +1746,69 @@ def execute_computer_use_step(
                 exit_code=130,  # SIGINT-ish
             )
         messages.append(f"#{i+1} [{res.action_type}] {'OK' if res.ok else 'FAIL'}: {res.message}")
+
+        # VLM 把關:動作沒立即失敗(res.ok)且需驗 → 截後圖 + 送 VLM 比對 expected
+        # 動作本身已 fail 走原有 fail 路徑、不浪費 VLM token
+        if do_verify and res.ok:
+            time.sleep(0.3)  # 給 UI render 時間、太快截圖會抓到動作前狀態
+            after_path = _capture_to_png("after", i)
+            if not before_path or not after_path:
+                logger.warning(f"[computer_use] 動作 #{i+1} VLM 截圖不齊全(before={bool(before_path)}, after={bool(after_path)})、跳過驗證")
+            else:
+                expected = (action.get("expected") or "").strip()
+                _retry_count = 0
+                while True:
+                    verdict = _run_vlm_verify(before_path, after_path, expected)
+                    logger.info(f"[computer_use] 動作 #{i+1} VLM verdict: ok={verdict['ok']} reason={verdict['reason'][:100]}")
+                    if verdict["ok"]:
+                        break
+                    # 不 ok、依 cu_on_mismatch 處理
+                    if cu_on_mismatch == "skip_and_continue":
+                        logger.warning(f"[computer_use] 動作 #{i+1} VLM 失敗、skip_and_continue 模式繼續: {verdict['reason'][:120]}")
+                        messages.append(f"  ⚠ VLM mismatch ignored: {verdict['reason'][:120]}")
+                        break
+                    if cu_on_mismatch == "retry_once" and _retry_count < cu_vlm_max_retries:
+                        _retry_count += 1
+                        logger.info(f"[computer_use] 動作 #{i+1} VLM 失敗、retry {_retry_count}/{cu_vlm_max_retries}")
+                        # 重執行同動作:不重新截 before、用同 before 比新 after
+                        try:
+                            res = execute_action(action, assets, i, logger, run_id,
+                                                 allow_coord_fallback=layout_ok,
+                                                 cv_threshold=cv_threshold,
+                                                 cv_search_only_near=cv_search_only_near,
+                                                 cv_search_radius=cv_search_radius,
+                                                 cv_trigger_hover=cv_trigger_hover,
+                                                 cv_hover_wait_ms=cv_hover_wait_ms,
+                                                 cv_coord_fallback=cv_coord_fallback,
+                                                 ocr_threshold=ocr_threshold,
+                                                 ocr_cv_fallback=ocr_cv_fallback)
+                        except RuntimeError as abort_err:
+                            return StepResult(
+                                success=False, total_actions=len(actions),
+                                succeeded=succeeded, failed_at=i,
+                                stdout="\n".join(messages), stderr=str(abort_err),
+                                exit_code=130,
+                            )
+                        if not res.ok:
+                            messages.append(f"  ⚠ retry {_retry_count} 動作直接失敗: {res.message}")
+                            break  # 動作 fail、跳出 retry loop、走下面 res.ok=False 邏輯
+                        time.sleep(0.3)
+                        after_path = _capture_to_png("after_retry", i)
+                        continue
+                    # stop_notify(預設)或 retry 用完仍失敗
+                    logger.warning(f"[computer_use] 動作 #{i+1} VLM 失敗、stop_notify: {verdict['reason'][:200]}")
+                    messages.append(f"  ❌ VLM mismatch (stop_notify): {verdict['reason'][:200]}")
+                    _push_mismatch_to_tg(i, action, verdict, after_path)
+                    return StepResult(
+                        success=False,
+                        total_actions=len(actions),
+                        succeeded=succeeded,
+                        failed_at=i,
+                        stdout="\n".join(messages),
+                        stderr=f"VLM 把關失敗(動作 #{i+1} {res.action_type}): {verdict['reason'][:200]}",
+                        exit_code=2,  # 區別動作 fail (=1) 和 VLM mismatch (=2)
+                    )
+
         if res.ok:
             succeeded += 1
         else:

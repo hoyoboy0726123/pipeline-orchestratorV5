@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { X, FolderOpen, ChevronDown, ChevronUp, Sparkles } from 'lucide-react'
+import { X, FolderOpen, ChevronDown, ChevronUp, Sparkles, Bot } from 'lucide-react'
 import type { SkillData, SkillNode } from './_helpers'
 import { fsBrowse, listAvailableSkills, type AvailableSkill } from '@/lib/api'
 import { toast } from 'sonner'
@@ -130,8 +130,8 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
       <div className="absolute top-0 right-0 h-full w-[380px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
         {/* Header */}
         <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: SKILL_COLOR, borderTopWidth: 3 }}>
-          <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-            style={{ background: SKILL_COLOR }}>✨</span>
+          <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
+            style={{ background: SKILL_COLOR }}><Bot className="w-4 h-4" strokeWidth={2.4} /></span>
           <div className="flex-1 min-w-0">
             <span className="font-semibold text-gray-800 text-sm block truncate">AI技能節點</span>
             <span className="text-xs text-gray-400">AI 根據描述自動撰寫並執行程式碼，成功後儲存為 Recipe</span>
@@ -152,13 +152,20 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">任務描述</label>
             <textarea
-              rows={5}
+              rows={7}
               value={data.taskDescription}
               onChange={e => onUpdate({ taskDescription: e.target.value })}
+              onWheel={(e) => {
+                // 滾動 containment:textarea 內可滾就吃 event、到邊界才讓外層滾(避免「滾過頭」)
+                const el = e.currentTarget
+                const atTop = el.scrollTop === 0
+                const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+                if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+              }}
               placeholder={'用自然語言描述 AI 應該做什麼…\n例如：到 Yahoo Finance 抓取台積電（2330.TW）最近 30 天的收盤價，存成 CSV 檔案，欄位包含日期和收盤價'}
-              className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+              className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[120px]`}
             />
-            <p className="text-xs text-gray-400 mt-1.5">AI 會根據描述自動撰寫 Python 程式碼並執行</p>
+            <p className="text-xs text-gray-400 mt-1.5">AI 會根據描述自動撰寫 Python 程式碼並執行（拖右下角可拉高）</p>
           </div>
 
           {/* Claude Code Skill mount */}
@@ -204,7 +211,7 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
                   Skill 功能需要模型有足夠推理能力才能正確理解 SKILL.md 與使用子資源腳本。建議：
                 </p>
                 <ul className="text-amber-700 mt-1 ml-3 list-disc space-y-0.5">
-                  <li><b>Groq / Gemini / OpenRouter</b>：使用各家旗艦或大型模型（非輕量版）</li>
+                  <li><b>Groq / Gemini / OpenAI / Anthropic</b>：使用各家旗艦或大型模型（非輕量版）</li>
                   <li><b>Ollama</b>：避免使用 8B 以下小模型（能力不足會忽略 skill 指示）</li>
                 </ul>
                 <p className="text-amber-700 mt-1">若結果不如預期，切換更強的模型並以「完整模式」重跑覆蓋 recipe。</p>
@@ -273,11 +280,17 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete }: 
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">預期輸出描述</label>
             <textarea
-              rows={3}
+              rows={5}
               value={data.expectedOutput}
               onChange={e => onUpdate({ expectedOutput: e.target.value })}
+              onWheel={(e) => {
+                const el = e.currentTarget
+                const atTop = el.scrollTop === 0
+                const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+                if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+              }}
               placeholder="描述輸出應包含什麼內容…&#10;例如：CSV 檔案包含至少 20 筆資料，有 date 和 close 欄位"
-              className={`${inputCls} resize-none text-xs leading-relaxed`}
+              className={`${inputCls} resize-y text-xs leading-relaxed min-h-[80px]`}
             />
             <p className="text-xs text-gray-400 mt-1">
               <b>填了</b> → AI 會用此描述嚴格驗證輸出（每步 +5-15 秒）。<br />

@@ -79,7 +79,7 @@ async def _execute_pipeline_task(task_id: str, yaml_path: str, chat_id: int):
         config_d["_use_recipe"] = use_recipe
         if workflow_id:
             config_d["_workflow_id"] = workflow_id
-        config_d["_no_save_recipe"] = True  # 排程模式預設不覆蓋 recipe
+        config_d["_silent_recipe"] = True  # 排程模式:無人值守、直接覆寫、不彈 dialog
         await run_pipeline(config_dict=config_d, chat_id=chat_id)
         if task_id in _task_meta:
             _task_meta[task_id].last_run = datetime.now().isoformat()

@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { X, Plus, Trash2, GripVertical, Info, ChevronDown, ChevronRight } from 'lucide-react'
+import { X, Plus, Trash2, GripVertical, Info, ChevronDown, ChevronRight, Globe, Film } from 'lucide-react'
 import type { WebCrawlerData, WebCrawlerNode, WebCrawlerAction } from './_helpers'
 
 const NODE_COLOR = '#0d9488'
@@ -70,8 +70,12 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: P
     <div className="absolute top-0 right-0 h-full w-[420px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: NODE_COLOR, borderTopWidth: 3 }}>
-        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-          style={{ background: NODE_COLOR }}>{isVideo ? '🎬' : '🌐'}</span>
+        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
+          style={{ background: NODE_COLOR }}>
+          {isVideo
+            ? <Film className="w-4 h-4" strokeWidth={2.4} />
+            : <Globe className="w-4 h-4" strokeWidth={2.4} />}
+        </span>
         <div className="flex-1 min-w-0">
           <span className="font-semibold text-gray-800 text-sm block truncate">
             {isVideo ? '影片下載節點' : '網頁爬蟲節點'}
@@ -187,11 +191,17 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: P
                 </span>
               </label>
               <textarea
-                className={`${inputCls} font-mono text-xs`}
-                rows={isMulti ? 5 : 2}
+                className={`${inputCls} font-mono text-xs resize-y min-h-[60px]`}
+                rows={isMulti ? 7 : 4}
                 placeholder={'https://example.com/article/...\n# 多 URL 一行一個（# 開頭視為註解、跳過）\nhttps://another-site.com/page'}
                 value={urlsText}
                 onChange={e => handleChange(e.target.value)}
+                onWheel={(e) => {
+                  const el = e.currentTarget
+                  const atTop = el.scrollTop === 0
+                  const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+                  if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+                }}
               />
               <p className="text-[10px] text-gray-400 mt-0.5">
                 {isMulti ? (
@@ -649,11 +659,17 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete }: P
                   </span>
                 </label>
                 <textarea
-                  className={`${inputCls} font-mono text-xs`}
-                  rows={3}
+                  className={`${inputCls} font-mono text-xs resize-y min-h-[80px]`}
+                  rows={5}
                   placeholder={'三種格式都接受：\n  key=value（一行一個）\n  key=v1; k2=v2（整串 Cookie 標頭）\n  [{"name":"k","value":"v"}]（JSON 陣列）'}
                   value={data.cookies}
                   onChange={e => onUpdate({ cookies: e.target.value })}
+                  onWheel={(e) => {
+                    const el = e.currentTarget
+                    const atTop = el.scrollTop === 0
+                    const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+                    if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
+                  }}
                 />
 
                 {/* 教學：怎麼從瀏覽器抓 cookies */}

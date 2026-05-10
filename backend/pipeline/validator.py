@@ -360,7 +360,7 @@ Exit Code：{exit_code}
             return ValidationResult(
                 status="rate_limited",
                 reason=f"LLM provider 配額用盡或速率受限（429）：{str(e)[:300]}",
-                suggestion="等配額重置（通常每分鐘 / 每天）或在 Settings 切換 provider（Groq / OpenRouter / Ollama 本地）",
+                suggestion="等配額重置（通常每分鐘 / 每天）或在 Settings 切換 provider（Groq / OpenAI / Anthropic / Ollama 本地）",
             )
         logger.error(f"[{step_name}] LLM 驗證失敗：{e}，退回 exit code 判斷")
         # Fallback：純 exit code 判斷
@@ -937,7 +937,7 @@ Exit Code：{exit_code}
             return ValidationResult(
                 status="rate_limited",
                 reason=f"LLM provider 配額用盡或速率受限（429）：{str(e)[:300]}",
-                suggestion="等配額重置或在 Settings 切換 provider（Groq / OpenRouter / Ollama 本地）",
+                suggestion="等配額重置或在 Settings 切換 provider（Groq / OpenAI / Anthropic / Ollama 本地）",
             )
         logger.error(f"[{step_name}] Skill 驗證失敗：{e}，退回一般驗證")
         # Fallback to standard validation

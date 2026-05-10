@@ -29,6 +29,15 @@ class StepResult:
     # 沒明確 output.path 的 skill 節點，用這欄就能拿到該步真正寫的檔，
     # 不會跟其他 skill 節點搶到同一個「workflow dir 最新檔」。
     actual_output_path: str = ""
+    # 該步驟用了多少 LLM token（subagent / skill 多輪 loop 累計；script / human_confirm 等保持空）。
+    # 結構: {"input_tokens": int, "output_tokens": int, "total_tokens": int, "model": str}
+    token_usage: dict = field(default_factory=dict)
+    # 該步驟內部的 tool 呼叫時間軸（subagent / skill 用；給前端 trace 視圖渲染）。
+    # 每筆: {"name": str, "input_preview": str(<=200), "result_preview": str(<=300)}
+    tool_calls: list = field(default_factory=list)
+    # ISO 時間戳（給 trace 算 step 耗時、subagent / skill loop 第一輪 LLM call 前 / 最後 done 後）。
+    started_at: str = ""
+    ended_at: str = ""
 
 
 @dataclass

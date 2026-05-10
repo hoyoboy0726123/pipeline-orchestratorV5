@@ -13,6 +13,7 @@ import InsertableEdge from './_insertableEdge'
 import {
   Play, Clock, Code2, Plus, Sparkles, BookOpen, Zap, Square,
   Loader2, CheckCircle2, XCircle, Workflow, Terminal, X, Hand,
+  Bot, Brain, ShieldCheck, UserCheck, MousePointer2, ScanEye, Mail, Globe,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Toaster } from 'sonner'
@@ -25,6 +26,7 @@ import ComputerUseNodeComponent    from './_computerUseNode'
 import VisualValidationNodeComponent from './_visualValidationNode'
 import OutlookNodeComponent        from './_outlookNode'
 import WebCrawlerNodeComponent     from './_webCrawlerNode'
+import SubagentStepNode             from './_subagentNode'
 import ScriptConfigPanel           from './_scriptPanel'
 import SkillConfigPanel            from './_skillPanel'
 import AiValidationPanel           from './_aiValidationPanel'
@@ -33,14 +35,15 @@ import ComputerUsePanel            from './_computerUsePanel'
 import VisualValidationPanel       from './_visualValidationPanel'
 import OutlookPanel                from './_outlookPanel'
 import WebCrawlerPanel             from './_webCrawlerPanel'
+import SubagentConfigPanel          from './_subagentPanel'
 import Sidebar                from './_sidebar'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
-  type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData,
+  type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData, type SubagentData,
   type ScriptNode, type SkillNode, type HumanConfirmNode, type ComputerUseNode, type VisualValidationNode,
-  type OutlookNode, type WebCrawlerNode,
+  type OutlookNode, type WebCrawlerNode, type SubagentNode,
   newStepData, newSkillData, newAiValidationData, newHumanConfirmData, newComputerUseData,
-  newVisualValidationData, newOutlookData, newWebCrawlerData,
+  newVisualValidationData, newOutlookData, newWebCrawlerData, newSubagentData,
   stepsToFlow, flowToSteps, stepsToYaml, parseYaml,
 } from './_helpers'
 import { useWorkflowStore } from './_store'
@@ -52,6 +55,7 @@ import {
   deleteComputerUseAssets,
 } from '@/lib/api'
 import type { PipelineRun } from '@/lib/types'
+import { computeCostUsd, formatCostUsd } from '@/lib/cost'
 import { useRunStatusStore } from './_runStatus'
 
 const nodeTypes = {
@@ -63,6 +67,7 @@ const nodeTypes = {
   visualValidation: VisualValidationNodeComponent,
   outlookAutomation: OutlookNodeComponent,
   webCrawler: WebCrawlerNodeComponent,
+  subagent: SubagentStepNode,
 }
 
 // Edge 類型：全部用 InsertableEdge — hover 出 + / 🗑️ 按鈕（n8n 風格）
@@ -336,7 +341,7 @@ export default function PipelinePage() {
   const runStatusRef = useRef(runStatus)
   const setRunStatus = (v: typeof runStatus) => { runStatusRef.current = v; _setRunStatus(v) }
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
-  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user'>('failure')
+  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval'>('failure')
   const [askUserOptions, setAskUserOptions] = useState<string[]>([])
   const [askUserContext, setAskUserContext] = useState('')
   const [askUserAnswer, setAskUserAnswer] = useState('')
@@ -347,6 +352,9 @@ export default function PipelinePage() {
   const [pendingRecipeCount, setPendingRecipeCount] = useState(0)
   const [showLog, setShowLog]       = useState(false)
   const [logLines, setLogLines]     = useState<string[]>([])
+  // Trace 模式：log panel 切換顯示「pipeline run 的 step_results / tool_calls / token timeline」
+  const [showTrace, setShowTrace]   = useState(false)
+  const [traceRun, setTraceRun]     = useState<PipelineRun | null>(null)
   const logEndRef  = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
   const logAutoScrollRef = useRef(true)
@@ -429,22 +437,32 @@ export default function PipelinePage() {
     if (bgDetectRef.current) clearInterval(bgDetectRef.current)
     if (!pipelineName) return
 
+    // 切 workflow 時 reset 跑 / log，避免上一個 workflow 的狀態殘留蓋過去
+    // (這個 reset 不影響 awaiting_human 訊息，因為下面 detect 會立即接管 active run)
+    runIdRef.current = null
+    setLogLines([])
+    setRunning(false)
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+
+    // initial fallback 旗標：第一輪 detect 找不到 active 時、改載 latest run 的 log
+    // 切 workflow 一次只 fallback 一次，後續 detect 只負責偵測新 active(user 啟動 / TG / 排程觸發)
+    let initialDone = false
+
     const detect = async () => {
-      // 已在前端執行中就不重複偵測
-      if (runIdRef.current) return
       try {
         const runs = await getPipelineRuns()
         const active = runs.find(
           r => (r.status === 'running' || r.status === 'awaiting_human') && r.pipeline_name === pipelineName
         )
-        if (active && !runIdRef.current) {
+        // 偵測 active(running / awaiting)— 接管條件:有 active 且不是當前已偵測過的同一個 run
+        if (active && runIdRef.current !== active.run_id) {
           runIdRef.current = active.run_id
           setRunning(true)
           if (active.status === 'awaiting_human') {
             setRunStatus('awaiting')
             setAwaitingRunId(active.run_id)
             const at = (active as any).awaiting_type
-            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : 'failure'
+            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
             setAwaitingType(mapped)
             setAwaitingMessage((active as any).awaiting_message || '')
             setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -462,6 +480,21 @@ export default function PipelinePage() {
           toast.info(`偵測到排程執行中`)
           pollStatus(active.run_id)
           pollRef.current = setInterval(() => pollStatus(active.run_id), 1500)
+          initialDone = true
+          return
+        }
+        // 沒 active：第一輪做 fallback — 找該 workflow 最新一筆 run、載入該 run 的 log
+        // 讓使用者切過去就能看到上次跑的結果(不用按執行)；trace 視圖也會吃到同個 runIdRef
+        if (!initialDone) {
+          initialDone = true
+          const latest = runs.find(r => r.pipeline_name === pipelineName)
+          if (latest) {
+            runIdRef.current = latest.run_id
+            try {
+              const data = await getPipelineLog(latest.run_id)
+              setLogLines((data.log || '').split('\n'))
+            } catch { /* ignore */ }
+          }
         }
       } catch { /* ignore */ }
     }
@@ -539,6 +572,7 @@ export default function PipelinePage() {
     if (n.type === 'computerUse') return '#9333ea'
     if (n.type === 'outlookAutomation') return '#0078d4'
     if (n.type === 'webCrawler') return '#0d9488'
+    if (n.type === 'subagent') return '#4f46e5'
     return '#3b82f6'
   }, [])
 
@@ -651,6 +685,17 @@ export default function PipelinePage() {
     setSelectedId(id)
   }, [nodes, setNodes])
 
+  // ── Add 多輪代理（subagent）節點 ──────────────────────────────────────
+  const addSubagent = useCallback(() => {
+    const id = `subagent-${Date.now()}`
+    const data = newSubagentData(nodes.length)
+    const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
+    const x = lastNode ? lastNode.position.x + 320 : 100
+    const y = lastNode ? lastNode.position.y : 160
+    setNodes(ns => [...ns, { id, type: 'subagent', position: { x, y }, data }])
+    setSelectedId(id)
+  }, [nodes, setNodes])
+
   // ── Edge 上的 ➕ 按鈕：在指定 edge 中間插入新節點 ──────────────────────────
   // _insertableEdge.tsx dispatch 'pipeline-insert-node-on-edge' CustomEvent
   // detail = { edgeId, source, target, nodeType, labelX, labelY }
@@ -673,6 +718,7 @@ export default function PipelinePage() {
         case 'visualValidation':   data = newVisualValidationData(0); break
         case 'outlookAutomation':  data = newOutlookData(0); break
         case 'webCrawler':         data = newWebCrawlerData(0); break
+        case 'subagent':           data = newSubagentData(0); break
         default: return
       }
       setNodes(ns => [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }])
@@ -781,7 +827,7 @@ export default function PipelinePage() {
 
   // ── Run pipeline ──────────────────────────────────────────────────────────
   const handleRunClick = async () => {
-    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler')
+    const stepNodes = nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler' || n.type === 'subagent')
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
     const steps = flowToSteps(nodes, edges)
     // 空步驟檢查：排除有自己 schema 的節點類型（不靠 batch 跑的）
@@ -931,7 +977,7 @@ export default function PipelinePage() {
                 setRunStatus('awaiting')
                 setAwaitingRunId(active.run_id)
                 const at = (active as any).awaiting_type
-                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : 'failure'
+                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
                 setAwaitingType(mapped)
                 setAwaitingMessage((active as any).awaiting_message || '')
                 setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1021,7 +1067,7 @@ export default function PipelinePage() {
           setRunStatus('awaiting')
           setAwaitingRunId(runId)
           const at = data.awaiting_type
-          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : 'failure'
+          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
           setAwaitingType(mapped)
           setAwaitingMessage(data.awaiting_message || '')
           setAwaitingSuggestion(data.awaiting_suggestion || '')
@@ -1103,7 +1149,7 @@ export default function PipelinePage() {
   const [hintText, setHintText] = useState('')
   const [showHintInput, setShowHintInput] = useState(false)
 
-  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer', hint?: string) => {
+  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command', hint?: string) => {
     if (!awaitingRunId) return
     const rid = awaitingRunId
 
@@ -1154,6 +1200,29 @@ export default function PipelinePage() {
   useEffect(() => {
     if (showLog && logAutoScrollRef.current) logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [logLines, showLog])
+
+  // Trace 視圖 live poll — 開啟期間每 3 秒重抓 run、保持 token / tool_calls / 步驟狀態 up-to-date
+  // 切 workflow(pipelineName 變)時也重 trigger，立即 fetch 新 workflow 的 run trace
+  useEffect(() => {
+    if (!showTrace) return
+    let stopped = false
+    const tick = async () => {
+      if (stopped) return
+      const rid = runIdRef.current
+      if (!rid) {
+        // 該 workflow 還沒跑過任何 run、清掉舊 trace 避免顯示其他 workflow 的殘影
+        setTraceRun(null)
+        return
+      }
+      try {
+        const run = await getPipelineRun(rid)
+        if (!stopped) setTraceRun(run)
+      } catch { /* ignore */ }
+    }
+    tick()
+    const id = setInterval(tick, 3000)
+    return () => { stopped = true; clearInterval(id) }
+  }, [showTrace, running, pipelineName])
 
   // 開啟 log 時重置 auto-scroll
   useEffect(() => { if (showLog) logAutoScrollRef.current = true }, [showLog])
@@ -1247,7 +1316,7 @@ export default function PipelinePage() {
         ) : (
           <button
             onClick={handleRunClick}
-            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler').length === 0}
+            disabled={nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler' || n.type === 'subagent').length === 0}
             className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium shadow-sm"
           >
             <Play className="w-3.5 h-3.5" /> 執行
@@ -1295,56 +1364,63 @@ export default function PipelinePage() {
                 title="新增一個執行 Python 腳本/指令的步驟"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-blue-200 rounded-xl text-sm text-blue-600 hover:border-blue-400 hover:bg-blue-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> Python腳本
+                <Plus className="w-3.5 h-3.5" /> <Code2 className="w-3.5 h-3.5" /> Python腳本
               </button>
               <button
                 onClick={addAiValidation}
                 title="新增 AI 快速驗證節點"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-amber-200 rounded-xl text-sm text-amber-600 hover:border-amber-400 hover:bg-amber-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> AI驗證
+                <Plus className="w-3.5 h-3.5" /> <ShieldCheck className="w-3.5 h-3.5" /> AI驗證
               </button>
               <button
                 onClick={addSkillStep}
                 title="新增 AI 自動化步驟（自動寫程式碼）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-purple-200 rounded-xl text-sm text-purple-600 hover:border-purple-400 hover:bg-purple-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> AI技能
+                <Plus className="w-3.5 h-3.5" /> <Bot className="w-3.5 h-3.5" /> AI技能
               </button>
               <button
                 onClick={addHumanConfirm}
                 title="新增人工確認節點（暫停等待確認後繼續）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-emerald-200 rounded-xl text-sm text-emerald-600 hover:border-emerald-400 hover:bg-emerald-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 人工確認
+                <Plus className="w-3.5 h-3.5" /> <UserCheck className="w-3.5 h-3.5" /> 人工確認
               </button>
               <button
                 onClick={addComputerUse}
                 title="新增桌面自動化節點（錄製滑鼠鍵盤操作後重播）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-fuchsia-200 rounded-xl text-sm text-fuchsia-700 hover:border-fuchsia-400 hover:bg-fuchsia-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 桌面自動化
+                <Plus className="w-3.5 h-3.5" /> <MousePointer2 className="w-3.5 h-3.5" /> 桌面自動化
               </button>
               <button
                 onClick={addVisualValidation}
                 title="新增視覺驗證節點（VLM 看畫面或上一步輸出檔判斷成不成功）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-indigo-200 rounded-xl text-sm text-indigo-600 hover:border-indigo-400 hover:bg-indigo-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 視覺驗證
+                <Plus className="w-3.5 h-3.5" /> <ScanEye className="w-3.5 h-3.5" /> 視覺驗證
               </button>
               <button
                 onClick={addOutlook}
                 title="新增 Outlook 自動化節點（pywin32 + Outlook COM；只在 Windows host 跑）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-sky-200 rounded-xl text-sm text-sky-700 hover:border-sky-400 hover:bg-sky-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> Outlook
+                <Plus className="w-3.5 h-3.5" /> <Mail className="w-3.5 h-3.5" /> Outlook
               </button>
               <button
                 onClick={addWebCrawler}
                 title="新增網頁爬蟲節點（沙盒內 Crawl4AI + Cloudflare fallback；輸出 markdown 給 skill 解析）"
                 className="flex items-center gap-1.5 px-3 py-2 bg-white border border-teal-200 rounded-xl text-sm text-teal-700 hover:border-teal-400 hover:bg-teal-50 shadow-sm transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" /> 網頁爬蟲
+                <Plus className="w-3.5 h-3.5" /> <Globe className="w-3.5 h-3.5" /> 網頁爬蟲
+              </button>
+              <button
+                onClick={addSubagent}
+                title="新增 AI 多輪代理節點（指派角色 + 工具白名單；多輪推理直到完成；不存 Recipe）"
+                className="flex items-center gap-1.5 px-3 py-2 bg-white border border-violet-200 rounded-xl text-sm text-violet-700 hover:border-violet-400 hover:bg-violet-50 shadow-sm transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> <Brain className="w-3.5 h-3.5" /> 多輪代理
               </button>
             </div>
           </Panel>
@@ -1481,8 +1557,96 @@ export default function PipelinePage() {
           </div>
         )}
 
+        {/* missing_dependency banner — skill 跑到一半發現缺套件 */}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'missing_dep' && (() => {
+          let meta: { packages?: string[]; stderr_tail?: string } = {}
+          try { meta = awaitingSuggestion ? JSON.parse(awaitingSuggestion) : {} } catch { /* ignore */ }
+          const pkgs = meta.packages || []
+          return (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-blue-50 border border-blue-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-blue-700 font-medium text-sm whitespace-nowrap">📦 需要安裝套件</span>
+                {awaitingMessage && <span className="text-blue-600 text-xs max-w-[260px] truncate">{awaitingMessage}</span>}
+                <div className="flex items-center gap-2 ml-auto">
+                  <button
+                    onClick={() => handleDecision('install_dep', pkgs.join(','))}
+                    disabled={pkgs.length === 0}
+                    className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+                  >✅ 安裝並繼續</button>
+                  <a
+                    href="/settings"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="去設定頁手動安裝"
+                    className="px-3 py-1.5 bg-white border border-blue-200 text-blue-700 rounded-lg text-xs font-medium hover:bg-blue-100 whitespace-nowrap"
+                  >⚙️ 去設定頁</a>
+                  <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
+                </div>
+              </div>
+              {pkgs.length > 0 && (
+                <div className="bg-blue-100 border border-blue-200 rounded-lg px-3 py-2">
+                  <p className="text-xs font-semibold text-blue-700 mb-1">缺少：</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {pkgs.map(p => (
+                      <code key={p} className="text-xs bg-white border border-blue-200 text-blue-800 rounded px-1.5 py-0.5 font-mono">{p}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {meta.stderr_tail && (
+                <details className="text-xs text-blue-700/80">
+                  <summary className="cursor-pointer hover:text-blue-800">stderr 片段</summary>
+                  <pre className="mt-1 bg-white/60 rounded p-2 overflow-auto max-h-32 text-[11px] text-gray-700 whitespace-pre-wrap">{meta.stderr_tail}</pre>
+                </details>
+              )}
+            </div>
+          )
+        })()}
+
+        {/* command_approval banner — ask_mode 攔截敏感命令、需用戶授權 */}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'cmd_approval' && (() => {
+          let meta: { category?: string; label?: string; preview?: string; tool_name?: string; step_name?: string } = {}
+          try { meta = awaitingSuggestion ? JSON.parse(awaitingSuggestion) : {} } catch { /* ignore */ }
+          return (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-rose-50 border border-rose-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[680px] w-[95%]">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-rose-700 font-medium text-sm whitespace-nowrap">⚠️ 敏感操作需授權</span>
+                {meta.category && <span className="text-[11px] px-1.5 py-0.5 rounded bg-rose-200 text-rose-800 font-mono">{meta.category}</span>}
+                <div className="flex items-center gap-2 ml-auto">
+                  <button onClick={() => handleDecision('approve_command')} className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 whitespace-nowrap">✅ 執行</button>
+                  <button onClick={() => setShowHintInput(!showHintInput)} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${showHintInput ? 'bg-purple-700 text-white' : 'bg-purple-600 text-white hover:bg-purple-700'}`}>💬 改任務</button>
+                  <button onClick={() => handleDecision('deny_command')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">❌ 拒絕</button>
+                </div>
+              </div>
+              {meta.preview && (
+                <pre className="bg-rose-100 border border-rose-200 rounded-lg px-3 py-2 text-[11px] font-mono text-rose-900 leading-relaxed whitespace-pre-wrap break-all max-h-40 overflow-auto">{meta.preview}</pre>
+              )}
+              {meta.step_name && (
+                <p className="text-[11px] text-rose-700/80">步驟:<span className="font-mono">{meta.step_name}</span>{meta.tool_name ? ` · ${meta.tool_name}` : ''}</p>
+              )}
+              {showHintInput && (
+                <div className="flex gap-2">
+                  <input
+                    value={hintText}
+                    onChange={e => setHintText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && hintText.trim()) handleDecision('hint_command', hintText.trim()) }}
+                    placeholder="改任務的提示(例如：別用 sudo、改用 conda、跳過這步…)"
+                    className="flex-1 border border-rose-300 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-purple-400 bg-white"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => hintText.trim() && handleDecision('hint_command', hintText.trim())}
+                    disabled={!hintText.trim()}
+                    className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50 whitespace-nowrap"
+                  >送出</button>
+                </div>
+              )}
+            </div>
+          )
+        })()}
+
         {/* Empty state */}
-        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler').length === 0 && <EmptyState onAdd={addScriptStep} />}
+        {nodes.filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation' || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation' || n.type === 'webCrawler' || n.type === 'subagent').length === 0 && <EmptyState onAdd={addScriptStep} />}
 
         {/* Node config panel */}
         {selectedNode && selectedNode.type === 'computerUse' ? (
@@ -1526,6 +1690,13 @@ export default function PipelinePage() {
           <WebCrawlerPanel
             node={selectedNode as WebCrawlerNode}
             pipelineName={pipelineName}
+            onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
+            onClose={() => setSelectedId(null)}
+            onDelete={() => deleteStep(selectedNode.id)}
+          />
+        ) : selectedNode && selectedNode.type === 'subagent' ? (
+          <SubagentConfigPanel
+            node={selectedNode as SubagentNode}
             onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
@@ -1582,16 +1753,111 @@ export default function PipelinePage() {
             />
             <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 shrink-0">
               <Terminal className="w-3.5 h-3.5 text-gray-400" />
-              <span className="text-xs text-gray-400 font-mono">Pipeline Log</span>
+              <span className="text-xs text-gray-400 font-mono">Pipeline {showTrace ? 'Trace' : 'Log'}</span>
               {running && <span className="text-xs text-green-400 animate-pulse">● 執行中</span>}
               {!running && runIdRef.current && <span className="text-xs text-gray-500">Run: {runIdRef.current}</span>}
               <div className="flex-1" />
+              <button
+                onClick={async () => {
+                  const next = !showTrace
+                  if (next && runIdRef.current) {
+                    // Trace 跟 Log 是同一個 run 的兩個視圖、永遠繫到 runIdRef.current；
+                    // 想看別 run 請在 sidebar 切換 workflow（log 跟 trace 同步切）
+                    try {
+                      const run = await getPipelineRun(runIdRef.current)
+                      setTraceRun(run)
+                    } catch { /* ignore */ }
+                  }
+                  setShowTrace(next)
+                }}
+                className={`text-xs px-2 py-0.5 rounded transition-colors ${showTrace ? 'bg-indigo-700 text-white hover:bg-indigo-600' : 'border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
+                title={showTrace ? '切回 Log 視圖（時序文字流）' : '切到 Trace 視圖（每步驟 tool 呼叫與 token 用量）'}
+              >{showTrace ? '📜 Log' : '📊 Trace'}</button>
               <button onClick={() => setLogLines([])} className="text-xs text-gray-500 hover:text-gray-300 px-2">清除</button>
               <button onClick={() => setShowLog(false)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
-            <div ref={logContainerRef} className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-5"
+            {/* Trace 視圖 — toggle 自 header 的 📊 按鈕；showTrace=true 時取代 log 顯示，
+                並在 useEffect 內 3 秒 poll 一次保持 live update */}
+            {showTrace && (
+              <div className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-5 bg-gray-900/30">
+                {!traceRun ? (
+                  <span className="text-gray-600">{runIdRef.current ? '載入 trace 中…（再按一次 📊 重新拉）' : '尚無 run — 請先執行 Pipeline'}</span>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-baseline gap-3 pb-1 border-b border-gray-800">
+                      <span className="text-gray-300 font-semibold">{traceRun.pipeline_name}</span>
+                      <span className="text-gray-500 text-[11px]">({traceRun.status})</span>
+                      {(() => {
+                        const srs = traceRun.step_results || []
+                        const totalTokens = srs.reduce((s: number, sr) => s + (sr.token_usage?.total_tokens || 0), 0)
+                        const totalTools = srs.reduce((s: number, sr) => s + (sr.tool_calls?.length || 0), 0)
+                        // 累計 USD 成本：每 step 用各自的 model 算（不同 step 可能切過 model）
+                        let totalCost = 0
+                        let hasCost = false
+                        for (const sr of srs) {
+                          const tu = sr.token_usage
+                          if (tu?.model && tu.total_tokens) {
+                            const c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
+                            if (c !== null) { totalCost += c; hasCost = true }
+                          }
+                        }
+                        return (
+                          <span className="text-gray-400 text-[11px] ml-auto">
+                            合計 <span className="text-indigo-300">{totalTokens.toLocaleString()}</span> tokens ·{' '}
+                            <span className="text-indigo-300">{totalTools}</span> tool calls ·{' '}
+                            <span className="text-indigo-300">{srs.length}</span> steps
+                            {hasCost && <> · <span className="text-emerald-300" title="估算成本（公開定價、僅參考）">~{formatCostUsd(totalCost)}</span></>}
+                          </span>
+                        )
+                      })()}
+                    </div>
+                    {(traceRun.step_results || []).map((sr, i) => {
+                      const ok = sr.validation_status === 'ok'
+                      const failed = sr.validation_status === 'failed'
+                      return (
+                        <details key={i} open className="bg-gray-950/60 border border-gray-800 rounded">
+                          <summary className="px-2 py-1.5 cursor-pointer text-gray-300 hover:bg-gray-800/40 select-none">
+                            <span className="text-gray-500">[{i + 1}]</span>{' '}
+                            <span className={ok ? 'text-green-400' : failed ? 'text-red-400' : 'text-yellow-400'}>
+                              {ok ? '✓' : failed ? '✗' : '⚠'}
+                            </span>{' '}
+                            <span className="font-medium">{sr.step_name}</span>
+                            {sr.token_usage?.total_tokens ? (
+                              <span className="text-gray-500 ml-2 text-[11px]">({(sr.token_usage.total_tokens).toLocaleString()} tok)</span>
+                            ) : null}
+                            {sr.tool_calls?.length ? (
+                              <span className="text-gray-500 ml-1 text-[11px]">· {sr.tool_calls.length} tools</span>
+                            ) : null}
+                            {(() => {
+                              const tu = sr.token_usage
+                              if (!tu?.model || !tu.total_tokens) return null
+                              const c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
+                              if (c === null) return null
+                              return <span className="text-emerald-400/70 ml-1 text-[11px]" title={`model: ${tu.model}`}>· ~{formatCostUsd(c)}</span>
+                            })()}
+                          </summary>
+                          <div className="px-2 pb-2 space-y-1 border-t border-gray-800 pt-1.5">
+                            {(sr.tool_calls || []).map((tc, j) => (
+                              <div key={j} className="bg-gray-950 rounded px-2 py-1 border border-gray-800/50">
+                                <div className="text-indigo-300">🛠 <span className="font-mono">{tc.name}</span></div>
+                                {tc.input_preview && <div className="text-gray-500 mt-0.5 break-all">› {tc.input_preview}</div>}
+                                {tc.result_preview && <div className="text-gray-400 mt-0.5 break-all">← {tc.result_preview}</div>}
+                              </div>
+                            ))}
+                            {!sr.tool_calls?.length && (
+                              <div className="text-gray-600 text-[11px]">（無 tool call — 此步驟非 LLM agent loop，例如 script / human_confirm / web_crawler）</div>
+                            )}
+                          </div>
+                        </details>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            <div ref={logContainerRef} className={`flex-1 overflow-y-auto p-3 font-mono text-xs leading-5${showTrace ? ' hidden' : ''}`}
               onScroll={() => {
                 const el = logContainerRef.current
                 if (!el) return

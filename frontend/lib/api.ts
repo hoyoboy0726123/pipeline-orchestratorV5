@@ -255,7 +255,7 @@ export async function deletePipelineRun(runId: string): Promise<void> {
   if (!res.ok) throw new Error('刪除失敗')
 }
 
-export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer', hint?: string): Promise<{ message: string }> {
+export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command', hint?: string): Promise<{ message: string }> {
   const body: Record<string, string> = { decision }
   if (hint) body.hint = hint
   const res = await fetch(`${BASE}/pipeline/runs/${runId}/resume`, {
@@ -335,13 +335,13 @@ export async function deletePipelineSchedule(taskId: string): Promise<void> {
 
 // ── Settings ─────────────────────────────────────────────────
 export interface ModelSettings {
-  provider: 'groq' | 'ollama' | 'gemini' | 'openrouter'
+  provider: 'groq' | 'ollama' | 'gemini' | 'openai' | 'anthropic'
   model: string
   ollama_base_url: string
   ollama_thinking: 'auto' | 'on' | 'off'
   ollama_num_ctx: number
   gemini_thinking: 'off' | 'auto' | 'low' | 'medium' | 'high'
-  openrouter_thinking: 'off' | 'on'
+  anthropic_thinking: 'off' | 'on'
 }
 
 export interface ModelOption {
@@ -356,8 +356,10 @@ export interface AvailableModels {
   groq_error: string | null
   gemini: ModelOption[]
   gemini_error: string | null
-  openrouter: ModelOption[]
-  openrouter_error: string | null
+  openai: ModelOption[]
+  openai_error: string | null
+  anthropic: ModelOption[]
+  anthropic_error: string | null
   ollama: ModelOption[]
   ollama_base_url: string
   ollama_error: string | null
@@ -513,6 +515,133 @@ export async function cropAnchorFromFull(req: CropAnchorReq): Promise<{
   if (!res.ok) {
     const detail = await res.text().catch(() => '')
     throw new Error(detail || `裁切錨點失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
+/** UIA element tree 節點(遞迴)。給 frontend tree picker 用。 */
+export interface UiaElement {
+  type: string                 // ControlType 名(Button / Edit / DataGrid 等)
+  name: string
+  auto_id: string              // AutomationId(可能是空)
+  rect: number[]               // [x, y, w, h] 絕對桌面座標
+  enabled: boolean
+  offscreen: boolean
+  children: UiaElement[]
+}
+
+export interface UiaInspectResult {
+  ok: boolean
+  window: { name: string; class: string; rect: number[]; process_id: number }
+  tree: UiaElement
+  error?: string
+}
+
+/** 檢視指定視窗的 UIA element tree(空 window = 當前 foreground)。 */
+export async function uiaInspect(req: {
+  window?: string
+  max_depth?: number
+  max_children_per_node?: number
+}): Promise<UiaInspectResult> {
+  const res = await fetch(`${BASE}/computer-use/uia/inspect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      window: req.window ?? '',
+      max_depth: req.max_depth ?? 6,
+      max_children_per_node: req.max_children_per_node ?? 50,
+    }),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `UIA inspect 失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
+/** 桌面對應位置畫紅框 outline、ttl_ms 後自動消失。 */
+export async function uiaHighlight(req: {
+  x: number; y: number; width: number; height: number; ttl_ms?: number
+}): Promise<void> {
+  await fetch(`${BASE}/computer-use/uia/highlight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...req, ttl_ms: req.ttl_ms ?? 1500 }),
+  }).catch(() => {})  // hover 失敗不打擾使用者
+}
+
+/** 立即清除紅框 outline。 */
+export async function uiaHighlightClear(): Promise<void> {
+  await fetch(`${BASE}/computer-use/uia/highlight/clear`, {
+    method: 'POST',
+  }).catch(() => {})
+}
+
+export interface UiaWindowInfo {
+  name: string
+  class: string
+  rect: number[]
+  is_offscreen: boolean
+}
+
+/** 列當下所有可見的 top-level 視窗。 */
+export async function uiaListWindows(): Promise<{ ok: boolean; windows: UiaWindowInfo[] }> {
+  const res = await fetch(`${BASE}/computer-use/uia/windows`)
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `列視窗失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
+/** UIA Live Picker — 滑鼠 hover 桌面選元素 + F8 確認、F9 取消 */
+export interface UiaPickerStatus {
+  running: boolean
+  hovered: UiaElement | null
+  confirmed: UiaElement | null
+  error: string | null
+}
+
+export async function uiaPickerStart(): Promise<{ ok: boolean; started: boolean; running: boolean }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/start`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function uiaPickerPoll(): Promise<UiaPickerStatus> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/poll`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function uiaPickerConsume(): Promise<{ ok: boolean; element: UiaElement | null }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/consume`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function uiaPickerStop(): Promise<{ ok: boolean; was_running: boolean }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function uiaPickerConfirm(): Promise<{ ok: boolean; element?: UiaElement; error?: string }> {
+  const res = await fetch(`${BASE}/computer-use/uia/picker/confirm`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+/** 把 base64 PNG 直接存到 assets_dir(VLM 錨點立即截圖用、瀏覽器內裁切後上傳) */
+export async function saveAnchorPng(req: {
+  dir: string
+  name: string
+  png_b64: string
+}): Promise<{ image: string; width: number; height: number; variance: number; size_bytes: number }> {
+  const res = await fetch(`${BASE}/computer-use/assets/save-png`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `存錨點 PNG 失敗 (${res.status})`)
   }
   return res.json()
 }
@@ -813,10 +942,91 @@ export async function pipelineChat(
     body: JSON.stringify(body),
   })
   if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(detail ? `AI 回應失敗 (${res.status}): ${detail.slice(0, 200)}` : 'AI 回應失敗（請確認後端 uvicorn 在執行）')
+    // 後端走 _friendly_llm_error 翻譯後、HTTPException detail 已是繁中友善訊息
+    let detail = ''
+    try {
+      const j = await res.json()
+      detail = typeof j?.detail === 'string' ? j.detail : JSON.stringify(j?.detail ?? j)
+    } catch {
+      detail = await res.text().catch(() => '')
+    }
+    throw new Error(detail || `AI 回應失敗(HTTP ${res.status})、請確認後端 uvicorn 在執行`)
   }
   return res.json()
+}
+
+
+// ── 串流版 chat:fetch streaming + NDJSON 解析 ──────────────────────
+export type ChatStreamEvent =
+  | { type: 'token'; text: string }
+  | { type: 'tool_start'; name: string; args: Record<string, unknown> }
+  | { type: 'tool_end'; name: string; result_preview: string }
+  | { type: 'done'; reply: string; has_yaml: boolean; yaml_content: string | null; yaml_error: string | null }
+  | { type: 'error'; status_code?: number; detail: string }
+
+/**
+ * 串流呼叫 /pipeline/chat/stream、邊收事件邊 callback。
+ * AbortSignal 可中斷請求(用 AbortController)。
+ *
+ * 行為:
+ *   - token  事件:LLM 即時產出的文字片段、incremental render
+ *   - tool_start / tool_end:tool 呼叫進度
+ *   - done   事件:最終結果(含 has_yaml / yaml_content / yaml_error)
+ *   - error  事件:任何階段失敗(會 throw)
+ */
+export async function pipelineChatStream(
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  workflowId: string | null | undefined,
+  onEvent: (ev: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const body: Record<string, unknown> = { messages }
+  if (workflowId) body.workflow_id = workflowId
+  const res = await fetch(`${DIRECT_BASE}/pipeline/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const j = await res.json()
+      detail = typeof j?.detail === 'string' ? j.detail : JSON.stringify(j?.detail ?? j)
+    } catch {
+      detail = await res.text().catch(() => '')
+    }
+    throw new Error(detail || `AI 串流失敗(HTTP ${res.status})`)
+  }
+  if (!res.body) throw new Error('AI 串流回應沒有 body')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // NDJSON:一行一個 JSON
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        try {
+          const ev = JSON.parse(line) as ChatStreamEvent
+          onEvent(ev)
+          if (ev.type === 'error') {
+            throw new Error(ev.detail || '串流回 error 事件')
+          }
+        } catch (e) {
+          // JSON parse 失敗 → 略過此行(不是合法事件、可能是空行)
+          if (e instanceof Error && e.message.startsWith('串流回')) throw e
+        }
+      }
+      nl = buffer.indexOf('\n')
+    }
+  }
 }
 
 // ── Per-workflow chat history ────────────────────────────────────────────────

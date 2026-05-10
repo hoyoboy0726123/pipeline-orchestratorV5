@@ -1,0 +1,86 @@
+name: Reddit r/ASUS 討論摘要
+validate: true
+
+steps:
+  - name: 抓 r/ASUS 列表
+    web_crawler: true
+    wc_url: "https://www.reddit.com/r/ASUS/"
+    timeout: 90
+  - name: 人工確認 1
+    human_confirm: true
+    send_prev_output: true
+  - name: 提取連結並產出摘要報告
+    batch: |
+      讀上一步抓回來的 r/ASUS 列表頁 markdown，把所有貼文（討論串）連結抽出來，
+      用 crawl4ai 一篇一篇抓回 markdown，對每篇做摘要 + 留言情緒分析,
+      最後彙整成一份報告寫到 output_path。
+
+      Reddit 列表頁的特性（給你判斷怎麼抽連結用）：
+      - 貼文連結都長得像 .../r/ASUS/comments/<id>/<slug>/，靠這個 pattern 篩就行
+      - 列表頂部會有幾篇釘選的「超級討論串 / 公告」，可選擇略過
+      - 同一篇貼文有時會交叉出現在 r/ASUS 與 r/ASUSROG 兩個版（slug 相同），
+        同一個 slug 只抓一次
+
+      Reddit 詳細頁的特性（影響你怎麼抓單篇）：
+      - 是 SPA，留言區要等 JS 渲染才會出現；wait_until 用 networkidle 會 timeout，
+        建議用 domcontentloaded + 滾動兩次各等 1.5~2 秒讓內容載入完
+      - 內文前一大段是 Reddit 頁首 UI（「跳至主要內容」「開啟導覽列」「註冊加入
+        Reddit」「登入 Reddit」「展開使用者選單」之類），看到這些就知道內容還沒開始,
+        你必須**讀懂內文**才寫摘要，不要切前 N 字 — 切到的會是頁首 navigation 不是文章
+      - 主文的 upvote 數有時候 JS 沒渲染就抓不到，抓不到就標 N/A，不要硬編
+
+      限制：
+      - 最多抓 10 篇（避免 rate limit）
+      - 每篇摘要 80 字內
+
+      輸出 `daily_report.md` 格式（每篇一塊）：
+
+      ```markdown
+      # r/ASUS 每日摘要
+      > 抓取時間：（datetime.now() 真實時間）
+      > 來源：（步驟 1 的 URL）
+      > 篇數：N
+
+      ---
+
+      ## 1. [文章標題]
+      - 作者：xxx
+      - 統計：（這站有的對應指標 — Reddit 的話通常列表頁能看到「N 票 • N 則留言」，
+        詳細頁也能看到留言數；抓不到就標 N/A）
+      - Flair：（Support / Discussion / 公告 等，沒有就略）
+      - 連結：URL
+
+      **內容摘要**：80 字內，用你的話描述這篇在講什麼
+
+      **留言情緒**：正面 / 負面 / 中立 / 兩極（一句話補充判斷依據）
+
+      ---
+
+      ## 2. ...
+      ```
+    skill_mode: true
+    output:
+      ai_validation: true
+      description: |
+        檔案存在且至少包含 5 篇以上的摘要區塊（每塊有「## 數字. 標題」的 heading）。
+        檔案大小應該大於 2KB。
+        每篇的「內容摘要」必須是有意義的中文摘要（看得懂這篇在講什麼），
+        絕對不能是「跳至主要內容」「開啟導覽列」「註冊加入 Reddit」「登入 Reddit」
+        這類 Reddit SPA 的頁首 UI 字串。
+        每篇的「留言情緒」必須是四種之一（正面/負面/中立/兩極）+ 有判斷依據說明。
+      skill_mode: true
+    timeout: 1200
+  - name: 人工確認 1
+    human_confirm: true
+    send_prev_output: true
+  - name: AI技能 1
+    batch: 將上一步驟輸出的結果做成一個正式的Word報告
+    skill_mode: true
+    skill: docx
+  - name: 人工確認 2
+    human_confirm: true
+    send_prev_output: true
+  - name: Outlook 自動化 1
+    outlook_automation: true
+    outlook_template: send_with_attachment
+    outlook_params: {"to":"wilson_bai@asus.com","subject":"PTT分析報告","body":"請查收本日分析結果"}

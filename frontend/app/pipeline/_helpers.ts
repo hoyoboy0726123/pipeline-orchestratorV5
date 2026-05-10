@@ -36,11 +36,22 @@ export interface StepData extends Record<string, unknown> {
   cvCoordFallback?: boolean              // true = CV 失敗時退回錄製座標硬點（預設 false = 失敗就停）
   ocrThreshold?: number                  // OCR 最小 conf 門檻（預設 0.6）
   ocrCvFallback?: boolean                // true = OCR 失敗接著 CV 比對（預設 false = 失敗就停）
+  // VLM 把關 Phase 1（每動作後驗證 expected outcome）
+  cuVlmCheckStrategy?: 'off' | 'after_each' | 'critical_only'   // 預設 off
+  cuOnMismatch?: 'stop_notify' | 'retry_once' | 'skip_and_continue'  // 預設 stop_notify
+  cuVlmMaxRetries?: number                // retry_once 模式重試上限（預設 1）
+  // UIA 模式
+  cuMode?: 'pixel' | 'uia'                // 預設 pixel
+  uiaWindow?: string                       // 視窗 title pattern(支援 *)
   // 視覺驗證節點（visual_validation）
   visualValidation?: boolean             // optional — 視覺驗證步驟
   vvSource?: 'prev_output' | 'current_screen'
   vvPrompt?: string
   vvSearchRegion?: number[]              // [left, top, width, height]，空陣列 = 看整個螢幕
+  // Subagent 節點（subagent）
+  subagent?: boolean                     // optional — Subagent 步驟（多輪 LLM agent loop）
+  subagentRole?: string                  // data_analyst | coder | researcher | critic | planner
+  subagentMaxIter?: number               // 最多 LLM 輪數上限（預設 5）
   // Outlook 自動化節點（outlook_automation）
   outlookAutomation?: boolean            // optional — Outlook 自動化步驟
   outlookTemplate?: string               // 選單模板 ID（空字串 = 自由輸入需求）
@@ -72,6 +83,21 @@ export interface StepData extends Record<string, unknown> {
   wcVideoSubs?: boolean                  // [video mode] 是否下載字幕
   wcVideoSubsLangs?: string              // [video mode] 字幕語言偏好（逗號分隔）
   wcVideoSaveInfoJson?: boolean          // [video mode] 是否寫 video.info.json（預設 OFF）
+  timeout: number
+  retry: number
+  index: number
+  status: 'idle' | 'running' | 'success' | 'failed'
+  errorMsg: string
+}
+
+/** Subagent 節點：多輪 LLM agent loop、role-based、跳過 recipe + validator */
+export interface SubagentData extends Record<string, unknown> {
+  name: string
+  taskDescription: string
+  workingDir: string
+  outputPath: string
+  role: string             // data_analyst | coder | researcher | critic | planner
+  maxIter: number          // 最多 LLM 輪數上限（1-10、預設 5）
   timeout: number
   retry: number
   index: number
@@ -122,6 +148,8 @@ export interface HumanConfirmData extends Record<string, unknown> {
 export interface ComputerUseAction {
   type: 'click_image' | 'click_at' | 'type_text' | 'hotkey' | 'wait' | 'wait_image' | 'screenshot' | 'scroll' | 'drag'
       | 'assert_image' | 'assert_text' | 'activate_window' | 'if_image_found' | 'retry_until' | 'vlm_check'
+      | 'uia_click' | 'uia_send_keys' | 'uia_get_text' | 'uia_get_table_rowcount' | 'uia_click_cell'
+      | 'uia_wait_enabled' | 'uia_assert_state' | 'uia_close_window' | 'uia_set_clipboard'
   image?: string
   image2?: string        // 次錨點（多錨點驗證）
   dx2?: number           // 次錨點相對點擊點的 X 位移
@@ -151,6 +179,17 @@ export interface ComputerUseAction {
   ocr_box_height?: number
   // 嚴格鎖定範圍：true = 框內找不到立即 fail（不退附近、不退全螢幕）
   ocr_strict_region?: boolean
+  // VLM 把關 Phase 1：動作後預期狀態（自然語言）+ 是否標記為 critical（critical_only 模式下才驗）
+  expected?: string
+  verify_critical?: boolean
+  // UIA action 專用(uia_click / uia_send_keys / uia_get_text / uia_get_table_rowcount / uia_click_cell / uia_wait_enabled / uia_assert_state)
+  control?: { type?: string; name?: string; auto_id?: string; depth?: number }
+  save_as?: string
+  row?: number | string                                    // 字串支援 {{var}} 替換
+  column?: number | string
+  check?: 'exists' | 'enabled' | 'focused' | 'checked'
+  window?: string                                          // action 層級 window 覆寫(空 → 用 step.uiaWindow)
+  rect?: number[]                                          // UIA picker 抓到的 element rect[x,y,w,h]、給 backend ControlFromPoint fallback 用
   anchor_off_x?: number // 點擊相對錨點影像中心的偏移 x
   anchor_off_y?: number // 點擊相對錨點影像中心的偏移 y
   full_image?: string   // 全螢幕截圖檔名（手動圈選編輯錨點時用）
@@ -189,6 +228,13 @@ export interface ComputerUseData extends Record<string, unknown> {
   cvCoordFallback: boolean  // true = CV 失敗時退回錄製座標硬點。預設 false（失敗就停，不亂點）
   ocrThreshold: number      // OCR 最小 conf 門檻（1.0/0.9/0.8/0.6 分級；預設 0.6）
   ocrCvFallback: boolean    // true = OCR 失敗時繼續試 CV 比對鏈。預設 false（失敗就停）
+  // VLM 把關 Phase 1（節點層級設定）
+  cuVlmCheckStrategy: 'off' | 'after_each' | 'critical_only'        // 預設 off
+  cuOnMismatch: 'stop_notify' | 'retry_once' | 'skip_and_continue'  // 預設 stop_notify
+  cuVlmMaxRetries: number   // retry_once 重試上限（預設 1）
+  // UIA 模式(預設 pixel、向後相容)
+  cuMode: 'pixel' | 'uia'   // 'pixel' = 錄製座標(現況);'uia' = UIA tree 控制
+  uiaWindow: string         // UIA 模式視窗 title pattern(支援 *)、空字串 = foreground
   timeout: number           // 秒（執行上限）
   retry: number
   index: number
@@ -279,13 +325,14 @@ export interface OutlookData extends Record<string, unknown> {
 
 export type ScriptNode = Node<StepData>
 export type SkillNode = Node<SkillData>
+export type SubagentNode = Node<SubagentData>
 export type AiValidationNode = Node<AiValidationData>
 export type HumanConfirmNode = Node<HumanConfirmData>
 export type ComputerUseNode = Node<ComputerUseData>
 export type VisualValidationNode = Node<VisualValidationData>
 export type OutlookNode = Node<OutlookData>
 export type WebCrawlerNode = Node<WebCrawlerData>
-export type AppNode = Node<StepData | AiValidationData | SkillData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData>
+export type AppNode = Node<StepData | AiValidationData | SkillData | SubagentData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData>
 
 export function newAiValidationData(index = 0): AiValidationData {
   return { expectText: '', targetPath: '', skillMode: false, index }
@@ -396,6 +443,11 @@ export function newComputerUseData(index = 0): ComputerUseData {
     cvCoordFallback: false,
     ocrThreshold: 0.6,
     ocrCvFallback: false,
+    cuVlmCheckStrategy: 'off',
+    cuOnMismatch: 'stop_notify',
+    cuVlmMaxRetries: 1,
+    cuMode: 'pixel',
+    uiaWindow: '',
     timeout: 300,
     retry: 0,
     index,
@@ -425,6 +477,24 @@ export function newStepData(index = 0): StepData {
 }
 
 let _skillCounter = 0
+let _subagentCounter = 0
+export function newSubagentData(index = 0): SubagentData {
+  _subagentCounter++
+  return {
+    name: `Subagent ${_subagentCounter}`,
+    taskDescription: '',
+    workingDir: '',
+    outputPath: '',
+    role: 'data_analyst',
+    maxIter: 5,
+    timeout: 600,
+    retry: 1,
+    index,
+    status: 'idle',
+    errorMsg: '',
+  }
+}
+
 export function newSkillData(index = 0): SkillData {
   _skillCounter++
   return {
@@ -471,6 +541,11 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           cvCoordFallback: s.cvCoordFallback ?? false,
           ocrThreshold: s.ocrThreshold ?? 0.6,
           ocrCvFallback: s.ocrCvFallback ?? false,
+          cuVlmCheckStrategy: s.cuVlmCheckStrategy ?? 'off',
+          cuOnMismatch: s.cuOnMismatch ?? 'stop_notify',
+          cuVlmMaxRetries: s.cuVlmMaxRetries ?? 1,
+          cuMode: s.cuMode ?? 'pixel',
+          uiaWindow: s.uiaWindow ?? '',
           timeout: s.timeout,
           retry: s.retry,
           index: i,
@@ -569,6 +644,26 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
         } as HumanConfirmData,
       }
     }
+    if (s.subagent) {
+      return {
+        id: `step-${i}`,
+        type: 'subagent' as const,
+        position: { x: i * 320, y: 160 },
+        data: {
+          name: s.name,
+          taskDescription: s.batch,
+          workingDir: s.workingDir || '',
+          outputPath: s.outputPath,
+          role: s.subagentRole || 'data_analyst',
+          maxIter: s.subagentMaxIter ?? 5,
+          timeout: s.timeout,
+          retry: s.retry,
+          index: i,
+          status: 'idle' as const,
+          errorMsg: '',
+        } as SubagentData,
+      }
+    }
     if (s.skillMode) {
       // 向後相容：舊格式 skillMode=true → skillStep 節點
       return {
@@ -632,7 +727,8 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
   const execNodeIds = new Set<string>()
   const execNodes: AppNode[] = []
   for (const n of nodes) {
-    if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation'
+    if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'subagent'
+        || n.type === 'humanConfirmation'
         || n.type === 'computerUse' || n.type === 'visualValidation'
         || n.type === 'outlookAutomation' || n.type === 'webCrawler') {
       execNodeIds.add(n.id)
@@ -717,6 +813,11 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         ocrThreshold: d.ocrThreshold,
         ocrCvFallback: d.ocrCvFallback,
         cvCoordFallback: d.cvCoordFallback,
+        cuVlmCheckStrategy: d.cuVlmCheckStrategy,
+        cuOnMismatch: d.cuOnMismatch,
+        cuVlmMaxRetries: d.cuVlmMaxRetries,
+        cuMode: d.cuMode,
+        uiaWindow: d.uiaWindow,
         timeout: d.timeout,
         retry: d.retry,
         index: i,
@@ -835,6 +936,25 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         readonly: d.readonly || false,
         skill: d.skill || '',
         askMode: d.askMode || false,
+        timeout: d.timeout,
+        retry: d.retry,
+        index: i,
+        status: d.status,
+        errorMsg: d.errorMsg,
+      } as StepData
+    }
+
+    if (n.type === 'subagent') {
+      const d = n.data as SubagentData
+      return {
+        name: d.name,
+        batch: d.taskDescription,
+        workingDir: d.workingDir || '',
+        outputPath: d.outputPath,
+        expect: '',  // subagent 不走 validator、無 expect
+        subagent: true,
+        subagentRole: d.role || 'data_analyst',
+        subagentMaxIter: d.maxIter ?? 5,
         timeout: d.timeout,
         retry: d.retry,
         index: i,
@@ -974,6 +1094,33 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
       continue
     }
+    if (s.subagent) {
+      lines.push(`    subagent: true`)
+      if (s.subagentRole && s.subagentRole !== 'data_analyst') {
+        lines.push(`    subagent_role: ${s.subagentRole}`)
+      } else {
+        lines.push(`    subagent_role: ${s.subagentRole || 'data_analyst'}`)
+      }
+      if (s.subagentMaxIter !== undefined && s.subagentMaxIter !== 5) {
+        lines.push(`    subagent_max_iter: ${s.subagentMaxIter}`)
+      }
+      if (s.batch) {
+        if (s.batch.includes('\n') || s.batch.length > 80) {
+          lines.push(`    batch: |`)
+          for (const bl of s.batch.split('\n')) lines.push(`      ${bl}`)
+        } else {
+          lines.push(`    batch: ${s.batch}`)
+        }
+      }
+      if (s.workingDir) lines.push(`    working_dir: ${s.workingDir}`)
+      if (s.outputPath) {
+        lines.push(`    output:`)
+        lines.push(`      path: ${s.outputPath}`)
+      }
+      if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
+      if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
+      continue
+    }
     if (s.outlookAutomation) {
       lines.push(`    outlook_automation: true`)
       if (s.outlookTemplate) lines.push(`    outlook_template: ${s.outlookTemplate}`)
@@ -1011,6 +1158,13 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.cvCoordFallback === true) lines.push(`    cv_coord_fallback: true`)
       if (s.ocrThreshold !== undefined && s.ocrThreshold !== 0.6) lines.push(`    ocr_threshold: ${s.ocrThreshold}`)
       if (s.ocrCvFallback === true) lines.push(`    ocr_cv_fallback: true`)
+      // VLM 把關 Phase 1 — 預設 off / stop_notify / 1、只在不同預設時寫入
+      if (s.cuVlmCheckStrategy && s.cuVlmCheckStrategy !== 'off') lines.push(`    cu_vlm_check_strategy: ${s.cuVlmCheckStrategy}`)
+      if (s.cuOnMismatch && s.cuOnMismatch !== 'stop_notify') lines.push(`    cu_on_mismatch: ${s.cuOnMismatch}`)
+      if (s.cuVlmMaxRetries !== undefined && s.cuVlmMaxRetries !== 1) lines.push(`    cu_vlm_max_retries: ${s.cuVlmMaxRetries}`)
+      // UIA 模式 — 預設 pixel、空 window
+      if (s.cuMode && s.cuMode !== 'pixel') lines.push(`    cu_mode: ${s.cuMode}`)
+      if (s.uiaWindow) lines.push(`    uia_window: ${JSON.stringify(s.uiaWindow)}`)
       if (s.computerUseActions && s.computerUseActions.length > 0) {
         // 以 JSON 陣列寫入 actions（一行一動作，夠精簡又能 yaml parse）
         lines.push(`    actions:`)
@@ -1259,6 +1413,12 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
           const arr = m[1].split(',').map(x => parseInt(x.trim()) || 0)
           if (arr.length === 4) cur.vvSearchRegion = arr
         }
+      } else if (/^subagent:/.test(t) && cur) {
+        cur.subagent = /true/.test(t)
+      } else if (/^subagent_role:/.test(t) && cur) {
+        cur.subagentRole = t.replace(/^subagent_role:\s*/, '').replace(/^"|"$/g, '').trim() || 'data_analyst'
+      } else if (/^subagent_max_iter:/.test(t) && cur) {
+        cur.subagentMaxIter = parseInt(t.replace(/^subagent_max_iter:\s*/, '')) || 5
       } else if (/^outlook_automation:/.test(t) && cur) {
         cur.outlookAutomation = /true/.test(t)
       } else if (/^outlook_template:/.test(t) && cur) {
@@ -1375,7 +1535,10 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     outlookTemplate: partial.outlookTemplate ?? '',
     outlookFreeText: partial.outlookFreeText ?? '',
     outlookParams: partial.outlookParams ?? {},
-    timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : 300)))),
+    subagent: partial.subagent ?? false,
+    subagentRole: partial.subagentRole ?? 'data_analyst',
+    subagentMaxIter: partial.subagentMaxIter ?? 5,
+    timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : (partial.subagent ? 600 : 300))))),
     // YAML 沒寫 retry 時的 fallback — 跟 newSkillData / newStepData 跟 backend
     // PipelineStep.retry default 一致（都是 1）。讓「貼 YAML 進來」跟「拉新節點」
     // 看到的預設值相同，避免使用者疑惑。
