@@ -27,6 +27,7 @@ import VisualValidationNodeComponent from './_visualValidationNode'
 import OutlookNodeComponent        from './_outlookNode'
 import WebCrawlerNodeComponent     from './_webCrawlerNode'
 import SubagentStepNode             from './_subagentNode'
+import ConditionNodeComponent      from './_conditionNode'
 import ScriptConfigPanel           from './_scriptPanel'
 import SkillConfigPanel            from './_skillPanel'
 import DryRunModal                 from './_dryRunModal'
@@ -37,14 +38,16 @@ import VisualValidationPanel       from './_visualValidationPanel'
 import OutlookPanel                from './_outlookPanel'
 import WebCrawlerPanel             from './_webCrawlerPanel'
 import SubagentConfigPanel          from './_subagentPanel'
+import ConditionPanel               from './_conditionPanel'
 import Sidebar                from './_sidebar'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
   type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData, type SubagentData,
+  type ConditionData,
   type ScriptNode, type SkillNode, type HumanConfirmNode, type ComputerUseNode, type VisualValidationNode,
-  type OutlookNode, type WebCrawlerNode, type SubagentNode,
+  type OutlookNode, type WebCrawlerNode, type SubagentNode, type ConditionNode,
   newStepData, newSkillData, newAiValidationData, newHumanConfirmData, newComputerUseData,
-  newVisualValidationData, newOutlookData, newWebCrawlerData, newSubagentData,
+  newVisualValidationData, newOutlookData, newWebCrawlerData, newSubagentData, newConditionData,
   stepsToFlow, flowToSteps, stepsToYaml, parseYaml,
 } from './_helpers'
 import { useWorkflowStore } from './_store'
@@ -69,6 +72,7 @@ const nodeTypes = {
   outlookAutomation: OutlookNodeComponent,
   webCrawler: WebCrawlerNodeComponent,
   subagent: SubagentStepNode,
+  condition: ConditionNodeComponent,
 }
 
 // Edge 類型：全部用 InsertableEdge — hover 出 + / 🗑️ 按鈕（n8n 風格）
@@ -767,6 +771,17 @@ export default function PipelinePage() {
     setSelectedId(id)
   }, [nodes, setNodes])
 
+  // ── Add Condition 節點(IF / Switch 控制流)── Ticket 2 ─────────────
+  const addCondition = useCallback(() => {
+    const id = `condition-${Date.now()}`
+    const data = newConditionData(nodes.length)
+    const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
+    const x = lastNode ? lastNode.position.x + 280 : 100
+    const y = lastNode ? lastNode.position.y : 160
+    setNodes(ns => [...ns, { id, type: 'condition', position: { x, y }, data }])
+    setSelectedId(id)
+  }, [nodes, setNodes])
+
   // ── Edge 上的 ➕ 按鈕：在指定 edge 中間插入新節點 ──────────────────────────
   // _insertableEdge.tsx dispatch 'pipeline-insert-node-on-edge' CustomEvent
   // detail = { edgeId, source, target, nodeType, labelX, labelY }
@@ -790,6 +805,7 @@ export default function PipelinePage() {
         case 'outlookAutomation':  data = newOutlookData(0); break
         case 'webCrawler':         data = newWebCrawlerData(0); break
         case 'subagent':           data = newSubagentData(0); break
+        case 'condition':          data = newConditionData(0); break
         default: return
       }
       setNodes(ns => [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }])
@@ -835,9 +851,9 @@ export default function PipelinePage() {
   }, [nodes, edges, setNodes, setEdges, pipelineName])
 
   // ── Update step data (works for both scriptStep and skillStep) ─────────────
-  const updateStep = useCallback((id: string, patch: Partial<StepData> | Partial<SkillData>) => {
+  const updateStep = useCallback((id: string, patch: Partial<StepData> | Partial<SkillData> | Partial<ConditionData>) => {
     setNodes(ns => ns.map(n =>
-      n.id === id ? { ...n, data: { ...n.data, ...patch } } : n
+      n.id === id ? ({ ...n, data: { ...n.data, ...patch } } as AppNode) : n
     ))
   }, [setNodes])
 
@@ -1502,6 +1518,13 @@ export default function PipelinePage() {
               >
                 <Plus className="w-3.5 h-3.5" /> <Brain className="w-3.5 h-3.5" /> 多輪代理
               </button>
+              <button
+                onClick={addCondition}
+                title="新增 Condition 控制流節點(IF / Switch — 求值表達式後跳到指定 step)"
+                className="flex items-center gap-1.5 px-3 py-2 bg-white border border-orange-200 rounded-xl text-sm text-orange-700 hover:border-orange-400 hover:bg-orange-50 shadow-sm transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> 🔀 條件分支
+              </button>
             </div>
           </Panel>
         </ReactFlow>
@@ -1786,6 +1809,17 @@ export default function PipelinePage() {
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
             workflowId={activeId ?? undefined}
+          />
+        ) : selectedNode && selectedNode.type === 'condition' ? (
+          <ConditionPanel
+            node={selectedNode as ConditionNode}
+            onUpdate={patch => updateStep(selectedNode.id, patch as Partial<StepData>)}
+            onClose={() => setSelectedId(null)}
+            onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
+            availableStepNames={nodes
+              .filter(n => 'name' in (n.data ?? {}) && (n.data as any).name)
+              .map(n => (n.data as any).name as string)}
           />
         ) : selectedNode && selectedNode.type === 'skillStep' ? (
           <SkillConfigPanel

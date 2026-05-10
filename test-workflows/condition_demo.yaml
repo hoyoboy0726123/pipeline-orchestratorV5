@@ -1,0 +1,50 @@
+pipeline:
+  name: 條件分支 demo
+  validate: false
+  # ──────────────────────────────────────────────────────────────
+  # Ticket 2 端對端示範:
+  #   - IF 模式:依 input.data_size 大或小走不同流程
+  #   - Switch 模式:依 input.action 走 fetch / process / archive 三條
+  #   - next: end 標明 branch 跑完就結束、不會誤掉到下一個 branch
+  #
+  # 跑法:
+  #   /run 條件分支 demo data_size=200 action=process
+  #   /run 條件分支 demo data_size=10  action=archive
+  # ──────────────────────────────────────────────────────────────
+  steps:
+    # ===== IF 範例 =====
+    - name: route_by_size
+      condition: true
+      expression: "{{ input.data_size | int > 100 }}"
+      on_true: bulk_process
+      on_false: light_process
+
+    - name: bulk_process
+      batch: "echo 大資料(>100)分批處理 size={{ input.data_size }}"
+      next: switch_action      # 跑完不要掉到 light_process、跳 IF 之後的 Switch
+
+    - name: light_process
+      batch: "echo 小資料(<=100)直接跑 size={{ input.data_size }}"
+      next: switch_action
+
+    # ===== Switch 範例 =====
+    - name: switch_action
+      condition: true
+      switch: "{{ input.action }}"
+      cases:
+        "fetch": do_fetch
+        "process": do_process
+        "archive": do_archive
+      default: do_process
+
+    - name: do_fetch
+      batch: "echo 抓資料 → {{ input.action }}"
+      next: end                # 結束流程
+
+    - name: do_process
+      batch: "echo 處理 → {{ input.action }}"
+      next: end
+
+    - name: do_archive
+      batch: "echo 封存 → {{ input.action }}"
+      next: end

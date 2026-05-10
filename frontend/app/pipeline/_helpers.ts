@@ -52,6 +52,16 @@ export interface StepData extends Record<string, unknown> {
   subagent?: boolean                     // optional — Subagent 步驟（多輪 LLM agent loop）
   subagentRole?: string                  // data_analyst | coder | researcher | critic | planner
   subagentMaxIter?: number               // 最多 LLM 輪數上限（預設 5）
+  // Condition 節點(Ticket 2 控制流)— 純 metadata、runner 跳轉用、不執行命令
+  condition?: boolean
+  expression?: string                    // IF mode
+  onTrue?: string
+  onFalse?: string
+  switch?: string                        // Switch mode
+  cases?: Record<string, string>
+  default?: string
+  // 跳轉:任意 step 跑完跳指定下一步(end / __end__ / 空 = 線性)
+  next?: string
   // Outlook 自動化節點（outlook_automation）
   outlookAutomation?: boolean            // optional — Outlook 自動化步驟
   outlookTemplate?: string               // 選單模板 ID（空字串 = 自由輸入需求）
@@ -128,6 +138,22 @@ export interface AiValidationData extends Record<string, unknown> {
   targetPath: string
   skillMode: boolean   // 保留：控制驗證時是否可執行程式碼
   index: number
+}
+
+/** Condition 節點(Ticket 2):IF / Switch 控制流。
+ *  純 metadata、不執行命令。runner 求值表達式後跳到目標 step name。 */
+export interface ConditionData extends Record<string, unknown> {
+  name: string
+  mode: 'if' | 'switch'      // UI 顯示用、後端只看 expression / switch 哪個非空
+  expression: string         // IF 模式:Jinja2 boolean expression
+  onTrue: string             // IF 模式:條件為真跳的 step name
+  onFalse: string            // IF 模式:條件為假跳的 step name(留空 = end)
+  switch: string             // Switch 模式:Jinja2 expression、求值後 str(value)
+  cases: Record<string, string>  // Switch 模式:case_value → step_name
+  default: string            // Switch 模式:沒命中時跳的 step name(留空 = end)
+  index: number
+  status: 'idle' | 'running' | 'success' | 'failed'
+  errorMsg: string
 }
 
 /** 人工確認節點：暫停 Pipeline 等待人為確認 */
@@ -332,7 +358,8 @@ export type ComputerUseNode = Node<ComputerUseData>
 export type VisualValidationNode = Node<VisualValidationData>
 export type OutlookNode = Node<OutlookData>
 export type WebCrawlerNode = Node<WebCrawlerData>
-export type AppNode = Node<StepData | AiValidationData | SkillData | SubagentData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData>
+export type ConditionNode = Node<ConditionData>
+export type AppNode = Node<StepData | AiValidationData | SkillData | SubagentData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData | ConditionData>
 
 export function newAiValidationData(index = 0): AiValidationData {
   return { expectText: '', targetPath: '', skillMode: false, index }
@@ -404,6 +431,24 @@ export function newVisualValidationData(index = 0): VisualValidationData {
     source: 'prev_output',
     prompt: '',
     searchRegion: [],
+    index,
+    status: 'idle',
+    errorMsg: '',
+  }
+}
+
+let _conditionCounter = 0
+export function newConditionData(index = 0): ConditionData {
+  _conditionCounter++
+  return {
+    name: `條件 ${_conditionCounter}`,
+    mode: 'if',
+    expression: '',
+    onTrue: '',
+    onFalse: '',
+    switch: '',
+    cases: {},
+    default: '',
     index,
     status: 'idle',
     errorMsg: '',
@@ -644,6 +689,28 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
         } as HumanConfirmData,
       }
     }
+    if (s.condition) {
+      // YAML 來源:有寫 expression → IF 模式;有寫 switch → Switch 模式
+      const inferredMode: 'if' | 'switch' = s.switch ? 'switch' : 'if'
+      return {
+        id: `step-${i}`,
+        type: 'condition' as const,
+        position: { x: i * 320, y: 160 },
+        data: {
+          name: s.name,
+          mode: inferredMode,
+          expression: s.expression || '',
+          onTrue: s.onTrue || '',
+          onFalse: s.onFalse || '',
+          switch: s.switch || '',
+          cases: (s.cases as Record<string, string>) || {},
+          default: s.default || '',
+          index: i,
+          status: 'idle' as const,
+          errorMsg: '',
+        } as ConditionData,
+      }
+    }
     if (s.subagent) {
       return {
         id: `step-${i}`,
@@ -723,12 +790,13 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
     }
   }
 
-  // 過濾出可執行節點（scriptStep + skillStep + humanConfirmation + computerUse + visualValidation）
+  // 過濾出可執行節點(scriptStep + skillStep + humanConfirmation + computerUse + visualValidation + condition + ...)
+  // condition 雖然不執行命令但要進 YAML、由 runner 求值跳轉
   const execNodeIds = new Set<string>()
   const execNodes: AppNode[] = []
   for (const n of nodes) {
     if (n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'subagent'
-        || n.type === 'humanConfirmation'
+        || n.type === 'humanConfirmation' || n.type === 'condition'
         || n.type === 'computerUse' || n.type === 'visualValidation'
         || n.type === 'outlookAutomation' || n.type === 'webCrawler') {
       execNodeIds.add(n.id)
@@ -923,6 +991,30 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       } as StepData
     }
 
+    if (n.type === 'condition') {
+      const d = n.data as ConditionData
+      return {
+        name: d.name,
+        batch: '',
+        workingDir: '',
+        outputPath: '',
+        expect: '',
+        condition: true,
+        // IF 跟 Switch 用同一份 model 欄位、依 d.mode 把該寫的寫進去、不該寫的留空
+        expression: d.mode === 'if' ? (d.expression || '') : '',
+        onTrue: d.mode === 'if' ? (d.onTrue || '') : '',
+        onFalse: d.mode === 'if' ? (d.onFalse || '') : '',
+        switch: d.mode === 'switch' ? (d.switch || '') : '',
+        cases: d.mode === 'switch' ? (d.cases || {}) : {},
+        default: d.mode === 'switch' ? (d.default || '') : '',
+        timeout: 5,
+        retry: 0,
+        index: i,
+        status: d.status,
+        errorMsg: d.errorMsg,
+      } as StepData
+    }
+
     if (n.type === 'skillStep') {
       const d = n.data as SkillData
       return {
@@ -1002,6 +1094,24 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.humanConfirmPreview) lines.push(`    preview_prev_output: true`)
       if (s.humanConfirmSendPrevOutput) lines.push(`    send_prev_output: true`)
       if (s.timeout && s.timeout !== 3600) lines.push(`    timeout: ${s.timeout}`)
+      if (s.next) lines.push(`    next: ${s.next}`)
+      continue
+    }
+    if (s.condition) {
+      // Condition 節點:純 metadata、不需 batch / output / timeout
+      lines.push(`    condition: true`)
+      if (s.expression) lines.push(`    expression: "${s.expression.replace(/"/g, '\\"')}"`)
+      if (s.onTrue) lines.push(`    on_true: ${s.onTrue}`)
+      if (s.onFalse) lines.push(`    on_false: ${s.onFalse}`)
+      if (s.switch) lines.push(`    switch: "${s.switch.replace(/"/g, '\\"')}"`)
+      if (s.cases && Object.keys(s.cases).length > 0) {
+        const inline = Object.entries(s.cases)
+          .map(([k, v]) => `"${k}": ${v}`)
+          .join(', ')
+        lines.push(`    cases: { ${inline} }`)
+      }
+      if (s.default) lines.push(`    default: ${s.default}`)
+      if (s.next) lines.push(`    next: ${s.next}`)
       continue
     }
     if (s.visualValidation) {
@@ -1419,6 +1529,33 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.subagentRole = t.replace(/^subagent_role:\s*/, '').replace(/^"|"$/g, '').trim() || 'data_analyst'
       } else if (/^subagent_max_iter:/.test(t) && cur) {
         cur.subagentMaxIter = parseInt(t.replace(/^subagent_max_iter:\s*/, '')) || 5
+      } else if (/^condition:/.test(t) && cur) {
+        cur.condition = /true/.test(t)
+      } else if (/^expression:/.test(t) && cur) {
+        cur.expression = t.replace(/^expression:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^on_true:/.test(t) && cur) {
+        cur.onTrue = t.replace(/^on_true:\s*/, '').replace(/^"|"$/g, '').trim()
+      } else if (/^on_false:/.test(t) && cur) {
+        cur.onFalse = t.replace(/^on_false:\s*/, '').replace(/^"|"$/g, '').trim()
+      } else if (/^switch:/.test(t) && cur) {
+        cur.switch = t.replace(/^switch:\s*/, '').replace(/^"|"$/g, '')
+      } else if (/^cases:/.test(t) && cur) {
+        // inline JSON-ish:cases: { "200": ok, "404": retry }
+        const m = t.match(/cases:\s*\{(.+)\}\s*$/)
+        if (m) {
+          const cases: Record<string, string> = {}
+          // 切 key/value pairs:`"200": ok, "404": retry` → entries
+          for (const pair of m[1].split(',')) {
+            const p = pair.trim()
+            const kv = p.match(/^"?([^"]*?)"?\s*:\s*(.+)$/)
+            if (kv) cases[kv[1].trim()] = kv[2].trim()
+          }
+          cur.cases = cases
+        }
+      } else if (/^default:/.test(t) && cur) {
+        cur.default = t.replace(/^default:\s*/, '').replace(/^"|"$/g, '').trim()
+      } else if (/^next:/.test(t) && cur) {
+        cur.next = t.replace(/^next:\s*/, '').replace(/^"|"$/g, '').trim()
       } else if (/^outlook_automation:/.test(t) && cur) {
         cur.outlookAutomation = /true/.test(t)
       } else if (/^outlook_template:/.test(t) && cur) {
