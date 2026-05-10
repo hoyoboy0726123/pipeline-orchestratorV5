@@ -237,11 +237,18 @@ export async function getPipelineRun(runId: string): Promise<PipelineRun> {
   return res.json()
 }
 
-export async function startPipeline(yamlContent: string, validate = true, useRecipe = false, workflowId?: string, noSaveRecipe = false): Promise<{ run_id: string }> {
+export async function startPipeline(yamlContent: string, validate = true, useRecipe = false, workflowId?: string, noSaveRecipe = false, inputParams?: Record<string, string>): Promise<{ run_id: string }> {
   const res = await fetch(`${BASE}/pipeline/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ yaml_content: yamlContent, validate, use_recipe: useRecipe, workflow_id: workflowId ?? null, no_save_recipe: noSaveRecipe }),
+    body: JSON.stringify({
+      yaml_content: yamlContent,
+      validate,
+      use_recipe: useRecipe,
+      workflow_id: workflowId ?? null,
+      no_save_recipe: noSaveRecipe,
+      input_params: inputParams || {},
+    }),
   })
   if (!res.ok) {
     const err = await res.json()

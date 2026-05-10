@@ -207,30 +207,94 @@ function ScheduleDialog({ yaml, pipelineName, workflowId, recipeStatus, onClose 
 
 // ── Run Dialog（選擇快速/完整模式）──────────────────────────────────────────────
 function RunDialog({
-  recipeStatus, onRun, onClose,
+  recipeStatus, workflowId, onRun, onClose,
 }: {
   recipeStatus: RecipeStatus | null
-  onRun: (useRecipe: boolean) => void
+  workflowId?: string
+  onRun: (useRecipe: boolean, inputParams: Record<string, string>) => void
   onClose: () => void
 }) {
   const hasRecipe = recipeStatus?.has_recipes ?? false
   const covered = recipeStatus?.covered_steps ?? 0
   const total = recipeStatus?.total_skill_steps ?? 0
 
+  // 掃 workflow 引用了哪些 input.X、把上次值預填回去
+  const [inputKeys, setInputKeys] = useState<string[]>([])
+  const [inputParams, setInputParams] = useState<Record<string, string>>({})
+  useEffect(() => {
+    if (!workflowId) return
+    let cancelled = false
+    import('@/lib/api').then(({ getWorkflowVariables }) =>
+      getWorkflowVariables(workflowId)
+        .then((r) => {
+          if (cancelled) return
+          const keys = r.available.input.map((i) => i.key)
+          setInputKeys(keys)
+          const init: Record<string, string> = {}
+          for (const i of r.available.input) init[i.key] = String(i.last_value ?? '')
+          setInputParams(init)
+        })
+        .catch(() => {}),
+    )
+    return () => { cancelled = true }
+  }, [workflowId])
+
+  const setQuickDate = (k: string, kind: 'today' | 'yesterday' | 'tomorrow') => {
+    const d = new Date()
+    if (kind === 'yesterday') d.setDate(d.getDate() - 1)
+    else if (kind === 'tomorrow') d.setDate(d.getDate() + 1)
+    setInputParams((p) => ({ ...p, [k]: d.toISOString().slice(0, 10) }))
+  }
+
+  const missing = inputKeys.filter((k) => !(inputParams[k] || '').trim())
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-[420px] overflow-hidden" onClick={e => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-[460px] max-h-[88vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 px-5 py-4 border-b">
           <Play className="w-4 h-4 text-indigo-600" />
           <span className="font-semibold text-gray-800">執行 Pipeline</span>
         </div>
-        <div className="p-5 space-y-3">
+        <div className="p-5 space-y-3 overflow-y-auto">
+          {/* 啟動參數 input_params */}
+          {inputKeys.length > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2.5">
+              <div className="text-xs font-semibold text-amber-800">📌 此 workflow 需要啟動參數</div>
+              {inputKeys.map((k) => (
+                <div key={k}>
+                  <label className="text-[11px] text-gray-600 block mb-0.5 font-mono">input.{k}</label>
+                  <input
+                    value={inputParams[k] ?? ''}
+                    onChange={(e) => setInputParams((p) => ({ ...p, [k]: e.target.value }))}
+                    placeholder={k.toLowerCase().includes('date') ? '2026-05-10' : ''}
+                    className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-indigo-400 bg-white"
+                  />
+                  {k.toLowerCase().includes('date') && (
+                    <div className="flex gap-1.5 mt-1">
+                      {(['today', 'yesterday', 'tomorrow'] as const).map((kind) => (
+                        <button
+                          key={kind}
+                          type="button"
+                          onClick={() => setQuickDate(k, kind)}
+                          className="text-[10px] px-1.5 py-0.5 rounded border border-gray-200 text-gray-500 hover:bg-indigo-50 hover:border-indigo-300 hover:text-indigo-700"
+                        >{kind === 'today' ? '今天' : kind === 'yesterday' ? '昨天' : '明天'}</button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {missing.length > 0 && (
+                <p className="text-[11px] text-amber-700">⚠ 還缺:<span className="font-mono">{missing.join(', ')}</span></p>
+              )}
+            </div>
+          )}
+
           {/* 快速模式 */}
           <button
-            onClick={() => onRun(true)}
-            disabled={!hasRecipe}
+            onClick={() => onRun(true, inputParams)}
+            disabled={!hasRecipe || missing.length > 0}
             className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
-              hasRecipe
+              hasRecipe && missing.length === 0
                 ? 'border-emerald-200 hover:border-emerald-400 hover:bg-emerald-50 cursor-pointer'
                 : 'border-gray-100 bg-gray-50 opacity-60 cursor-not-allowed'
             }`}
@@ -253,8 +317,13 @@ function RunDialog({
 
           {/* 完整模式 */}
           <button
-            onClick={() => onRun(false)}
-            className="w-full text-left p-4 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all cursor-pointer"
+            onClick={() => onRun(false, inputParams)}
+            disabled={missing.length > 0}
+            className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
+              missing.length === 0
+                ? 'border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 cursor-pointer'
+                : 'border-gray-100 bg-gray-50 opacity-60 cursor-not-allowed'
+            }`}
           >
             <div className="flex items-center gap-2 mb-1">
               <Sparkles className="w-4 h-4 text-indigo-500" />
@@ -909,7 +978,7 @@ export default function PipelinePage() {
     setShowRunDialog(true)
   }
 
-  const handleRunConfirm = async (useRecipe: boolean) => {
+  const handleRunConfirm = async (useRecipe: boolean, inputParams: Record<string, string> = {}) => {
     setShowRunDialog(false)
     const yaml = getYaml()
     setRunning(true)
@@ -919,7 +988,7 @@ export default function PipelinePage() {
       const steps = flowToSteps(nodes, edges)
       const needsValidate = steps.some(s => s.skillMode || !!s.expect)
       const hasSkill = steps.some(s => s.skillMode)
-      const res = await startPipeline(yaml, needsValidate, useRecipe, activeId ?? undefined, hasSkill)
+      const res = await startPipeline(yaml, needsValidate, useRecipe, activeId ?? undefined, hasSkill, inputParams)
       runIdRef.current = res.run_id
       toast.success(`Pipeline 已啟動（ID: ${res.run_id}）${useRecipe ? ' ⚡ 快速模式' : ''}`)
       pollStatus(res.run_id)
@@ -1911,6 +1980,7 @@ export default function PipelinePage() {
       {showRunDialog && (
         <RunDialog
           recipeStatus={recipeStatus}
+          workflowId={activeId ?? undefined}
           onRun={handleRunConfirm}
           onClose={() => setShowRunDialog(false)}
         />
