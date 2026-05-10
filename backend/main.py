@@ -1551,6 +1551,307 @@ async def start_pipeline(req: PipelineRunRequest):
     return {"run_id": run_id, "message": f"Pipeline '{config.name}' 已啟動"}
 
 
+# ── 變數系統(Ticket 1):dry-run + list_workflow_variables ────────────────
+
+class DryRunRequest(BaseModel):
+    yaml_content: str
+    input_params: dict = {}
+    # 可選:給定後從這個 workflow 最近一次 run 撈 step output 真實值,
+    # 讓「step2 引用 step1 output」能 render 出實際值預覽
+    workflow_id: Optional[str] = None
+
+
+@app.post("/pipeline/dry-run")
+async def api_pipeline_dryrun(req: DryRunRequest):
+    """不執行 workflow、純 render 每 step 的 {{ }} → 回傳渲染後的命令。
+
+    用於前端「預覽渲染」按鈕;讓使用者看清楚變數展開後實際會跑什麼。
+    """
+    import yaml as _yaml
+    from pipeline.models import PipelineConfig
+    from pipeline.expression import build_context, render, ExpressionError, find_referenced_vars
+    from pipeline.store import get_store
+
+    # 1) 解析 YAML
+    try:
+        data = _yaml.safe_load(req.yaml_content)
+        config_dict = data.get("pipeline", data)
+        config_dict["validate"] = config_dict.get("validate", True)
+        config = PipelineConfig(**config_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"YAML 解析失敗:{e}")
+
+    # 2) 從最近一次 run 撈 step output(供「step2 引用 step1 output」做預覽)
+    last_step_results = []
+    if req.workflow_id:
+        try:
+            recent = get_store().list_recent(20)
+            for r in recent:
+                if r.workflow_id == req.workflow_id and r.step_results:
+                    last_step_results = list(r.step_results)
+                    break
+        except Exception:
+            pass
+
+    # 3) 針對每個 step、render 主要欄位
+    # 用 running_results 一邊 render 一邊累積:這樣 step2 可以引用 step1 在 YAML 寫的 output.path
+    # (即使沒跑過、user 在 YAML 寫 path: foo_{{ input.date }}.csv 也能 render 給 step2 看)
+    from pipeline.store import StepResult as _SR
+    running_results: list = list(last_step_results)
+    # 把已知 step_name → StepResult 整理出來,新 render 的 step 要更新或追加
+    _by_name = {sr.step_name: i for i, sr in enumerate(running_results)}
+
+    out_steps: list[dict] = []
+    overall_ok = True
+    for idx, step in enumerate(config.steps):
+        # 每個 step 開始前重 build context、納入前面 step 的 rendered output
+        base_ctx = build_context(
+            step_results=running_results,
+            input_params=req.input_params or {},
+        )
+        step_info: dict = {
+            "index": idx,
+            "name": step.name,
+            "node_type": _classify_node_type(step),
+            "rendered": {},
+            "referenced_vars": [],
+            "errors": [],
+        }
+        # 收集這個 step 引用了哪些變數(掃 batch / message / output.path 等)
+        for fname in ("batch", "message", "uia_window", "vv_prompt"):
+            v = getattr(step, fname, "")
+            if isinstance(v, str) and v:
+                step_info["referenced_vars"].extend(find_referenced_vars(v))
+        if step.output and step.output.path:
+            step_info["referenced_vars"].extend(find_referenced_vars(step.output.path))
+        step_info["referenced_vars"] = sorted(set(step_info["referenced_vars"]))
+
+        # 試 render 主要顯示欄位
+        for fname in ("batch", "message", "uia_window", "vv_prompt"):
+            v = getattr(step, fname, "")
+            if not (isinstance(v, str) and v and "{{" in v):
+                continue
+            try:
+                step_info["rendered"][fname] = render(v, base_ctx)
+            except ExpressionError as e:
+                step_info["rendered"][fname] = v  # 保留原樣
+                step_info["errors"].append(f"{fname}: {e}")
+                overall_ok = False
+        rendered_output_path = (step.output.path if step.output else "") or ""
+        if step.output and step.output.path and "{{" in step.output.path:
+            try:
+                rendered_output_path = render(step.output.path, base_ctx)
+                step_info["rendered"]["output_path"] = rendered_output_path
+            except ExpressionError as e:
+                step_info["errors"].append(f"output.path: {e}")
+                overall_ok = False
+
+        # 把 rendered output_path 塞進 running_results、給下一個 step 的 render 用
+        # (這樣即使沒跑過,user 在 YAML 寫 output.path 的下游引用也能 render 出實際值)
+        if step.name and not step.human_confirm:
+            stub = _SR(
+                step_index=idx, step_name=step.name, exit_code=0,
+                stdout_tail="", stderr_tail="",
+                validation_status="ok", validation_reason="", validation_suggestion="",
+                actual_output_path=rendered_output_path,
+            )
+            if step.name in _by_name:
+                running_results[_by_name[step.name]] = stub
+            else:
+                _by_name[step.name] = len(running_results)
+                running_results.append(stub)
+
+        out_steps.append(step_info)
+
+    return {
+        "ok": overall_ok,
+        "workflow_name": config.name,
+        "input_params": req.input_params or {},
+        "steps": out_steps,
+    }
+
+
+def _classify_node_type(step) -> str:
+    """從 PipelineStep 的旗標判斷實際 node 類型(給前端 / dry-run 顯示用)。"""
+    if step.human_confirm: return "human_confirm"
+    if step.computer_use: return "computer_use"
+    if step.skill_mode: return "skill"
+    if step.subagent: return "subagent"
+    if step.web_crawler: return "web_crawler"
+    if step.outlook_automation: return "outlook"
+    if step.visual_validation: return "visual_validation"
+    return "script"
+
+
+@app.get("/workflows/{wf_id}/variables")
+async def api_workflow_variables(wf_id: str):
+    """列出此 workflow 的可用變數 + 上次跑出來的實際值(給前端「插入變數」modal 用)。
+
+    回傳:
+        available.steps[].fields[]:每個上游 step 提供的 output 欄位 + 上次值
+        available.input[]:此 workflow 引用到的 input.X + 上次傳入值
+        available.env[]:可用環境變數(過濾 secrets)
+        referenced:整份 YAML 引用到的所有 dotted-path
+    """
+    import yaml as _yaml
+    import os as _os
+    from db import get_workflow as _get_wf
+    from pipeline.models import PipelineConfig
+    from pipeline.expression import find_referenced_vars
+    from pipeline.store import get_store
+
+    wf = _get_wf(wf_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="找不到工作流")
+
+    yaml_str = wf.get("yaml", "") or ""
+    if not yaml_str.strip():
+        return {
+            "available": {"steps": [], "input": [], "env": []},
+            "referenced": [],
+            "last_run_id": None,
+        }
+
+    try:
+        data = _yaml.safe_load(yaml_str)
+        config_dict = data.get("pipeline", data)
+        config_dict["validate"] = config_dict.get("validate", True)
+        config = PipelineConfig(**config_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"workflow YAML 解析失敗:{e}")
+
+    # 撈最近一次該 workflow 的 run、用來填 last_value
+    last_run = None
+    last_step_by_name: dict = {}
+    last_input_params: dict = {}
+    try:
+        for r in get_store().list_recent(20):
+            if r.workflow_id == wf_id:
+                last_run = r
+                last_input_params = getattr(r, "input_params", None) or {}
+                for sr in r.step_results:
+                    last_step_by_name[sr.step_name] = sr
+                break
+    except Exception:
+        pass
+
+    # 1) 掃整份 YAML 找所有 {{ }} 引用
+    referenced: set[str] = set()
+    for step in config.steps:
+        for fname in ("batch", "message", "uia_window", "vv_prompt", "working_dir",
+                      "wc_url", "wc_video_url", "wc_wait_for_selector"):
+            v = getattr(step, fname, "")
+            if isinstance(v, str) and v:
+                for ref in find_referenced_vars(v):
+                    referenced.add(ref)
+        if step.output and step.output.path:
+            for ref in find_referenced_vars(step.output.path):
+                referenced.add(ref)
+        # action 內的 text / control / image
+        if step.actions:
+            for a in step.actions:
+                for fname in ("text", "title", "title_contains", "vlm_prompt", "expected", "ocr_text"):
+                    v = getattr(a, fname, "")
+                    if isinstance(v, str) and v:
+                        for ref in find_referenced_vars(v):
+                            referenced.add(ref)
+                if a.control:
+                    for v in a.control.values():
+                        if isinstance(v, str):
+                            for ref in find_referenced_vars(v):
+                                referenced.add(ref)
+
+    # 2) 上游 step 提供的 output 欄位
+    avail_steps: list[dict] = []
+    for step in config.steps:
+        if step.human_confirm:
+            continue
+        sr = last_step_by_name.get(step.name)
+        fields: list[dict] = []
+
+        # 通用欄位:path / stdout / exit_code / status
+        if step.output and step.output.path:
+            fields.append({
+                "key": "path",
+                "type": "string",
+                "last_value": (sr.actual_output_path if sr else "") or step.output.path,
+                "source": "output.path"
+            })
+        elif sr and getattr(sr, "actual_output_path", ""):
+            fields.append({
+                "key": "path", "type": "string",
+                "last_value": sr.actual_output_path, "source": "auto-detected"
+            })
+
+        if sr:
+            fields.append({"key": "stdout", "type": "string",
+                           "last_value": (sr.stdout_tail or "")[:200], "source": "stdout"})
+            fields.append({"key": "exit_code", "type": "number",
+                           "last_value": sr.exit_code, "source": "exit_code"})
+            fields.append({"key": "status", "type": "string",
+                           "last_value": sr.validation_status, "source": "validation"})
+
+        # save_as / step_vars
+        if step.actions:
+            seen: set[str] = set()
+            for a in step.actions:
+                if a.save_as and a.save_as not in seen:
+                    seen.add(a.save_as)
+                    last_v = ""
+                    if sr and getattr(sr, "step_vars", None):
+                        last_v = sr.step_vars.get(a.save_as, "")
+                    fields.append({
+                        "key": a.save_as,
+                        "type": "string",
+                        "last_value": str(last_v) if last_v else "",
+                        "source": f"save_as ({a.type})",
+                    })
+
+        avail_steps.append({
+            "name": step.name,
+            "node_type": _classify_node_type(step),
+            "fields": fields,
+        })
+
+    # 3) input 欄位:從 referenced 中抓 input.X、配上 last_run 的值
+    input_keys: list[str] = sorted({
+        ref.split(".", 1)[1] for ref in referenced
+        if ref.startswith("input.") and "." in ref
+    })
+    avail_input = [
+        {"key": k, "last_value": last_input_params.get(k, ""),
+         "required": True}
+        for k in input_keys
+    ]
+
+    # 4) env:常用清單 + workflow 引用到的(過濾 secrets)
+    common_env = ["OUTPUT_BASE_PATH", "PIPELINE_DIR", "HOME", "USERPROFILE", "TIMEZONE"]
+    env_keys: set[str] = set(common_env)
+    for ref in referenced:
+        if ref.startswith("env.") and "." in ref:
+            k = ref.split(".", 1)[1]
+            env_keys.add(k)
+
+    def _is_secret(k: str) -> bool:
+        u = k.upper()
+        return any(t in u for t in ("KEY", "TOKEN", "SECRET", "PASSWORD", "PWD"))
+
+    avail_env = [
+        {"key": k, "last_value": _os.environ.get(k, ""), "is_secret": False}
+        for k in sorted(env_keys) if not _is_secret(k) and _os.environ.get(k)
+    ]
+
+    return {
+        "available": {
+            "steps": avail_steps,
+            "input": avail_input,
+            "env": avail_env,
+        },
+        "referenced": sorted(referenced),
+        "last_run_id": last_run.run_id if last_run else None,
+    }
+
+
 @app.get("/pipeline/runs")
 async def list_pipeline_runs():
     from pipeline.store import get_store
