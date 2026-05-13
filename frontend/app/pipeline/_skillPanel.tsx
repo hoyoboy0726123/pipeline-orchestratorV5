@@ -6,6 +6,7 @@ import { fsBrowse, listAvailableSkills, type AvailableSkill } from '@/lib/api'
 import { toast } from 'sonner'
 import { useRunStatusStore } from './_runStatus'
 import { VariableButton } from './_variablePicker'
+import LlmRoleSelector from './_llmRoleSelector'
 
 // ── File Browser Modal ────────────────────────────────────────────────────────
 interface BrowseItem { name: string; is_dir: boolean; path: string }
@@ -364,6 +365,10 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete, wo
                     condition 分支用:branch 跑完寫 <code className="bg-gray-100 px-1 rounded font-mono">end</code> 結束流程
                   </p>
                 </div>
+                <LlmRoleSelector
+                  value={(data.llmRole as 'primary' | 'secondary') || 'primary'}
+                  onChange={(v) => onUpdate({ llmRole: v } as any)}
+                />
               </div>
             )}
           </div>

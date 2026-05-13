@@ -93,15 +93,22 @@ def clear_abort(run_id: str):
 
 # ── Telegram helpers ─────────────────────────────────────────────────────────
 
-def _decision_keyboard(run_id: str) -> InlineKeyboardMarkup:
+def _decision_keyboard(run_id: str, has_prev: bool = True) -> InlineKeyboardMarkup:
     # 步驟失敗時的決策鍵盤。
-    # 💡 截圖按鈕：失敗時使用者可能人不在電腦前，加截圖按鈕讓遠端也能先看畫面再決策
-    #    （不分節點類型 — skill 腳本 / 桌面自動化 / shell 失敗都可能需要看現場）
-    return InlineKeyboardMarkup([
+    # 💡 截圖按鈕:失敗時使用者可能人不在電腦前,加截圖按鈕讓遠端也能先看畫面再決策
+    #    (不分節點類型 — skill 腳本 / 桌面自動化 / shell 失敗都可能需要看現場)
+    # has_prev=True 顯示「重做上一步」按鈕;current_step=0 時隱藏
+    rows = [
         [
             InlineKeyboardButton("🔄 重試", callback_data=f"pipe_retry:{run_id}"),
             InlineKeyboardButton("💬 補充指示", callback_data=f"pipe_hint:{run_id}"),
         ],
+    ]
+    skip_row = [InlineKeyboardButton("⏩ 跳過此步", callback_data=f"pipe_skip:{run_id}")]
+    if has_prev:
+        skip_row.append(InlineKeyboardButton("↩ 重做上一步", callback_data=f"pipe_redo_prev:{run_id}"))
+    rows.append(skip_row)
+    rows.extend([
         [
             InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"),
             InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}"),
@@ -110,6 +117,7 @@ def _decision_keyboard(run_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"),
         ],
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _missing_dep_keyboard(run_id: str, packages: list[str]) -> InlineKeyboardMarkup:
@@ -766,19 +774,45 @@ async def _send_step_output_to_tg(
         return False, f"Telegram 設定不完整：chat_id={chat_id or '無'}, token={'有' if token else '無'}"
 
     try:
-        # 用 async with：避免手動 bot.close()（那是 TG `close` API method、
-        # 文件寫前 10 分鐘必回 429、嚴格 rate-limit、不該在 bot code 呼叫）。
+        # 文字檔(.md / .txt / .csv / .json / .yaml / .html / .log)送 TG 前加 UTF-8 BOM ─
+        # 否則 iOS Telegram doc viewer 沒 BOM 時可能猜成 Big5/CP950、繁中變亂碼。
+        # 寫到 system temp、不污染原檔。
+        _text_exts = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".log"}
+        _ext = Path(file_path).suffix.lower()
+        _send_path = file_path
+        _temp_to_cleanup = None
+        if _ext in _text_exts:
+            try:
+                with open(file_path, "rb") as _f:
+                    _bytes = _f.read()
+                # 已經有 BOM 就不重複加
+                if not _bytes.startswith(b"\xef\xbb\xbf"):
+                    import tempfile
+                    _fd, _tmp = tempfile.mkstemp(suffix=_ext)
+                    os.close(_fd)
+                    with open(_tmp, "wb") as _wf:
+                        _wf.write(b"\xef\xbb\xbf" + _bytes)
+                    _send_path = _tmp
+                    _temp_to_cleanup = _tmp
+                    log.info(f"[Telegram] 文字檔加 UTF-8 BOM 避免 iOS 解碼成 Big5 亂碼:{display}")
+            except Exception as _e:
+                log.warning(f"[Telegram] 加 BOM 失敗、用原檔送:{_e}")
+        # 用 async with:避免手動 bot.close()(那是 TG `close` API method、
+        # 文件寫前 10 分鐘必回 429、嚴格 rate-limit、不該在 bot code 呼叫)。
         # 之前 user 報「每次手動點按鈕必出現速率限制警告」就是這個 bug。
         async with Bot(token=token) as bot:
-            with open(file_path, "rb") as fp:
+            with open(_send_path, "rb") as fp:
                 await bot.send_document(
                     chat_id=chat_id,
                     document=fp,
                     filename=display,
-                    caption=f"📎 {step_label or '上一步輸出'}：{display}" if step_label else None,
+                    caption=f"📎 {step_label or '上一步輸出'}:{display}" if step_label else None,
                 )
+        if _temp_to_cleanup:
+            try: os.unlink(_temp_to_cleanup)
+            except Exception: pass
         log.info(f"[Telegram] ✅ 已傳送 {display} 到 chat {chat_id}")
-        return True, f"已傳送：{display}"
+        return True, f"已傳送:{display}"
     except Exception as e:
         # Telegram rate limit (flood control) → 翻譯成易懂訊息
         es = str(e)
@@ -996,7 +1030,8 @@ async def _notify_failure(run: PipelineRun, val: ValidationResult, step_name: st
     if val.suggestion:
         text += f"💡 建議：{val.suggestion}\n"
     text += "\n請選擇處理方式："
-    await _tg_send(run.telegram_chat_id, text, _decision_keyboard(run.run_id))
+    has_prev = run.current_step > 0
+    await _tg_send(run.telegram_chat_id, text, _decision_keyboard(run.run_id, has_prev=has_prev))
 
 
 async def _notify_final(run: PipelineRun, config: PipelineConfig):
@@ -1634,6 +1669,7 @@ async def run_pipeline(
                     out_dir=wd,
                     search_region=vv_region,
                     logger=logger,
+                    llm_role=getattr(step, "llm_role", "primary"),
                 )
                 exec_result = _ExecResult(
                     exit_code=0 if vv_pass else 1,
@@ -1673,6 +1709,7 @@ async def run_pipeline(
                         cu_on_mismatch=step.cu_on_mismatch,
                         cu_vlm_max_retries=step.cu_vlm_max_retries,
                         uia_window=step.uia_window,
+                        llm_role=getattr(step, "llm_role", "primary"),
                     ),
                 )
                 # 映射回 ExecResult 讓後續驗證/重試邏輯通用
@@ -1709,6 +1746,7 @@ async def run_pipeline(
                     prev_outputs=completed_outputs if completed_outputs else None,
                     run_id=run.run_id,
                     ask_mode=step.ask_mode,
+                    llm_role=getattr(step, "llm_role", "primary"),
                 )
             elif step.web_crawler:
                 # 網頁爬蟲節點：永遠跑沙盒（Crawl4AI 在 pipeline-sandbox-v5 容器內）；
@@ -1766,6 +1804,7 @@ async def run_pipeline(
                     prev_outputs=completed_outputs if completed_outputs else None,
                     timeout=step.timeout,
                     step_logger=logger,
+                    llm_role=getattr(step, "llm_role", "primary"),
                 )
                 _tools_used = [tc.get("name", "?") for tc in sub_result.tool_calls_made]
                 # 把 subagent 的 token usage / tool 呼叫時間軸記到該 step、StepResult 結尾寫入
@@ -1802,6 +1841,7 @@ async def run_pipeline(
                     skill_name=step.skill,
                     ask_mode=step.ask_mode,
                     silent_recipe=silent_recipe,
+                    llm_role=getattr(step, "llm_role", "primary"),
                 )
             else:
                 exec_result = await execute_step(
@@ -1853,10 +1893,31 @@ async def run_pipeline(
             # visual_validation 節點：節點自己就是 VLM 判斷，不需要再跑一次 LLM 驗證
             elif step.visual_validation:
                 _status = "ok" if exec_result.exit_code == 0 else "failed"
+                _vv_suggestion = exec_result.stderr if _status == "failed" else ""
+                # 若 pptx/docx 失敗且 host 沒裝 LibreOffice → 強烈建議使用者裝
+                # 因為 file_preview 走 B1 純文字 PNG、VLM 看到的不是真實版面、永遠評不過
+                if _status == "failed":
+                    try:
+                        _prev_file = _find_prev_output_file(run, config) or ""
+                        _ext = _prev_file.lower().rsplit(".", 1)[-1] if "." in _prev_file else ""
+                        if _ext in ("pptx", "docx"):
+                            from .host_tools import get_libreoffice_status
+                            _lo_ok, _ = get_libreoffice_status()
+                            if not _lo_ok:
+                                _vv_suggestion = (
+                                    "⚠ 偵測到主機未裝 LibreOffice、VLM 看到的不是真實 PPT/DOCX 版面"
+                                    "(走純文字 PNG 退化路徑、VLM 永遠評不過)。"
+                                    "強烈建議:winget install -e --id TheDocumentFoundation.LibreOffice "
+                                    "(macOS:brew install --cask libreoffice / Linux:sudo apt install libreoffice)。"
+                                    "裝完重啟 backend 再重試。"
+                                    + ("\n\n原 VLM 訊息:" + _vv_suggestion if _vv_suggestion else "")
+                                )
+                    except Exception:
+                        pass
                 val = ValidationResult(
                     status=_status,
                     reason=exec_result.stdout.replace("[visual_validation] ", "") or "視覺驗證",
-                    suggestion=exec_result.stderr if _status == "failed" else "",
+                    suggestion=_vv_suggestion,
                 )
             # subagent 節點：loop 內已自我驗證、不需要再叫 LLM 驗證一次
             elif step.subagent:
@@ -1900,6 +1961,7 @@ async def run_pipeline(
                     output_path=(str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None),
                     output_expect=step.output.get_expect() if step.output else None,
                     logger=logger,
+                    llm_role=getattr(step, "llm_role", "primary"),
                 )
             elif config.validate and has_expect:
                 # 使用者填了「預期輸出描述」→ 跑 LLM 驗證
@@ -1918,6 +1980,7 @@ async def run_pipeline(
                     output_path=(str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None),
                     output_expect=step.output.get_expect() if step.output else None,
                     logger=logger,
+                    llm_role=getattr(step, "llm_role", "primary"),
                 )
             elif config.validate and not has_expect and step.skill_mode:
                 # Skill 節點沒填 expect → 仍走 LLM 淺驗證
@@ -1934,6 +1997,7 @@ async def run_pipeline(
                     output_path=(str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None),
                     output_expect=None,
                     logger=logger,
+                    llm_role=getattr(step, "llm_role", "primary"),
                 )
             elif config.validate and not has_expect:
                 # Script / 其他無 skill_mode 節點 + 沒填 expect → 只做確定性檢查
@@ -2272,6 +2336,35 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
 
         asyncio.create_task(_delayed_retry())
         return f"🔄 重試步驟 {step_num}/{total}"
+
+    elif decision == "redo_prev":
+        # 重做上一個 step:對應 user 看到當前 step 失敗、判斷是因為上一步沒做好、想回頭重來
+        # 例:step 5 VLM 驗 PPT 排版失敗 → 重做上一步(step 4 產 PPT)、再次推進到 step 5 驗
+        if run.current_step <= 0:
+            return "⚠️ 已經是第一步、無法重做上一步"
+        prev_step = run.current_step - 1
+        logger.info(f"用戶選擇重做上一步 {prev_step + 1}(原失敗在 {step_num})")
+        # 清掉當前失敗 step 的 result + 上一步 result(讓兩步都重跑)
+        run.step_results = [sr for sr in run.step_results if sr.step_index < prev_step]
+        run.current_step = prev_step
+        run.awaiting_type = ""
+        run.awaiting_message = ""
+        run.awaiting_suggestion = ""
+        run.status = "running"
+        store.save(run)
+
+        async def _delayed_redo_prev():
+            await asyncio.sleep(0.2)
+            t = asyncio.create_task(run_pipeline(
+                config_dict=run.config_dict,
+                chat_id=run.telegram_chat_id,
+                run_id=run.run_id,
+                start_from_step=prev_step,
+            ))
+            register_task(run.run_id, t)
+
+        asyncio.create_task(_delayed_redo_prev())
+        return f"↩ 重做上一步({prev_step + 1}/{total}),完成後再次推進到原步驟"
 
     elif decision == "install_dep":
         # 用戶從 missing_dependency awaiting_human 按「允許安裝」

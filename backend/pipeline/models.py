@@ -169,6 +169,9 @@ class PipelineStep(BaseModel):
     timeout: int = 300    # 秒
     output: Optional[StepOutput] = None
     retry: int = 1        # 自動重試次數（超過才問用戶）
+    # 此節點要用哪份 LLM 設定:"primary"(預設、走主模型)或 "secondary"(走副模型)
+    # 副模型在設定頁設;若 secondary_provider 為空 → 自動 fallback primary
+    llm_role: str = "primary"
     skill_mode: bool = False  # True = batch 為自然語言，由 LLM Skill agent 執行
     skill: str = ""            # 掛載的 Claude Code skill 名稱（~/.agents/skills/ 下的資料夾名）
     readonly: bool = False  # True = 唯讀驗證模式，禁止修改檔案

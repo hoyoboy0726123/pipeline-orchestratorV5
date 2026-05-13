@@ -126,6 +126,7 @@ async def run_visual_validation(
     out_dir: str,
     search_region: Optional[tuple[int, int, int, int]],
     logger: logging.Logger,
+    llm_role: str = "primary",
 ) -> tuple[bool, str]:
     """主要入口。回 (pass, reason)。失敗訊息寫進 reason 給 retry 邏輯用。"""
     if not prompt or not prompt.strip():
@@ -137,6 +138,20 @@ async def run_visual_validation(
     if source in ("prev_output", "prev_output_file", "rendered_preview"):
         if not prev_output_file:
             return (False, "找不到上一步輸出檔（沒有設 output.path 或檔案不存在）")
+        # pptx/docx 必須走 LibreOffice 渲染真實版面、純文字 PNG 不算「視覺驗證」、直接拒絕
+        _ext = prev_output_file.lower().rsplit(".", 1)[-1] if "." in prev_output_file else ""
+        if _ext in ("pptx", "docx"):
+            try:
+                from .host_tools import get_libreoffice_status
+            except ImportError:
+                from pipeline.host_tools import get_libreoffice_status  # type: ignore
+            _lo_ok, _ = get_libreoffice_status()
+            if not _lo_ok:
+                return (False, (
+                    f"視覺驗證需 LibreOffice 才能渲染 {_ext.upper()} 真實版面、主機未裝。"
+                    "請改用 vv_source=current_screen(目前螢幕)模式、或安裝 LibreOffice 後重啟 backend:"
+                    "winget install -e --id TheDocumentFoundation.LibreOffice"
+                ))
         images = _resolve_image_for_file(prev_output_file, out_dir=out_dir)
     elif source == "current_screen":
         out_path = Path(out_dir) / "_vv_screen.png"
@@ -180,7 +195,7 @@ async def run_visual_validation(
     user_content = [{"type": "text", "text": user_text}, *image_blocks]
 
     try:
-        llm = build_llm(temperature=0)
+        llm = build_llm(temperature=0, role=llm_role)
         result = await asyncio.get_event_loop().run_in_executor(
             None, lambda: llm.invoke([SystemMessage(content=sys_msg), HumanMessage(content=user_content)])
         )

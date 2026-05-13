@@ -48,6 +48,10 @@ async def startup():
     # 自動安裝 skill_packages.txt 中缺少的套件
     from skill_pkg_manager import auto_install_packages
     auto_install_packages()
+    # 主機系統工具健康檢查(non-fatal、只警告)
+    from config import check_host_tools
+    for w in check_host_tools():
+        print(w)
     await sched_start()
     print("✅ Pipeline Scheduler 已啟動")
     from telegram_handler import start_polling as tg_start
@@ -67,6 +71,21 @@ async def shutdown():
 async def health():
     missing = check_config()
     return {"status": "ok", "warnings": [f"{k} 未設定" for k in missing]}
+
+
+@app.get("/system/host-tools")
+async def host_tools_status():
+    """主機系統工具(非 pip)健康檢查 — 給前端設定頁顯示。
+
+    回每個工具的 name / installed / found_at / install_cmd / why / required。
+    """
+    from dataclasses import asdict
+    import platform
+    from pipeline.host_tools import get_host_tools
+    return {
+        "platform": platform.system(),  # "Windows" / "Darwin" / "Linux"
+        "tools": [asdict(t) for t in get_host_tools()],
+    }
 
 
 # ── Settings（模型選擇）─────────────────────────────────────
@@ -95,6 +114,13 @@ class ModelSettingsRequest(BaseModel):
     ollama_num_ctx: Optional[int] = None
     gemini_thinking: Optional[str] = None   # "off" | "auto" | "low" | "medium" | "high"
     anthropic_thinking: Optional[str] = None  # "off" | "on" — Claude Opus 4 extended thinking
+    # ── 副模型(選填、空字串 = 不啟用、所有節點都走 primary)──
+    secondary_provider: Optional[str] = None
+    secondary_model: Optional[str] = None
+    secondary_ollama_thinking: Optional[str] = None
+    secondary_ollama_num_ctx: Optional[int] = None
+    secondary_gemini_thinking: Optional[str] = None
+    secondary_anthropic_thinking: Optional[str] = None
 
 
 @app.put("/settings/model")
@@ -104,6 +130,12 @@ async def put_model_settings(req: ModelSettingsRequest):
         return update_settings(
             req.provider, req.model, req.ollama_base_url, req.ollama_thinking, req.ollama_num_ctx,
             req.gemini_thinking, req.anthropic_thinking,
+            secondary_provider=req.secondary_provider,
+            secondary_model=req.secondary_model,
+            secondary_ollama_thinking=req.secondary_ollama_thinking,
+            secondary_ollama_num_ctx=req.secondary_ollama_num_ctx,
+            secondary_gemini_thinking=req.secondary_gemini_thinking,
+            secondary_anthropic_thinking=req.secondary_anthropic_thinking,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1879,8 +1911,8 @@ async def delete_pipeline_run(run_id: str):
 
 @app.post("/pipeline/runs/{run_id}/resume")
 async def resume_pipeline_run(run_id: str, req: PipelineDecisionRequest):
-    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer", "install_dep", "approve_command", "deny_command", "hint_command"):
-        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer / install_dep / approve_command / deny_command / hint_command")
+    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer", "install_dep", "approve_command", "deny_command", "hint_command", "redo_prev"):
+        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer / install_dep / approve_command / deny_command / hint_command / redo_prev")
     from pipeline.runner import resume_pipeline
     msg = await resume_pipeline(run_id, req.decision, hint=req.hint or "")
     return {"message": msg}

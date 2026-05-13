@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { testOutlookConnection } from '@/lib/api'
 import type { OutlookData, OutlookNode } from './_helpers'
 import { VariableButton } from './_variablePicker'
+import LlmRoleSelector from './_llmRoleSelector'
 
 // 帶「確定」按鈕的日期/時間欄位：onChange 只寫 draft，按確定才 commit 到 params
 // 避免使用者在 picker 裡選一半就被當前值覆蓋（用戶反映需要明確確認）
@@ -689,6 +690,11 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete, workfl
             onChange={e => onUpdate({ retry: Number(e.target.value) || 0 })}
           />
         </div>
+
+        <LlmRoleSelector
+          value={data.llmRole || 'primary'}
+          onChange={(v) => onUpdate({ llmRole: v } as any)}
+        />
 
         {/* Timeout（秒）*/}
         <div>

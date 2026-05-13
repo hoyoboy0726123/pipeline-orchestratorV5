@@ -1,6 +1,7 @@
 'use client'
 import { X, ShieldCheck } from 'lucide-react'
 import type { AiValidationData } from './_helpers'
+import LlmRoleSelector from './_llmRoleSelector'
 
 interface Props {
   data: AiValidationData
@@ -69,7 +70,12 @@ export default function AiValidationPanel({ data, onUpdate, onClose, onDelete }:
           <p className="text-xs text-gray-400 mt-1">指定要驗證的輸出檔案路徑，留空則驗證前一步驟的標準輸出</p>
         </div>
 
-        {/* 驗證深度（Skill 模式 toggle）：預設關＝快速；開啟＝深度 ReAct 多輪查 */}
+        <LlmRoleSelector
+          value={data.llmRole || 'primary'}
+          onChange={(v) => onUpdate({ llmRole: v })}
+        />
+
+        {/* 驗證深度(Skill 模式 toggle):預設關＝快速;開啟＝深度 ReAct 多輪查 */}
         <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-3">
           <label className="flex items-start gap-2 cursor-pointer">
             <input

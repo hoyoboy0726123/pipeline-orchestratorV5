@@ -262,7 +262,7 @@ export async function deletePipelineRun(runId: string): Promise<void> {
   if (!res.ok) throw new Error('刪除失敗')
 }
 
-export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command', hint?: string): Promise<{ message: string }> {
+export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev', hint?: string): Promise<{ message: string }> {
   const body: Record<string, string> = { decision }
   if (hint) body.hint = hint
   const res = await fetch(`${BASE}/pipeline/runs/${runId}/resume`, {
@@ -349,6 +349,13 @@ export interface ModelSettings {
   ollama_num_ctx: number
   gemini_thinking: 'off' | 'auto' | 'low' | 'medium' | 'high'
   anthropic_thinking: 'off' | 'on'
+  // 副模型(選填、空 = 不啟用)
+  secondary_provider?: '' | 'groq' | 'ollama' | 'gemini' | 'openai' | 'anthropic'
+  secondary_model?: string
+  secondary_ollama_thinking?: 'auto' | 'on' | 'off'
+  secondary_ollama_num_ctx?: number
+  secondary_gemini_thinking?: 'off' | 'auto' | 'low' | 'medium' | 'high'
+  secondary_anthropic_thinking?: 'off' | 'on'
 }
 
 export interface ModelOption {
@@ -664,6 +671,28 @@ export interface NodeStatus {
 export async function getNodeStatus(): Promise<NodeStatus> {
   const res = await fetchWithRetry(`${BASE}/settings/node-status`)
   if (!res.ok) throw new Error('讀取 Node.js 狀態失敗')
+  return res.json()
+}
+
+// ── 主機系統工具(LibreOffice / FFmpeg / Tesseract...)健康檢查 ─────────
+export interface HostTool {
+  name: string
+  bin: string
+  installed: boolean
+  found_at: string | null
+  install_cmd: { windows: string; macos: string; linux: string }
+  why: string
+  required: boolean
+}
+
+export interface HostToolsResponse {
+  platform: 'Windows' | 'Darwin' | 'Linux' | string
+  tools: HostTool[]
+}
+
+export async function getHostTools(): Promise<HostToolsResponse> {
+  const res = await fetchWithRetry(`${BASE}/system/host-tools`)
+  if (!res.ok) throw new Error('讀取主機工具狀態失敗')
   return res.json()
 }
 

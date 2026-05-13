@@ -13,6 +13,8 @@ import {
   listAvailableSkills, scanSkillDependencies,
   scanUnlistedPackages, adoptExistingPackage,
   getNodeStatus,
+  getHostTools,
+  type HostToolsResponse,
   getSandboxStatus, setSandboxMode,
   type ModelSettings, type AvailableModels, type SkillPackage, type NotificationSettings,
   type WebSearchSettingsInput,
@@ -1192,14 +1194,24 @@ export default function SettingsPage() {
   const [numCtx, setNumCtx] = useState<number>(16384)
   const [geminiThinking, setGeminiThinking] = useState<'off' | 'auto' | 'low' | 'medium' | 'high'>('off')
   const [antThinking, setAntThinking] = useState<'off' | 'on'>('off')
+  // ── 副模型 state(空 provider = 不啟用)──
+  const [secEnabled, setSecEnabled] = useState(false)
+  const [secProvider, setSecProvider] = useState<'groq' | 'ollama' | 'gemini' | 'openai' | 'anthropic'>('gemini')
+  const [secModel, setSecModel] = useState('')
+  const [secThinking, setSecThinking] = useState<'auto' | 'on' | 'off'>('off')
+  const [secNumCtx, setSecNumCtx] = useState<number>(16384)
+  const [secGeminiThinking, setSecGeminiThinking] = useState<'off' | 'auto' | 'low' | 'medium' | 'high'>('off')
+  const [secAntThinking, setSecAntThinking] = useState<'off' | 'on'>('off')
   const [loading, setLoading] = useState(true)
   const [availableError, setAvailableError] = useState<string | null>(null)
   const [reloadingModels, setReloadingModels] = useState(false)
   const [saving, setSaving] = useState(false)
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null)
+  const [hostTools, setHostTools] = useState<HostToolsResponse | null>(null)
 
   useEffect(() => {
     getNodeStatus().then(setNodeStatus).catch(() => {})
+    getHostTools().then(setHostTools).catch(() => {})
   }, [])
 
   // 拆開兩個請求：current 是本地 JSON 很快、必要；available 要打 4 個外部 API 可能失敗
@@ -1229,6 +1241,17 @@ export default function SettingsPage() {
       setNumCtx(cur.ollama_num_ctx || 16384)
       setGeminiThinking(cur.gemini_thinking || 'off')
       setAntThinking(cur.anthropic_thinking || 'off')
+      // 載入副模型(provider 有值 = 已啟用)
+      const sp = (cur.secondary_provider || '') as string
+      if (sp) {
+        setSecEnabled(true)
+        setSecProvider(sp as any)
+        setSecModel(cur.secondary_model || '')
+        setSecThinking(cur.secondary_ollama_thinking || 'off')
+        setSecNumCtx(cur.secondary_ollama_num_ctx || 16384)
+        setSecGeminiThinking(cur.secondary_gemini_thinking || 'off')
+        setSecAntThinking(cur.secondary_anthropic_thinking || 'off')
+      }
     } catch (e) {
       toast.error((e as Error).message)
     } finally {
@@ -1242,7 +1265,11 @@ export default function SettingsPage() {
 
   const handleSave = async () => {
     if (!model) {
-      toast.error('請選擇模型')
+      toast.error('請選擇主要模型')
+      return
+    }
+    if (secEnabled && !secModel) {
+      toast.error('副模型已啟用、請選擇模型(或取消啟用)')
       return
     }
     setSaving(true)
@@ -1251,9 +1278,17 @@ export default function SettingsPage() {
         provider, model,
         ollama_base_url: ollamaUrl, ollama_thinking: thinking, ollama_num_ctx: numCtx,
         gemini_thinking: geminiThinking, anthropic_thinking: antThinking,
+        // 副模型:secEnabled=false 時送空字串 → 後端清掉副模型設定
+        secondary_provider: secEnabled ? secProvider : '',
+        secondary_model: secEnabled ? secModel : '',
+        secondary_ollama_thinking: secEnabled ? secThinking : 'off',
+        secondary_ollama_num_ctx: secEnabled ? secNumCtx : 16384,
+        secondary_gemini_thinking: secEnabled ? secGeminiThinking : 'off',
+        secondary_anthropic_thinking: secEnabled ? secAntThinking : 'off',
       })
       setCurrent(saved)
-      toast.success(`已儲存：${saved.provider} / ${saved.model}`)
+      const secMsg = secEnabled ? `;副 ${saved.secondary_provider}/${saved.secondary_model}` : ''
+      toast.success(`已儲存:主 ${saved.provider}/${saved.model}${secMsg}`)
     } catch (e) {
       toast.error((e as Error).message)
     } finally {
@@ -1275,6 +1310,8 @@ export default function SettingsPage() {
     : provider === 'openai' ? available?.openai_error
     : provider === 'anthropic' ? available?.anthropic_error
     : available?.ollama_error
+  const _curSecProv = (current?.secondary_provider || '') as string
+  const _curSecEnabled = !!_curSecProv
   const dirty = current && (
     provider !== current.provider ||
     model !== current.model ||
@@ -1282,7 +1319,17 @@ export default function SettingsPage() {
     thinking !== current.ollama_thinking ||
     numCtx !== current.ollama_num_ctx ||
     geminiThinking !== (current.gemini_thinking || 'off') ||
-    antThinking !== (current.anthropic_thinking || 'off')
+    antThinking !== (current.anthropic_thinking || 'off') ||
+    // 副模型 dirty 偵測
+    secEnabled !== _curSecEnabled ||
+    (secEnabled && (
+      secProvider !== _curSecProv ||
+      secModel !== (current.secondary_model || '') ||
+      secThinking !== (current.secondary_ollama_thinking || 'off') ||
+      secNumCtx !== (current.secondary_ollama_num_ctx || 16384) ||
+      secGeminiThinking !== (current.secondary_gemini_thinking || 'off') ||
+      secAntThinking !== (current.secondary_anthropic_thinking || 'off')
+    ))
   )
 
   return (
@@ -1331,12 +1378,70 @@ export default function SettingsPage() {
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-semibold text-amber-800 mb-1">Node.js 已安裝但找不到 npm</div>
                 <p className="text-xs text-amber-700">
-                  Node.js ({nodeStatus.node_version}) 已偵測到，但無法找到 <code className="bg-white px-1 rounded">npm</code> 指令。請重新安裝 Node.js LTS 版本或確認 npm 已加入 PATH。
+                  Node.js ({nodeStatus.node_version}) 已偵測到,但無法找到 <code className="bg-white px-1 rounded">npm</code> 指令。請重新安裝 Node.js LTS 版本或確認 npm 已加入 PATH。
                 </p>
               </div>
             </div>
           </div>
         )}
+
+        {/* 主機系統工具(LibreOffice 等)健康檢查 ── 必要工具沒裝才顯示橘色警告區 */}
+        {hostTools && (() => {
+          const platKey = hostTools.platform === 'Windows' ? 'windows' :
+                          hostTools.platform === 'Darwin' ? 'macos' : 'linux'
+          const missingRequired = hostTools.tools.filter(t => t.required && !t.installed)
+          const allInstalled = hostTools.tools.every(t => t.installed)
+          if (missingRequired.length === 0 && allInstalled) return null
+          return (
+            <div className={`mb-6 rounded-xl p-4 border ${
+              missingRequired.length > 0
+                ? 'bg-amber-50 border-amber-200'
+                : 'bg-blue-50 border-blue-200'
+            }`}>
+              <div className="flex items-start gap-3">
+                <AlertCircle className={`w-5 h-5 shrink-0 mt-0.5 ${
+                  missingRequired.length > 0 ? 'text-amber-600' : 'text-blue-600'
+                }`} />
+                <div className="flex-1 min-w-0">
+                  <div className={`text-sm font-semibold mb-2 ${
+                    missingRequired.length > 0 ? 'text-amber-800' : 'text-blue-800'
+                  }`}>
+                    🛠 主機系統工具狀態 ({hostTools.platform})
+                  </div>
+                  <div className="space-y-2">
+                    {hostTools.tools.map(tool => (
+                      <div key={tool.name} className="text-xs leading-relaxed">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className={tool.installed ? 'text-green-700' : (tool.required ? 'text-red-700' : 'text-gray-500')}>
+                            {tool.installed ? '✅' : (tool.required ? '❌' : '⚪')}
+                          </span>
+                          <span className="font-semibold text-gray-800">{tool.name}</span>
+                          {tool.required && !tool.installed && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">必要</span>
+                          )}
+                          {tool.installed && tool.found_at && (
+                            <span className="text-[10px] text-gray-500 font-mono truncate">{tool.found_at}</span>
+                          )}
+                        </div>
+                        <p className="text-gray-600 ml-6">{tool.why}</p>
+                        {!tool.installed && (
+                          <div className="ml-6 mt-1 bg-white border border-gray-200 rounded px-2 py-1 font-mono text-[10px] break-all">
+                            {tool.install_cmd[platKey as 'windows' | 'macos' | 'linux']}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {missingRequired.length > 0 && (
+                    <p className="text-[11px] text-amber-700 mt-3 leading-relaxed">
+                      💡 必要工具沒裝會影響 <b>視覺驗證 / 人工確認預覽</b>(VLM 看到的不是真實 PPT/DOCX 版面、永遠評不過)。裝完<b>重啟 backend</b> 才生效。
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )
+        })()}
 
         {loading ? (
           <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400">
@@ -1622,6 +1727,129 @@ export default function SettingsPage() {
                     </label>
                   ))}
                 </div>
+              )}
+            </div>
+
+            {/* ── 副模型 Secondary 區塊 ── */}
+            <div className="px-6 py-4 border-t border-gray-200 bg-amber-50/30">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-600" />
+                  <h3 className="text-sm font-semibold text-gray-900">副模型(可選)</h3>
+                  <span className="text-xs text-gray-500">— 每個節點可在 panel 選用「副模型」</span>
+                </div>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={secEnabled}
+                    onChange={(e) => setSecEnabled(e.target.checked)}
+                    className="accent-amber-600"
+                  />
+                  <span className="text-xs text-gray-700">{secEnabled ? '已啟用' : '未啟用'}</span>
+                </label>
+              </div>
+
+              {secEnabled && (
+                <div className="space-y-3">
+                  {/* Provider 切換 */}
+                  <div>
+                    <label className="text-xs font-medium text-gray-600 mb-1.5 block">Provider</label>
+                    <div className="grid grid-cols-5 gap-1.5">
+                      {(['groq', 'gemini', 'openai', 'anthropic', 'ollama'] as const).map(p => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => setSecProvider(p)}
+                          className={cn(
+                            'px-2 py-1.5 text-xs rounded border transition-colors',
+                            secProvider === p
+                              ? 'bg-amber-600 text-white border-amber-600'
+                              : 'bg-white text-gray-700 border-gray-200 hover:border-amber-400'
+                          )}
+                        >{p}</button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Model 直接輸入(避免再 dup 一份 model picker 邏輯)— 進階使用者填 id */}
+                  <div>
+                    <label className="text-xs font-medium text-gray-600 mb-1.5 block">Model ID</label>
+                    <input
+                      value={secModel}
+                      onChange={(e) => setSecModel(e.target.value)}
+                      placeholder={
+                        secProvider === 'groq' ? '例:meta-llama/llama-4-scout-17b-16e-instruct' :
+                        secProvider === 'gemini' ? '例:gemini-2.5-flash / gemini-3-pro' :
+                        secProvider === 'openai' ? '例:gpt-5 / gpt-5-mini' :
+                        secProvider === 'anthropic' ? '例:claude-sonnet-4-5 / claude-opus-4-7' :
+                        '例:qwen3:8b / llama3.1:70b'
+                      }
+                      className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono outline-none focus:border-amber-400"
+                    />
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      💡 提示:可從「主要模型」區的清單複製 model id 過來,或直接打。
+                    </p>
+                  </div>
+
+                  {/* Thinking(視 provider 切換)*/}
+                  {secProvider === 'gemini' && (
+                    <div>
+                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">Thinking</label>
+                      <select
+                        value={secGeminiThinking}
+                        onChange={(e) => setSecGeminiThinking(e.target.value as any)}
+                        className="border border-gray-200 rounded-lg px-2 py-1 text-xs"
+                      >
+                        {['off', 'auto', 'low', 'medium', 'high'].map(v => <option key={v} value={v}>{v}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {secProvider === 'anthropic' && (
+                    <div>
+                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">Extended Thinking</label>
+                      <select
+                        value={secAntThinking}
+                        onChange={(e) => setSecAntThinking(e.target.value as any)}
+                        className="border border-gray-200 rounded-lg px-2 py-1 text-xs"
+                      >
+                        <option value="off">off</option>
+                        <option value="on">on</option>
+                      </select>
+                    </div>
+                  )}
+                  {secProvider === 'ollama' && (
+                    <>
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 mb-1.5 block">Thinking</label>
+                        <select
+                          value={secThinking}
+                          onChange={(e) => setSecThinking(e.target.value as any)}
+                          className="border border-gray-200 rounded-lg px-2 py-1 text-xs"
+                        >
+                          {['off', 'auto', 'on'].map(v => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 mb-1.5 block">num_ctx</label>
+                        <input
+                          type="number" min={2048} max={262144} step={2048}
+                          value={secNumCtx}
+                          onChange={(e) => setSecNumCtx(parseInt(e.target.value) || 16384)}
+                          className="w-32 border border-gray-200 rounded-lg px-2 py-1 text-xs font-mono"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  <p className="text-[11px] text-gray-500 leading-relaxed bg-white border border-amber-200 rounded px-2 py-1.5">
+                    💡 用途:在節點 panel 選「llm_role: secondary」就會用這個模型。例:主用便宜的 Gemma 跑大部分節點、副掛 Claude Sonnet 給 PPT 產出 / 視覺驗證等對品質敏感的節點。
+                  </p>
+                </div>
+              )}
+              {!secEnabled && (
+                <p className="text-[11px] text-gray-500">
+                  未啟用 — 所有節點都用「主要模型」。打勾啟用後、節點可在 panel 選用副模型。
+                </p>
               )}
             </div>
 

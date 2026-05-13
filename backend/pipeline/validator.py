@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -55,19 +55,18 @@ def _is_rate_limit_error(e: Exception) -> bool:
             or "rate limit" in s.lower() or "rate_limit" in s.lower())
 
 
-_llm = None
-_llm_sig: Optional[str] = None
+# 雙模型 cache:key = (role, settings_signature)
+_llm_cache: dict[tuple[str, str], Any] = {}
 
 
-def _get_llm():
-    global _llm, _llm_sig
+def _get_llm(role: str = "primary"):
     from settings import settings_signature
     from llm_factory import build_llm
     sig = settings_signature()
-    if _llm is None or _llm_sig != sig:
-        _llm = build_llm(temperature=0)
-        _llm_sig = sig
-    return _llm
+    key = (role, sig)
+    if key not in _llm_cache:
+        _llm_cache[key] = build_llm(temperature=0, role=role)
+    return _llm_cache[key]
 
 
 # ── 檔案內容讀取 ──────────────────────────────────────────────────────────────
@@ -230,6 +229,7 @@ async def validate_step(
     output_path: Optional[str],
     output_expect: Optional[str],
     logger: logging.Logger,
+    llm_role: str = "primary",
 ) -> ValidationResult:
     """
     使用 LLM 語意分析執行結果，回傳結構化驗證結論。
@@ -309,7 +309,7 @@ Exit Code：{exit_code}
 此情境只看：(1) 完成標記是否存在、(2) 輸出檔案是否存在且內容符合預期。"""
 
     try:
-        llm = _get_llm()
+        llm = _get_llm(role=llm_role)
 
         # 構建 message content（支援圖片 vision）
         if file_content["image_b64"]:
@@ -717,6 +717,7 @@ async def validate_step_with_skill(
     output_path: Optional[str],
     output_expect: Optional[str],
     logger: logging.Logger,
+    llm_role: str = "primary",
 ) -> ValidationResult:
     """
     Skill 模式驗證：LLM 作為 ReAct agent，可主動執行程式碼來驗證步驟結果。
@@ -818,7 +819,7 @@ Exit Code：{exit_code}
 請使用工具主動驗證輸出是否符合預期。開始吧。"""
 
     try:
-        llm = _get_llm()
+        llm = _get_llm(role=llm_role)
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),

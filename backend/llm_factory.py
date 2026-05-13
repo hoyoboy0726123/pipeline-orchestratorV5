@@ -16,11 +16,45 @@ def _is_gemini_3x(model: str) -> bool:
     return any(model.startswith(p) for p in _GEMINI_3X_PREFIXES)
 
 
-def build_llm(temperature: float = 0.0) -> Any:
-    """依當前設定回傳一個 LangChain chat model 實例。"""
+def _resolve_role_settings(s: dict, role: str) -> dict:
+    """根據 role 從 settings 抽出該角色的 (provider, model, thinking 設定)。
+
+    role='primary' → 用 provider/model
+    role='secondary' → 用 secondary_provider/secondary_model;空時 fallback 回 primary
+
+    回傳統一 key:provider/model/ollama_thinking/ollama_num_ctx/gemini_thinking/anthropic_thinking/ollama_base_url
+    """
+    if role == "secondary" and (s.get("secondary_provider") or "").strip():
+        return {
+            "provider": s["secondary_provider"],
+            "model": s["secondary_model"],
+            "ollama_thinking": s.get("secondary_ollama_thinking", "off"),
+            "ollama_num_ctx": s.get("secondary_ollama_num_ctx", 16384),
+            "gemini_thinking": s.get("secondary_gemini_thinking", "off"),
+            "anthropic_thinking": s.get("secondary_anthropic_thinking", "off"),
+            "ollama_base_url": s.get("ollama_base_url", "http://localhost:11434"),  # 共用
+        }
+    # primary 或 secondary 沒設定時 fallback
+    return {
+        "provider": s["provider"],
+        "model": s["model"],
+        "ollama_thinking": s.get("ollama_thinking", "off"),
+        "ollama_num_ctx": s.get("ollama_num_ctx", 16384),
+        "gemini_thinking": s.get("gemini_thinking", "off"),
+        "anthropic_thinking": s.get("anthropic_thinking", "off"),
+        "ollama_base_url": s.get("ollama_base_url", "http://localhost:11434"),
+    }
+
+
+def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
+    """依當前設定回傳一個 LangChain chat model 實例。
+
+    role:'primary'(預設、走主模型)或 'secondary'(走副模型;副模型未設則 fallback 主)
+    """
     s = get_settings()
-    provider = s["provider"]
-    model = s["model"]
+    cfg = _resolve_role_settings(s, role)
+    provider = cfg["provider"]
+    model = cfg["model"]
 
     if provider == "groq":
         from langchain_groq import ChatGroq
@@ -28,14 +62,14 @@ def build_llm(temperature: float = 0.0) -> Any:
 
     if provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
-        gem_thinking = s.get("gemini_thinking", "off")
+        gem_thinking = cfg.get("gemini_thinking", "off")
         kwargs: dict[str, Any] = {
             "model": model,
             "google_api_key": GEMINI_API_KEY,
             "temperature": temperature,
             "max_output_tokens": 8192,  # 防止 gemma 等模型無限生成
         }
-        # 只有 gemini-2.5 和 gemini-3.x 系列支援思考模式，其他模型（gemma, gemini-2.0）靜默忽略
+        # 只有 gemini-2.5 和 gemini-3.x 系列支援思考模式,其他模型(gemma, gemini-2.0)靜默忽略
         supports_thinking = model.startswith("gemini-2.5-") or _is_gemini_3x(model)
         if gem_thinking != "off" and supports_thinking:
             if _is_gemini_3x(model):
@@ -55,7 +89,7 @@ def build_llm(temperature: float = 0.0) -> Any:
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        # Anthropic 預設沒設 max_tokens 會吃 LangChain 的 1024 default、Claude 4 系列容易截斷；
+        # Anthropic 預設沒設 max_tokens 會吃 LangChain 的 1024 default、Claude 4 系列容易截斷;
         # 這裡明確給 8192、跟 Gemini 那邊邏輯一致
         return ChatAnthropic(
             model=model,
@@ -66,15 +100,15 @@ def build_llm(temperature: float = 0.0) -> Any:
 
     if provider == "ollama":
         from langchain_ollama import ChatOllama
-        thinking = s.get("ollama_thinking", "off")
-        num_ctx = s.get("ollama_num_ctx", 16384)
+        thinking = cfg.get("ollama_thinking", "off")
+        num_ctx = cfg.get("ollama_num_ctx", 16384)
         kwargs = {
             "model": model,
-            "base_url": s.get("ollama_base_url") or "http://localhost:11434",
+            "base_url": cfg.get("ollama_base_url") or "http://localhost:11434",
             "temperature": temperature,
             "num_ctx": num_ctx,
         }
-        # auto → 不傳，讓模型自行決定；on/off → 明確開關（對 qwen3 等思考型模型有效）
+        # auto → 不傳、讓模型自行決定;on/off → 明確開關(對 qwen3 等思考型模型有效)
         if thinking == "on":
             kwargs["reasoning"] = True
         elif thinking == "off":

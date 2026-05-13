@@ -62,6 +62,9 @@ export interface StepData extends Record<string, unknown> {
   default?: string
   // 跳轉:任意 step 跑完跳指定下一步(end / __end__ / 空 = 線性)
   next?: string
+  // 此節點用哪份 LLM 設定:"primary"(預設、走主模型)或 "secondary"(走副模型)
+  // 副模型在設定頁設;副模型未設則自動 fallback 主
+  llmRole?: 'primary' | 'secondary'
   // Outlook 自動化節點（outlook_automation）
   outlookAutomation?: boolean            // optional — Outlook 自動化步驟
   outlookTemplate?: string               // 選單模板 ID（空字串 = 自由輸入需求）
@@ -110,6 +113,7 @@ export interface SubagentData extends Record<string, unknown> {
   maxIter: number          // 最多 LLM 輪數上限（1-10、預設 5）
   timeout: number
   retry: number
+  llmRole?: 'primary' | 'secondary'
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -128,6 +132,7 @@ export interface SkillData extends Record<string, unknown> {
   timeout: number
   retry: number
   next?: string         // 跳轉:跑完跳指定 step name(end / 留空 = 線性、用於 condition 分支)
+  llmRole?: 'primary' | 'secondary'  // 用主/副模型(預設主)
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -138,6 +143,7 @@ export interface AiValidationData extends Record<string, unknown> {
   expectText: string
   targetPath: string
   skillMode: boolean   // 保留：控制驗證時是否可執行程式碼
+  llmRole?: 'primary' | 'secondary'  // 此驗證用主/副模型(會覆寫前一步的 llm_role)
   index: number
 }
 
@@ -264,6 +270,7 @@ export interface ComputerUseData extends Record<string, unknown> {
   uiaWindow: string         // UIA 模式視窗 title pattern(支援 *)、空字串 = foreground
   timeout: number           // 秒（執行上限）
   retry: number
+  llmRole?: 'primary' | 'secondary'  // VLM 把關 / 視覺輔助用主/副模型
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -276,6 +283,7 @@ export interface VisualValidationData extends Record<string, unknown> {
   prompt: string                              // 描述「應該看到什麼」的判斷條件
   // current_screen 來源時可選的螢幕區域（虛擬桌面絕對座標）。空陣列 = 看整個螢幕
   searchRegion: number[]   // [left, top, width, height]
+  llmRole?: 'primary' | 'secondary'
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -345,6 +353,7 @@ export interface OutlookData extends Record<string, unknown> {
   // 整個步驟的執行上限（秒）。Outlook COM 對巨型收信夾 search_mail 可能跑 4-5 分鐘，
   // 預設 600 秒；30k+ 信箱建議 1800-3600。
   timeout: number
+  llmRole?: 'primary' | 'secondary'
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -363,7 +372,7 @@ export type ConditionNode = Node<ConditionData>
 export type AppNode = Node<StepData | AiValidationData | SkillData | SubagentData | HumanConfirmData | ComputerUseData | VisualValidationData | OutlookData | WebCrawlerData | ConditionData>
 
 export function newAiValidationData(index = 0): AiValidationData {
-  return { expectText: '', targetPath: '', skillMode: false, index }
+  return { expectText: '', targetPath: '', skillMode: false, llmRole: 'primary', index }
 }
 
 let _webCrawlerCounter = 0
@@ -594,6 +603,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           uiaWindow: s.uiaWindow ?? '',
           timeout: s.timeout,
           retry: s.retry,
+          llmRole: (s.llmRole === 'secondary' ? 'secondary' : 'primary') as 'primary' | 'secondary',
           index: i,
           status: 'idle' as const,
           errorMsg: '',
@@ -610,6 +620,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           source: (s.vvSource === 'current_screen' ? 'current_screen' : 'prev_output') as 'prev_output' | 'current_screen',
           prompt: s.vvPrompt || '',
           searchRegion: Array.isArray(s.vvSearchRegion) ? s.vvSearchRegion : [],
+          llmRole: (s.llmRole === 'secondary' ? 'secondary' : 'primary') as 'primary' | 'secondary',
           index: i,
           status: 'idle' as const,
           errorMsg: '',
@@ -628,6 +639,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           params: (s.outlookParams as Record<string, unknown>) || {},
           outputPath: s.outputPath,
           retry: s.retry,
+          llmRole: (s.llmRole === 'secondary' ? 'secondary' : 'primary') as 'primary' | 'secondary',
           index: i,
           status: 'idle' as const,
           errorMsg: '',
@@ -726,6 +738,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           maxIter: s.subagentMaxIter ?? 5,
           timeout: s.timeout,
           retry: s.retry,
+          llmRole: (s.llmRole === 'secondary' ? 'secondary' : 'primary') as 'primary' | 'secondary',
           index: i,
           status: 'idle' as const,
           errorMsg: '',
@@ -733,7 +746,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
       }
     }
     if (s.skillMode) {
-      // 向後相容：舊格式 skillMode=true → skillStep 節點
+      // 向後相容:舊格式 skillMode=true → skillStep 節點
       return {
         id: `step-${i}`,
         type: 'skillStep' as const,
@@ -749,6 +762,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           askMode: s.askMode || false,
           timeout: s.timeout,
           retry: s.retry,
+          llmRole: (s.llmRole === 'secondary' ? 'secondary' : 'primary') as 'primary' | 'secondary',
           index: i,
           status: 'idle' as const,
           errorMsg: '',
@@ -889,6 +903,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         uiaWindow: d.uiaWindow,
         timeout: d.timeout,
         retry: d.retry,
+        llmRole: d.llmRole || 'primary',
         index: i,
         status: d.status,
         errorMsg: d.errorMsg,
@@ -909,6 +924,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         vvSearchRegion: d.searchRegion && d.searchRegion.length === 4 ? d.searchRegion : [],
         timeout: 120,
         retry: 0,
+        llmRole: d.llmRole || 'primary',
         index: i,
         status: d.status,
         errorMsg: d.errorMsg,
@@ -918,7 +934,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       const d = n.data as OutlookData
       return {
         name: d.name,
-        batch: d.freeText || '',          // batch 欄位塞自由輸入；agent 跑時會優先看 outlookTemplate
+        batch: d.freeText || '',          // batch 欄位塞自由輸入;agent 跑時會優先看 outlookTemplate
         workingDir: '',
         outputPath: d.outputPath,
         expect: '',
@@ -928,6 +944,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         outlookParams: d.params,
         timeout: typeof d.timeout === 'number' && d.timeout > 0 ? d.timeout : 600,
         retry: d.retry,
+        llmRole: d.llmRole || 'primary',
         index: i,
         status: d.status,
         errorMsg: d.errorMsg,
@@ -1032,6 +1049,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         timeout: d.timeout,
         retry: d.retry,
         next: d.next || '',
+        llmRole: d.llmRole || 'primary',
         index: i,
         status: d.status,
         errorMsg: d.errorMsg,
@@ -1051,6 +1069,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         subagentMaxIter: d.maxIter ?? 5,
         timeout: d.timeout,
         retry: d.retry,
+        llmRole: d.llmRole || 'primary',
         index: i,
         status: d.status,
         errorMsg: d.errorMsg,
@@ -1058,18 +1077,24 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
     }
 
     const d = n.data as StepData
+    // AI 驗證節點如果設了 llmRole(且非預設 primary)→ 覆寫此 script 的 llmRole
+    // 因為實際驗證 LLM 是用此 step 的 llm_role 跑、AI 驗證節點是修飾此 step 的驗證行為
+    const effectiveLlmRole = (aiData?.llmRole === 'secondary')
+      ? 'secondary'
+      : (d.llmRole || 'primary')
     return {
       name: d.name,
       batch: d.batch,
       workingDir: d.workingDir || '',
       outputPath: (aiData?.targetPath && !d.outputPath) ? aiData.targetPath : d.outputPath,
       expect: aiData?.expectText || d.expect,
-      skillMode: false,  // script / 其他節點：step-level 永不是 skill
+      skillMode: false,  // script / 其他節點:step-level 永不是 skill
       // AI 驗證節點若勾「Skill 模式」→ expectSkillMode=true → 走 deep 驗證
       expectSkillMode: !!aiData?.skillMode,
       timeout: d.timeout,
       retry: d.retry,
       next: d.next || '',
+      llmRole: effectiveLlmRole,
       index: i,
       status: d.status,
       errorMsg: d.errorMsg,
@@ -1135,6 +1160,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         lines.push(`    vv_search_region: [${s.vvSearchRegion.join(', ')}]`)
       }
       if (s.timeout && s.timeout !== 120) lines.push(`    timeout: ${s.timeout}`)
+      if (s.llmRole === 'secondary') lines.push(`    llm_role: secondary`)
       continue
     }
     if (s.webCrawler) {
@@ -1234,6 +1260,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
       if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
       if (s.next) lines.push(`    next: ${s.next}`)
+      if (s.llmRole === 'secondary') lines.push(`    llm_role: secondary`)
       continue
     }
     if (s.outlookAutomation) {
@@ -1258,6 +1285,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       }
       if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
       if (s.retry && s.retry !== 0) lines.push(`    retry: ${s.retry}`)
+      if (s.llmRole === 'secondary') lines.push(`    llm_role: secondary`)
       continue
     }
     if (s.computerUse) {
@@ -1290,9 +1318,10 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         }
       }
       if (s.timeout !== 300) lines.push(`    timeout: ${s.timeout}`)
-      // computer_use 一定寫 retry（即使是 0），因為 backend PipelineStep 預設 retry=1
-      // 對 UI 自動化來說 retry 從動作 #1 重跑會重複點擊造成副作用，所以預期是 retry=0
+      // computer_use 一定寫 retry(即使是 0),因為 backend PipelineStep 預設 retry=1
+      // 對 UI 自動化來說 retry 從動作 #1 重跑會重複點擊造成副作用,所以預期是 retry=0
       lines.push(`    retry: ${s.retry ?? 0}`)
+      if (s.llmRole === 'secondary') lines.push(`    llm_role: secondary`)
       continue
     }
     if (s.workingDir) lines.push(`    working_dir: ${s.workingDir}`)
@@ -1331,6 +1360,8 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
     if (s.retry !== 1)     lines.push(`    retry: ${s.retry}`)
     // next 跳轉(condition 分支用、空字串 = 線性、不寫)
     if (s.next)            lines.push(`    next: ${s.next}`)
+    // llm_role(預設 primary、不寫;只在 secondary 時寫)
+    if (s.llmRole === 'secondary') lines.push(`    llm_role: secondary`)
   }
   return lines.join('\n')
 }
@@ -1563,6 +1594,9 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.default = t.replace(/^default:\s*/, '').replace(/^"|"$/g, '').trim()
       } else if (/^next:/.test(t) && cur) {
         cur.next = t.replace(/^next:\s*/, '').replace(/^"|"$/g, '').trim()
+      } else if (/^llm_role:/.test(t) && cur) {
+        const v = t.replace(/^llm_role:\s*/, '').replace(/^"|"$/g, '').trim()
+        cur.llmRole = (v === 'secondary' ? 'secondary' : 'primary')
       } else if (/^outlook_automation:/.test(t) && cur) {
         cur.outlookAutomation = /true/.test(t)
       } else if (/^outlook_template:/.test(t) && cur) {

@@ -11,6 +11,7 @@ _lock = threading.Lock()
 
 # 預設：沿用環境變數 / config.py 預設的 Groq 模型
 _DEFAULT = {
+    # ── 主模型(預設、所有節點不另設 llm_role 時用這個)──
     "provider": "groq",           # "groq" | "ollama" | "gemini" | "openai" | "anthropic"
     "model": GROQ_MODEL_MAIN,      # e.g. "meta-llama/llama-4-scout-17b-16e-instruct" or "qwen3:8b"
     "ollama_base_url": "http://localhost:11434",
@@ -18,6 +19,14 @@ _DEFAULT = {
     "ollama_num_ctx": 16384,       # Ollama context window tokens（僅 Ollama）
     "gemini_thinking": "off",      # "off" | "auto" | "low" | "medium" | "high"
     "anthropic_thinking": "off",   # "off" | "on" — Claude Opus 4 系列 extended thinking
+    # ── 副模型(節點可在 panel 選 llm_role: secondary 切到這個)──
+    # 預設全空、=不啟用副模型;任一 node 設 llm_role=secondary 而副模型未設 → fallback 主
+    "secondary_provider": "",
+    "secondary_model": "",
+    "secondary_ollama_thinking": "off",
+    "secondary_ollama_num_ctx": 16384,
+    "secondary_gemini_thinking": "off",
+    "secondary_anthropic_thinking": "off",
     # 通知設定
     "telegram_bot_token": "",
     "telegram_chat_id": "",
@@ -72,6 +81,13 @@ def update_settings(
     ollama_num_ctx: Optional[int] = None,
     gemini_thinking: Optional[str] = None,
     anthropic_thinking: Optional[str] = None,
+    # ── 副模型(選填、空字串 = 不啟用)──
+    secondary_provider: Optional[str] = None,
+    secondary_model: Optional[str] = None,
+    secondary_ollama_thinking: Optional[str] = None,
+    secondary_ollama_num_ctx: Optional[int] = None,
+    secondary_gemini_thinking: Optional[str] = None,
+    secondary_anthropic_thinking: Optional[str] = None,
 ) -> dict:
     """更新並寫入磁碟。"""
     global _cache
@@ -90,10 +106,30 @@ def update_settings(
         raise ValueError(f"invalid anthropic_thinking: {ant_thinking}")
     num_ctx = ollama_num_ctx if ollama_num_ctx is not None else _DEFAULT["ollama_num_ctx"]
     if not isinstance(num_ctx, int) or num_ctx < 2048 or num_ctx > 262144:
-        raise ValueError(f"invalid ollama_num_ctx: {num_ctx}（需介於 2048~262144）")
+        raise ValueError(f"invalid ollama_num_ctx: {num_ctx}(需介於 2048~262144)")
+
+    # ── Secondary 驗證(可全空表示停用)──
+    sec_provider = (secondary_provider or "").strip()
+    sec_model = (secondary_model or "").strip()
+    if sec_provider and sec_provider not in ("groq", "ollama", "gemini", "openai", "anthropic"):
+        raise ValueError(f"unsupported secondary_provider: {sec_provider}")
+    if sec_provider and not sec_model:
+        raise ValueError("secondary_model is required when secondary_provider is set")
+    sec_oll_thinking = (secondary_ollama_thinking or "off").strip()
+    if sec_oll_thinking not in ("auto", "on", "off"):
+        raise ValueError(f"invalid secondary_ollama_thinking: {sec_oll_thinking}")
+    sec_gem_thinking = (secondary_gemini_thinking or "off").strip()
+    if sec_gem_thinking not in ("off", "auto", "low", "medium", "high"):
+        raise ValueError(f"invalid secondary_gemini_thinking: {sec_gem_thinking}")
+    sec_ant_thinking = (secondary_anthropic_thinking or "off").strip()
+    if sec_ant_thinking not in ("off", "on"):
+        raise ValueError(f"invalid secondary_anthropic_thinking: {sec_ant_thinking}")
+    sec_num_ctx = secondary_ollama_num_ctx if secondary_ollama_num_ctx is not None else _DEFAULT["secondary_ollama_num_ctx"]
+    if not isinstance(sec_num_ctx, int) or sec_num_ctx < 2048 or sec_num_ctx > 262144:
+        raise ValueError(f"invalid secondary_ollama_num_ctx: {sec_num_ctx}")
 
     with _lock:
-        # 先讀取現有設定（保留通知等其他欄位）
+        # 先讀取現有設定(保留通知等其他欄位)
         existing = _cache if _cache else _load_from_disk()
         existing.update({
             "provider": provider,
@@ -103,6 +139,12 @@ def update_settings(
             "ollama_num_ctx": num_ctx,
             "gemini_thinking": gem_thinking,
             "anthropic_thinking": ant_thinking,
+            "secondary_provider": sec_provider,
+            "secondary_model": sec_model,
+            "secondary_ollama_thinking": sec_oll_thinking,
+            "secondary_ollama_num_ctx": sec_num_ctx,
+            "secondary_gemini_thinking": sec_gem_thinking,
+            "secondary_anthropic_thinking": sec_ant_thinking,
         })
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:

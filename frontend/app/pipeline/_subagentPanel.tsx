@@ -5,6 +5,7 @@ import type { SubagentData, SubagentNode } from './_helpers'
 import { fsBrowse } from '@/lib/api'
 import { toast } from 'sonner'
 import { VariableButton } from './_variablePicker'
+import LlmRoleSelector from './_llmRoleSelector'
 
 // ── File Browser Modal（沿用 skillPanel 的設計）────────────────────────────────
 interface BrowseItem { name: string; is_dir: boolean; path: string }
@@ -216,9 +217,14 @@ export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete,
               className={inputCls}
             />
             <p className="text-xs text-gray-400 mt-1">
-              超過上限會視為失敗（沿用 runner retry 機制）。建議 3-5 輪、複雜任務 8-10 輪。
+              超過上限會視為失敗(沿用 runner retry 機制)。建議 3-5 輪、複雜任務 8-10 輪。
             </p>
           </div>
+
+          <LlmRoleSelector
+            value={data.llmRole || 'primary'}
+            onChange={(v) => onUpdate({ llmRole: v } as any)}
+          />
 
           {/* Output path */}
           <div>

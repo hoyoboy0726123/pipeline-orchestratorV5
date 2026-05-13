@@ -218,6 +218,7 @@ async def run_subagent(
     prev_outputs: Optional[list[dict]] = None,
     timeout: int = 600,
     step_logger: Optional[logging.Logger] = None,
+    llm_role: str = "primary",
 ) -> SubagentResult:
     """執行 subagent loop。
 
@@ -254,7 +255,7 @@ async def run_subagent(
     tool_timeout = _compute_tool_timeout(timeout)
 
     try:
-        llm = build_llm()
+        llm = build_llm(role=llm_role)
     except Exception as e:
         return SubagentResult(success=False, final_message="", iterations=0, error=f"LLM 建立失敗: {e}")
 

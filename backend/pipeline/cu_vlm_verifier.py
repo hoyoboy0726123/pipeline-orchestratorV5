@@ -120,6 +120,7 @@ async def verify_action_outcome(
     expected: str,
     logger: logging.Logger,
     timeout_sec: float = 30.0,
+    llm_role: str = "primary",
 ) -> dict:
     """送前後截圖 + expected 給 VLM、回 verdict dict。
 
@@ -160,7 +161,7 @@ async def verify_action_outcome(
     user_content = [{"type": "text", "text": user_text}, *image_blocks]
 
     try:
-        llm = build_llm(temperature=0)
+        llm = build_llm(temperature=0, role=llm_role)
         # run_in_executor 避免阻塞 event loop;timeout 防 LLM hang 影響整套 pipeline
         result = await asyncio.wait_for(
             asyncio.get_event_loop().run_in_executor(
