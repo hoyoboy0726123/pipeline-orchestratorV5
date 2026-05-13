@@ -850,6 +850,164 @@ def _skill_read_file(path: str, max_lines: int = 100) -> str:
         return f"[錯誤] 讀取失敗：{e}"
 
 
+# ── write_file / edit_file / grep / glob tools ─────────────────────────────
+# 這 4 個 tool 解掉「LLM 必須用 Python 包外國語言」的結構性問題:
+# - write_file:LLM 直接傳 content 寫檔、不用 Python `"""..."""` 包(解 triple-quote 雷)
+# - edit_file:局部替換、不用整檔 read+rewrite
+# - grep:搜尋字串、不用 subprocess 包 grep
+# - glob:列檔、不用 Path.glob() in Python
+# 跟 run_python 互補:run_python 仍是邏輯處理主力,新 tool 接管「LLM 已知做什麼」場景
+
+def _skill_write_file(input_str: str) -> str:
+    """write_file(path, content) — JSON input: {"path": "...", "content": "..."}.
+    解 triple-quote 雷:LLM 直接傳 content,不用 Python 字串嵌入。"""
+    try:
+        import json as _json
+        data = _json.loads(input_str)
+        path = data.get("path") or data.get("file_path") or ""
+        content = data.get("content")
+        if not path:
+            return "[錯誤] write_file 需要 'path' 欄位"
+        if content is None:
+            return "[錯誤] write_file 需要 'content' 欄位"
+        # WSL→Windows 路徑轉換
+        path = _wsl_to_windows_path(path)
+        p = Path(path).expanduser()
+        # 自動建 parent 目錄
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        size = p.stat().st_size
+        return f"✓ 已寫入 {p}({size:,} bytes、{len(content.splitlines()) if isinstance(content, str) else '?'} 行)"
+    except _json.JSONDecodeError as e:
+        return (f"[錯誤] JSON 格式錯誤:{e}\n"
+                f"正確格式:{{\"path\":\"x.js\",\"content\":\"檔案內容\"}}\n"
+                f"注意 content 內的 \" 要 escape 為 \\\"、換行用 \\n")
+    except Exception as e:
+        return f"[錯誤] 寫檔失敗:{e.__class__.__name__}: {e}"
+
+
+def _skill_edit_file(input_str: str) -> str:
+    """edit_file(path, old, new) — JSON: {"path":"...", "old_text":"...", "new_text":"..."}.
+    局部替換、不用整檔重寫。要求 old_text 唯一出現一次(避免歧義)。"""
+    try:
+        import json as _json
+        data = _json.loads(input_str)
+        path = data.get("path") or data.get("file_path") or ""
+        old_text = data.get("old_text") or data.get("old") or ""
+        new_text = data.get("new_text") or data.get("new") or ""
+        replace_all = bool(data.get("replace_all", False))
+        if not path:
+            return "[錯誤] edit_file 需要 'path' 欄位"
+        if not old_text:
+            return "[錯誤] edit_file 需要 'old_text' 欄位(要被替換的文字)"
+        path = _wsl_to_windows_path(path)
+        p = Path(path).expanduser()
+        if not p.exists():
+            return f"[錯誤] 檔案不存在:{p}"
+        content = p.read_text(encoding="utf-8", errors="replace")
+        count = content.count(old_text)
+        if count == 0:
+            return (f"[錯誤] 在 {p.name} 找不到 old_text。檢查:(1) 完全相符的字串(含空格/換行);"
+                    f"(2) 用 read_file 確認檔案目前內容")
+        if count > 1 and not replace_all:
+            return (f"[錯誤] old_text 在檔案內出現 {count} 次、不唯一。"
+                    f"加更多上下文讓它唯一、或加 \"replace_all\": true 全部替換")
+        new_content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
+        p.write_text(new_content, encoding="utf-8")
+        return f"✓ 已替換 {p.name}({count if replace_all else 1} 處)、檔案 {p.stat().st_size:,} bytes"
+    except _json.JSONDecodeError as e:
+        return f"[錯誤] JSON 格式錯誤:{e}"
+    except Exception as e:
+        return f"[錯誤] 編輯失敗:{e.__class__.__name__}: {e}"
+
+
+def _skill_grep(input_str: str) -> str:
+    """grep(pattern, path) — JSON: {"pattern":"...", "path":"...", "glob":"*.py"(選填), "max_results":50(選填)}.
+    用 ripgrep / fallback re。回 matching lines with file:line prefix。"""
+    try:
+        import json as _json
+        import re as _re
+        data = _json.loads(input_str)
+        pattern = data.get("pattern") or ""
+        search_path = data.get("path") or "."
+        glob_filter = data.get("glob") or ""
+        max_results = int(data.get("max_results") or 50)
+        case_sensitive = bool(data.get("case_sensitive", True))
+        if not pattern:
+            return "[錯誤] grep 需要 'pattern' 欄位"
+        search_path = _wsl_to_windows_path(search_path)
+        root = Path(search_path).expanduser()
+        if not root.exists():
+            return f"[錯誤] 路徑不存在:{root}"
+        # 用 Python re scan(避免依賴外部 ripgrep);大量檔案搜尋仍 OK
+        flags = 0 if case_sensitive else _re.IGNORECASE
+        try:
+            regex = _re.compile(pattern, flags)
+        except _re.error as e:
+            return f"[錯誤] regex 語法錯:{e}。試試簡化 pattern 或加 \\ 跳脫特殊字元"
+        results: list[str] = []
+        files_iter = [root] if root.is_file() else root.rglob(glob_filter or "*")
+        for fp in files_iter:
+            if not fp.is_file() or fp.suffix.lower() in {'.pkl', '.zip', '.gz', '.png', '.jpg', '.jpeg', '.pdf', '.xlsx', '.docx', '.pptx'}:
+                continue
+            try:
+                with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                    for lineno, line in enumerate(f, 1):
+                        if regex.search(line):
+                            rel = fp.relative_to(root) if root.is_dir() else fp.name
+                            results.append(f"{rel}:{lineno}:{line.rstrip()[:200]}")
+                            if len(results) >= max_results:
+                                break
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(results) >= max_results:
+                break
+        if not results:
+            return f"(no match for `{pattern}` in {root})"
+        suffix = f"\n... (截斷,只顯示前 {max_results} 筆)" if len(results) >= max_results else ""
+        return "\n".join(results) + suffix
+    except _json.JSONDecodeError as e:
+        return f"[錯誤] JSON 格式錯誤:{e}"
+    except Exception as e:
+        return f"[錯誤] grep 失敗:{e.__class__.__name__}: {e}"
+
+
+def _skill_glob(input_str: str) -> str:
+    """glob(pattern, path) — JSON: {"pattern":"*.py", "path":"."(選填), "max_results":100(選填)}.
+    用 pathlib.rglob 列檔。回 sorted file paths。"""
+    try:
+        import json as _json
+        data = _json.loads(input_str)
+        pattern = data.get("pattern") or ""
+        search_path = data.get("path") or "."
+        max_results = int(data.get("max_results") or 100)
+        if not pattern:
+            return "[錯誤] glob 需要 'pattern' 欄位(例 *.py、**/*.csv)"
+        search_path = _wsl_to_windows_path(search_path)
+        root = Path(search_path).expanduser()
+        if not root.exists():
+            return f"[錯誤] 路徑不存在:{root}"
+        if not root.is_dir():
+            return f"[錯誤] glob 的 path 必須是目錄:{root}"
+        matches = []
+        for fp in root.rglob(pattern):
+            if fp.is_file():
+                rel = fp.relative_to(root)
+                size = fp.stat().st_size
+                matches.append(f"{rel} ({size:,} B)")
+                if len(matches) >= max_results:
+                    break
+        if not matches:
+            return f"(no file matches `{pattern}` in {root})"
+        matches.sort()
+        suffix = f"\n... (截斷,只顯示前 {max_results} 筆)" if len(matches) >= max_results else ""
+        return f"{len(matches)} files matching `{pattern}` in {root}:\n" + "\n".join(matches) + suffix
+    except _json.JSONDecodeError as e:
+        return f"[錯誤] JSON 格式錯誤:{e}"
+    except Exception as e:
+        return f"[錯誤] glob 失敗:{e.__class__.__name__}: {e}"
+
+
 IMAGE_EXTS_SKILL = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
                     '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp'}
 
@@ -1156,6 +1314,14 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
         return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
     elif tool_name == "read_file":
         return _skill_read_file(tool_input)
+    elif tool_name == "write_file":
+        return _skill_write_file(tool_input)
+    elif tool_name == "edit_file":
+        return _skill_edit_file(tool_input)
+    elif tool_name == "grep":
+        return _skill_grep(tool_input)
+    elif tool_name == "glob":
+        return _skill_glob(tool_input)
     elif tool_name == "web_search":
         # call_count 由呼叫方維護（每個 skill step 獨立計數）— 這邊拿不到，交由 agent loop 處理呼叫前計數
         return _skill_web_search(tool_input, logger=logger)
@@ -1670,15 +1836,33 @@ async def execute_step_with_skill(
    ✓ 用於:讀上一步輸出 / 樣本檔 / 設定檔(餵推理用)
    ✗ 不要用於:「驗證自己剛 write 的檔存在」(Python exit 0 已證、用 Path.exists() 在 run_python 內就行)
    ✗ 不要用於:「再確認一次自己剛寫的內容對不對」(交給外部 validator、不要重複工作浪費 iter)
-4. view_image — 看圖(png/jpg/gif/webp/bmp、上限 20MB)。驗證圖表 / 從圖擷取資訊用。
+4. write_file — **整檔寫入**(LLM 已知 content、直接寫,**避免用 Python 三引號包大段外語碼**)
+   <input>{"path":"output.js","content":"const x = ...整段內容..."}</input>
+   ✓ 用於:寫 JS/HTML/CSS/SQL/markdown/設定檔等「LLM 知道全部內容、要原樣寫到檔」
+   ✓ 解 triple-quote 雷:不要再 run_python 然後用 Python 三引號(三個雙引號)包大段 JS
+   ✗ 不要用於:寫 pandas DataFrame、計算結果(用 run_python + to_csv 才對)
+   注意:content 內 " 要 escape 為 \\"、換行用 \\n(JSON 標準)
+5. edit_file — **局部替換**(部分修改既有檔案、不整檔重寫)
+   <input>{"path":"x.py","old_text":"return None","new_text":"return result"}</input>
+   ✓ 用於:換一行、改一個函式、修一個 bug
+   要求:old_text 在檔內**唯一**(否則加上下文讓它唯一、或加 "replace_all": true)
+6. grep — **搜尋字串 in files**
+   <input>{"pattern":"import\\\\s+pandas","path":".","glob":"*.py"}</input>
+   ✓ 用於:找 keyword、找 imports、找 TODO、找錯誤訊息
+   選填:glob(*.py 之類過濾)、max_results(預設 50)、case_sensitive(預設 true)
+7. glob — **列檔案**(找符合 pattern 的檔)
+   <input>{"pattern":"*.csv","path":"data/"}</input>
+   ✓ 用於:看資料夾有哪些檔、找特定副檔名
+   pattern 用 pathlib 規則:`*.py` / `**/*.csv` / `report_*.md`
+8. view_image — 看圖(png/jpg/gif/webp/bmp、上限 20MB)。驗證圖表 / 從圖擷取資訊用。
    模型不支援視覺時直接 done(success=false) 並在 error 註記。
    <input>path/to/chart.png</input>
-5. ask_user — 不確定 / 模糊 / 高風險時**優先用、不要硬猜**:任務歧義(欄位 / 格式 / 路徑)、
+9. ask_user — 不確定 / 模糊 / 高風險時**優先用、不要硬猜**:任務歧義(欄位 / 格式 / 路徑)、
    覆寫 / 刪除使用者檔、外部 API、多種合理做法、環境狀態不確定。
    <input>{"question":"輸出哪種格式?","options":["PDF","Word","MD"],"context":"資料 120 筆"}</input>
    question 必填(中文、可一次多題)、options 選填(陣列 → UI 顯示按鈕)、context 選填。
    使用者回 → 工具回傳「使用者回答：<答案>」、再依答案繼續。逾時 / 取消 → 用合理預設或 done(success=false)。
-6. done — 完成回報。
+10. done — 完成回報。
    成功:<input>{"success":true,"summary":"完成了什麼"}</input>
    失敗(已窮盡所有可用工具與方法後):<input>{"success":false,"error":"已試 X/Y/Z 各自失敗原因","missing_packages":["套件A"]}</input>
    - 必須先試完已安裝套件的所有替代方案才呼叫 success=false
