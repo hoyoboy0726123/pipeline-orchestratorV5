@@ -690,8 +690,23 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
     # 默認用 Python 三引號包整段 JS/HTML 寫到 .js/.html。實測訓練資料 prior > 所有
     # 自願性提示。唯一解法:系統層直接 reject、強制 LLM 改路徑。
     import re as _trip_re
+    # case A:未配對三引號(LLM 寫太長忘記收尾)→ Python 必定 SyntaxError、先攔下
+    if len(code) > 800:
+        _dq_count = code.count('"""')
+        _sq_count = code.count("'''")
+        if _dq_count % 2 == 1 or _sq_count % 2 == 1:
+            return (
+                f"[REJECTED] 偵測到 Python 三引號未配對("
+                f"雙引號出現 {_dq_count} 次、單引號出現 {_sq_count} 次、奇數代表沒收尾)。\n\n"
+                "⚠️ 系統強制拒絕 — 你在寫大段內容時忘記關閉三引號、Python 必定 SyntaxError。"
+                "實測強模型反覆撞此坑、改方法:\n\n"
+                "✅ 改用 write_file tool 直接寫檔(content 是 JSON 參數、不過 Python 字串嵌入):\n"
+                '<tool>write_file</tool><input>{"path":"output.js","content":"const x = ...你的內容..."}</input>\n\n'
+                "記得 content 內 \" escape 為 \\\" 、換行用 \\n(JSON 標準)。\n"
+                "寫完用 run_shell 跑(若是 .js → `node output.js`)。"
+            )
     _trip_blocks = _trip_re.findall(r'"""(.*?)"""', code, _trip_re.DOTALL)
-    # 過濾掉短 docstring / 短字串(<= 800 字元、<= 30 行)、只攔大段
+    # case B:配對但內含大段內容(>800 字 或 >30 行)
     _big_trip_blocks = [b for b in _trip_blocks if len(b) > 800 or b.count('\n') > 30]
     if _big_trip_blocks:
         _biggest = max(_big_trip_blocks, key=len)
