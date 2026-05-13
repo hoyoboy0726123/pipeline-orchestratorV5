@@ -16,7 +16,7 @@ import { ChevronDown, ChevronRight, MousePointerClick, Type, Eye, Hash, ListChec
 import { toast } from 'sonner'
 import {
   uiaInspect, uiaHighlight, uiaListWindows,
-  uiaPickerStart, uiaPickerPoll, uiaPickerConsume, uiaPickerStop, uiaPickerConfirm,
+  uiaPickerStart, uiaPickerPoll, uiaPickerConsume, uiaPickerStop,
   type UiaElement, type UiaInspectResult, type UiaWindowInfo
 } from '@/lib/api'
 import type { ComputerUseAction } from './_helpers'
@@ -258,7 +258,7 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
             <div className="flex items-center gap-2">
               <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span className="font-semibold text-emerald-700 text-sm">🎯 定位中…</span>
-              <span className="text-[10px] text-gray-500 ml-auto">F8/F9 或下方按鈕</span>
+              <span className="text-[10px] text-gray-500 ml-auto">F8 確認 / F9 取消</span>
             </div>
             {hoveredEl ? (
               <div className="bg-white border border-emerald-200 rounded p-2 text-[11px]">
@@ -277,36 +277,6 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
             ) : (
               <div className="text-[11px] text-gray-500 italic px-1">移動滑鼠到桌面元素…</div>
             )}
-            {/* 按鈕保險(F8/F9 失靈時用)*/}
-            <div className="flex gap-2">
-              <button
-                onClick={async () => {
-                  try {
-                    const r = await uiaPickerConfirm()
-                    if (r.ok && r.element) {
-                      // picker backend 已停、frontend 也要 sync
-                      if (pickerPollRef.current) { clearInterval(pickerPollRef.current); pickerPollRef.current = null }
-                      setPickerActive(false)
-                      setHoveredEl(null)
-                      setPicker({ element: r.element, path: ['picked'] })
-                      toast.success(`已選 ${r.element.type}${r.element.name ? ': ' + r.element.name.slice(0, 40) : ''}`)
-                    } else {
-                      toast.error(r.error || '目前沒 hover 任何元素')
-                    }
-                  } catch (e) { toast.error((e as Error).message) }
-                }}
-                disabled={!hoveredEl}
-                className="flex-1 px-2 py-1.5 bg-emerald-600 text-white rounded text-xs font-medium hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-1"
-              >
-                <CheckCircle className="w-3.5 h-3.5" /> 確認(F8)
-              </button>
-              <button
-                onClick={stopPicker}
-                className="flex-1 px-2 py-1.5 bg-white border border-gray-300 text-gray-700 rounded text-xs font-medium hover:bg-gray-50 flex items-center justify-center gap-1"
-              >
-                <X className="w-3.5 h-3.5" /> 取消(F9)
-              </button>
-            </div>
           </div>
         )}
       </div>
@@ -329,32 +299,34 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
         <label className="text-xs font-semibold text-purple-700 uppercase tracking-wide block mb-1.5">
           🪟 目標視窗(支援 wildcard *、空 = 當前 foreground)
         </label>
-        <div className="flex items-center gap-2">
-          <input
-            value={uiaWindow}
-            onChange={e => onUpdateWindow(e.target.value)}
-            placeholder="例:*檔案總管* / *{{ input.app }}* / 留空用 foreground"
-            className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white"
-          />
+        {/* 輸入單獨一行 + 三顆按鈕第二行(等寬、不會被擠變形) */}
+        <input
+          value={uiaWindow}
+          onChange={e => onUpdateWindow(e.target.value)}
+          placeholder="例:*檔案總管* / *{{ input.app }}* / 留空用 foreground"
+          className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white mb-1.5"
+        />
+        <div className="flex items-center gap-1.5">
           <VariableButton
             workflowId={workflowId}
             onPick={(p) => onUpdateWindow(`${uiaWindow || ''}{{ ${p} }}`)}
+            className="!flex-shrink-0"
           />
           <button
             onClick={loadWindows}
             disabled={loadingWindows}
             title="列出當下所有 top-level 視窗、選一個自動填 pattern"
-            className="px-2.5 py-1.5 bg-white border border-purple-300 text-purple-700 rounded-lg text-sm font-medium hover:bg-purple-50 disabled:bg-gray-100 flex items-center gap-1"
+            className="flex-1 px-2 py-1.5 bg-white border border-purple-300 text-purple-700 rounded-lg text-xs font-medium hover:bg-purple-50 disabled:bg-gray-100 flex items-center justify-center gap-1 whitespace-nowrap"
           >
-            {loadingWindows ? <RefreshCcw className="w-3.5 h-3.5 animate-spin" /> : <AppWindow className="w-3.5 h-3.5" />}
+            {loadingWindows ? <RefreshCcw className="w-3.5 h-3.5 animate-spin shrink-0" /> : <AppWindow className="w-3.5 h-3.5 shrink-0" />}
             列視窗
           </button>
           <button
             onClick={inspect}
             disabled={loading}
-            className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:bg-gray-300 flex items-center gap-1"
+            className="flex-1 px-2 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:bg-gray-300 flex items-center justify-center gap-1 whitespace-nowrap"
           >
-            {loading ? <RefreshCcw className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+            {loading ? <RefreshCcw className="w-3.5 h-3.5 animate-spin shrink-0" /> : <Search className="w-3.5 h-3.5 shrink-0" />}
             {loading ? '讀取中…' : '抓取元素'}
           </button>
         </div>

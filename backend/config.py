@@ -29,3 +29,27 @@ def check_config() -> list[str]:
     if not GROQ_API_KEY:
         missing.append("GROQ_API_KEY（AI 驗證與 YAML 助手需要）")
     return missing
+
+
+def check_host_tools() -> list[str]:
+    """檢查 host 端必要系統工具(非 pip 套件、非 sandbox 可達)是否裝。
+
+    回傳警告字串 list、空 list = 全裝齊。non-fatal、只 log 給使用者參考。
+    """
+    warnings: list[str] = []
+    try:
+        from pipeline.host_tools import get_host_tools
+        for t in get_host_tools():
+            if t.required and not t.installed:
+                # 平台對應 install 指令
+                import platform
+                plat_key = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}.get(
+                    platform.system(), "linux"
+                )
+                cmd = t.install_cmd.get(plat_key, "")
+                warnings.append(
+                    f"⚠ 缺少 {t.name}({t.why})。安裝指令:{cmd}"
+                )
+    except Exception as e:
+        warnings.append(f"⚠ host 工具檢查失敗、略過:{e}")
+    return warnings

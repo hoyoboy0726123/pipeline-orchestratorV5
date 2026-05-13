@@ -69,7 +69,7 @@ def clear_template_cache() -> None:
 
 
 def request_abort(run_id: str) -> None:
-    """標記此 run 需立即中止；computer_use 引擎會在每個動作間檢查"""
+    """標記此 run 需立即中止;computer_use 引擎會在每個動作間檢查"""
     _abort_flags[run_id] = True
 
 
@@ -79,6 +79,68 @@ def clear_abort(run_id: str) -> None:
 
 def _should_abort(run_id: Optional[str]) -> bool:
     return bool(run_id) and _abort_flags.get(run_id, False)
+
+
+# ── ESC × 2 緊急停止 watcher(Windows only)────────────────────────────
+# 比 pyautogui FAILSAFE (滑鼠甩到 0,0) 更直覺。
+# 偵測邏輯:GetAsyncKeyState 輪詢 VK_ESCAPE,看到 rising edge(從沒按 → 按下)
+# 兩次間隔 < 500ms 就觸發 abort。
+#
+# 設計:模組級單例 watcher、新 step 啟動時切換 run_id;不需要 try/finally 包整個
+# step 函式 — 即使 step 函式有很多 return 路徑、watcher 也會 follow 最新 run_id。
+_esc_watcher_state: dict = {"running": False, "run_id": "", "logger": None, "thread": None}
+
+
+def _esc_watcher_loop():
+    """單例 watcher loop:看 _esc_watcher_state['run_id'] 動態 follow 當前 run。"""
+    import threading
+    try:
+        from ctypes import windll, c_short, c_long
+        VK_ESCAPE = 0x1B
+        get_key = windll.user32.GetAsyncKeyState
+        get_key.restype = c_short
+        get_key.argtypes = [c_long]
+    except Exception:
+        return  # 非 Windows、FAILSAFE 仍為備援
+
+    was_down = False
+    last_press_time = 0.0
+    DOUBLE_PRESS_WINDOW_SEC = 0.5
+
+    while _esc_watcher_state["running"]:
+        try:
+            raw = get_key(VK_ESCAPE)
+            is_down = bool(raw & 0x8000)
+            pressed_since = bool(raw & 1)
+            if (is_down and not was_down) or pressed_since:
+                now = time.time()
+                if now - last_press_time < DOUBLE_PRESS_WINDOW_SEC:
+                    rid = _esc_watcher_state.get("run_id") or ""
+                    lg = _esc_watcher_state.get("logger")
+                    if rid and lg:
+                        lg.warning(f"[esc-watcher] ⚠ 偵測到 ESC × 2、觸發 abort run_id={rid}")
+                        request_abort(rid)
+                    # 不停 loop、繼續看下個 step 的 ESC × 2
+                    last_press_time = 0.0
+                else:
+                    last_press_time = now
+            was_down = is_down
+            time.sleep(0.05)
+        except Exception:
+            time.sleep(0.1)
+
+
+def _ensure_esc_watcher(run_id: str, logger: logging.Logger) -> None:
+    """確保 watcher 已啟動;每次 step 開始時呼叫、會 update 當前 run_id"""
+    import threading
+    _esc_watcher_state["run_id"] = run_id
+    _esc_watcher_state["logger"] = logger
+    if _esc_watcher_state["running"]:
+        return  # 已有 watcher 在跑、只 update run_id 即可
+    _esc_watcher_state["running"] = True
+    t = threading.Thread(target=_esc_watcher_loop, daemon=True, name="esc-watcher")
+    _esc_watcher_state["thread"] = t
+    t.start()
 
 
 # ── 螢幕擷取與圖像比對 ──────────────────────────────────────────
@@ -1527,6 +1589,7 @@ def execute_computer_use_step(
     cu_vlm_max_retries: int = 1,
     # UIA 模式相關(action.type 是 uia_* 時用)
     uia_window: str = "",                   # 視窗 title pattern(可含 *)、空字串 = foreground
+    llm_role: str = "primary",              # VLM 把關用主/副模型
 ) -> StepResult:
     """執行一整個 computer_use 步驟。
 
@@ -1540,6 +1603,10 @@ def execute_computer_use_step(
     """
     import json  # 供 _screen_layout_match 讀 meta.json
     clear_abort(run_id or "")
+    # ── ESC × 2 緊急中止 watcher(Windows only)──
+    # 比 FAILSAFE 滑鼠甩到 (0,0) 更直覺;非 Windows 自動 no-op、FAILSAFE 仍生效當備援
+    if run_id:
+        _ensure_esc_watcher(run_id, logger)
     if len(actions) > MAX_ACTIONS_PER_STEP:
         return StepResult(
             success=False,
@@ -1623,22 +1690,22 @@ def execute_computer_use_step(
         from .cu_vlm_verifier import verify_action_outcome
         import asyncio as _aio
         try:
-            # execute_computer_use_step 在 run_in_executor 內、無 event loop、可直接 asyncio.run
             return _aio.run(verify_action_outcome(
                 before_path=before,
                 after_path=after,
                 expected=expected,
                 logger=logger,
                 timeout_sec=30.0,
+                llm_role=llm_role,
             ))
         except RuntimeError as e:
-            # 萬一被誤從 async context 呼叫(不該發生、但保險)、退到 new loop
             if "event loop" in str(e).lower():
                 _loop = _aio.new_event_loop()
                 try:
                     return _loop.run_until_complete(verify_action_outcome(
                         before_path=before, after_path=after,
                         expected=expected, logger=logger, timeout_sec=30.0,
+                        llm_role=llm_role,
                     ))
                 finally:
                     _loop.close()

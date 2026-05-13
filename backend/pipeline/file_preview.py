@@ -28,8 +28,10 @@ log = logging.getLogger(__name__)
 # ── 單頁圖片尺寸（統一規格，避免 TG 上大小不一致）──
 PREVIEW_WIDTH = 1600   # 合適手機閱讀
 PREVIEW_HEIGHT = 1200
-# 多頁文件最多 render 幾頁（PDF / PPTX），超過截斷
-MAX_PAGES = 3
+# 多頁文件最多 render 幾頁(PDF / PPTX),超過截斷。
+# 12 是經驗值:PPT 報告通常 8-12 張、VLM 驗排版要看完整;太多會炸 token / 上傳時間。
+# 想驗 N>12 張 PPT 的場景請拆 step 或寫成 vlm_check 動作。
+MAX_PAGES = 12
 # 表格類型（xlsx/csv）顯示前幾列
 MAX_TABLE_ROWS = 20
 # 文字類型（docx/txt）顯示前幾行
@@ -66,6 +68,19 @@ def render_file_preview(file_path: str, out_dir: Optional[str] = None) -> list[s
                     log.warning(f"[preview] LibreOffice 渲染失敗（{_e}）；退回 B1 pandas 表格（圖表會看不到）")
         except Exception as _e:
             log.debug(f"[preview] 偵測 chart 失敗、走 B1：{_e}")
+
+    # pptx / docx 的 B1(python-pptx / python-docx)只抽純文字、看不到版面 / 圖片 / 圖表 /
+    # 顏色 / 排版。對「視覺驗證 PPT 排版」這種需求 B1 永遠評不過(VLM 看到的是白底純文字 PNG、
+    # 不是真實投影片)。LibreOffice 有裝就用、沒裝才退回 B1 文字 PNG。
+    if ext in ("pptx", "docx"):
+        if _libreoffice_binary():
+            try:
+                log.info(f"[preview] {p.name} 走 LibreOffice 渲染真實版面")
+                return _render_via_libreoffice(p, out)
+            except Exception as _e:
+                log.warning(f"[preview] LibreOffice 渲染失敗({_e})、退回 B1 純文字 PNG")
+        else:
+            log.warning(f"[preview] {p.name} 將以 B1 純文字 PNG 預覽(LibreOffice 未安裝、視覺驗證可能誤判)")
 
     # B1 路線：每種格式有對應 renderer
     try:

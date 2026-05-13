@@ -1,0 +1,81 @@
+pipeline:
+  name: NB 輿情分析 PPT
+  validate: true
+  steps:
+    # 1) 爬筆電板
+    - name: 抓取_nb_shopping_列表
+      web_crawler: true
+      wc_mode: web
+      wc_url: "https://www.pttweb.cc/bbs/nb-shopping"
+      wc_js_render: true
+      wc_with_children: true
+      wc_max_children: 15
+      wc_target_post_count: 15
+      output:
+        path: "ai_output/NB 輿情分析/raw_posts.md"
+      timeout: 300
+
+    # 2) 篩選
+    - name: 篩選有討論價值的貼文
+      skill_mode: true
+      batch: |
+        從上一步抓回的內容裡,挑出至少 10 篇有討論價值的筆電相關貼文。
+        買賣文、公告、灌水短文不要。
+        每一篇都要把原文完整保留(後續分析會用到),不要只記標題跟連結。
+      output:
+        path: "ai_output/NB 輿情分析/filtered_posts.md"
+        description: "至少 10 篇,每篇含完整原文"
+      timeout: 600
+      retry: 1
+
+    # 3) 深度分析
+    - name: 深度分析每篇貼文
+      skill_mode: true
+      batch: |
+        針對上一步篩出的每一篇貼文,做一份深入的分析報告。
+        每篇要看得出來:在討論哪個品牌或機型、討論的是什麼主題、網友的整體情緒是正面還是負面、有沒有爭議點、共識是什麼。
+        最後加一段整體洞察:哪個品牌討論最熱、最常被抱怨的問題、整體情緒怎樣。
+      output:
+        path: "ai_output/NB 輿情分析/report.md"
+        description: "每篇有結構化分析,結尾有總體洞察"
+      timeout: 900
+      retry: 1
+
+    # 4) 產 PPT — 掛 pptx skill、剩下交給 LLM
+    - name: 產出 PPT 簡報
+      skill_mode: true
+      skill: pptx
+      batch: |
+        把上一步的分析報告做成一份專業的 PPT。
+        每篇貼文一頁、最後一頁總結。要看起來像會議簡報、不是純文字條列那種陽春版。
+      output:
+        path: "ai_output/NB 輿情分析/report.pptx"
+        description: "至少 12 張投影片、有設計感、不是純文字白底"
+      timeout: 1200
+      retry: 1
+
+    # 5) 視覺驗證
+    - name: 驗證 PPT 排版
+      visual_validation: true
+      vv_source: prev_output
+      vv_prompt: |
+        檢查這份 PPT 是否符合專業簡報水準:
+        - 不是純白底加黑字條列那種陽春版
+        - 排版乾淨、字沒有溢出或被截斷
+        - 有設計感(背景、配色、字體層次)
+        全部都過才算 pass。
+
+    # 6) 人工最終確認
+    - name: 人工確認後寄送
+      human_confirm: true
+      preview_prev_output: true
+      send_prev_output: true
+      message: |
+        PPT 已完成、視覺驗證也通過了。
+        附上預覽截圖,請最終確認是否要寄出。
+
+    # 7) 寄送
+    - name: 寄送分析報告
+      outlook_automation: true
+      outlook_template: send_with_attachment
+      outlook_params: {"to":"YOUR_EMAIL@asus.com","subject":"NB 輿情分析報告","body":"附件為 PTT 筆電板自動分析結果。","attachments":["ai_output/NB 輿情分析/report.pptx"]}

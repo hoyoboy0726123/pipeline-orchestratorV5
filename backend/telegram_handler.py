@@ -2035,7 +2035,7 @@ async def _poll_loop():
                         )
                     continue
 
-                if action not in ("retry", "skip", "abort", "continue"):
+                if action not in ("retry", "skip", "abort", "continue", "redo_prev"):
                     await cb.answer("❓ 未知操作")
                     continue
 
@@ -2048,9 +2048,10 @@ async def _poll_loop():
                     # 更新原訊息，標記已處理
                     action_labels = {
                         "retry": "🔄 已選擇重試",
-                        "skip": "⏩ 已選擇跳過",
+                        "skip": "⏩ 已選擇跳過此步",
                         "abort": "🛑 已選擇中止",
                         "continue": "✅ 已確認繼續",
+                        "redo_prev": "↩ 已選擇重做上一步",
                     }
                     try:
                         original_text = cb.message.text or ""

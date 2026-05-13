@@ -1,9 +1,12 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X, MousePointerSquareDashed, Trash2, ScanEye } from 'lucide-react'
 import type { VisualValidationData } from './_helpers'
 import ScreenRegionPicker from './_screenRegionPicker'
 import { VariableButton } from './_variablePicker'
+import LlmRoleSelector from './_llmRoleSelector'
+import { getHostTools } from '@/lib/api'
+import { toast } from 'sonner'
 
 interface Props {
   data: VisualValidationData
@@ -19,6 +22,30 @@ export default function VisualValidationPanel({ data, onUpdate, onClose, onDelet
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/20 bg-white'
   const [showPicker, setShowPicker] = useState(false)
   const hasRegion = data.searchRegion && data.searchRegion.length === 4 && data.searchRegion[2] > 0 && data.searchRegion[3] > 0
+
+  // 偵測主機是否裝 LibreOffice — pptx/docx 走 prev_output 模式必須
+  // 沒裝 → prev_output radio disable + 已選此模式時自動切到 current_screen
+  const [libreofficeOk, setLibreofficeOk] = useState<boolean | null>(null)
+  useEffect(() => {
+    getHostTools()
+      .then(r => {
+        const lo = r.tools.find(t => t.name === 'LibreOffice')
+        setLibreofficeOk(!!lo?.installed)
+      })
+      .catch(() => setLibreofficeOk(null))
+  }, [])
+
+  // 沒裝 LibreOffice 且當前是 prev_output → 自動切 current_screen + 提示
+  useEffect(() => {
+    if (libreofficeOk === false && data.source === 'prev_output') {
+      onUpdate({ source: 'current_screen' })
+      toast.warning('主機未裝 LibreOffice — 已自動切到「目前螢幕」模式;裝完 LibreOffice 並重啟 backend 才能用「上一步輸出檔」', {
+        duration: 7000,
+      })
+    }
+  }, [libreofficeOk, data.source, onUpdate])
+
+  const prevOutputDisabled = libreofficeOk === false
 
   return (
     <div className="absolute top-0 right-0 h-full w-[420px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
@@ -50,24 +77,47 @@ export default function VisualValidationPanel({ data, onUpdate, onClose, onDelet
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">看什麼？</label>
           <div className="space-y-1.5">
-            {/* 上一步輸出檔 */}
-            <label className={`block p-2.5 rounded-lg border cursor-pointer transition-colors ${
-              data.source === 'prev_output'
-                ? 'border-indigo-400 bg-indigo-50'
-                : 'border-gray-200 hover:border-indigo-200 hover:bg-gray-50'
-            }`}>
+            {/* 上一步輸出檔(沒裝 LibreOffice 時 disable、pptx/docx 視覺渲染必須) */}
+            <label
+              className={`block p-2.5 rounded-lg border transition-colors ${
+                prevOutputDisabled
+                  ? 'border-gray-200 bg-gray-50 opacity-60 cursor-not-allowed'
+                  : data.source === 'prev_output'
+                    ? 'border-indigo-400 bg-indigo-50 cursor-pointer'
+                    : 'border-gray-200 hover:border-indigo-200 hover:bg-gray-50 cursor-pointer'
+              }`}
+              onClick={() => {
+                if (prevOutputDisabled) {
+                  toast.error('主機未裝 LibreOffice — 無法渲染 pptx/docx 真實版面;此模式停用。請先安裝再重啟 backend:winget install -e --id TheDocumentFoundation.LibreOffice', {
+                    duration: 9000,
+                  })
+                }
+              }}
+            >
               <div className="flex items-start gap-2">
                 <input type="radio"
                        name="vv-source"
                        checked={data.source === 'prev_output'}
-                       onChange={() => onUpdate({ source: 'prev_output' })}
-                       className="mt-0.5 accent-indigo-600" />
+                       onChange={() => !prevOutputDisabled && onUpdate({ source: 'prev_output' })}
+                       disabled={prevOutputDisabled}
+                       className="mt-0.5 accent-indigo-600 disabled:cursor-not-allowed" />
                 <div className="flex-1">
-                  <div className="text-sm font-medium text-gray-800">上一步的輸出檔</div>
+                  <div className="text-sm font-medium text-gray-800 flex items-center gap-2">
+                    上一步的輸出檔
+                    {prevOutputDisabled && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-mono">需 LibreOffice</span>
+                    )}
+                  </div>
                   <div className="text-[11px] text-gray-500 leading-relaxed mt-0.5">
-                    自動處理：圖檔（PNG/JPG）直送 VLM；非圖檔（xlsx/docx/pdf）自動 render 成 PNG 再送（多 sheet xlsx 會每 sheet 拍一張全部送）。
+                    自動處理:圖檔(PNG/JPG)直送 VLM;非圖檔(xlsx/docx/pdf/pptx)自動 render 成 PNG 再送。
                     <br />
-                    <span className="text-indigo-600">📄 用在：驗證上一步腳本/Skill 產出的檔案是不是對的</span>
+                    <span className="text-indigo-600">📄 用在:驗證上一步腳本 / Skill 產出的檔案是不是對的</span>
+                    {prevOutputDisabled && (
+                      <>
+                        <br />
+                        <span className="text-red-600">⚠ 此模式已停用 — pptx / docx 真實版面渲染需 LibreOffice。請改用「目前螢幕」、或安裝 LibreOffice 後重啟 backend。</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -126,10 +176,15 @@ export default function VisualValidationPanel({ data, onUpdate, onClose, onDelet
             }
             className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[120px]`}
           />
-          <p className="text-[11px] text-gray-400 mt-1">VLM 會回 pass / fail + 原因。pass=false 步驟即失敗（會走 retry 邏輯）</p>
+          <p className="text-[11px] text-gray-400 mt-1">VLM 會回 pass / fail + 原因。pass=false 步驟即失敗(會走 retry 邏輯)</p>
         </div>
 
-        {/* 螢幕區域選擇器（只在 current_screen 時顯示） */}
+        <LlmRoleSelector
+          value={(data as any).llmRole || 'primary'}
+          onChange={(v) => onUpdate({ llmRole: v } as any)}
+        />
+
+        {/* 螢幕區域選擇器(只在 current_screen 時顯示) */}
         {data.source === 'current_screen' && (
           <div className="rounded-xl border border-indigo-200 bg-indigo-50/40 p-3 space-y-2">
             <div className="flex items-center justify-between">
