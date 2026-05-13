@@ -685,6 +685,38 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
     tool_tag_pos = code.find('<tool>')
     if tool_tag_pos > 0:
         code = code[:tool_tag_pos].rstrip()
+    # ── 強制攔截:Python 三引號包大段非 Python 內容 ─────────────────────────
+    # 強模型(Sonnet/Opus)即使有 write_file tool + system rule + 對症提示、依然會
+    # 默認用 Python 三引號包整段 JS/HTML 寫到 .js/.html。實測訓練資料 prior > 所有
+    # 自願性提示。唯一解法:系統層直接 reject、強制 LLM 改路徑。
+    import re as _trip_re
+    _trip_blocks = _trip_re.findall(r'"""(.*?)"""', code, _trip_re.DOTALL)
+    # 過濾掉短 docstring / 短字串(<= 800 字元、<= 30 行)、只攔大段
+    _big_trip_blocks = [b for b in _trip_blocks if len(b) > 800 or b.count('\n') > 30]
+    if _big_trip_blocks:
+        _biggest = max(_big_trip_blocks, key=len)
+        _lines = _biggest.count('\n') + 1
+        _chars = len(_biggest)
+        _preview = _biggest[:200].replace('\n', '\\n')
+        return (
+            f"[REJECTED] 偵測到 Python 三引號包大段內容(最大 {_chars:,} 字、{_lines} 行、"
+            f"開頭: `{_preview}...`)。\n\n"
+            f"⚠️ 系統強制拒絕此寫法 — 三引號包大段 JS/HTML/SQL/外語碼**極易因內含字元破裂**、"
+            f"實測強模型(Sonnet/Opus)反覆撞此坑。\n\n"
+            f"✅ **改用 write_file tool** 直接寫檔(content 是 JSON 參數、不過 Python 字串嵌入):\n"
+            f'<tool>write_file</tool><input>{{"path":"output.js","content":"const x = ...你的內容..."}}</input>\n\n'
+            f"記得 content 內 \" 要 escape 為 \\\" 、換行用 \\n(JSON 標準)。\n"
+            f"寫完用 run_shell 跑(若是 .js → `node output.js`)。\n\n"
+            f"再次提交相同 run_python 仍會被系統拒絕、必須切換 tool。"
+        )
+    # 同理偵測 三個單引號(也算包大段)
+    _trip_blocks_s = _trip_re.findall(r"'''(.*?)'''", code, _trip_re.DOTALL)
+    _big_trip_blocks_s = [b for b in _trip_blocks_s if len(b) > 800 or b.count('\n') > 30]
+    if _big_trip_blocks_s:
+        return (
+            "[REJECTED] 偵測到 Python 單三引號(''')包大段內容。\n"
+            "✅ 改用 write_file tool 寫檔、再用 run_shell 執行該檔。"
+        )
     # 注入 done / view_image / read_file 的 no-op stub，避免 LLM 把工具名當 Python 函式呼叫而崩潰
     # 另外抑制所有 warnings，避免 pandas FutureWarning 等雜訊污染 stderr 害 LLM 誤以為失敗
     # 第一行必須是 UTF-8 encoding 宣告（PEP 263）：即使我們用 UTF-8 寫檔，也保險讓 Python 明確識別
@@ -1824,6 +1856,13 @@ async def execute_step_with_skill(
     )
 
     system_prompt = _date_block + """你是 pipeline Skill 執行 agent。根據任務描述自主寫程式並跑、回繁體中文。
+
+⚠️ **寫檔規則(優先順序、必守、不要違反)**:
+- LLM 已知完整 content、要原樣寫到檔 → **一律 write_file**(包括 .js / .html / .css / .md / .json / .yaml)
+- 局部修改既有檔(換一行、改一個函式)→ **一律 edit_file**
+- 寫 pandas DataFrame / 動態計算結果 / dump 大量資料 → run_python(用 to_csv / to_excel 等)
+- **嚴禁** 用 run_python + Path(p).write_text(...) 寫**超過 10 行**的內容(必中 Python 字串嵌入字元/引號雷、實測強模型反覆撞)
+- 寫 PPT/DOCX 等需要呼叫 pptxgenjs / python-pptx → 用 write_file 把整段 JS/Python script 直接寫到檔、再 run_shell 執行該檔(**不要** Python 三引號包大段)
 
 工具(每次回覆只能呼叫一個、用 <tool>名稱</tool><input>...</input> 格式):
 
