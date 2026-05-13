@@ -1566,19 +1566,8 @@ export default function PipelinePage() {
             {/* AI 解決建議 */}
             {awaitingSuggestion && (
               <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-blue-700 mb-0.5">💡 AI 建議</p>
-                    <p className="text-xs text-blue-800 leading-relaxed">{awaitingSuggestion}</p>
-                  </div>
-                  <a
-                    href="/settings"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="shrink-0 px-2.5 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 whitespace-nowrap"
-                    title="前往設定頁面安裝套件"
-                  >⚙️ 安裝套件</a>
-                </div>
+                <p className="text-xs font-semibold text-blue-700 mb-0.5">💡 AI 建議</p>
+                <p className="text-xs text-blue-800 leading-relaxed">{awaitingSuggestion}</p>
               </div>
             )}
             {/* 補充指示輸入框 */}

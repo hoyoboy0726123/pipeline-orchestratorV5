@@ -55,6 +55,69 @@ SKILL_CONTEXT_KEEP_RECENT_FULL = 3
 SKILL_CONTEXT_PREVIEW_CHARS = 200
 
 
+# ── 錯誤分類 + 對症提示 ───────────────────────────────────────────────────────
+# 連續 2 次同類錯誤時、注入具體的恢復策略給 LLM(取代「換策略」這種空話)
+# 每條 (kind, regex, hint),kind 是用來 dedup 計數的、regex 比對 stderr/tool_result
+import re as _re
+_ERROR_HINTS: list[tuple[str, "_re.Pattern[str]", str]] = [
+    ("syntax_triple_quote",
+     _re.compile(r"unterminated.*triple-quoted|EOL while scanning string|unterminated string literal", _re.IGNORECASE),
+     '你用 Python `"""..."""` 包大段 JS/HTML/SQL 容易破。改成 `Path(p).write_text(content, encoding="utf-8")` '
+     '把要寫的內容當一般字串、別當 Python source code 嵌入。或者把長字串拆成多個 .write() append。'),
+    ("syntax_general",
+     _re.compile(r"SyntaxError|IndentationError", _re.IGNORECASE),
+     'Python 語法錯誤。常見原因:(1) f-string 內含 `{` `}` 字面值要寫 `{{` `}}`;(2) 中文標點 `,` `:` `:` `;` 被誤用;'
+     '(3) 縮排混 tab/space。建議把這次 run_python 拆 < 100 行分批跑、好定位問題。'),
+    ("attr_str_no_method",
+     _re.compile(r"AttributeError:\s*['\"]?str['\"]?\s*object has no attribute"),
+     '「str object has no attribute」幾乎都是 pickle 反序列化壞了(class 找不到變成 str)。**改用 JSON**:'
+     '`json.dump(obj, f, default=str)` 寫、`json.load(f)` 讀。不要用 pickle 保存 LLM/第三方套件的物件。'),
+    ("missing_module",
+     _re.compile(r"(ModuleNotFoundError|ImportError):\s*No module named\s+['\"]?([\w\.]+)"),
+     '套件未安裝。**不要 pip install、也不要 try/except 繞**,直接呼叫 '
+     '`done(success=false, missing_packages=["套件名"])`。系統會幫你安裝後自動重跑這步。'),
+    # docker_chdir 必須在 file_not_found 前面、否則「No such file or directory」會被 file_not_found 先匹配
+    ("docker_chdir",
+     _re.compile(r"OCI runtime exec failed|chdir.*no such file or directory", _re.IGNORECASE),
+     'Docker 容器看不到這條路徑、不在 bind mount 範圍。容器只掛了 PROJECT_DIR + .agents。'
+     '改寫到 `PROJECT_DIR/ai_output/` 內、不要寫 `~/ai_output/` 或其他絕對路徑。'),
+    ("file_not_found",
+     _re.compile(r"FileNotFoundError|No such file or directory", _re.IGNORECASE),
+     '找不到檔案。檢查:(1) 路徑含 `~` 沒展開 → `Path(p).expanduser()`;'
+     '(2) 寫檔前 `Path(p).parent.mkdir(parents=True, exist_ok=True)`;'
+     '(3) 上一步是否真的有輸出該檔(先 `Path(p).exists()` 驗證)。'),
+    ("permission_denied",
+     _re.compile(r"PermissionError|Permission denied", _re.IGNORECASE),
+     '檔案權限被拒。Windows 上多半是檔案被 Excel/PDF Reader/編輯器鎖住。'
+     '建議:(1) 寫到不同檔名(加 timestamp 後綴);(2) 或在 done 訊息提示使用者關閉該檔。'),
+    ("json_decode",
+     _re.compile(r"json\.(decoder\.)?JSONDecodeError|Expecting value"),
+     'JSON 解析失敗。先 `print(repr(s[:300]))` 看實際拿到的字串長怎樣 — 可能含 BOM、HTML、'
+     '純文字或裝飾字元(```json 開頭)。確認是合法 JSON 再 parse。'),
+    ("timeout",
+     _re.compile(r"asyncio.*TimeoutError|timeout after \d+s", _re.IGNORECASE),
+     '單次工具超時。把任務拆小:(1) 先用 3-5 筆資料測試邏輯;'
+     '(2) 拆成多次 run_python、每次 <30s;(3) 用 async/concurrency 平行(若是 IO bound)。'),
+]
+
+
+def _classify_tool_error(tool_result: str) -> Optional[str]:
+    """回傳錯誤 kind(用於 dedup 計數);找不到對應規則回 None。"""
+    if not tool_result:
+        return None
+    for kind, pattern, _hint in _ERROR_HINTS:
+        if pattern.search(tool_result):
+            return kind
+    return None
+
+
+def _hint_for_error_kind(kind: str) -> Optional[str]:
+    for k, _p, hint in _ERROR_HINTS:
+        if k == kind:
+            return hint
+    return None
+
+
 def _compact_old_tool_results(messages: list) -> int:
     """壓縮舊 tool 結果防 context 膨脹。回傳壓縮的訊息數。
 
@@ -1871,6 +1934,10 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         last_tool_inputs: list[str] = []   # 最近幾次 (tool_name, tool_input_hash)
         # 連續失敗早停（任何類型的 tool failure 都算）
         consecutive_failures = 0
+        # 錯誤類型追蹤:連續同類錯誤 2 次就注入對症提示(取代「換策略」空話)
+        last_error_kind: Optional[str] = None
+        same_error_kind_count = 0
+        injected_hint_kinds: set[str] = set()  # 已注入過的 kind、避免每輪重複注入同一條
         import time as _time
         skill_start_time = _time.time()
 
@@ -2462,6 +2529,34 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             sig = f"{tool_name}:{tool_input[:300]}"
             last_tool_inputs.append(sig)
             last_tool_inputs = last_tool_inputs[-4:]   # 只保留最近 4 筆
+
+            # 0) 錯誤類型分類:連續 2 次同 kind 錯誤 → 注入對症提示
+            #    這比「換策略」空話有用、給 LLM 具體下一步(例如 SyntaxError on triple-quote
+            #    → 改用 Path.write_text;AttributeError 'str' has no attribute → 不要 pickle)
+            if failed_now:
+                _kind = _classify_tool_error(tool_result)
+                if _kind:
+                    if _kind == last_error_kind:
+                        same_error_kind_count += 1
+                    else:
+                        last_error_kind = _kind
+                        same_error_kind_count = 1
+                    # 第 2 次同類錯誤 + 還沒注入過這條 hint → 注入
+                    if same_error_kind_count >= 2 and _kind not in injected_hint_kinds:
+                        _hint = _hint_for_error_kind(_kind)
+                        if _hint:
+                            logger.warning(f"[{step_name}] 連續 2 次 '{_kind}' 錯誤、注入對症提示")
+                            messages.append(HumanMessage(
+                                content=f"[系統診斷] 你連續 2 次撞到同類錯誤(`{_kind}`)。針對性建議:\n\n{_hint}"
+                            ))
+                            injected_hint_kinds.add(_kind)
+                else:
+                    # 錯誤對不上任何 pattern → reset 計數
+                    last_error_kind = None
+                    same_error_kind_count = 0
+            else:
+                last_error_kind = None
+                same_error_kind_count = 0
 
             # 1) 剛剛這次和上次 tool_input 一模一樣且失敗 → 強制打破迴圈
             if failed_now and len(last_tool_inputs) >= 2 and last_tool_inputs[-1] == last_tool_inputs[-2]:
