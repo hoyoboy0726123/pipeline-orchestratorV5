@@ -1702,6 +1702,12 @@ async def execute_step_with_skill(
 - 任務需選擇:優先用任務指定;無指定 → 最合理預設值 + summary 註明假設;只有「會嚴重影響結果(覆蓋重要檔、無法回復)」才用 done(success=false)
 - 讀其他檔(csv / xlsx)第一步先 run_python 看前幾行確認欄位、不要猜
 - 重試:絕不重複同一方法、回顧歷史、用尚未嘗試的不同套件 / 策略;耗盡才 done(success=false) + missing_packages
+- ⚠️ 寫 JS/HTML/CSS/SQL 等**非 Python 程式碼到檔案** → 不要用 Python 三引號(三個雙引號)包大段(>10 行) source code
+  原因:三引號內含的特殊字元 / 不平衡引號 / template literal 會讓 Python parser 破裂(實測強模型最常踩此坑)
+  ✓ 正確:`Path("x.js").write_text(content, encoding="utf-8")` — content 當一般 string 變數放、不要當 Python source 嵌入
+  ✓ 或多次 `f.write()` 分段 append、每段 < 50 行
+  ✗ 錯誤:`code = (三引號) <整段 200 行 JS> (三引號); Path(...).write_text(code)`(脆弱、會炸)
+  例外:Python docstring / 短 SQL(<5 行)/ 短 regex pattern 仍可用三引號
 
 【工具呼叫格式(最重要)】
 - 每次回覆只一個 tool call、所有程式碼放 <tool> + <input> 標籤內
