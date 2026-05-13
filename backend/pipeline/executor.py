@@ -118,6 +118,60 @@ def _hint_for_error_kind(kind: str) -> Optional[str]:
     return None
 
 
+# LLM agent 自己寫的程式碼壓縮(對 AIMessage 用)— 防 pptx skill 那種「寫 15KB JS wrap」case
+# 跟 _compact_old_tool_results 對稱:tool 結果第 4 輪起壓、LLM 自己寫的程式碼也該第 4 輪起壓
+SKILL_AI_INPUT_COMPRESS_THRESHOLD = 3000  # AIMessage 內 <input>...</input> 段超過此長度才壓
+SKILL_AI_INPUT_PREVIEW_CHARS = 300        # 壓縮後保留 head + tail 各 N 字
+
+
+def _compact_old_llm_input_blocks(messages: list) -> int:
+    """壓縮舊 AIMessage 內的 `<input>...</input>` 程式碼段。回傳壓縮的訊息數。
+
+    對應場景:pptx skill 需要 LLM 寫 15KB+ Python wrap JS;這種「LLM 自己寫的巨碼」
+    在歷史輪數會一直留著、context 5 輪後爆。
+
+    規則:
+    - 找所有 AIMessage(LLM 回覆)
+    - 保留最近 SKILL_CONTEXT_KEEP_RECENT_FULL 個完整
+    - 更早的:用 regex 抓 `<input>...</input>` 段,內容 > THRESHOLD 就截成 head+tail
+    - 已壓過(含 `(舊輪程式摘要)` 標記)的不重複壓
+    """
+    from langchain_core.messages import AIMessage as _AI
+    ai_indices = [i for i, m in enumerate(messages) if isinstance(m, _AI) and isinstance(m.content, str)]
+    if len(ai_indices) <= SKILL_CONTEXT_KEEP_RECENT_FULL:
+        return 0
+    # 要壓縮的:除了最後 KEEP_RECENT_FULL 個之外的
+    to_compact = ai_indices[:-SKILL_CONTEXT_KEEP_RECENT_FULL]
+    compacted = 0
+    # 抓 <input>...</input>(非貪婪、跨行)、找 long 段壓縮
+    _pat = _re.compile(r"(<input>)(.*?)(</input>)", _re.DOTALL)
+
+    def _shrink(m: "_re.Match[str]") -> str:
+        body = m.group(2)
+        if len(body) <= SKILL_AI_INPUT_COMPRESS_THRESHOLD:
+            return m.group(0)
+        if "(舊輪程式摘要)" in body:
+            return m.group(0)
+        head = body[:SKILL_AI_INPUT_PREVIEW_CHARS]
+        tail = body[-SKILL_AI_INPUT_PREVIEW_CHARS:]
+        new_body = (
+            f"\n(舊輪程式摘要、原長 {len(body)} 字)\n"
+            f"--- 前 {SKILL_AI_INPUT_PREVIEW_CHARS} 字 ---\n{head}\n"
+            f"--- 後 {SKILL_AI_INPUT_PREVIEW_CHARS} 字 ---\n{tail}\n"
+        )
+        return m.group(1) + new_body + m.group(3)
+
+    for idx in to_compact:
+        content = messages[idx].content
+        if "<input>" not in content:
+            continue
+        new_content, n = _pat.subn(_shrink, content)
+        if new_content != content:
+            messages[idx] = _AI(content=new_content)
+            compacted += 1
+    return compacted
+
+
 def _compact_old_tool_results(messages: list) -> int:
     """壓縮舊 tool 結果防 context 膨脹。回傳壓縮的訊息數。
 
@@ -2001,6 +2055,11 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 _compacted = _compact_old_tool_results(messages)
                 if _compacted:
                     logger.debug(f"[{step_name}] 🪶 壓縮 {_compacted} 條舊 tool 結果(防 context 膨脹)")
+                # 同時壓縮 AIMessage 內的 <input>...</input>(LLM 自己寫的巨碼、pptx wrap JS 那種)
+                # 跟 tool 結果壓縮對稱、舊輪保留 head+tail preview 即可、最近 3 輪保全
+                _ai_compacted = _compact_old_llm_input_blocks(messages)
+                if _ai_compacted:
+                    logger.debug(f"[{step_name}] 🪶 壓縮 {_ai_compacted} 條舊 LLM 程式碼段(防 context 膨脹)")
 
             # 第一輪後 strip <!--FIRST_ITER_BEGIN/END--> 區塊(sandbox env / web_search / matplotlib /
             # tool_timeout 等規則第一輪 LLM 已內化、後續輪數重送純粹浪費 token)
