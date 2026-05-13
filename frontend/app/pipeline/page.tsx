@@ -467,6 +467,10 @@ export default function PipelinePage() {
   const rfInstanceRef = useRef<ReactFlowInstance<AppNode, Edge> | null>(null)
   const [editingName, setEditingName] = useState(false)
   const runIdRef   = useRef<string | null>(null)
+  // latestRunId 鏡像 runIdRef.current 給 useEffect 依賴用 — 切完成工作流時 Trace 視圖能即時 re-fetch、
+  // 不用等 3 秒 interval。ref 仍是 source of truth、所有寫入都用 setRunId helper 雙寫
+  const [latestRunId, setLatestRunId] = useState<string | null>(null)
+  const setRunId = (v: string | null) => { runIdRef.current = v; setLatestRunId(v) }
   const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const savingRef  = useRef(false)  // 防止切換工作流時觸發 auto-save
 
@@ -481,7 +485,7 @@ export default function PipelinePage() {
     savingRef.current = true
     // 切換工作流前：清除上一個工作流的執行狀態
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
-    runIdRef.current = null
+    setRunId(null)
     setRunning(false)
     useRunStatusStore.getState().resetAll()
     const timer = setTimeout(() => {
@@ -514,7 +518,7 @@ export default function PipelinePage() {
 
     // 切 workflow 時 reset 跑 / log，避免上一個 workflow 的狀態殘留蓋過去
     // (這個 reset 不影響 awaiting_human 訊息，因為下面 detect 會立即接管 active run)
-    runIdRef.current = null
+    setRunId(null)
     setLogLines([])
     setRunning(false)
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
@@ -531,7 +535,7 @@ export default function PipelinePage() {
         )
         // 偵測 active(running / awaiting)— 接管條件:有 active 且不是當前已偵測過的同一個 run
         if (active && runIdRef.current !== active.run_id) {
-          runIdRef.current = active.run_id
+          setRunId(active.run_id)
           setRunning(true)
           if (active.status === 'awaiting_human') {
             setRunStatus('awaiting')
@@ -564,7 +568,7 @@ export default function PipelinePage() {
           initialDone = true
           const latest = runs.find(r => r.pipeline_name === pipelineName)
           if (latest) {
-            runIdRef.current = latest.run_id
+            setRunId(latest.run_id)
             try {
               const data = await getPipelineLog(latest.run_id)
               setLogLines((data.log || '').split('\n'))
@@ -1005,7 +1009,7 @@ export default function PipelinePage() {
       const needsValidate = steps.some(s => s.skillMode || !!s.expect)
       const hasSkill = steps.some(s => s.skillMode)
       const res = await startPipeline(yaml, needsValidate, useRecipe, activeId ?? undefined, hasSkill, inputParams)
-      runIdRef.current = res.run_id
+      setRunId(res.run_id)
       toast.success(`Pipeline 已啟動（ID: ${res.run_id}）${useRecipe ? ' ⚡ 快速模式' : ''}`)
       pollStatus(res.run_id)
       pollRef.current = setInterval(() => pollStatus(res.run_id), 1500)
@@ -1058,7 +1062,7 @@ export default function PipelinePage() {
               (r: any) => (r.status === 'running' || r.status === 'awaiting_human') && r.pipeline_name === pipelineName
             )
             if (active && !runIdRef.current) {
-              runIdRef.current = active.run_id
+              setRunId(active.run_id)
               setRunning(true)
               if (active.status === 'awaiting_human') {
                 setRunStatus('awaiting')
@@ -1094,6 +1098,7 @@ export default function PipelinePage() {
     const rid = runIdRef.current
     if (!rid) return
     // 立即清除所有 UI 狀態（避免 in-flight poll 覆蓋）
+    // 注意:只清 ref(停掉 active poll)、保留 latestRunId 給 trace/log 視圖繼續顯示這次的結果
     runIdRef.current = null
     if (pollRef.current) clearInterval(pollRef.current)
     if (bgDetectRef.current) { clearInterval(bgDetectRef.current); bgDetectRef.current = null }
@@ -1236,7 +1241,7 @@ export default function PipelinePage() {
   const [hintText, setHintText] = useState('')
   const [showHintInput, setShowHintInput] = useState(false)
 
-  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command', hint?: string) => {
+  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev', hint?: string) => {
     if (!awaitingRunId) return
     const rid = awaitingRunId
 
@@ -1289,13 +1294,13 @@ export default function PipelinePage() {
   }, [logLines, showLog])
 
   // Trace 視圖 live poll — 開啟期間每 3 秒重抓 run、保持 token / tool_calls / 步驟狀態 up-to-date
-  // 切 workflow(pipelineName 變)時也重 trigger，立即 fetch 新 workflow 的 run trace
+  // 切 workflow(pipelineName 變)或 bgDetect fallback 補抓 latestRunId 時都會 re-trigger
   useEffect(() => {
     if (!showTrace) return
     let stopped = false
     const tick = async () => {
       if (stopped) return
-      const rid = runIdRef.current
+      const rid = latestRunId
       if (!rid) {
         // 該 workflow 還沒跑過任何 run、清掉舊 trace 避免顯示其他 workflow 的殘影
         setTraceRun(null)
@@ -1309,7 +1314,7 @@ export default function PipelinePage() {
     tick()
     const id = setInterval(tick, 3000)
     return () => { stopped = true; clearInterval(id) }
-  }, [showTrace, running, pipelineName])
+  }, [showTrace, running, pipelineName, latestRunId])
 
   // 開啟 log 時重置 auto-scroll
   useEffect(() => { if (showLog) logAutoScrollRef.current = true }, [showLog])
@@ -1534,10 +1539,20 @@ export default function PipelinePage() {
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-amber-50 border border-amber-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
             {/* 標題列 + 操作按鈕 */}
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-amber-600 font-medium text-sm whitespace-nowrap">⚠️ 步驟失敗，請選擇處理方式</span>
-              <div className="flex items-center gap-2 ml-auto">
+              <span className="text-amber-600 font-medium text-sm whitespace-nowrap">⚠️ 步驟失敗,請選擇處理方式</span>
+              <div className="flex items-center gap-1.5 ml-auto flex-wrap">
                 <button onClick={() => handleDecision('retry')} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 whitespace-nowrap">🔄 重試</button>
                 <button onClick={() => setShowHintInput(!showHintInput)} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${showHintInput ? 'bg-purple-700 text-white' : 'bg-purple-600 text-white hover:bg-purple-700'}`}>💬 補充指示</button>
+                <button
+                  onClick={() => handleDecision('skip')}
+                  title="跳過此步、直接跑下一步(原失敗 step 不再執行)"
+                  className="px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-medium hover:bg-amber-600 whitespace-nowrap"
+                >⏩ 跳過</button>
+                <button
+                  onClick={() => handleDecision('redo_prev')}
+                  title="認為失敗是因為上一步沒做好;清掉上一步 + 當前步結果、從上一步重跑"
+                  className="px-3 py-1.5 bg-teal-600 text-white rounded-lg text-xs font-medium hover:bg-teal-700 whitespace-nowrap"
+                >↩ 重做上一步</button>
                 <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
               </div>
             </div>
@@ -1886,16 +1901,16 @@ export default function PipelinePage() {
               <Terminal className="w-3.5 h-3.5 text-gray-400" />
               <span className="text-xs text-gray-400 font-mono">Pipeline {showTrace ? 'Trace' : 'Log'}</span>
               {running && <span className="text-xs text-green-400 animate-pulse">● 執行中</span>}
-              {!running && runIdRef.current && <span className="text-xs text-gray-500">Run: {runIdRef.current}</span>}
+              {!running && latestRunId && <span className="text-xs text-gray-500">Run: {latestRunId}</span>}
               <div className="flex-1" />
               <button
                 onClick={async () => {
                   const next = !showTrace
-                  if (next && runIdRef.current) {
-                    // Trace 跟 Log 是同一個 run 的兩個視圖、永遠繫到 runIdRef.current；
+                  if (next && latestRunId) {
+                    // Trace 跟 Log 是同一個 run 的兩個視圖、永遠繫到 latestRunId(包含跑完的 run);
                     // 想看別 run 請在 sidebar 切換 workflow（log 跟 trace 同步切）
                     try {
-                      const run = await getPipelineRun(runIdRef.current)
+                      const run = await getPipelineRun(latestRunId)
                       setTraceRun(run)
                     } catch { /* ignore */ }
                   }
@@ -1914,7 +1929,7 @@ export default function PipelinePage() {
             {showTrace && (
               <div className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-5 bg-gray-900/30">
                 {!traceRun ? (
-                  <span className="text-gray-600">{runIdRef.current ? '載入 trace 中…（再按一次 📊 重新拉）' : '尚無 run — 請先執行 Pipeline'}</span>
+                  <span className="text-gray-600">{latestRunId ? '載入 trace 中…（再按一次 📊 重新拉）' : '尚無 run — 請先執行 Pipeline'}</span>
                 ) : (
                   <div className="space-y-2">
                     <div className="flex items-baseline gap-3 pb-1 border-b border-gray-800">

@@ -18,7 +18,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -30,7 +30,72 @@ from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 
 SKILL_TOOL_TIMEOUT = 60          # 預設值：給沒透過 execute_step_with_skill 流程的呼叫者用
 SKILL_TOOL_TIMEOUT_MAX = 180     # 動態 tool timeout 上限（避免 step.timeout 開超大時 run_python 永遠不被砍）
-SKILL_MAX_ITERATIONS = 15
+SKILL_MAX_ITERATIONS = 8  # 降 15→8:多數 task 4-5 輪就該完成、超過 8 通常是 LLM 卡在 verify loop 不下 done
+
+# 連續 N 輪 LLM 口頭說「完成」但沒下 <tool>done</tool> → 強制 done 收尾
+# 解決 Sonnet / GPT 等強模型常見的「死循環式 verify」— 寫好檔案後一直確認、不打標準 tag
+_DONE_KEYWORDS = (
+    "任務已完成", "已完成任務", "已成功完成", "✅ 任務", "✅ 已完成", "✅ 完成",
+    "task complete", "task is complete", "successfully completed", "all done",
+    "已成功", "成功完成", "已順利完成", "完整完成",
+)
+
+
+def _looks_like_done(reply: str) -> bool:
+    """偵測 LLM 口頭表示完成但沒打 <tool>done</tool> 標準 tag。"""
+    if not reply:
+        return False
+    r = reply.lower()
+    return any(k.lower() in r for k in _DONE_KEYWORDS)
+
+
+# 第 N 輪起把更早的 tool 結果摺成短摘要、防 context 雪崩
+# 保留最近 KEEP_RECENT_FULL 輪的完整結果、更早的截首尾各 PREVIEW_CHARS 字
+SKILL_CONTEXT_KEEP_RECENT_FULL = 3
+SKILL_CONTEXT_PREVIEW_CHARS = 200
+
+
+def _compact_old_tool_results(messages: list) -> int:
+    """壓縮舊 tool 結果防 context 膨脹。回傳壓縮的訊息數。
+
+    規則:
+    - 找所有 `[工具結果 —` 開頭的 HumanMessage
+    - 保留最後 KEEP_RECENT_FULL 個完整、更早的截成 head + tail preview
+    - 已經是 [摘要] 的不重複壓
+    """
+    from langchain_core.messages import HumanMessage as _HM
+    # 找出所有「工具結果」訊息的 index
+    tool_msg_indices = []
+    for i, m in enumerate(messages):
+        if isinstance(m, _HM) and isinstance(m.content, str) and m.content.startswith("[工具結果 —"):
+            tool_msg_indices.append(i)
+
+    if len(tool_msg_indices) <= SKILL_CONTEXT_KEEP_RECENT_FULL:
+        return 0  # 還不需要壓縮
+
+    # 要壓縮的:除了最後 KEEP_RECENT_FULL 個之外的、且還沒壓過的
+    to_compact = tool_msg_indices[:-SKILL_CONTEXT_KEEP_RECENT_FULL]
+    compacted = 0
+    for idx in to_compact:
+        content = messages[idx].content
+        if "(舊輪摘要)" in content:
+            continue  # 已壓過
+        # 抽 tool name(第一行的 [工具結果 — X])
+        first_nl = content.find("\n")
+        header = content[:first_nl] if first_nl > 0 else content[:80]
+        body = content[first_nl + 1:] if first_nl > 0 else ""
+        if len(body) <= SKILL_CONTEXT_PREVIEW_CHARS * 2 + 50:
+            continue  # 短的不必壓
+        head = body[:SKILL_CONTEXT_PREVIEW_CHARS]
+        tail = body[-SKILL_CONTEXT_PREVIEW_CHARS:]
+        new_content = (
+            f"{header} (舊輪摘要、原長度 {len(body)} 字)\n"
+            f"--- 前 {SKILL_CONTEXT_PREVIEW_CHARS} 字 ---\n{head}\n"
+            f"--- 後 {SKILL_CONTEXT_PREVIEW_CHARS} 字 ---\n{tail}"
+        )
+        messages[idx] = _HM(content=new_content)
+        compacted += 1
+    return compacted
 
 
 def _compute_tool_timeout(step_timeout: int) -> int:
@@ -481,19 +546,19 @@ async def execute_step(
 
 _DANGEROUS_COMMANDS = {'rm', 'rmdir', 'del', 'format', 'mkfs', 'dd', 'kill', 'shutdown', 'reboot'}
 
-_skill_llm = None
-_skill_llm_sig: Optional[str] = None
+# 雙模型 cache:key = (role, settings_signature)
+_skill_llm_cache: dict[tuple[str, str], Any] = {}
 
 
-def _get_skill_llm():
-    global _skill_llm, _skill_llm_sig
+def _get_skill_llm(role: str = "primary"):
+    """依 role(primary/secondary)拿對應的 LLM。設定變動時 cache 失效。"""
     from settings import settings_signature
     from llm_factory import build_llm
     sig = settings_signature()
-    if _skill_llm is None or _skill_llm_sig != sig:
-        _skill_llm = build_llm(temperature=0)
-        _skill_llm_sig = sig
-    return _skill_llm
+    key = (role, sig)
+    if key not in _skill_llm_cache:
+        _skill_llm_cache[key] = build_llm(temperature=0, role=role)
+    return _skill_llm_cache[key]
 
 
 def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
@@ -1334,6 +1399,7 @@ async def execute_step_with_skill(
     skill_name: str = "",
     ask_mode: bool = False,
     silent_recipe: bool = False,
+    llm_role: str = "primary",
 ) -> ExecResult:
     """
     Skill 模式執行器：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼。
@@ -1792,7 +1858,7 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
     all_stdout: list[str] = []
 
     try:
-        llm = _get_skill_llm()
+        llm = _get_skill_llm(role=llm_role)
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
@@ -1856,8 +1922,18 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         # dict 是 mutable，傳進 helper 裡改 'allowed' 外層看得到
         sandbox_fallback_state: dict = {"allowed": False}
 
+        # 「完成」字樣連續輪數計數 — 連 2 輪 LLM 口頭說完成但沒下 done tag 就強制收尾
+        done_keyword_streak = 0
+
         for iteration in range(SKILL_MAX_ITERATIONS):
             logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS}")
+
+            # Context 雪崩防護:第 4 輪起壓縮更早的 tool 結果(保留最近 3 輪完整、舊的摺成首尾預覽)
+            # 解決 25 輪場景每輪 token 從 9k 漲到 21k 的問題、保持每輪 context size 大致穩定
+            if iteration >= SKILL_CONTEXT_KEEP_RECENT_FULL + 1:
+                _compacted = _compact_old_tool_results(messages)
+                if _compacted:
+                    logger.debug(f"[{step_name}] 🪶 壓縮 {_compacted} 條舊 tool 結果(防 context 膨脹)")
 
             # 第一輪後 strip <!--FIRST_ITER_BEGIN/END--> 區塊(sandbox env / web_search / matplotlib /
             # tool_timeout 等規則第一輪 LLM 已內化、後續輪數重送純粹浪費 token)
@@ -1872,6 +1948,21 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 )
                 messages[0] = SystemMessage(content=_stripped)
                 logger.debug(f"[{step_name}] 🪶 第二輪起 system prompt 已 strip first-iter blocks")
+
+            # 接近 max_iter 時、在送 LLM 前主動提醒收尾(比等沒下 tool 才提醒更早一步)
+            # iter 剩 ≤ 2 時注入一條短 system reminder、不重複加(用 sentinel 防重)
+            remaining_iters = SKILL_MAX_ITERATIONS - iteration
+            if remaining_iters <= 2:
+                _wrap_msg = (
+                    f"⚠ 系統提醒:目前第 {iteration + 1}/{SKILL_MAX_ITERATIONS} 輪、只剩 {remaining_iters} 輪。"
+                    "如果任務已可收尾、本輪請直接 <tool>done</tool><input>{\"success\": true, \"summary\": \"...\"}</input>。"
+                    "不要再做純驗證或解釋、直接動作。"
+                )
+                # 上一次注入過就不重複
+                _already = (messages and messages[-1].__class__.__name__ == 'HumanMessage'
+                            and "系統提醒:目前第" in str(messages[-1].content))
+                if not _already:
+                    messages.append(HumanMessage(content=_wrap_msg))
 
             # 冷卻機制：每 SKILL_COOLDOWN_EVERY 次呼叫後暫停
             if iteration > 0 and iteration % SKILL_COOLDOWN_EVERY == 0:
@@ -1908,10 +1999,54 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             tool_calls = _parse_skill_tool_calls(reply)
 
             if not tool_calls:
-                # 沒有工具呼叫，提示 agent
+                # 沒有工具呼叫、提示 agent
+                # 同時偵測「LLM 口頭說完成但沒打 done tag」連續 2 輪 → 強制 done 收尾
+                # 解決 Sonnet / GPT 等強模型常見死循環:寫好檔後一直 verify、不打標準 tag
+                if _looks_like_done(reply):
+                    done_keyword_streak += 1
+                    if done_keyword_streak >= 2:
+                        logger.warning(
+                            f"[{step_name}] 連續 {done_keyword_streak} 輪 LLM 口頭表示完成但沒下 <tool>done</tool> tag,"
+                            f" 強制 done 收尾(避免無謂 iter 燒 token)"
+                        )
+                        # 條件:最近一次 run_python 成功 OR 沒跑過 run_python(純 read_file 也算)
+                        # 否則拒絕強制 done、繼續循環給 LLM 修錯機會
+                        if last_run_python_ok is not False:
+                            # 模擬 done call、跳出 loop
+                            final_summary = reply[:500] if reply else "LLM 連續表示完成、系統強制收尾"
+                            logger.info(f"[{step_name}] Skill 執行完成:強制 done — {final_summary[:100]}")
+                            all_stdout.append(f"[系統強制 done] {final_summary}")
+                            return ExecResult(
+                                exit_code=0,
+                                stdout="\n".join(all_stdout) if all_stdout else final_summary,
+                                stderr="",
+                                missing_packages=[],
+                            )
+                        else:
+                            messages.append(HumanMessage(content=reply))
+                            messages.append(HumanMessage(content=(
+                                "⚠ 你說完成但最近一次 run_python 失敗、必須先修錯。"
+                                "請寫程式修正,或如果無法完成就用 done(success=false, reason=...)。"
+                            )))
+                            continue
+                else:
+                    done_keyword_streak = 0
+
                 messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content="請使用工具來執行任務，或呼叫 done 回報結果。"))
+                # 接近 max_iter 時加緊提醒 LLM 收尾
+                remaining = SKILL_MAX_ITERATIONS - iteration - 1
+                if remaining <= 2:
+                    messages.append(HumanMessage(content=(
+                        f"⚠ 剩 {remaining} 輪、必須收尾。若任務已完成請立刻打 "
+                        f"<tool>done</tool><input>{{...}}</input>;若還沒完成請寫程式繼續。"
+                        f"不要再做純文字確認 / 解釋,直接動作。"
+                    )))
+                else:
+                    messages.append(HumanMessage(content="請使用工具來執行任務,或呼叫 done 回報結果。"))
                 continue
+            else:
+                # 有 tool call、清掉 done streak
+                done_keyword_streak = 0
 
             # 多工具偵測：LLM 一次塞 run_python + done 是惡習（會把假成功訊息混進 done），
             # 預設只跑第一個 tool（既有行為）、明確告訴 LLM「這次只跑 X、忽略 Y」
@@ -2617,6 +2752,7 @@ async def execute_step_with_outlook(
     prev_outputs: Optional[list] = None,
     run_id: str = "",
     ask_mode: bool = False,
+    llm_role: str = "primary",
 ) -> ExecResult:
     """Outlook 自動化節點。
 
@@ -2715,7 +2851,7 @@ async def execute_step_with_outlook(
     # LLM
     from llm_factory import build_llm, invoke_with_streaming
     from langchain_core.messages import HumanMessage, SystemMessage
-    llm = build_llm()
+    llm = build_llm(role=llm_role)
 
     user_prompt = _build_outlook_prompt(
         template=template,
