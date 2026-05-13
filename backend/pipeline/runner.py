@@ -1823,6 +1823,13 @@ async def run_pipeline(
                 recipe_step_key = f"{step_num}:{step.name}"
                 # 把 output_path 解析成絕對路徑傳給 LLM，避免 LLM 搞不清楚相對於哪個 cwd
                 _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                # 判斷此 step 之後有沒有外部 AI validator 會跑、用於 skill loop 內 output-driven hint
+                # validator 跑的條件:pipeline.validate=True AND step.output 有設且有 expect/description
+                _has_validator = (
+                    config.validate
+                    and step.output is not None
+                    and bool(step.output.get_expect())
+                )
                 exec_result = await execute_step_with_skill(
                     task_description=step.batch,
                     timeout=step.timeout,
@@ -1842,6 +1849,7 @@ async def run_pipeline(
                     ask_mode=step.ask_mode,
                     silent_recipe=silent_recipe,
                     llm_role=getattr(step, "llm_role", "primary"),
+                    has_external_validator=_has_validator,
                 )
             else:
                 exec_result = await execute_step(

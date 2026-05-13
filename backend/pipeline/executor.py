@@ -1517,6 +1517,7 @@ async def execute_step_with_skill(
     ask_mode: bool = False,
     silent_recipe: bool = False,
     llm_role: str = "primary",
+    has_external_validator: bool = False,  # runner 傳:此 step 之後有沒有 AI validator 跑
 ) -> ExecResult:
     """
     Skill 模式執行器：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼。
@@ -1666,6 +1667,9 @@ async def execute_step_with_skill(
    <input>wc -l output.csv</input>
 3. read_file — 讀檔(路徑不加引號)
    <input>path/to/file.txt</input>
+   ✓ 用於:讀上一步輸出 / 樣本檔 / 設定檔(餵推理用)
+   ✗ 不要用於:「驗證自己剛 write 的檔存在」(Python exit 0 已證、用 Path.exists() 在 run_python 內就行)
+   ✗ 不要用於:「再確認一次自己剛寫的內容對不對」(交給外部 validator、不要重複工作浪費 iter)
 4. view_image — 看圖(png/jpg/gif/webp/bmp、上限 20MB)。驗證圖表 / 從圖擷取資訊用。
    模型不支援視覺時直接 done(success=false) 並在 error 註記。
    <input>path/to/chart.png</input>
@@ -1992,6 +1996,8 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         last_error_kind: Optional[str] = None
         same_error_kind_count = 0
         injected_hint_kinds: set[str] = set()  # 已注入過的 kind、避免每輪重複注入同一條
+        # Output-driven done 提示:輸出檔已產生、提醒 LLM 早 done、避免「再驗證一輪」迴圈
+        output_done_hint_injected = False
         import time as _time
         skill_start_time = _time.time()
 
@@ -2482,6 +2488,36 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 if "[exit code:" not in tool_result:
                     last_run_python_ok = True
                     last_successful_code = tool_input  # 成功才記給 recipe
+
+                    # ── Output-driven done 提示 ────────────────────────────────
+                    # 偵測:run_python 成功 + output_path 存在 + 檔案有內容 → 提醒早 done
+                    # 解決「再驗證一下」「再優化一下」迴圈、Gemma 等弱模型不會主動 done 的問題
+                    # 注入 1 次/step、別重複煩 LLM
+                    if (
+                        output_path
+                        and not output_done_hint_injected
+                        and Path(output_path).exists()
+                        and Path(output_path).stat().st_size > 0
+                    ):
+                        _size = Path(output_path).stat().st_size
+                        if has_external_validator:
+                            _hint = (
+                                f"[系統提醒] ✅ 輸出檔 `{output_path}` 已存在(**{_size:,} bytes**)且 Python 跑成功。\n"
+                                f"此 step 後面有外部 AI validator 會檢查內容、**不要再 read_file 確認**、"
+                                f"**不要再優化格式**。如果輸出本身是合理的、現在就 `<tool>done</tool>` 結束。"
+                            )
+                        else:
+                            _hint = (
+                                f"[系統提醒] ✅ 輸出檔 `{output_path}` 已存在(**{_size:,} bytes**)且 Python 跑成功。\n"
+                                f"此 step **沒有外部 validator** → 用 stdout 已看到的內容快速確認結果合理就 `<tool>done</tool>`,"
+                                f"**不要為「驗證檔存在」再 read_file**(浪費一輪)、**不要為「再優化」多寫**(合理就 OK)。"
+                            )
+                        messages.append(HumanMessage(content=_hint))
+                        output_done_hint_injected = True
+                        logger.info(
+                            f"[{step_name}] 💡 output-driven done 提示已注入"
+                            f"(size={_size}, has_validator={has_external_validator})"
+                        )
                 else:
                     last_run_python_ok = False
                     logger.info(f"[{step_name}] run_python 失敗 → last_run_python_ok=False（下次 done 會被守門）")
