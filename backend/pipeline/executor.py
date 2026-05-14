@@ -685,53 +685,6 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
     tool_tag_pos = code.find('<tool>')
     if tool_tag_pos > 0:
         code = code[:tool_tag_pos].rstrip()
-    # ── 強制攔截:Python 三引號包大段非 Python 內容 ─────────────────────────
-    # 強模型(Sonnet/Opus)即使有 write_file tool + system rule + 對症提示、依然會
-    # 默認用 Python 三引號包整段 JS/HTML 寫到 .js/.html。實測訓練資料 prior > 所有
-    # 自願性提示。唯一解法:系統層直接 reject、強制 LLM 改路徑。
-    import re as _trip_re
-    # case A:未配對三引號(LLM 寫太長忘記收尾)→ Python 必定 SyntaxError、先攔下
-    if len(code) > 800:
-        _dq_count = code.count('"""')
-        _sq_count = code.count("'''")
-        if _dq_count % 2 == 1 or _sq_count % 2 == 1:
-            return (
-                f"[REJECTED] 偵測到 Python 三引號未配對("
-                f"雙引號出現 {_dq_count} 次、單引號出現 {_sq_count} 次、奇數代表沒收尾)。\n\n"
-                "⚠️ 系統強制拒絕 — 你在寫大段內容時忘記關閉三引號、Python 必定 SyntaxError。"
-                "實測強模型反覆撞此坑、改方法:\n\n"
-                "✅ 改用 write_file tool 直接寫檔(content 是 JSON 參數、不過 Python 字串嵌入):\n"
-                '<tool>write_file</tool><input>{"path":"output.js","content":"const x = ...你的內容..."}</input>\n\n'
-                "記得 content 內 \" escape 為 \\\" 、換行用 \\n(JSON 標準)。\n"
-                "寫完用 run_shell 跑(若是 .js → `node output.js`)。"
-            )
-    _trip_blocks = _trip_re.findall(r'"""(.*?)"""', code, _trip_re.DOTALL)
-    # case B:配對但內含大段內容(>800 字 或 >30 行)
-    _big_trip_blocks = [b for b in _trip_blocks if len(b) > 800 or b.count('\n') > 30]
-    if _big_trip_blocks:
-        _biggest = max(_big_trip_blocks, key=len)
-        _lines = _biggest.count('\n') + 1
-        _chars = len(_biggest)
-        _preview = _biggest[:200].replace('\n', '\\n')
-        return (
-            f"[REJECTED] 偵測到 Python 三引號包大段內容(最大 {_chars:,} 字、{_lines} 行、"
-            f"開頭: `{_preview}...`)。\n\n"
-            f"⚠️ 系統強制拒絕此寫法 — 三引號包大段 JS/HTML/SQL/外語碼**極易因內含字元破裂**、"
-            f"實測強模型(Sonnet/Opus)反覆撞此坑。\n\n"
-            f"✅ **改用 write_file tool** 直接寫檔(content 是 JSON 參數、不過 Python 字串嵌入):\n"
-            f'<tool>write_file</tool><input>{{"path":"output.js","content":"const x = ...你的內容..."}}</input>\n\n'
-            f"記得 content 內 \" 要 escape 為 \\\" 、換行用 \\n(JSON 標準)。\n"
-            f"寫完用 run_shell 跑(若是 .js → `node output.js`)。\n\n"
-            f"再次提交相同 run_python 仍會被系統拒絕、必須切換 tool。"
-        )
-    # 同理偵測 三個單引號(也算包大段)
-    _trip_blocks_s = _trip_re.findall(r"'''(.*?)'''", code, _trip_re.DOTALL)
-    _big_trip_blocks_s = [b for b in _trip_blocks_s if len(b) > 800 or b.count('\n') > 30]
-    if _big_trip_blocks_s:
-        return (
-            "[REJECTED] 偵測到 Python 單三引號(''')包大段內容。\n"
-            "✅ 改用 write_file tool 寫檔、再用 run_shell 執行該檔。"
-        )
     # 注入 done / view_image / read_file 的 no-op stub，避免 LLM 把工具名當 Python 函式呼叫而崩潰
     # 另外抑制所有 warnings，避免 pandas FutureWarning 等雜訊污染 stderr 害 LLM 誤以為失敗
     # 第一行必須是 UTF-8 encoding 宣告（PEP 263）：即使我們用 UTF-8 寫檔，也保險讓 Python 明確識別
@@ -1872,13 +1825,6 @@ async def execute_step_with_skill(
 
     system_prompt = _date_block + """你是 pipeline Skill 執行 agent。根據任務描述自主寫程式並跑、回繁體中文。
 
-⚠️ **寫檔規則(優先順序、必守、不要違反)**:
-- LLM 已知完整 content、要原樣寫到檔 → **一律 write_file**(包括 .js / .html / .css / .md / .json / .yaml)
-- 局部修改既有檔(換一行、改一個函式)→ **一律 edit_file**
-- 寫 pandas DataFrame / 動態計算結果 / dump 大量資料 → run_python(用 to_csv / to_excel 等)
-- **嚴禁** 用 run_python + Path(p).write_text(...) 寫**超過 10 行**的內容(必中 Python 字串嵌入字元/引號雷、實測強模型反覆撞)
-- 寫 PPT/DOCX 等需要呼叫 pptxgenjs / python-pptx → 用 write_file 把整段 JS/Python script 直接寫到檔、再 run_shell 執行該檔(**不要** Python 三引號包大段)
-
 工具(每次回覆只能呼叫一個、用 <tool>名稱</tool><input>...</input> 格式):
 
 1. run_python — Python 程式碼(在工作目錄執行)
@@ -2064,6 +2010,9 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
 【🛡️ Sandbox 環境(Linux Docker 容器、python:3.13-slim、不是 Windows)】
 - OS = Linux:沒有 win32com / pywin32 / PowerShell / cmd.exe — 用純 Python 或 Linux 工具
 - 產 PPT 用 `python-pptx`(首選)或 Node.js + `pptxgenjs`(走 `.agents/skills/pptx`);**不要 import win32com.client**(永遠 ImportError)
+- Node.js 全域套件已預裝(`pptxgenjs`、`docx`、可能還有其他 npm 包),`NODE_PATH=/usr/local/lib/node_modules` 已設好
+  → **JS 檔內 require 一律用裸模組名**:`require('pptxgenjs')`、`require('docx')`
+  → **絕對禁止** `require('C:/...')`、`require('/mnt/c/.../node_modules/pptxgenjs')`(那是 Windows / 主機路徑、container 內找不到、必定 Cannot find module)
 - 路徑轉換:Windows `C:\...` / `C:/...` 在容器無效、pathlib 會當相對路徑導致找不到檔
   - `C:\Users\X\...` → `/mnt/c/Users/X/...`
   - `D:\data\...` → `/mnt/d/data/...`
@@ -2280,6 +2229,9 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         # 沒跑過 run_python = None（容許純 read_file / web_search 後直接 done）；
         # 跑過 = True（成功）/ False（失敗，下次 done 拒絕並要 LLM 修錯）
         last_run_python_ok: Optional[bool] = None
+        # 同理:防 LLM 在 run_shell rc=1(Cannot find module / no such file 等)後硬送 done。
+        # 實測 Sonnet 會在 run_shell 失敗後直接 done(success=true)+ 寫假 summary 騙過 validator。
+        last_run_shell_ok: Optional[bool] = None
         ask_user_count = 0               # ask_user 呼叫次數（上限 ASK_USER_MAX）
         web_search_count = 0             # web_search 呼叫次數（上限 WEB_SEARCH_MAX_PER_STEP）
         was_interactive = False          # 首次互動標記（給 recipe）
@@ -2452,6 +2404,19 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                             content="[系統] 拒絕 done：你最近一次 run_python 執行失敗（看上面的 stderr / Traceback）。"
                                     "請先用 run_python 修正錯誤、確認真的成功（沒有 [exit code: N] 失敗訊息）後，"
                                     "才能呼叫 done。不要在程式碼失敗後硬送 success=true。"
+                        ))
+                        continue
+
+                    # 守門 1b:同上,但守的是 run_shell(Cannot find module / no such file / rc!=0 等)
+                    # 實測 Sonnet 在 run_shell 失敗後會直接 done(success=true)+ 編造假 summary 騙 validator
+                    if success and last_run_shell_ok is False:
+                        logger.warning(f"[{step_name}] Agent 在 run_shell 失敗後送 done(success=true) — 拒絕並要求修錯")
+                        messages.append(HumanMessage(content=reply))
+                        messages.append(HumanMessage(
+                            content="[系統] 拒絕 done：你最近一次 run_shell 執行失敗（看上面的 stderr 與 exit code）。"
+                                    "請先修正命令（常見:路徑不對、模組沒裝、引號 escape 錯）、確認 run_shell 真的成功"
+                                    "(rc=0、沒有 Cannot find / No such file / Error 等)後,才能呼叫 done。"
+                                    "**不要在 shell 失敗後硬送 success=true、不要在 summary 編造未發生的執行結果。**"
                         ))
                         continue
 
@@ -2720,6 +2685,13 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             if acc_tool_calls and acc_tool_calls[-1].get("name") == tool_name and not acc_tool_calls[-1].get("result_preview"):
                 acc_tool_calls[-1]["result_preview"] = (str(tool_result) or "")[:300]
             all_stdout.append(f"[{tool_name}] {tool_result}")
+            # 追蹤 run_shell 成敗:用 [exit code:] marker(_skill_run_shell 失敗會帶)
+            if tool_name == "run_shell":
+                if "[exit code:" not in tool_result:
+                    last_run_shell_ok = True
+                else:
+                    last_run_shell_ok = False
+                    logger.info(f"[{step_name}] run_shell 失敗 → last_run_shell_ok=False(下次 done 會被守門)")
             # 追蹤 run_python 成敗：用 [exit code:] 在 tool_result 是否出現當判斷
             # （sandbox 跟 host 兩條路徑都用同個 marker，見 _skill_run_python / _try_sandbox_exec）
             if tool_name == "run_python":

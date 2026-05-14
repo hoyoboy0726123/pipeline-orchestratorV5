@@ -89,13 +89,15 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        # Anthropic 預設沒設 max_tokens 會吃 LangChain 的 1024 default、Claude 4 系列容易截斷;
-        # 這裡明確給 8192、跟 Gemini 那邊邏輯一致
+        # Anthropic 預設沒設 max_tokens 會吃 LangChain 的 1024 default、Claude 4 系列容易截斷。
+        # 8192 對寫大段 Python(含三引號 heredoc)會在中途被斷流、收不到結尾的 """,
+        # 解析時就會抛 unterminated triple-quoted string literal。設 32768 給足夠空間。
+        # 只按實際生成 token 收費、不會因為設高了多花錢。
         return ChatAnthropic(
             model=model,
             api_key=ANTHROPIC_API_KEY,
             temperature=temperature,
-            max_tokens=8192,
+            max_tokens=32768,
         )
 
     if provider == "ollama":

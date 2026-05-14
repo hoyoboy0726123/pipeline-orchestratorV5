@@ -1879,6 +1879,26 @@ async def run_pipeline(
                 step_tool_calls = list(_tc)
 
             has_expect = step.output and step.output.get_expect()
+
+            # ── 預先算 snapshot diff(在 validate 之前)─────────────────
+            # 目的:就算使用者沒設 output.path,系統也能告訴 validator「這個 step 實際寫了什麼新檔」
+            # → validator 拿到的 effective_output_path 才能做 mtime 檢查、擋住 LLM 用舊檔幻覺成功
+            # 不算 multi-URL web_crawler(輸出是資料夾、單檔 diff 會挑錯)
+            _eff_output_path: Optional[str] = None
+            try:
+                if step.output and step.output.path:
+                    _p = _resolve_path(step.output.path)
+                    if _p.exists() and _p.is_file():
+                        _eff_output_path = str(_p.absolute())
+                if not _eff_output_path:
+                    _is_multi_wc = bool(getattr(step, "web_crawler", False)) and len(
+                        [u for u in (getattr(step, "wc_urls", None) or []) if u and u.strip()]
+                    ) > 1
+                    if not _is_multi_wc:
+                        _eff_output_path = _diff_snapshot_pick_main(_step_dir_snapshot_before, config.name)
+            except Exception as _e:
+                logger.debug(f"[{step.name}] 預算 snapshot diff 失敗(略過):{_e}")
+
             # exit_code -429 = LLM 配額用盡（executor 標記），直接走 rate_limited 路徑、不再叫 validator（會再 429 一次）
             if exec_result.exit_code == -429:
                 val = ValidationResult(
@@ -1968,10 +1988,11 @@ async def run_pipeline(
                     exit_code=exec_result.exit_code,
                     stdout=exec_result.stdout,
                     stderr=exec_result.stderr,
-                    output_path=(str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None),
+                    output_path=_eff_output_path,
                     output_expect=step.output.get_expect() if step.output else None,
                     logger=logger,
                     llm_role=getattr(step, "llm_role", "primary"),
+                    step_start_time=step_started_at,
                 )
             elif config.validate and has_expect:
                 # 使用者填了「預期輸出描述」→ 跑 LLM 驗證
@@ -1987,10 +2008,11 @@ async def run_pipeline(
                     exit_code=exec_result.exit_code,
                     stdout=exec_result.stdout,
                     stderr=exec_result.stderr,
-                    output_path=(str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None),
+                    output_path=_eff_output_path,
                     output_expect=step.output.get_expect() if step.output else None,
                     logger=logger,
                     llm_role=getattr(step, "llm_role", "primary"),
+                    step_start_time=step_started_at,
                 )
             elif config.validate and not has_expect and step.skill_mode:
                 # Skill 節點沒填 expect → 仍走 LLM 淺驗證
@@ -2004,10 +2026,11 @@ async def run_pipeline(
                     exit_code=exec_result.exit_code,
                     stdout=exec_result.stdout,
                     stderr=exec_result.stderr,
-                    output_path=(str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None),
+                    output_path=_eff_output_path,
                     output_expect=None,
                     logger=logger,
                     llm_role=getattr(step, "llm_role", "primary"),
+                    step_start_time=step_started_at,
                 )
             elif config.validate and not has_expect:
                 # Script / 其他無 skill_mode 節點 + 沒填 expect → 只做確定性檢查
@@ -2024,24 +2047,8 @@ async def run_pipeline(
                 logger.info(f"[{step.name}] 驗證（僅 exit code）：{val.status}")
 
             # ── 算這步真正寫到 workflow dir 的主要檔案 ─────────────────
-            # 優先順序：明確 output.path > snapshot diff > 空字串
-            # snapshot diff 對沒設 output.path 的 skill 步驟最關鍵 —
-            # 否則 TG「取任一步輸出」會多步搶同一個「workflow dir 最新檔」
-            actual_out = ""
-            try:
-                if step.output and step.output.path:
-                    p = _resolve_path(step.output.path)
-                    if p.exists() and p.is_file():
-                        actual_out = str(p.absolute())
-                # 多 URL 爬蟲輸出是資料夾（多檔 + index.json），單檔 diff 會挑錯。
-                # 跳過 — 走 _resolve_step_output_for_tg 既有的「parent dir fallback」邏輯
-                _is_multi_wc = bool(getattr(step, "web_crawler", False)) and len(
-                    [u for u in (getattr(step, "wc_urls", None) or []) if u and u.strip()]
-                ) > 1
-                if not actual_out and not _is_multi_wc:
-                    actual_out = _diff_snapshot_pick_main(_step_dir_snapshot_before, config.name) or ""
-            except Exception as _e:
-                logger.debug(f"[{step.name}] snapshot diff 失敗（略過）：{_e}")
+            # 上面 validate 前已經算過 _eff_output_path、這邊直接重用、不要重複呼 snapshot diff
+            actual_out = _eff_output_path or ""
 
             step_result = StepResult(
                 step_index=run.current_step,

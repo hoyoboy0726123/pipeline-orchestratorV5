@@ -230,6 +230,7 @@ async def validate_step(
     output_expect: Optional[str],
     logger: logging.Logger,
     llm_role: str = "primary",
+    step_start_time: Optional[str] = None,
 ) -> ValidationResult:
     """
     使用 LLM 語意分析執行結果，回傳結構化驗證結論。
@@ -243,7 +244,7 @@ async def validate_step(
     - 是否符合 expect 描述的期望
     """
     # 收集輸出檔案資訊
-    file_info = _check_output_file(output_path)
+    file_info = _check_output_file(output_path, step_start_time=step_start_time)
     file_content = _read_file_content(output_path)
 
     # 截取重要片段（節省 token）
@@ -306,7 +307,12 @@ Exit Code：{exit_code}
 若 stdout 出現 `[Skill 完成]` 或 `[Outlook 完成]` 標記、且 exit code 為 0，代表 agent
 已完成試錯並成功產出結果。**就算 stdout 含早期 iteration 的 Traceback，也不該判 failed**
 （那是 agent 試錯過程的正常產物，並非最終狀態）。
-此情境只看：(1) 完成標記是否存在、(2) 輸出檔案是否存在且內容符合預期。"""
+此情境只看：(1) 完成標記是否存在、(2) 輸出檔案是否存在且內容符合預期。
+
+【舊檔冒充新檔的攔截】
+若【檔案狀態】欄出現「⚠️ 警告：檔案 mtime ... 早於本步驟開始時間」、或目錄內所有檔案 mtime 早於本步驟開始時間，
+代表 agent **沒有真正產出新檔**、輸出的是先前 run 的殘留檔。**此情境必判 failed**、
+即使 stdout 有 [Skill 完成] 標記也一樣（agent 可能用虛構工具結果騙過 done）。"""
 
     try:
         llm = _get_llm(role=llm_role)
@@ -390,23 +396,48 @@ def _resolve_user_path(path: str) -> Path:
     return p
 
 
-def _check_output_file(path: Optional[str]) -> str:
-    """取得輸出檔案或目錄的基本資訊"""
+def _check_output_file(path: Optional[str], step_start_time: Optional[str] = None) -> str:
+    """取得輸出檔案或目錄的基本資訊。
+    若 step_start_time(ISO) 有給,額外檢查 mtime 是否早於 step 開始時間 → 抓「舊檔冒充新檔」的假成功。
+    """
     if not path:
         return "無需檢查"
     p = _resolve_user_path(path)
     if not p.exists():
         return "❌ 路徑不存在"
+    # 解析 step_start_time → epoch seconds(供 mtime 比較)
+    _start_ts = None
+    if step_start_time:
+        try:
+            from datetime import datetime as _dt
+            _start_ts = _dt.fromisoformat(step_start_time).timestamp()
+        except Exception:
+            _start_ts = None
     if p.is_dir():
         files = list(p.iterdir())
         if not files:
             return "⚠ 目錄存在但為空"
         total = sum(f.stat().st_size for f in files if f.is_file())
-        return f"✅ 目錄存在，共 {len(files)} 個檔案，總大小：{total:,} bytes"
+        _stale_note = ""
+        if _start_ts is not None:
+            newest = max((f.stat().st_mtime for f in files if f.is_file()), default=0)
+            if newest > 0 and newest < _start_ts:
+                _stale_note = "  ⚠️ **警告：目錄內所有檔案的 mtime 都早於本步驟開始時間，可能是先前 run 的舊產物、本次未實際更新**"
+        return f"✅ 目錄存在，共 {len(files)} 個檔案，總大小：{total:,} bytes{_stale_note}"
     size = p.stat().st_size
     if size == 0:
         return "⚠ 檔案存在但為空（0 bytes）"
-    return f"✅ 檔案存在，大小：{size:,} bytes"
+    _stale_note = ""
+    if _start_ts is not None:
+        mtime = p.stat().st_mtime
+        if mtime < _start_ts:
+            from datetime import datetime as _dt
+            _mtime_iso = _dt.fromtimestamp(mtime).isoformat(timespec='seconds')
+            _stale_note = (
+                f"  ⚠️ **警告：檔案 mtime={_mtime_iso} 早於本步驟開始時間 {step_start_time[:19]}、"
+                f"可能是先前 run 的舊產物、本次未實際更新 — 應判 failed**"
+            )
+    return f"✅ 檔案存在，大小：{size:,} bytes{_stale_note}"
 
 
 # ── Skill 模式：ReAct Agent 驗證 ──────────────────────────────────────────────
@@ -718,6 +749,7 @@ async def validate_step_with_skill(
     output_expect: Optional[str],
     logger: logging.Logger,
     llm_role: str = "primary",
+    step_start_time: Optional[str] = None,
 ) -> ValidationResult:
     """
     Skill 模式驗證：LLM 作為 ReAct agent，可主動執行程式碼來驗證步驟結果。
@@ -951,4 +983,5 @@ Exit Code：{exit_code}
             output_path=output_path,
             output_expect=output_expect,
             logger=logger,
+            step_start_time=step_start_time,
         )
