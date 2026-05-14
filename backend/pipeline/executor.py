@@ -591,9 +591,14 @@ async def execute_step(
 
     # 準備環境變數
     env = _clean_env()
+    cwd_arg: Optional[str] = None
     if working_dir:
-        # 強制將工作目錄注入環境變數，供腳本讀取
+        # 強制將工作目錄注入環境變數,供 stage 系列腳本主動讀取
         env["PIPELINE_OUTPUT_DIR"] = str(Path(working_dir).absolute())
+        # 把 subprocess CWD 設成 workflow dir
+        # → 一般使用者寫的 Python 工具就算用 open("x.csv") / Path("x.csv").write_text(...)
+        # 也會落在 workflow 資料夾、snapshot diff 抓得到、下游 {{ steps.X.output.path }} 自動代入
+        cwd_arg = str(Path(working_dir).absolute())
 
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -601,6 +606,7 @@ async def execute_step(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=cwd_arg,
         )
         if run_id:
             register_proc(run_id, proc)

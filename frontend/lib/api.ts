@@ -1213,6 +1213,10 @@ export interface DryRunStepResult {
   rendered: Record<string, string>
   referenced_vars: string[]
   errors: string[]
+  /** 此 step 預期的工作目錄(subprocess CWD / skill agent working_dir 用) */
+  working_dir?: string
+  /** 非致命提醒(e.g. 引用的上游 step 沒設 output.path、runtime 可能是空) */
+  warnings?: string[]
 }
 
 export interface DryRunResult {

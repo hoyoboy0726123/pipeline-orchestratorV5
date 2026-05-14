@@ -1360,13 +1360,13 @@ export default function PipelinePage() {
         {RunStatusIcon && <span>{RunStatusIcon}</span>}
         <div className="flex-1" />
 
-        {/* 預覽渲染 (dry-run) */}
+        {/* 預覽指令 (dry-run) — 不執行、只渲染每個 step 變數展開後的指令文字 */}
         <button
           onClick={() => setShowDryRun(true)}
-          title="不執行、只顯示變數展開後的最終命令"
+          title="不執行、只顯示每個 step 變數展開後的指令"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
         >
-          👁️ 預覽渲染
+          👁️ 預覽指令
         </button>
 
         {/* YAML */}
@@ -1779,6 +1779,7 @@ export default function PipelinePage() {
             onUpdate={patch => updateAiNode(selectedNode.id, patch)}
             onClose={() => setSelectedId(null)}
             onDelete={() => deleteStep(selectedNode.id)}
+            workflowId={activeId ?? undefined}
           />
         ) : selectedNode && selectedNode.type === 'visualValidation' ? (
           <VisualValidationPanel

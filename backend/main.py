@@ -1629,9 +1629,20 @@ async def api_pipeline_dryrun(req: DryRunRequest):
     # 用 running_results 一邊 render 一邊累積:這樣 step2 可以引用 step1 在 YAML 寫的 output.path
     # (即使沒跑過、user 在 YAML 寫 path: foo_{{ input.date }}.csv 也能 render 給 step2 看)
     from pipeline.store import StepResult as _SR
+    from pathlib import Path as _P
     running_results: list = list(last_step_results)
     # 把已知 step_name → StepResult 整理出來,新 render 的 step 要更新或追加
     _by_name = {sr.step_name: i for i, sr in enumerate(running_results)}
+
+    # 為了預覽 working_dir,模擬 runner 的計算邏輯(包括跨 step 沿用)
+    _proj_root = _P(__file__).parent.parent.absolute()
+    _wf_default_wd = str(_proj_root / "ai_output" / config.name)
+    _prev_wd: str = ""
+
+    # 預先計算「哪些 step 有 output.path 設」、給警告用
+    _steps_with_output: dict[str, bool] = {}
+    for s in config.steps:
+        _steps_with_output[s.name] = bool(s.output and s.output.path)
 
     out_steps: list[dict] = []
     overall_ok = True
@@ -1677,6 +1688,46 @@ async def api_pipeline_dryrun(req: DryRunRequest):
             except ExpressionError as e:
                 step_info["errors"].append(f"output.path: {e}")
                 overall_ok = False
+
+        # ── 計算 working_dir(同 runner.py 的邏輯)──────────────────
+        # 優先序:step.working_dir > parent(output.path) > 前一步沿用 > workflow dir 預設
+        _wd: str = getattr(step, "working_dir", "") or ""
+        if not _wd and rendered_output_path:
+            # 用 rendered 後的 output.path(可能含 {{ }} 解開)算 parent
+            _p = _P(rendered_output_path)
+            if not _p.is_absolute():
+                _p = _proj_root / "ai_output" / config.name / _p
+            _wd = str(_p.parent.absolute())
+        if not _wd and _prev_wd:
+            _wd = _prev_wd
+        if not _wd:
+            _wd = _wf_default_wd
+        step_info["working_dir"] = _wd
+        _prev_wd = _wd
+
+        # ── 檢查引用的上游 step 有沒有 output.path(沒有就 warn)─────
+        # 例:user 在 batch 寫 {{ steps.前一步.output.path }} 但前一步沒設 output.path
+        # → 跑起來會拿到空字串、靜默踩坑
+        for ref in step_info["referenced_vars"]:
+            if not ref.startswith("steps."):
+                continue
+            parts = ref.split(".")
+            if len(parts) < 4 or parts[2] != "output" or parts[3] != "path":
+                continue  # 只警告 .output.path 引用
+            ref_step_name = parts[1]
+            if ref_step_name not in _steps_with_output:
+                step_info["errors"].append(
+                    f"引用了 {ref}、但找不到名為「{ref_step_name}」的上游 step(check 拼字)"
+                )
+                overall_ok = False
+            elif not _steps_with_output[ref_step_name]:
+                # 該 step 沒設 output.path → runtime 拿到的值會是 snapshot diff 推測結果
+                # 對 skill / outlook / web_crawler 這類「會自動偵測輸出」的節點還 OK
+                # 對 script 節點若沒設 output.path、又沒在 batch 寫檔到 CWD → 真的會空
+                step_info.setdefault("warnings", []).append(
+                    f"引用了 {ref}、但「{ref_step_name}」沒設 output.path。"
+                    f"runtime 會靠系統 snapshot 偵測該 step 寫了什麼新檔;若該 step 沒寫檔到工作流資料夾、此引用會是空字串"
+                )
 
         # 把 rendered output_path 塞進 running_results、給下一個 step 的 render 用
         # (這樣即使沒跑過,user 在 YAML 寫 output.path 的下游引用也能 render 出實際值)
@@ -2409,6 +2460,34 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 ```
 
 可用模板由系統動態列出（見下方注入區），優先選最貼近使用者意圖的模板。**沒有合適模板**就改成「`outlook_template:` 留空 + `batch:` 填自由需求」走 LLM 路徑。
+
+## 6.5 AI 驗證(`output.expect` — 上一個 step 的驗證描述)
+**使用者說**:「自動審核輸出」「跑完幫我檢查對不對」「驗證內容符不符合預期」「AI 驗證」
+**重要**:畫布上**看得到獨立的「AI 驗證節點」**(紫色盾牌 icon),但**它編譯成 YAML 時會併進前一個** step 的 `output.expect`、**不是獨立 YAML 步驟**。
+所以你若看到畫布上有 aiValidation 節點、轉回 YAML 時:
+- 直接把它的 expectText 塞到前一個 step 的 `output.expect`
+- **不要**在 YAML 寫成獨立 step(會炸、PipelineConfig 沒這欄位)
+- 反之若使用者直接要「幫我加 AI 驗證」,在 skill / script step 的 output 加 expect 就好、不需要建獨立節點
+
+```yaml
+- name: 摘要報告
+  skill_mode: true
+  batch: |
+    讀 raw.md、摘成 10 條重點、輸出 daily.md
+  output:
+    path: daily.md
+    expect: "至少 10 條中文重點、每條 30 字內、不能有英文段落"
+    # 進階:深度驗證(LLM 用 read_file 等工具去細查、token 成本較高)
+    # skill_mode: true
+```
+
+**`expect` 填什麼**:用自然語言寫具體驗收條件、不要寫成模糊「好不好看」。
+- ✅ 「CSV 至少 100 筆、欄位 email 全部 RFC5322 合法」
+- ✅ 「每張投影片有標題、no overflow、字體至少 18pt」
+- ❌ 「品質要好」「結果要對」
+
+**何時加深度驗證(`output.skill_mode: true`)**:文字 / 數字精準度要查內容(不只是格式)、容忍 LLM 多花 5-15s 跑工具確認。
+**何時不加**:單純看 stdout / 檔案存在,淺驗證夠用、便宜。
 
 ## 7. 視覺驗證節點（visual_validation）
 **使用者說**：「檢查產出畫面對不對」「驗證截圖」「看圖判斷」

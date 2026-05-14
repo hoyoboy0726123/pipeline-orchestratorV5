@@ -11,7 +11,7 @@
 import { useMemo } from 'react'
 import { X, GitBranch, Plus, Trash2 } from 'lucide-react'
 import type { ConditionData, ConditionNode } from './_helpers'
-import { VariableButton } from './_variablePicker'
+import { VariableInput } from './_variablePicker'
 
 const CONDITION_COLOR = '#f97316'  // 橘色 — 跟其他節點區隔
 
@@ -87,17 +87,15 @@ export default function ConditionPanel({
             <div>
               <div className="flex items-end justify-between mb-1.5">
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">條件表達式</label>
-                <VariableButton
-                  workflowId={workflowId}
-                  onPick={(p) => onUpdate({ expression: `${data.expression || ''}{{ ${p} }}` })}
-                />
               </div>
-              <textarea
+              <VariableInput
+                value={data.expression || ''}
+                onChange={(v) => onUpdate({ expression: v })}
+                workflowId={workflowId}
+                multiline
                 rows={3}
-                value={data.expression}
-                onChange={e => onUpdate({ expression: e.target.value })}
                 placeholder={'例:{{ steps.fetch.output.rows | int > 100 }}\n例:{{ "ok" in steps.api.output.stdout }}'}
-                className={`${inputCls} font-mono text-xs resize-y leading-relaxed`}
+                showHint={false}
               />
               <p className="text-[11px] text-gray-400 mt-1">Jinja2 boolean 表達式;求值後 truthy → on_true、falsy → on_false</p>
             </div>
@@ -120,16 +118,15 @@ export default function ConditionPanel({
             <div>
               <div className="flex items-end justify-between mb-1.5">
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">求值表達式</label>
-                <VariableButton
-                  workflowId={workflowId}
-                  onPick={(p) => onUpdate({ switch: `${data.switch || ''}{{ ${p} }}` })}
-                />
               </div>
-              <input
-                value={data.switch}
-                onChange={e => onUpdate({ switch: e.target.value })}
+              <VariableInput
+                value={data.switch || ''}
+                onChange={(v) => onUpdate({ switch: v })}
+                workflowId={workflowId}
+                multiline
+                rows={2}
                 placeholder="例:{{ steps.api.output.status }}"
-                className={`${inputCls} font-mono text-xs`}
+                showHint={false}
               />
               <p className="text-[11px] text-gray-400 mt-1">求值結果 str() 後與 cases keys 比對</p>
             </div>

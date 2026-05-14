@@ -4,7 +4,7 @@ import { X, AlertTriangle, Loader2, Check, Mail } from 'lucide-react'
 import { toast } from 'sonner'
 import { testOutlookConnection } from '@/lib/api'
 import type { OutlookData, OutlookNode } from './_helpers'
-import { VariableButton } from './_variablePicker'
+import { VariableInput } from './_variablePicker'
 import LlmRoleSelector from './_llmRoleSelector'
 
 // 帶「確定」按鈕的日期/時間欄位：onChange 只寫 draft，按確定才 commit 到 params
@@ -369,31 +369,19 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete, workfl
 
   const renderParam = (p: ParamSpec) => {
     const v = data.params?.[p.key]
-    // 字串類欄位都附 VariableButton(text/textarea — date/select/bool/number 不附)
-    const isStringy = p.type === 'textarea' || p.type === 'text' || !p.type
-    const varBtn = isStringy ? (
-      <VariableButton
-        workflowId={workflowId}
-        onPick={(path) => setParam(p.key, `${(v as string) || ''}{{ ${path} }}`)}
-      />
-    ) : null
+    // textarea / text 走 VariableInput(內建 chip + 變數按鈕)
+    // date / select / bool / number 維持原生控制項
     if (p.type === 'textarea') {
       return (
-        <div>
-          {varBtn && <div className="flex justify-end mb-1">{varBtn}</div>}
-          <textarea
-            className={`${inputCls} font-mono resize-y min-h-[100px]`} rows={6}
-            placeholder={p.placeholder}
-            value={(v as string) || ''}
-            onChange={e => setParam(p.key, e.target.value)}
-            onWheel={(e) => {
-              const el = e.currentTarget
-              const atTop = el.scrollTop === 0
-              const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
-              if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
-            }}
-          />
-        </div>
+        <VariableInput
+          value={(v as string) || ''}
+          onChange={(val) => setParam(p.key, val)}
+          workflowId={workflowId}
+          multiline
+          rows={6}
+          placeholder={p.placeholder}
+          showHint={false}
+        />
       )
     }
     if (p.type === 'select' && p.options) {
@@ -421,20 +409,31 @@ export default function OutlookPanel({ node, onUpdate, onClose, onDelete, workfl
         />
       )
     }
-    return (
-      <div>
+    // text 類:走 chip(可插變數);number 維持原生 input
+    if (p.type === 'number') {
+      return (
         <input
           className={inputCls}
-          type={p.type === 'number' ? 'number' : p.type}
+          type="number"
           placeholder={p.placeholder}
-          value={(v as string | number) ?? ''}
+          value={(v as number) ?? ''}
           onChange={e => {
             const raw = e.target.value
-            setParam(p.key, p.type === 'number' ? (raw === '' ? '' : Number(raw)) : raw)
+            setParam(p.key, raw === '' ? '' : Number(raw))
           }}
         />
-        {varBtn && <div className="flex justify-end mt-1">{varBtn}</div>}
-      </div>
+      )
+    }
+    return (
+      <VariableInput
+        value={(v as string) || ''}
+        onChange={(val) => setParam(p.key, val)}
+        workflowId={workflowId}
+        multiline
+        rows={1}
+        placeholder={p.placeholder}
+        showHint={false}
+      />
     )
   }
 

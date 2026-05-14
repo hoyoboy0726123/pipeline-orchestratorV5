@@ -329,7 +329,9 @@ export function VariableButton({
 //
 // 為什麼自己刻、不用 tiptap / slate?單一需求、不值得多 200KB bundle。
 
-const _CHIP_RE = /\{\{\s*([\w.\-_]+)\s*\}\}/g
+// 變數名稱可含中文(steps.<中文 step name>.output.path)、所以不能用 \w(JS \w 只認 ASCII)
+// 改成「不是空白、不是大括號」就接受、跟後端 Jinja 解析寬鬆度一致
+const _CHIP_RE = /\{\{\s*([^\s{}]+)\s*\}\}/g
 const _CHIP_CLS =
   'var-chip inline-flex items-center px-1.5 py-px mx-0.5 rounded bg-indigo-100 text-indigo-700 ' +
   'text-[11px] font-semibold select-none cursor-default whitespace-nowrap align-baseline'
@@ -355,7 +357,35 @@ const ChipTextarea = forwardRef<ChipTextareaHandle, {
   const elRef = useRef<HTMLDivElement | null>(null)
   // 用 ref 記「上次 set 進去的 value」,避免外部 onChange 回流時又 setInnerHTML 害游標跳
   const lastSetValueRef = useRef<string>('')
+  // 記最後一次游標位置 — 點外部按鈕(插入變數)時 focus 會跑掉、用這個還原
+  const lastRangeRef = useRef<Range | null>(null)
   const [isEmpty, setIsEmpty] = useState(!value)
+
+  // 任何 selection 變動都存一份 Range(只接受在自己 elRef 內的)
+  const saveRange = useCallback(() => {
+    const el = elRef.current
+    if (!el) return
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
+    const r = sel.getRangeAt(0)
+    if (el.contains(r.commonAncestorContainer)) {
+      lastRangeRef.current = r.cloneRange()
+    }
+  }, [])
+
+  // 還原游標(focus 從外部跑回來時)— focus 後 selection 不一定恢復、強制把存的 range 套回去
+  const restoreRange = useCallback(() => {
+    const el = elRef.current
+    if (!el) return false
+    el.focus()
+    const saved = lastRangeRef.current
+    if (!saved) return false
+    const sel = window.getSelection()
+    if (!sel) return false
+    sel.removeAllRanges()
+    sel.addRange(saved)
+    return true
+  }, [])
 
   // value → 安全 HTML(逃 escape 後、把 {{ ... }} 換成 chip span)
   const valueToHtml = useCallback((v: string): string => {
@@ -489,7 +519,8 @@ const ChipTextarea = forwardRef<ChipTextareaHandle, {
     insertChip: (path: string) => {
       const el = elRef.current
       if (!el) return
-      el.focus()
+      // 還原進入 modal 前的游標位置(否則 selection 不在 el 內、會插在預設位置 = 開頭)
+      restoreRange()
       const span = document.createElement('span')
       span.className = _CHIP_CLS
       span.contentEditable = 'false'
@@ -554,7 +585,7 @@ const ChipTextarea = forwardRef<ChipTextareaHandle, {
       lastSetValueRef.current = '__force__'
       onChange(next)
     },
-  }), [handleInput, onChange, serializeDom, value])
+  }), [handleInput, onChange, serializeDom, value, restoreRange])
 
   const baseCls =
     'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none ' +
@@ -568,8 +599,11 @@ const ChipTextarea = forwardRef<ChipTextareaHandle, {
         ref={elRef}
         contentEditable
         suppressContentEditableWarning
-        onInput={handleInput}
+        onInput={() => { handleInput(); saveRange() }}
         onKeyDown={handleKeyDown}
+        onKeyUp={saveRange}
+        onMouseUp={saveRange}
+        onBlur={saveRange}
         onPaste={handlePaste}
         className={baseCls}
         style={{ minHeight: minH }}

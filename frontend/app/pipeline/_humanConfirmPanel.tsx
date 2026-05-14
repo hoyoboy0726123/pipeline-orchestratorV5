@@ -1,7 +1,7 @@
 'use client'
 import { X, UserCheck } from 'lucide-react'
 import type { HumanConfirmData, HumanConfirmNode } from './_helpers'
-import { VariableButton } from './_variablePicker'
+import { VariableInput } from './_variablePicker'
 
 const CONFIRM_COLOR = '#10b981'
 
@@ -43,23 +43,15 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete, w
         <div>
           <div className="flex items-end justify-between mb-2">
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">確認訊息</label>
-            <VariableButton
-              workflowId={workflowId}
-              onPick={(p) => onUpdate({ message: `${data.message || ''}{{ ${p} }}` })}
-            />
           </div>
-          <textarea
+          <VariableInput
+            value={data.message || ''}
+            onChange={(v) => onUpdate({ message: v })}
+            workflowId={workflowId}
+            multiline
             rows={6}
-            value={data.message}
-            onChange={e => onUpdate({ message: e.target.value })}
-            onWheel={(e) => {
-              const el = e.currentTarget
-              const atTop = el.scrollTop === 0
-              const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
-              if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
-            }}
             placeholder={'(選填)自訂確認提示…\n例如:請確認 {{ steps.crawl.output.path }} 是否正確'}
-            className={`${inputCls} resize-y text-xs leading-relaxed min-h-[100px]`}
+            showHint={false}
           />
           <p className="text-xs text-gray-400 mt-1.5">支援 <code className="bg-gray-100 px-1 rounded font-mono">{`{{ steps.X.output.Y }}`}</code> 等變數;留空 = 預設「請確認上一步結果是否正確」</p>
         </div>

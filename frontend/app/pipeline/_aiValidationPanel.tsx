@@ -2,15 +2,17 @@
 import { X, ShieldCheck } from 'lucide-react'
 import type { AiValidationData } from './_helpers'
 import LlmRoleSelector from './_llmRoleSelector'
+import { VariableInput } from './_variablePicker'
 
 interface Props {
   data: AiValidationData
   onUpdate: (patch: Partial<AiValidationData>) => void
   onClose: () => void
   onDelete: () => void
+  workflowId?: string
 }
 
-export default function AiValidationPanel({ data, onUpdate, onClose, onDelete }: Props) {
+export default function AiValidationPanel({ data, onUpdate, onClose, onDelete, workflowId }: Props) {
   const color = '#f59e0b'
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/20 bg-white'
   const skillOn = data.skillMode === true
@@ -43,18 +45,14 @@ export default function AiValidationPanel({ data, onUpdate, onClose, onDelete }:
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">驗證描述</label>
-          <textarea
+          <VariableInput
+            value={data.expectText || ''}
+            onChange={(v) => onUpdate({ expectText: v })}
+            workflowId={workflowId}
+            multiline
             rows={6}
-            value={data.expectText}
-            onChange={e => onUpdate({ expectText: e.target.value })}
-            onWheel={(e) => {
-              const el = e.currentTarget
-              const atTop = el.scrollTop === 0
-              const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
-              if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
-            }}
             placeholder={'用自然語言描述 AI 應該確認什麼…\n例如：確認輸出的 CSV 包含至少 100 筆資料，且欄位 email 格式正確'}
-            className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[100px]`}
+            showHint={false}
           />
           <p className="text-xs text-gray-400 mt-1.5">AI 會在前一步驟完成後，依據此描述驗證執行結果</p>
         </div>
