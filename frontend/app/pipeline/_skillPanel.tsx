@@ -5,7 +5,7 @@ import type { SkillData, SkillNode } from './_helpers'
 import { fsBrowse, listAvailableSkills, type AvailableSkill } from '@/lib/api'
 import { toast } from 'sonner'
 import { useRunStatusStore } from './_runStatus'
-import { VariableButton } from './_variablePicker'
+import { VariableButton, VariableInput } from './_variablePicker'
 import LlmRoleSelector from './_llmRoleSelector'
 
 // ── File Browser Modal ────────────────────────────────────────────────────────
@@ -155,26 +155,17 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete, wo
           <div>
             <div className="flex items-end justify-between mb-2">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">任務描述</label>
-              <VariableButton
-                workflowId={workflowId}
-                onPick={(p) => onUpdate({ taskDescription: `${data.taskDescription || ''}{{ ${p} }}` })}
-              />
             </div>
-            <textarea
+            <VariableInput
+              value={data.taskDescription || ''}
+              onChange={(v) => onUpdate({ taskDescription: v })}
+              workflowId={workflowId}
+              multiline
               rows={7}
-              value={data.taskDescription}
-              onChange={e => onUpdate({ taskDescription: e.target.value })}
-              onWheel={(e) => {
-                // 滾動 containment:textarea 內可滾就吃 event、到邊界才讓外層滾(避免「滾過頭」)
-                const el = e.currentTarget
-                const atTop = el.scrollTop === 0
-                const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
-                if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
-              }}
-              placeholder={'用自然語言描述 AI 應該做什麼…\n例如：到 Yahoo Finance 抓取台積電（2330.TW）最近 30 天的收盤價,存成 CSV 檔案;支援 {{ input.date }} 等變數'}
-              className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[120px]`}
+              placeholder={'用自然語言描述 AI 應該做什麼…\n例如：到 Yahoo Finance 抓取台積電(2330.TW)最近 30 天的收盤價,存成 CSV 檔案;支援 {{ input.date }} 等變數'}
+              showHint={false}
             />
-            <p className="text-xs text-gray-400 mt-1.5">AI 會根據描述自動撰寫 Python 程式碼並執行(拖右下角可拉高)。支援 <code className="bg-gray-100 px-1 rounded font-mono">{`{{ steps.X.output.Y }}`}</code> 等變數</p>
+            <p className="text-xs text-gray-400 mt-1.5">AI 會根據描述自動撰寫 Python 程式碼並執行。引用上一步輸出請點 <span className="font-semibold text-indigo-600">🔗 插入變數</span> 或直接打 <code className="bg-gray-100 px-1 rounded font-mono">{`{{`}</code> 自動完成</p>
           </div>
 
           {/* Claude Code Skill mount */}

@@ -8,7 +8,7 @@
  *
  * 兩個 component 都用同一份 useWorkflowVariables hook 拿可用變數 + 上次值。
  */
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, forwardRef, useImperativeHandle } from 'react'
 import { createPortal } from 'react-dom'
 import { Link as LinkIcon, X, Search } from 'lucide-react'
 import {
@@ -320,6 +320,270 @@ export function VariableButton({
   )
 }
 
+// ── ChipTextarea — 把 {{ ... }} 渲染成不可分割的標籤 ─────────────────────
+// 使用 contenteditable + 不可編輯 span,讓 {{ steps.X.output.Y }} 變成一顆 chip:
+//  - 點到 chip 內部不會把游標跑進去(contenteditable=false)
+//  - 按 Backspace 整顆刪除(瀏覽器原生行為)
+//  - 跟普通文字混排、可放句首/句尾/任意位置
+// 序列化:DOM → string 時把 chip 還原成 {{ <path> }} 文字、其餘照舊
+//
+// 為什麼自己刻、不用 tiptap / slate?單一需求、不值得多 200KB bundle。
+
+const _CHIP_RE = /\{\{\s*([\w.\-_]+)\s*\}\}/g
+const _CHIP_CLS =
+  'var-chip inline-flex items-center px-1.5 py-px mx-0.5 rounded bg-indigo-100 text-indigo-700 ' +
+  'text-[11px] font-semibold select-none cursor-default whitespace-nowrap align-baseline'
+
+interface ChipTextareaHandle {
+  insertChip: (path: string) => void
+  insertText: (text: string) => void
+  focus: () => void
+  getCaretCoords: () => { left: number; top: number; height: number } | null
+  getTextBeforeCaret: () => string  // 用於偵測未閉合的 {{
+  replaceRange: (start: number, end: number, replacement: string, asChip: boolean) => void
+}
+
+const ChipTextarea = forwardRef<ChipTextareaHandle, {
+  value: string
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void
+  onInput?: () => void
+  placeholder?: string
+  rows?: number
+  className?: string
+}>(function ChipTextarea({ value, onChange, onKeyDown, onInput, placeholder, rows = 3, className = '' }, ref) {
+  const elRef = useRef<HTMLDivElement | null>(null)
+  // 用 ref 記「上次 set 進去的 value」,避免外部 onChange 回流時又 setInnerHTML 害游標跳
+  const lastSetValueRef = useRef<string>('')
+  const [isEmpty, setIsEmpty] = useState(!value)
+
+  // value → 安全 HTML(逃 escape 後、把 {{ ... }} 換成 chip span)
+  const valueToHtml = useCallback((v: string): string => {
+    const esc = (s: string) => s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+    let out = ''
+    let last = 0
+    _CHIP_RE.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = _CHIP_RE.exec(v)) !== null) {
+      out += esc(v.slice(last, m.index)).replace(/\n/g, '<br>')
+      const path = m[1]
+      out += `<span class="${_CHIP_CLS}" contenteditable="false" data-var="${esc(path)}">${esc(path)}</span>`
+      last = m.index + m[0].length
+    }
+    out += esc(v.slice(last)).replace(/\n/g, '<br>')
+    return out
+  }, [])
+
+  // DOM → string(chip 還原成 {{ path }}、<br> 換成 \n)
+  const serializeDom = useCallback((root: HTMLElement): string => {
+    let s = ''
+    const walk = (node: Node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        s += node.textContent || ''
+        return
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return
+      const el = node as HTMLElement
+      if (el.tagName === 'BR') { s += '\n'; return }
+      // chip:用 data-var 識別(class 名可能因 Tailwind 改變、用屬性穩)
+      if (el.hasAttribute('data-var')) {
+        const path = el.getAttribute('data-var') || el.textContent || ''
+        s += `{{ ${path} }}`
+        return
+      }
+      // div / p 等 block 邊界當換行
+      const isBlock = el.tagName === 'DIV' || el.tagName === 'P'
+      if (isBlock && s.length > 0 && !s.endsWith('\n')) s += '\n'
+      el.childNodes.forEach(walk)
+    }
+    root.childNodes.forEach(walk)
+    return s
+  }, [])
+
+  // 初始 + 外部 value 變動時同步進 DOM
+  useEffect(() => {
+    const el = elRef.current
+    if (!el) return
+    if (value === lastSetValueRef.current) return  // 是我們自己 onChange 出去的,不要再灌
+    el.innerHTML = valueToHtml(value)
+    lastSetValueRef.current = value
+    setIsEmpty(!value)
+  }, [value, valueToHtml])
+
+  // 使用者打字 / 改動 → 序列化回 string、通知外部
+  const handleInput = useCallback(() => {
+    const el = elRef.current
+    if (!el) return
+    const s = serializeDom(el)
+    lastSetValueRef.current = s
+    onChange(s)
+    setIsEmpty(!s)
+    onInput?.()
+  }, [onChange, onInput, serializeDom])
+
+  // 貼上時剝掉 rich text、只留純文字(防 chip 被破壞、防 HTML 注入)
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const text = e.clipboardData.getData('text/plain')
+    document.execCommand('insertText', false, text)
+  }, [])
+
+  // Backspace / Delete 顯式處理:游標在 chip 邊界時整顆刪掉
+  // 原因:不同瀏覽器對 contenteditable=false inline 元素的刪除行為不一致,
+  // 直接靠瀏覽器預設常常按 Backspace 沒反應。
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      const sel = window.getSelection()
+      if (sel && sel.isCollapsed && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        const node = range.startContainer
+        const offset = range.startOffset
+        const isBackspace = e.key === 'Backspace'
+        let target: Element | null = null
+        const checkSibling = (n: Node | null): Element | null => {
+          if (!n) return null
+          if (n.nodeType === Node.ELEMENT_NODE && (n as Element).hasAttribute('data-var')) {
+            return n as Element
+          }
+          // 跨 zero-width-space 文字節點:若是純空白/ZWSP、再往前/後看一格
+          if (n.nodeType === Node.TEXT_NODE) {
+            const t = (n.textContent || '').replace(/[​\s]/g, '')
+            if (t === '') return checkSibling(isBackspace ? n.previousSibling : n.nextSibling)
+          }
+          return null
+        }
+        if (isBackspace) {
+          // 游標前方是不是 chip
+          if (node.nodeType === Node.TEXT_NODE && offset === 0) {
+            target = checkSibling(node.previousSibling)
+          } else if (node.nodeType === Node.ELEMENT_NODE && offset > 0) {
+            target = checkSibling(node.childNodes[offset - 1])
+          }
+        } else {
+          // Delete:游標後方是不是 chip
+          if (node.nodeType === Node.TEXT_NODE && offset === (node.textContent?.length ?? 0)) {
+            target = checkSibling(node.nextSibling)
+          } else if (node.nodeType === Node.ELEMENT_NODE && offset < node.childNodes.length) {
+            target = checkSibling(node.childNodes[offset])
+          }
+        }
+        if (target) {
+          e.preventDefault()
+          target.remove()
+          handleInput()
+          return
+        }
+      }
+    }
+    onKeyDown?.(e)
+  }, [handleInput, onKeyDown])
+
+  // 暴露 imperative API 給外部 autocomplete / 插入變數按鈕用
+  useImperativeHandle(ref, () => ({
+    focus: () => elRef.current?.focus(),
+    insertChip: (path: string) => {
+      const el = elRef.current
+      if (!el) return
+      el.focus()
+      const span = document.createElement('span')
+      span.className = _CHIP_CLS
+      span.contentEditable = 'false'
+      span.setAttribute('data-var', path)
+      span.textContent = path
+      const sel = window.getSelection()
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        range.deleteContents()
+        range.insertNode(span)
+        // 補一個 zero-width space 後綴讓游標可以放在 chip 後面
+        const tail = document.createTextNode('​')
+        span.parentNode?.insertBefore(tail, span.nextSibling)
+        range.setStartAfter(tail)
+        range.collapse(true)
+        sel.removeAllRanges()
+        sel.addRange(range)
+      } else {
+        el.appendChild(span)
+      }
+      handleInput()
+    },
+    insertText: (text: string) => {
+      const el = elRef.current
+      if (!el) return
+      el.focus()
+      document.execCommand('insertText', false, text)
+      handleInput()
+    },
+    getCaretCoords: () => {
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0) return null
+      const range = sel.getRangeAt(0).cloneRange()
+      range.collapse(false)
+      const rect = range.getBoundingClientRect()
+      // 如果是空的 range(剛 focus 時),fallback 用容器
+      if (rect.left === 0 && rect.top === 0) {
+        const eRect = elRef.current?.getBoundingClientRect()
+        if (eRect) return { left: eRect.left, top: eRect.bottom + 4, height: eRect.height }
+      }
+      return { left: rect.left, top: rect.bottom + 4, height: rect.height || 20 }
+    },
+    getTextBeforeCaret: () => {
+      const el = elRef.current
+      if (!el) return ''
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0) return ''
+      const range = sel.getRangeAt(0).cloneRange()
+      range.setStart(el, 0)
+      // 用一個 Range fragment + 我們的 serializeDom 算游標前的字串
+      const frag = range.cloneContents()
+      const tmp = document.createElement('div')
+      tmp.appendChild(frag)
+      return serializeDom(tmp)
+    },
+    replaceRange: (start: number, end: number, replacement: string, asChip: boolean) => {
+      // 用 value-string 座標來定位、再重新渲染
+      const before = value.slice(0, start)
+      const after = value.slice(end)
+      const next = asChip ? `${before}{{ ${replacement} }}${after}` : `${before}${replacement}${after}`
+      // 強制 DOM 重渲染(因為 lastSetValueRef 會擋外部 useEffect)
+      lastSetValueRef.current = '__force__'
+      onChange(next)
+    },
+  }), [handleInput, onChange, serializeDom, value])
+
+  const baseCls =
+    'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none ' +
+    'focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/20 bg-white font-mono ' +
+    'whitespace-pre-wrap break-words overflow-y-auto'
+  const minH = `${rows * 1.5 + 0.5}rem`
+
+  return (
+    <div className={`relative ${className}`}>
+      <div
+        ref={elRef}
+        contentEditable
+        suppressContentEditableWarning
+        onInput={handleInput}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        className={baseCls}
+        style={{ minHeight: minH }}
+        spellCheck={false}
+      />
+      {isEmpty && placeholder && (
+        <div className="absolute top-1.5 left-2.5 text-sm text-gray-400 pointer-events-none font-mono">
+          {placeholder}
+        </div>
+      )}
+    </div>
+  )
+})
+
 // ── 公開 component:VariableInput(textarea / input wrapper)──────────────
 /**
  * 包裝 <textarea> 或 <input>:
@@ -358,6 +622,8 @@ export function VariableInput({
   showHint?: boolean
 }) {
   const inputRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
+  // multiline 走 chip-textarea(contenteditable + chip span)
+  const chipRef = useRef<ChipTextareaHandle | null>(null)
   const [autocompleteOpen, setAutocompleteOpen] = useState(false)
   const [autocompleteQuery, setAutocompleteQuery] = useState('')
   // {{ 觸發位置:autocomplete popup 在這個游標位置展開,選中後從這裡開始覆蓋
@@ -383,6 +649,47 @@ export function VariableInput({
     const rect = el.getBoundingClientRect()
     return { left: rect.left, top: rect.bottom + 4, height: rect.height }
   }
+
+  // ── multiline 模式:chip-textarea 的 input/keydown 觸發 ─────────────────
+  // ChipTextarea 內部已把 value 回傳;我們這邊只負責「偵測 {{ 觸發 autocomplete」
+  const handleChipInput = useCallback(() => {
+    if (!multiline) return
+    const before = chipRef.current?.getTextBeforeCaret() ?? ''
+    const lastOpen = before.lastIndexOf('{{')
+    const lastClose = before.lastIndexOf('}}')
+    if (lastOpen >= 0 && lastOpen > lastClose) {
+      const inside = before.slice(lastOpen + 2)
+      if (!inside.includes('\n')) {
+        const coords = chipRef.current?.getCaretCoords() || null
+        setAutocompleteQuery(inside.trim())
+        setAutocompleteAnchor({
+          start: lastOpen,
+          end: before.length,
+          coords: coords || { left: 0, top: 0, height: 20 },
+        })
+        setAutocompleteOpen(true)
+        setHighlightIdx(0)
+        return
+      }
+    }
+    setAutocompleteOpen(false)
+  }, [multiline])
+
+  const handleChipKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!autocompleteOpen || filteredItems.length === 0) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setHighlightIdx((i) => (i + 1) % filteredItems.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setHighlightIdx((i) => (i - 1 + filteredItems.length) % filteredItems.length)
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      insertSelected(filteredItems[highlightIdx].path)
+    } else if (e.key === 'Escape') {
+      setAutocompleteOpen(false)
+    }
+  }, [autocompleteOpen, filteredItems, highlightIdx])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
     const next = e.target.value
@@ -430,14 +737,19 @@ export function VariableInput({
   const insertSelected = useCallback(
     (path: string) => {
       if (!autocompleteAnchor) return
+      if (multiline && chipRef.current) {
+        // chip 模式:replaceRange 把 `{{ inside` 換成 chip
+        chipRef.current.replaceRange(autocompleteAnchor.start, autocompleteAnchor.end, path, true)
+        setAutocompleteOpen(false)
+        return
+      }
+      // textarea / input 模式
       const before = value.slice(0, autocompleteAnchor.start)
       const after = value.slice(autocompleteAnchor.end)
-      // 用標準 Jinja2 寫法:`{{ path }}`(前後加空格、人眼好讀)
       const insertion = `{{ ${path} }}`
       const next = before + insertion + after
       onChange(next)
       setAutocompleteOpen(false)
-      // 把游標移到插入文字之後
       requestAnimationFrame(() => {
         const el = inputRef.current
         if (el) {
@@ -447,11 +759,15 @@ export function VariableInput({
         }
       })
     },
-    [autocompleteAnchor, value, onChange],
+    [autocompleteAnchor, value, onChange, multiline],
   )
 
   // VariableButton 的插入(沒在 textarea 自動完成情境):游標位置插
   const insertAtCursor = (path: string) => {
+    if (multiline && chipRef.current) {
+      chipRef.current.insertChip(path)
+      return
+    }
     const el = inputRef.current
     const insertion = `{{ ${path} }}`
     if (el) {
@@ -480,14 +796,14 @@ export function VariableInput({
       </div>
 
       {multiline ? (
-        <textarea
-          ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-          rows={rows}
+        <ChipTextarea
+          ref={chipRef}
           value={value}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
+          onChange={onChange}
+          onInput={handleChipInput}
+          onKeyDown={handleChipKeyDown}
           placeholder={placeholder}
-          className={`${baseInputCls} resize-none`}
+          rows={rows}
         />
       ) : (
         <input
