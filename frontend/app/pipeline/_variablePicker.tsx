@@ -41,7 +41,7 @@ function useWorkflowVariables(workflowId: string | undefined, enabled: boolean) 
 // 把 dotted-path 攤平成「可選變數」list、給搜尋過濾用
 interface PickerItem {
   path: string                 // 完整 dotted-path,例:steps.crawl.output.path
-  category: 'steps' | 'input' | 'env'
+  category: 'steps' | 'input'
   label: string                // UI 顯示用,例:crawl.path
   detail: string               // 副標,例:Script · 上次:data/ptt.csv
   lastValue: string
@@ -72,15 +72,8 @@ function flattenVariables(data: WorkflowVariablesResult | null): PickerItem[] {
       lastValue: String(i.last_value ?? ''),
     })
   }
-  for (const e of data.available.env) {
-    out.push({
-      path: `env.${e.key}`,
-      category: 'env',
-      label: `env.${e.key}`,
-      detail: '環境變數',
-      lastValue: String(e.last_value ?? ''),
-    })
-  }
+  // 環境變數刻意不放進 picker / autocomplete:對 batch 編寫沒實際用途、徒增認知負擔。
+  // runtime 仍會替換 {{ env.X }}、進階使用者要用就直接打字。
   return out
 }
 
@@ -108,7 +101,7 @@ function PickerModal({ workflowId, onSelect, onClose }: PickerModalProps) {
   }, [all, search])
 
   const grouped = useMemo(() => {
-    const g: Record<string, PickerItem[]> = { steps: [], input: [], env: [] }
+    const g: Record<string, PickerItem[]> = { steps: [], input: [] }
     for (const it of filtered) g[it.category].push(it)
     return g
   }, [filtered])
@@ -182,15 +175,8 @@ function PickerModal({ workflowId, onSelect, onClose }: PickerModalProps) {
                   onSelect={onSelect}
                 />
               )}
-              {/* 環境變數 */}
-              {grouped.env.length > 0 && (
-                <Section
-                  title="🟨 環境變數 (env)"
-                  hint="從 .env / 系統環境讀,KEY/TOKEN/SECRET 已過濾掉"
-                  items={grouped.env}
-                  onSelect={onSelect}
-                />
-              )}
+              {/* 環境變數區塊已移除 — 對 batch 編寫沒實際用途、徒增認知負擔。
+                  如需 env 變數仍可在 batch 直接打 {{ env.X }}、runtime 會替換 */}
               {filtered.length === 0 && (
                 <p className="text-center text-gray-400 py-6 text-sm">
                   沒有符合的變數
@@ -210,6 +196,33 @@ function PickerModal({ workflowId, onSelect, onClose }: PickerModalProps) {
   )
 }
 
+// 變數用途提示 — 教使用者「該選哪個、別選哪個」
+// 避免新手把 stdout / exit_code / status 當「上一步輸出檔」誤插
+function getUsageHint(path: string): { tone: 'rec' | 'warn' | 'info'; text: string } | null {
+  if (path.endsWith('.path')) {
+    return { tone: 'rec', text: '✅ 推薦:檔案實際路徑(下游 LLM / 腳本要讀檔請選這個)' }
+  }
+  if (path.endsWith('.stdout')) {
+    return { tone: 'warn', text: '⚠ 上一步 stdout 一行訊息、不是檔案內容,通常不要用' }
+  }
+  if (path.endsWith('.exit_code')) {
+    return { tone: 'warn', text: '⚠ 只是 0 / 1 數字、沒語意,通常不要用' }
+  }
+  if (path.endsWith('.status')) {
+    return { tone: 'warn', text: '⚠ 只是 ok / failed 字串(驗證結果)、沒實際資料,通常不要用' }
+  }
+  if (path.startsWith('input.')) {
+    return { tone: 'info', text: '🟩 啟動參數:跑 workflow 時由 user 傳入(/run X arg=value)' }
+  }
+  return null
+}
+
+const _TONE_CLASS = {
+  rec: 'text-emerald-600',
+  warn: 'text-amber-600',
+  info: 'text-gray-500',
+} as const
+
 function Section({
   title, hint, items, onSelect,
 }: {
@@ -225,27 +238,35 @@ function Section({
         <div className="text-[11px] text-gray-500 mt-0.5">{hint}</div>
       </div>
       <div className="divide-y divide-gray-100">
-        {items.map((it) => (
-          <button
-            key={it.path}
-            onClick={() => onSelect(it.path)}
-            className="w-full flex items-center justify-between gap-3 px-3 py-2 hover:bg-indigo-50 text-left transition-colors"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="font-mono text-xs text-gray-800 truncate">{it.label}</div>
-              <div className="text-[11px] text-gray-400 truncate mt-0.5">{it.detail}</div>
-            </div>
-            {it.lastValue && (
-              <div
-                className="font-mono text-[11px] text-emerald-700 bg-emerald-50 px-2 py-1 rounded max-w-[200px] truncate shrink-0"
-                title={it.lastValue}
-              >
-                {it.lastValue}
+        {items.map((it) => {
+          const usage = getUsageHint(it.path)
+          return (
+            <button
+              key={it.path}
+              onClick={() => onSelect(it.path)}
+              className="w-full flex items-center justify-between gap-3 px-3 py-2 hover:bg-indigo-50 text-left transition-colors"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="font-mono text-xs text-gray-800 truncate">{it.label}</div>
+                <div className="text-[11px] text-gray-400 truncate mt-0.5">{it.detail}</div>
+                {usage && (
+                  <div className={`text-[11px] mt-0.5 truncate ${_TONE_CLASS[usage.tone]}`}>
+                    {usage.text}
+                  </div>
+                )}
               </div>
-            )}
-            <span className="text-[11px] text-indigo-500 font-medium shrink-0">插入</span>
-          </button>
-        ))}
+              {it.lastValue && (
+                <div
+                  className="font-mono text-[11px] text-emerald-700 bg-emerald-50 px-2 py-1 rounded max-w-[200px] truncate shrink-0"
+                  title={it.lastValue}
+                >
+                  {it.lastValue}
+                </div>
+              )}
+              <span className="text-[11px] text-indigo-500 font-medium shrink-0">插入</span>
+            </button>
+          )
+        })}
       </div>
     </div>
   )

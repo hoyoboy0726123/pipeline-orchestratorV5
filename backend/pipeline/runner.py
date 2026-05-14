@@ -1280,6 +1280,11 @@ async def run_pipeline(
             logger.info("偵測到 web_crawler 節點 → 自動關閉 recipe 儲存"
                         "（爬蟲輸出每次不同、recipe 永遠 miss、存了也不會命中）")
 
+    # ── 跨 step 沿用 working_dir(避免「step 1 設了自訂子資料夾、step 2 沒設 → 兩 step 落不同 dir」) ──
+    # 規則:後續 step 沒明確 working_dir / output.path 時、預設沿用前一步算出來的 wd
+    # 不沿用 default_wd(workflow name 那條)、保證輸出統一在同一個資料夾
+    _prev_step_wd: Optional[str] = None
+
     while run.current_step < len(config.steps):
         # ── 每步開始前檢查中止旗標 ──
         if is_abort_requested(run.run_id):
@@ -1641,8 +1646,14 @@ async def run_pipeline(
         wd = step.working_dir
         if not wd and step.output and step.output.path:
             wd = str(_resolve_path(step.output.path).parent)
+        if not wd and _prev_step_wd:
+            # 沿用前一步的 working_dir(此 step 沒設 working_dir、也沒設 output.path)
+            # 避免「step 1 自訂子資料夾、step 2 沒設」造成輸出散落
+            wd = _prev_step_wd
+            logger.info(f"[{step.name}] working_dir 沿用前一步:{wd}")
         if not wd:
             wd = default_wd
+        _prev_step_wd = wd  # 給下一步沿用
         _Path(wd).mkdir(parents=True, exist_ok=True)
 
         # Retry loop for this step
