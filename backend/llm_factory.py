@@ -198,14 +198,49 @@ async def invoke_with_streaming(
                     )
                 last_log = now
 
-    try:
-        await asyncio.wait_for(_stream(), timeout=timeout)
-    except asyncio.TimeoutError:
-        total = sum(len(p) for p in content_parts)
-        log.error(
-            f"[{label}] LLM 串流逾時（>{timeout:.0f}s），已收集 reasoning {reasoning_len} 字 / content {total} 字"
-        )
-        raise
+    # ── 暫時性 API 錯誤自動重試（500/502/503/504/429、overloaded 等）──
+    # 這類錯誤是 provider 服務端打嗝、不是任務本身的問題;靜默重試幾次
+    # 比把 step 打成失敗、再丟給使用者按「重試」務實得多。
+    _TRANSIENT_MARKERS = (
+        "500", "502", "503", "504", "429",
+        "INTERNAL", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "ResourceExhausted",
+        "overloaded", "ServiceUnavailable", "Service Unavailable",
+        "deadline", "DEADLINE", "Internal error", "try again",
+    )
+    _API_RETRY_BACKOFF = [3.0, 8.0, 20.0]  # 最多自動重試 3 次（共 4 次嘗試）
+
+    for _attempt in range(len(_API_RETRY_BACKOFF) + 1):
+        # 每次嘗試前重設串流累積狀態（避免上次 partial 殘留疊加）
+        content_parts.clear()
+        reasoning_len = 0
+        chunk_count = 0
+        final_chunk = None
+        for _k in list(acc_um.keys()):
+            acc_um[_k] = 0
+        start = time.time()
+        last_log = start
+        try:
+            await asyncio.wait_for(_stream(), timeout=timeout)
+            break  # 串流成功、跳出重試圈
+        except asyncio.TimeoutError:
+            total = sum(len(p) for p in content_parts)
+            log.error(
+                f"[{label}] LLM 串流逾時（>{timeout:.0f}s），已收集 reasoning {reasoning_len} 字 / content {total} 字"
+            )
+            raise
+        except Exception as _api_exc:
+            _msg = str(_api_exc)
+            _is_transient = any(m in _msg for m in _TRANSIENT_MARKERS)
+            if _is_transient and _attempt < len(_API_RETRY_BACKOFF):
+                _wait = _API_RETRY_BACKOFF[_attempt]
+                log.warning(
+                    f"[{label}] ⚠ LLM API 暫時性錯誤（{_msg[:140]}）"
+                    f"→ {_wait:.0f}s 後自動重試 {_attempt + 1}/{len(_API_RETRY_BACKOFF)}"
+                )
+                await asyncio.sleep(_wait)
+                continue
+            # 非暫時性錯誤 or 重試已用盡 → 往上拋
+            raise
 
     elapsed = time.time() - start
     total = sum(len(p) for p in content_parts)

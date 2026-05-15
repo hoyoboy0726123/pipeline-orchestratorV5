@@ -2507,6 +2507,41 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 **SPA / 反爬注意事項**（要主動提醒使用者）：
 - Reddit / Twitter / X 等 SPA 站，內部已預設用 `domcontentloaded`（用 `networkidle` 會 timeout）
 - 登入站要填 `wc_cookies`；Cloudflare 站系統會自動 fallback FlareSolverr
+- `wc_cookies` 可填 `${VAR_NAME}` 參照 backend/.env（cookie 是登入憑證、不該明文存 workflow）
+- `wc_child_link_pattern` 自動清單已涵蓋 Reddit / PTT / Dcard / HN / 新聞 / Mobile01 + 購物站
+  （蝦皮 / momo / PChome / 露天 / Amazon / eBay / 淘寶 / 京東）；不在清單的站可自填 regex
+- **反爬現實**：蝦皮 / 淘寶 / 京東 / Walmart 等用「自家反爬」（非 Cloudflare），FlareSolverr
+  解不了、需登入 cookie 才爬得到；一般論壇 / 新聞站 / 維基幾乎無反爬、好爬
+
+## 4.5 解析爬蟲內容節點（skill: scraped-content-parser）
+
+**核心**：爬蟲節點輸出的是**原始 HTML / markdown**。若使用者要的是「**結構化資料**」
+（每則留言 / 每個商品 / 每筆搜尋結果 → JSON），**不要叫一個通用 skill 節點「讀內容自己抽」**
+（LLM 逐筆抽取非確定性、慢、會漏、會編造），而是掛專用 skill `scraped-content-parser`：
+它讓 LLM 看樣本寫一支確定性 parser、再用程式碼跑完整檔、V5 Recipe 快取下次秒過。
+
+```yaml
+- name: 解析貼文
+  skill_mode: true
+  skill: scraped-content-parser
+  batch: |
+    解析 {{ steps.爬蟲節點名.output.path }}、辨識列表頁與子頁、
+    抽出每篇貼文的標題 / 連結 / 內文、輸出結構化 JSON 至 parsed.json
+  output:
+    path: parsed.json
+```
+
+**何時掛 / 不掛**：
+- 掛 → 輸出含**大量重複記錄**、要逐筆資料（論壇留言、購物商品、搜尋結果、新聞**列表頁**）
+- 不掛 → **單一頁面**（一篇新聞內文、一篇部落格、維基條目）→ 爬蟲 markdown 本身就是內容、
+  直接餵下游、再掛 parser 是多餘的 LLM 步驟
+
+**多站比較場景**（如「比較 3 個購物站的 X 價格」）：
+- 3 個**不同站**結構不同 → 要 **3 組「爬蟲 + scraped-content-parser」**、各站各一支 parser
+- **不要**把 3 個不同站塞進一個爬蟲節點的多 URL（會合併成一檔、一支 parser 解不了 3 種結構）
+- 各 parser 輸出**不同檔名**（pchome.json / amazon.json / ...）
+- 最後一個 skill 節點當「比較 / 分析節點」、用多個 `{{ steps.X.output.path }}` 讀進 3 個 JSON 彙整
+- runner 是線性執行 → 節點排成一直線即可（3 站依序爬、非真平行、但結果一樣）
 
 ## 5. 影片爬蟲節點（web_crawler，wc_mode: video）
 **使用者說**：貼 YouTube / Vimeo / Bilibili 連結「下載」「抓影片」

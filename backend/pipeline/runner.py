@@ -173,19 +173,24 @@ def _confirm_keyboard(run_id: str, screenshot: bool = False, allow_hint: bool = 
 def _ask_user_keyboard(run_id: str, options: list) -> InlineKeyboardMarkup:
     """
     ask_user 問題的 Telegram 鍵盤。
-    - 有 options → 每個選項一個按鈕（一行最多 2 個）+ 自由輸入 + 中止
+    - 有 options:
+        - 任一選項長度 > 14 → 改一行一個按鈕(長文不被 TG 攔腰截斷)
+        - 否則維持一行兩個按鈕(短選項更省螢幕)
     - 無 options → 只有「自由輸入」和「中止」
     """
     rows: list[list[InlineKeyboardButton]] = []
     if options:
-        # callback 長度上限 64 bytes，用索引傳遞
+        max_len = max(len(str(o)) for o in options)
+        one_per_row = max_len > 14
+        per_row = 1 if one_per_row else 2
+        label_cap = 60 if one_per_row else 30
         row: list[InlineKeyboardButton] = []
         for i, opt in enumerate(options):
             label = str(opt)
-            if len(label) > 30:
-                label = label[:27] + "…"
+            if len(label) > label_cap:
+                label = label[: label_cap - 1] + "…"
             row.append(InlineKeyboardButton(label, callback_data=f"pipe_answer:{run_id}:{i}"))
-            if len(row) == 2:
+            if len(row) == per_row:
                 rows.append(row)
                 row = []
         if row:
@@ -2177,6 +2182,28 @@ async def run_pipeline(
                     await _notify_failure(run, val, step.name)
                     unregister_task(run.run_id)
                     return run.run_id
+
+            # ── skill agent 主動 done(success=false) → 不 retry、直接 awaiting ──
+            # 這是 agent 給的「明確結論」(例:沙盒跑不動、請切 host),不是 crash。
+            # 重試只會重跑一輪得出同樣結論、浪費 LLM 額度、也延後使用者看到結論。
+            if val.status != "ok" and getattr(exec_result, "agent_concluded_fail", False):
+                logger.warning(
+                    f"步驟 {step_num} skill agent 主動 done(success=false) → 不 retry、直接 awaiting_human"
+                )
+                _agent_summary = (exec_result.stderr or "").strip()
+                run.status = "awaiting_human"
+                run.awaiting_type = "failure"
+                run.awaiting_message = _agent_summary or val.reason or ""
+                run.awaiting_suggestion = ""
+                # TG / 前端卡片是用 val.reason / val.suggestion 組的;agent 的 summary 才是
+                # 有意義的失敗結論(含「請切 host」之類引導)、覆蓋掉通用的「Exit code 1」。
+                if _agent_summary:
+                    val.reason = _agent_summary
+                    val.suggestion = ""
+                store.save(run)
+                await _notify_failure(run, val, step.name)
+                unregister_task(run.run_id)
+                return run.run_id
 
             if val.status == "ok":
                 logger.info(f"步驟 {step_num} ✅ 通過")

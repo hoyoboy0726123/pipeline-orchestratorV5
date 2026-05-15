@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl
 
 # 沙盒既有 wsl docker exec 封裝
 from .sandbox import (
@@ -495,7 +495,30 @@ _AUTO_CHILD_LINK_PATTERNS = [
     r'/item\?id=\d+',                   # Hacker News
     r'/M\.\d+\.A\.[A-F0-9]+',           # PTT (M.timestamp.A.hash)
     r'/bbs/[\w-]+/M\.\d+\.A\.[A-F0-9]+',  # PTT 含板名
+    r'/topicdetail\.php\?f=\d+&t=\d+',  # Mobile01 (topicdetail.php?f=板&t=文章)
+    # ── 購物 / 電商商品詳情頁 ──────────────────────────────
+    # 注意:pattern 只負責「從列表頁認出商品連結」;站點 anti-bot 擋不擋是另一回事。
+    r'-i\.\d+\.\d+',                    # 蝦皮 Shopee (name-i.shopid.itemid)
+    r'GoodsDetail\.jsp\?i_code=\d+',    # momo 購物網
+    r'/prod/[A-Z0-9]+',                 # PChome 24h
+    r'/item/\d{10,}',                   # 露天拍賣 Ruten (/item/長數字/)
+    r'/dp/[A-Z0-9]{10}',                # Amazon (/dp/ASIN)
+    r'/gp/product/[A-Z0-9]{10}',        # Amazon (/gp/product/ASIN)
+    r'/itm/\d+',                        # eBay
+    r'/ip/[\w-]+/\d+',                  # Walmart
+    r'item\.htm\?.*\bid=\d+',           # 淘寶 / 天貓
+    r'item\.jd\.com/\d+\.html',         # 京東 JD
 ]
+
+
+# 純追蹤用 query 參數 — 去重時砍掉(它們不影響「是哪一篇」)。
+# 保留的是帶文章 / 商品 ID 的參數(t / id / i_code / f 等)。
+_TRACKING_QUERY_KEYS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "yclid", "msclkid", "ref", "ref_", "ref_src",
+    "spm", "scm", "share_token", "share_tag", "share_crt_v",
+    "_branch_match_id", "from", "source", "src", "fromurl",
+}
 
 
 def _extract_child_links_from_markdown(
@@ -550,13 +573,19 @@ def _extract_child_links_from_markdown(
     seen = set()
     out: list[str] = []
     for block in blocks:
-        # 釘選區塊跳過
-        if skip_pinned_blocks and any(
+        block_urls = url_re.findall(block)
+        block_matches = [u for u in block_urls if _match(u)]
+        # 釘選區塊跳過 — 但**只跳「小區塊」**。
+        # 真正的釘選 / 公告區只有寥寥幾筆;若整個商品 / 文章清單擠成一大塊
+        # (例:eBay 搜尋結果整頁一塊、塊內剛好有 "Announcement" 字樣),
+        # 不能因為一個關鍵字就把整塊幾百筆連結全丟掉。
+        # 規則:塊內命中子頁 pattern 的連結 ≥ 5,視為「主清單」、不跳。
+        if (skip_pinned_blocks and len(block_matches) < 5 and any(
             kw in block for kw in ("超級討論串", "社群精選貼文", "公告", "Pinned",
                                      "moderator post", "Announcement", "📌")
-        ):
+        )):
             continue
-        for url in url_re.findall(block):
+        for url in block_matches:
             if not _match(url):
                 continue
             try:
@@ -564,8 +593,16 @@ def _extract_child_links_from_markdown(
                 # 同 domain 過濾（通用安全；parent_host 為空時不啟用、保留舊行為）
                 if parent_host and (p.hostname or "") != parent_host:
                     continue
-                # 用 hostname + 去掉 trailing slash 的 path 當去重 key（同一篇不同 query 也視為同篇）
-                key = (p.hostname or "", p.path.rstrip("/"))
+                # 去重 key = hostname + path + 「有意義的 query 參數」。
+                # query 不能整個丟 — 很多站(Mobile01 topicdetail.php?t=、momo
+                # GoodsDetail.jsp?i_code=、淘寶 item.htm?id=)文章/商品 ID 在 query 裡、
+                # 整個 path 都一樣;若忽略 query 會把整批不同文章誤判成同一篇而塌成 1 個。
+                # 但純追蹤參數(utm_* / fbclid / spm 等)要砍掉、否則同篇不同來源連結不會去重。
+                _meaningful_q = "&".join(
+                    f"{k}={v}" for k, v in sorted(parse_qsl(p.query))
+                    if k.lower() not in _TRACKING_QUERY_KEYS
+                )
+                key = (p.hostname or "", p.path.rstrip("/"), _meaningful_q)
             except Exception:
                 key = ("", url)
             if key in seen:
@@ -1689,12 +1726,35 @@ async def _run_flaresolverr(
 
 # ── 工具 helpers ─────────────────────────────────────────────────────
 
+def _resolve_cookie_env_refs(raw: str) -> str:
+    """把 cookie 字串裡的 `${VAR_NAME}` 換成環境變數值。
+
+    用途:cookie 是 session 憑證(等同帳密)、不該明文存進 workflow JSON。
+    使用者可在 cookie 欄位只填佔位符 `${MY_SHOPEE_COOKIE}`、真值放 backend/.env
+    (.env 在敏感 deny list、不進版控)。workflow 存的永遠是佔位符。
+
+    找不到對應環境變數 → 該 token 換成空字串(cookie 自然失效、使用者會察覺)。
+    """
+    if not raw or "${" not in raw:
+        return raw
+    import os as _os
+    return re.sub(
+        r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}',
+        lambda m: _os.environ.get(m.group(1), ""),
+        raw,
+    )
+
+
 def _parse_cookies(raw: str) -> list[dict]:
     """容忍三種輸入：
       - `key=value` 一行一個
       - `Cookie: key=v; k2=v2` 整串貼上
       - JSON list（[{name, value, domain?}]）
+    另外:輸入裡的 `${VAR}` 會先從環境變數 / .env 解析(見 _resolve_cookie_env_refs)。
     """
+    if not raw:
+        return []
+    raw = _resolve_cookie_env_refs(raw.strip())
     if not raw:
         return []
     raw = raw.strip()

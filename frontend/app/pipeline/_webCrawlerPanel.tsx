@@ -675,7 +675,7 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete, wor
                 <textarea
                   className={`${inputCls} font-mono text-xs resize-y min-h-[80px]`}
                   rows={5}
-                  placeholder={'三種格式都接受：\n  key=value（一行一個）\n  key=v1; k2=v2（整串 Cookie 標頭）\n  [{"name":"k","value":"v"}]（JSON 陣列）'}
+                  placeholder={'三種格式都接受：\n  key=value（一行一個）\n  key=v1; k2=v2（整串 Cookie 標頭）\n  [{"name":"k","value":"v"}]（JSON 陣列）\n\n或填 ${MY_COOKIE} 參照 backend/.env（推薦、不明文存）'}
                   value={data.cookies}
                   onChange={e => onUpdate({ cookies: e.target.value })}
                   onWheel={(e) => {
@@ -685,6 +685,13 @@ export default function WebCrawlerPanel({ node, onUpdate, onClose, onDelete, wor
                     if ((!atTop && e.deltaY < 0) || (!atBot && e.deltaY > 0)) e.stopPropagation()
                   }}
                 />
+                <p className="text-[10px] text-amber-600 leading-snug">
+                  🔒 Cookie 等同登入憑證。直接貼會明文存進 workflow 設定 —
+                  建議在 <code className="font-mono bg-amber-50 px-1 rounded">backend/.env</code> 設
+                  <code className="font-mono bg-amber-50 px-1 rounded">MY_COOKIE=…</code>、
+                  這裡只填 <code className="font-mono bg-amber-50 px-1 rounded">{'${MY_COOKIE}'}</code> 參照,
+                  workflow 就只會存佔位符、真值留在不進版控的 .env。
+                </p>
 
                 {/* 教學：怎麼從瀏覽器抓 cookies */}
                 <button

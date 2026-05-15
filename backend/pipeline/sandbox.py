@@ -95,6 +95,25 @@ def translate_code_paths(code: str) -> str:
     return pattern.sub(_sub, code)
 
 
+_SHELL_DRIVE_RE = re.compile(r'(?<![A-Za-z])([A-Za-z]):[\\/]([^"\'\s]*)')
+
+
+def translate_shell_paths(cmd_str: str) -> str:
+    """把 shell 字串內的 Windows 絕對路徑(`C:\\path` / `C:/path`)轉成 WSL `/mnt/c/path` 形式。
+
+    LLM 在 sandbox 模式下會把 write_file 回傳的 Windows 路徑直接抄進 run_shell、
+    bash 不認 `C:\\`、會把整串當相對檔名拼到 CWD 後面而失敗。這個函式攔截 cmd 字串、
+    在送進容器前把所有 drive-letter 路徑轉成 sandbox 看得懂的 `/mnt/<drive>/...`。
+
+    限制:含空格的路徑(`C:\\Program Files\\X`)只轉到第一個空格為止;
+    使用者放在 external_projects/ 下的專案通常無空格、實務上影響小。"""
+    def _sub(m: re.Match) -> str:
+        drive = m.group(1).lower()
+        rest = m.group(2).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+    return _SHELL_DRIVE_RE.sub(_sub, cmd_str)
+
+
 # ── wsl 指令呼叫封裝 ───────────────────────────────────────────────
 def _run_wsl(args: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
     """執行 `wsl.exe <args>`，回傳 (returncode, stdout, stderr)。"""
@@ -446,5 +465,6 @@ def run_shell(
 ) -> SandboxResult:
     """在沙盒內執行 shell 命令（透過 sh -c）。"""
     cwd_wsl = windows_to_wsl_path(cwd) if cwd else None
-    cmd = _docker_exec_cmd(cwd_wsl, ["sh", "-c", cmd_str])
+    final_cmd = translate_shell_paths(cmd_str)
+    cmd = _docker_exec_cmd(cwd_wsl, ["sh", "-c", final_cmd])
     return _run_subprocess(cmd, timeout, run_id, register_cb, unregister_cb)

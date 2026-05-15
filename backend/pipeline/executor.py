@@ -30,7 +30,7 @@ from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 
 SKILL_TOOL_TIMEOUT = 60          # 預設值：給沒透過 execute_step_with_skill 流程的呼叫者用
 SKILL_TOOL_TIMEOUT_MAX = 180     # 動態 tool timeout 上限（避免 step.timeout 開超大時 run_python 永遠不被砍）
-SKILL_MAX_ITERATIONS = 8  # 降 15→8:多數 task 4-5 輪就該完成、超過 8 通常是 LLM 卡在 verify loop 不下 done
+SKILL_MAX_ITERATIONS = 20  # 互動式 skill(python-cli-extractor:問 A-B/subcommand/參數 + 掃描大專案找函式簽名 + GUI 解耦 + retry 補套件 + 重跑)耗 iter 多;較不聰明的模型(Gemma 等)還會空回覆 / 多繞、15 仍會撞牆。20 留足容錯。純運算 skill 照樣 4-5 輪結束
 
 # 連續 N 輪 LLM 口頭說「完成」但沒下 <tool>done</tool> → 強制 done 收尾
 # 解決 Sonnet / GPT 等強模型常見的「死循環式 verify」— 寫好檔案後一直確認、不打標準 tag
@@ -228,7 +228,7 @@ def _compute_tool_timeout(step_timeout: int) -> int:
     /5 留出 1/3 ratio 給 LLM 思考 + tool retry buffer，不會把整個 step.timeout 用光。
     """
     return min(SKILL_TOOL_TIMEOUT_MAX, max(60, int(step_timeout) // 5))
-ASK_USER_MAX = 3          # 一個 skill 節點最多 ask_user 次數（ask_mode ON 時取消）
+ASK_USER_MAX = 6          # 一個 skill 節點最多 ask_user 次數（ask_mode ON 時取消）。互動式 skill（python-cli-extractor 要問 模式/A-B/subcommand/參數 ≥4 次）3 太緊跑不完、6 留容錯
 ASK_USER_TIMEOUT = 3600   # 單次等待使用者回答的逾時（秒）
 
 # ── web_search 成本 / context 保護 ─────────────────────────────────────────
@@ -593,6 +593,10 @@ class ExecResult:
     stderr: str
     pending_recipe: Optional[dict] = None  # 延遲儲存的 recipe 資料
     missing_packages: list = None          # LLM 回報缺少的套件（供 runner 產生安裝建議）
+    # skill agent 主動呼叫 done(success=false) — 這是「明確結論」非 crash / exception。
+    # runner 看到此旗標時跳過 step retry、直接進 awaiting_human 把 summary 給使用者
+    # （重試只會重複同樣結論、浪費一輪 LLM、延後使用者看到結論）。
+    agent_concluded_fail: bool = False
     # Trace / token tracking — skill / outlook agent loop 累計填入；shell 路徑保持 default 空。
     # 結構: {"input_tokens": int, "output_tokens": int, "total_tokens": int}
     token_usage: dict = field(default_factory=dict)
@@ -881,8 +885,12 @@ def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "",
         return f"[錯誤] 命令執行失敗：{e}"
 
 
-def _skill_read_file(path: str, max_lines: int = 100) -> str:
-    """讀取檔案內容。"""
+def _skill_read_file(path: str, max_lines: int = 100, offset: int = 0) -> str:
+    """讀取檔案內容。
+
+    offset：跳過開頭 N 行(用於分段讀大檔)。
+    max_lines：本次最多讀幾行。
+    兩者搭配 24KB byte 上限、讓大檔可被「分段讀完整」而非只看開頭。"""
     try:
         # 清理 LLM 常見的錯誤格式：read_file("path"), 引號, 空白
         cleaned = path.strip()
@@ -911,14 +919,41 @@ def _skill_read_file(path: str, max_lines: int = 100) -> str:
                     f"- .docx → python-docx\n"
                     f"- .png/.jpg → PIL 或 view_image 工具\n"
                     f"- .pdf → PyPDF2")
+        # byte 上限:防 100 行內但全是長行(minified / 資料檔)的檔案撐爆 context。
+        # 實測 retry round LLM 讀 187KB 大檔 → 單輪 input 衝到 273K 字 → LLM 異常。
+        _CHAR_BUDGET = 24000  # ≈ 8K token,單次讀取上限
+        offset = max(0, int(offset or 0))
         with open(p, 'r', encoding='utf-8', errors='replace') as f:
             lines = []
+            char_count = 0
+            truncated_reason = ""
+            next_offset = offset
+            read_count = 0
             for i, line in enumerate(f):
-                if i >= max_lines:
-                    lines.append(f"... (截斷，超過 {max_lines} 行)")
+                if i < offset:
+                    continue  # 跳過 offset 之前的行
+                if read_count >= max_lines:
+                    truncated_reason = f"已達本次 {max_lines} 行上限"
                     break
-                lines.append(line.rstrip())
-        return "\n".join(lines) or "(空檔案)"
+                stripped = line.rstrip()
+                char_count += len(stripped) + 1
+                if char_count > _CHAR_BUDGET:
+                    truncated_reason = f"已達 {_CHAR_BUDGET:,} 字元上限"
+                    break
+                lines.append(stripped)
+                read_count += 1
+                next_offset = i + 1
+            header = f"(檔案 {p.name}、共 {p.stat().st_size:,} bytes" + (
+                f"、本次從第 {offset + 1} 行起" if offset else "") + ")"
+            if truncated_reason:
+                lines.append(
+                    f"... ({truncated_reason}、檔案還有後續內容。"
+                    f"要接著讀下一段、用 read_file 帶 offset={next_offset}:"
+                    f' {{"path": "{cleaned}", "offset": {next_offset}}};'
+                    f"或用 grep 直接搜尋關鍵字)"
+                )
+        body = "\n".join(lines) or "(空檔案 / offset 已超過檔尾)"
+        return f"{header}\n{body}"
     except Exception as e:
         return f"[錯誤] 讀取失敗：{e}"
 
@@ -1386,7 +1421,22 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
     elif tool_name == "run_shell":
         return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
     elif tool_name == "read_file":
-        return _skill_read_file(tool_input)
+        # 兩種輸入皆支援:
+        #   1) 裸路徑字串(舊行為、向後相容)
+        #   2) JSON {"path": "...", "offset": N, "limit": N}(分段讀大檔)
+        _rf_path, _rf_offset, _rf_limit = tool_input, 0, 100
+        _ti_stripped = (tool_input or "").strip()
+        if _ti_stripped.startswith("{"):
+            try:
+                import json as _json_rf
+                _d = _json_rf.loads(_ti_stripped)
+                if isinstance(_d, dict) and _d.get("path"):
+                    _rf_path = str(_d["path"])
+                    _rf_offset = int(_d.get("offset", 0) or 0)
+                    _rf_limit = int(_d.get("limit", 100) or 100)
+            except Exception:
+                pass  # 解析失敗 → 當裸路徑處理
+        return _skill_read_file(_rf_path, max_lines=_rf_limit, offset=_rf_offset)
     elif tool_name == "write_file":
         return _skill_write_file(tool_input)
     elif tool_name == "edit_file":
@@ -1906,6 +1956,9 @@ async def execute_step_with_skill(
    <input>wc -l output.csv</input>
 3. read_file — 讀檔(路徑不加引號)
    <input>path/to/file.txt</input>
+   單次最多 100 行 / 24KB,超過會截斷。**大檔分段讀**:用 JSON 帶 offset
+   <input>{"path": "path/to/big.py", "offset": 100, "limit": 100}</input>
+   截斷訊息會告訴你下一段的 offset、照著帶就能接著讀完整檔。
    ✓ 用於:讀上一步輸出 / 樣本檔 / 設定檔(餵推理用)
    ✗ 不要用於:「驗證自己剛 write 的檔存在」(Python exit 0 已證、用 Path.exists() 在 run_python 內就行)
    ✗ 不要用於:「再確認一次自己剛寫的內容對不對」(交給外部 validator、不要重複工作浪費 iter)
@@ -2591,6 +2644,9 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                         stderr="" if success else summary,
                         pending_recipe=_pending_recipe,
                         missing_packages=pkgs or None,
+                        # 主動 done(success=false) 且非缺套件場景 → 標記為「明確結論」
+                        # 讓 runner 跳過 retry。缺套件(pkgs)走既有 missing_dependency 路徑、不重複攔。
+                        agent_concluded_fail=(not success and not pkgs),
                     ))
                 except json.JSONDecodeError:
                     messages.append(HumanMessage(content=reply))
@@ -2697,12 +2753,15 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     )
                 force_host = (decision == "host")
 
-            # ── Phase B: ask_mode ON 時、敏感命令攔截 ──
+            # ── Phase B: 敏感命令攔截 ──
             # 只對 run_python / run_shell 檢查（其他 tool 沒命令執行風險）
             # A1 模式:每次命中都問,不記憶
-            if ask_mode and tool_name in ("run_python", "run_shell"):
+            # 安裝類命令(pip install / npm install / apt 等)無論 ask_mode 開關都攔
+            # — 容器持久化、裝下去就留著、且可能裝奇怪套件、安全不可妥協
+            if tool_name in ("run_python", "run_shell"):
                 _classification = classify_command(tool_input)
-                if _classification:
+                _always_intercept = _classification and _classification[0] == "install"
+                if _classification and (ask_mode or _always_intercept):
                     _cat, _label, _preview = _classification
                     logger.warning(
                         f"[{step_name}] 🛡 ask_mode 偵測到敏感命令（{_cat}）→ 等用戶授權"
