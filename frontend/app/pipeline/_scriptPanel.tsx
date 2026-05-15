@@ -318,6 +318,38 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
                   <input value={data.workingDir} onChange={e => upd({ workingDir: e.target.value })}
                     placeholder="（留空 = 使用預設目錄）" className={inputCls} />
                 </div>
+                {/* 背景模式(GUI / daemon)*/}
+                <div className="rounded-lg border border-orange-200 bg-orange-50/50 p-2.5">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!(data as { background?: boolean }).background}
+                      onChange={e => upd({ background: e.target.checked } as Partial<typeof data>)}
+                      className="mt-0.5 w-3.5 h-3.5 rounded accent-orange-500"
+                    />
+                    <div className="flex-1">
+                      <div className="text-xs font-semibold text-orange-700">🚀 背景模式(這支腳本不會結束)</div>
+                      <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+                        勾起來:啟動後**不等**腳本結束、立刻下一步、subprocess 留著。
+                        適合開 GUI / server / daemon 等永遠不退出的進程,讓後續節點可以對它做自動化。
+                        Workflow 跑完會自動 kill。
+                      </p>
+                    </div>
+                  </label>
+                  {(data as { background?: boolean }).background && (
+                    <div className="mt-2 pl-5">
+                      <label className="text-[11px] text-gray-500 block mb-0.5">啟動後等幾秒讓它 ready 再下一步(秒,0=不等)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={120}
+                        value={(data as { readyAfterSeconds?: number }).readyAfterSeconds ?? 0}
+                        onChange={e => upd({ readyAfterSeconds: parseInt(e.target.value) || 0 } as Partial<typeof data>)}
+                        className={`${inputCls} font-mono`}
+                      />
+                    </div>
+                  )}
+                </div>
                 <div>
                   <label className="text-xs text-gray-500 block mb-1">跑完跳到(next)</label>
                   <input value={data.next || ''} onChange={e => upd({ next: e.target.value })}

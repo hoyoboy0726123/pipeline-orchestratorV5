@@ -39,6 +39,8 @@ import {
   getComputerUseRecordingStatus,
   loadComputerUseRecording,
   deleteComputerUseAssets,
+  armComputerUseRecordingHotkey,
+  disarmComputerUseRecordingHotkey,
 } from '@/lib/api'
 import AnchorEditorModal from './_anchorEditorModal'
 import VlmAnchorPicker from './_vlmAnchorPicker'
@@ -65,6 +67,8 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   const [recording, setRecording] = useState(false)
   const [statusText, setStatusText] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // F7 待命模式:arm 後最小化瀏覽器、把焦點留在目標 app、按 F7 啟動錄製
+  const [armed, setArmed] = useState(false)
 
   // CV 比對設定摺疊（預設收折，避免佔太多空間）
   const [cvOpen, setCvOpen] = useState(false)
@@ -80,7 +84,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
 
   // 錄製過程輪詢狀態
   useEffect(() => {
-    if (!recording) {
+    if (!recording && !armed) {
       if (pollRef.current) clearInterval(pollRef.current)
       pollRef.current = null
       return
@@ -89,18 +93,52 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
       try {
         const s = await getComputerUseRecordingStatus()
         if (s.recording) {
+          // 不論 arm or 直接按按鈕、recording true 都要進錄製狀態
+          if (!recording) setRecording(true)
+          if (armed) setArmed(false)
           setStatusText(`錄製中… ${s.action_count ?? 0} 個動作`)
-        } else {
+        } else if (recording) {
           // 錄製已被 F9 或後端自行停止
           setRecording(false)
           setStatusText('')
           await handleLoadRecording()
         }
+        // armed but not recording: 還在等 F7、保持 armed 狀態
       } catch {/* ignore transient errors */}
     }
     pollRef.current = setInterval(poll, 1000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [recording])
+  }, [recording, armed])
+
+  // panel 關閉時、清掉 arm(避免熱鍵繼續綁著)
+  useEffect(() => {
+    return () => {
+      if (armed) {
+        disarmComputerUseRecordingHotkey().catch(() => {})
+      }
+    }
+  }, [armed])
+
+  const handleArmHotkey = async () => {
+    if (armed || recording) return
+    try {
+      const sessionId = `${data.name}-${Date.now()}`
+      await armComputerUseRecordingHotkey(sessionId, defaultAssetsDir)
+      onUpdate({ assetsDir: defaultAssetsDir })
+      setArmed(true)
+      toast.success('🔫 F7 已待命。最小化瀏覽器、把焦點放到目標 app、按 F7 開始錄製')
+    } catch (e) {
+      toast.error((e as Error).message)
+    }
+  }
+
+  const handleDisarmHotkey = async () => {
+    try {
+      await disarmComputerUseRecordingHotkey()
+    } finally {
+      setArmed(false)
+    }
+  }
 
   const handleStart = async () => {
     if (recording) return
@@ -298,13 +336,34 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 開始錄製
               </button>
             ) : (
-              <button onClick={handleStop}
-                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-gray-700 hover:bg-gray-800 text-white rounded-lg text-sm font-medium transition-colors">
-                <StopIcon className="w-3.5 h-3.5" />
-                停止錄製
-              </button>
+              <div className="flex-1 flex flex-col gap-1">
+                <div className="text-center text-xs font-semibold text-red-600 animate-pulse">
+                  🎯 推薦:按 <kbd className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-mono text-[11px]">F9</kbd> 停止(免回來點按鈕害目標 app 失焦)
+                </div>
+                <button onClick={handleStop}
+                  className="flex items-center justify-center gap-2 px-3 py-2 bg-gray-700 hover:bg-gray-800 text-white rounded-lg text-sm font-medium transition-colors">
+                  <StopIcon className="w-3.5 h-3.5" />
+                  或點此停止錄製
+                </button>
+              </div>
             )}
           </div>
+          {/* F7 待命模式 — 用熱鍵開啟錄製、不必回來點按鈕害目標 app 失焦 */}
+          {!recording && (
+            <div className="flex items-center gap-2">
+              {!armed ? (
+                <button onClick={handleArmHotkey}
+                  className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 border border-purple-300 text-purple-700 hover:bg-purple-100 rounded-lg text-xs font-medium transition-colors">
+                  📡 啟用 F7 待命(免點按鈕、按 F7 直接錄)
+                </button>
+              ) : (
+                <button onClick={handleDisarmHotkey}
+                  className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 border border-orange-400 bg-orange-50 text-orange-700 hover:bg-orange-100 rounded-lg text-xs font-medium transition-colors animate-pulse">
+                  🔫 F7 已待命、按 F7 開始(點此取消)
+                </button>
+              )}
+            </div>
+          )}
           {recording && (
             <p className="text-xs text-red-600 flex items-center gap-1.5">
               <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse" />

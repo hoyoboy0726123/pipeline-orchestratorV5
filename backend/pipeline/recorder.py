@@ -25,7 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 log = logging.getLogger(__name__)
 
@@ -579,6 +579,58 @@ def _on_release(key) -> None:
 
 
 # ── 對外 API ──────────────────────────────────────────────────
+
+# ── 全域 arm 熱鍵 — 待命狀態下按某鍵自動 start_recording ────────────────
+# 用途:使用者開好 computer_use panel 後最小化瀏覽器、把焦點移到要錄製的目標 app、
+# 按熱鍵(預設 F7)就開始錄製、不必回去點按鈕(點按鈕會把目標 app 切到背景、毀掉錄製情境)。
+_arm_listener: Optional[Any] = None
+_arm_params: Optional[dict] = None
+
+
+def arm_start_hotkey(session_id: str, output_dir: str, key: str = "f7") -> dict:
+    """註冊全域 keyboard listener,按 `key`(預設 f7)會自動觸發 start_recording。
+    觸發後 listener 自動 disarm,避免重複觸發。
+    """
+    global _arm_listener, _arm_params
+    # 先清掉舊的
+    disarm_start_hotkey()
+    norm_key = key.lower().lstrip("Key.").strip()
+    _arm_params = {"session_id": session_id, "output_dir": output_dir, "key": norm_key}
+
+    def _on_arm_press(k):
+        try:
+            key_str = str(k).replace("Key.", "").lower()
+            if _arm_params and key_str == _arm_params["key"]:
+                log.info(f"[recorder] 🔥 {_arm_params['key'].upper()} 熱鍵觸發 → 自動 start_recording")
+                try:
+                    start_recording(_arm_params["session_id"], _arm_params["output_dir"])
+                except Exception as e:
+                    log.error(f"[recorder] 熱鍵觸發 start_recording 失敗:{e}")
+                disarm_start_hotkey()
+        except Exception as e:
+            log.warning(f"[recorder] arm hotkey on_press 例外:{e}")
+
+    try:
+        from pynput import keyboard
+    except ImportError:
+        raise RuntimeError("缺少 pynput 套件、請 pip install pynput")
+    _arm_listener = keyboard.Listener(on_press=_on_arm_press)
+    _arm_listener.start()
+    log.info(f"[recorder] 🔫 熱鍵 {norm_key.upper()} 已 arm,按下會自動開始錄製")
+    return {"armed": True, "key": norm_key}
+
+
+def disarm_start_hotkey() -> dict:
+    global _arm_listener, _arm_params
+    if _arm_listener is not None:
+        try:
+            _arm_listener.stop()
+        except Exception:
+            pass
+    _arm_listener = None
+    _arm_params = None
+    return {"armed": False}
+
 
 def start_recording(session_id: str, output_dir: str) -> dict:
     """開始錄製。若已有 session 則先停止它再新開一個。

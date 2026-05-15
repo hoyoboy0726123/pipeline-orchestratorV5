@@ -156,9 +156,27 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete, w
           </button>
         </div>
 
-        {/* Timeout */}
+        {/* Timeout 行為 */}
         <div>
-          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">等待超時</label>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">超時後的行動</label>
+          <select
+            value={(data as { hcOnTimeout?: string }).hcOnTimeout || 'wait'}
+            onChange={e => onUpdate({ hcOnTimeout: e.target.value } as Partial<typeof data>)}
+            className={`${inputCls} mb-2`}
+          >
+            <option value="wait">⏳ 永遠等(預設、超時欄位忽略)</option>
+            <option value="pass">✅ 當作通過、繼續下一步</option>
+            <option value="reject">↩️ 駁回、上一步重做</option>
+            <option value="abort">⛔ 中止整條 workflow</option>
+          </select>
+          <p className="text-[11px] text-gray-400 mb-3">
+            選「永遠等」時、下方秒數欄位完全忽略;選其他三個則依秒數倒數
+          </p>
+        </div>
+
+        {/* Timeout 秒數 */}
+        <div>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">超時秒數</label>
           <div className="grid grid-cols-4 gap-2 mb-2">
             {[
               { v: 600, label: '10 分鐘' },
@@ -187,7 +205,9 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete, w
             onChange={e => onUpdate({ timeout: parseInt(e.target.value) || 3600 })}
             className={`${inputCls} font-mono`}
           />
-          <p className="text-xs text-gray-400 mt-1">超過此秒數未確認，Pipeline 自動中止</p>
+          <p className="text-xs text-gray-400 mt-1">
+            「永遠等」模式下此值無作用;其他模式倒數此秒數沒回應就執行上方行動
+          </p>
         </div>
       </div>
 

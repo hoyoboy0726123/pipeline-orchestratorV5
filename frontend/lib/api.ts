@@ -457,6 +457,32 @@ export async function stopComputerUseRecording(): Promise<RecordingStatus> {
   return res.json()
 }
 
+export async function armComputerUseRecordingHotkey(sessionId: string, outputDir: string): Promise<{ armed: boolean; key: string }> {
+  const res = await fetch(`${BASE}/computer-use/recording/arm-hotkey`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, output_dir: outputDir }),
+  })
+  if (!res.ok) throw new Error('arm 熱鍵失敗')
+  return res.json()
+}
+
+export async function disarmComputerUseRecordingHotkey(): Promise<{ armed: boolean }> {
+  const res = await fetch(`${BASE}/computer-use/recording/disarm-hotkey`, { method: 'POST' })
+  if (!res.ok) return { armed: false }
+  return res.json()
+}
+
+export async function duplicateCanvasAssets(src: string, dest: string): Promise<{ ok: boolean; copied_files: number; error?: string }> {
+  const res = await fetch(`${BASE}/canvas/duplicate-assets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ src, dest }),
+  })
+  if (!res.ok) return { ok: false, copied_files: 0, error: `HTTP ${res.status}` }
+  return res.json()
+}
+
 export async function getComputerUseRecordingStatus(): Promise<RecordingStatus> {
   const res = await fetchWithRetry(`${BASE}/computer-use/recording/status`)
   if (!res.ok) throw new Error('查詢錄製狀態失敗')

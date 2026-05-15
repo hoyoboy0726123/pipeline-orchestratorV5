@@ -1605,6 +1605,40 @@ async def run_pipeline(
                         except Exception as _e:
                             logger.warning(f"[{step.name}] 檔案預覽失敗：{_e}")
 
+            # ── hc_timeout:超過 step.timeout 秒沒人按、自動取設定的行動 ─────
+            # 預設 hc_on_timeout='wait' = 永遠等(忽略 step.timeout、保留現有行為)
+            # 'pass' / 'reject' / 'abort' 才會啟動 watcher
+            _hc_to = int(getattr(step, "timeout", 0) or 0)
+            _hc_act = (getattr(step, "hc_on_timeout", "wait") or "wait").lower()
+            if _hc_to > 0 and _hc_act in ("pass", "reject", "abort"):
+                async def _hc_timeout_watcher(rid: str, secs: int, action: str, step_name: str):
+                    try:
+                        await asyncio.sleep(secs)
+                        # 檢查還在 awaiting_human、是同一個 step、才動作
+                        _cur = store.load(rid)
+                        if not _cur or _cur.status != "awaiting_human":
+                            return  # 已被使用者處理或別的原因離開
+                        if _cur.awaiting_type != "human_confirm":
+                            return  # 是別種等待(e.g. missing_dependency),不要打架
+                        logger.warning(f"[{step_name}] ⏰ hc_timeout 觸發({secs}s 沒回應)→ 自動取行動 '{action}'")
+                        # resume_pipeline 接受 decision: "retry"/"skip"/"abort"/"continue"/"retry_with_hint"
+                        if action == "pass":
+                            await resume_pipeline(rid, decision="continue", hint="(自動超時通過)")
+                        elif action == "reject":
+                            await resume_pipeline(rid, decision="retry", hint="(自動超時駁回、上一步重做)")
+                        elif action == "abort":
+                            _cur.status = "aborted"
+                            _cur.ended_at = datetime.now().isoformat()
+                            store.save(_cur)
+                            try:
+                                await _notify_final(_cur, config)
+                            except Exception:
+                                pass
+                    except Exception as _e:
+                        logger.warning(f"[{step_name}] hc_timeout watcher 例外:{_e}")
+                asyncio.create_task(_hc_timeout_watcher(run.run_id, _hc_to, _hc_act, step.name))
+                logger.info(f"[{step.name}] ⏰ 已設 hc_timeout={_hc_to}s、超時動作={_hc_act}")
+
             # step_result 已於 await 前寫入；這裡只純粹釋放 task 並退出協程
             unregister_task(run.run_id)
             return run.run_id  # 暫停，等 resume_pipeline 被呼叫
@@ -1872,6 +1906,8 @@ async def run_pipeline(
                     step_name=step.name,
                     run_id=run.run_id,
                     working_dir=wd,
+                    background=getattr(step, "background", False),
+                    ready_after_seconds=getattr(step, "ready_after_seconds", 0),
                 )
 
             # 快速模式：Recipe 命中 + 執行成功 → 確定性驗證（不叫 LLM）
@@ -2248,6 +2284,13 @@ async def run_pipeline(
     # ── 全部步驟完成 ─────────────────────────────────────────
     clear_abort(run.run_id)
     unregister_task(run.run_id)
+    # 清掉殘留的背景進程(background=true 的 step 留著的 GUI / daemon)
+    # 不清的話 workflow 結束後 GUI 還掛著、占記憶體
+    try:
+        from .executor import kill_run_processes
+        kill_run_processes(run.run_id)
+    except Exception as _e:
+        logger.warning(f"清理背景進程失敗(忽略):{_e}")
     run.status = "completed"
     run.ended_at = datetime.now().isoformat()
     store.save(run)
@@ -2549,12 +2592,18 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
         next_step = run.current_step + 1
 
         if next_step >= total:
+            # 清掉殘留的背景進程(同 main loop 結束時邏輯)
+            try:
+                from .executor import kill_run_processes
+                kill_run_processes(run.run_id)
+            except Exception as _e:
+                logger.warning(f"清理背景進程失敗(忽略):{_e}")
             run.status = "completed"
             run.ended_at = datetime.now().isoformat()
             store.save(run)
             logger.info(f"Pipeline {run.pipeline_name} 全部完成！")
             await _notify_final(run, config)
-            return f"✅ 確認通過，Pipeline 全部完成"
+            return f"✅ 確認通過,Pipeline 全部完成"
 
         run.status = "running"
         store.save(run)

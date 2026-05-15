@@ -376,13 +376,55 @@ def unregister_proc(run_id: str, proc):
 
 
 def kill_run_processes(run_id: str):
-    """立即終止指定 run 的所有子進程"""
+    """立即終止指定 run 的所有子進程,連同 process tree(防 cmd.exe wrapper 殺掉、Python 變孤兒)。
+    Windows 經典問題:create_subprocess_shell 透過 cmd.exe 開 Python,proc.kill() 只殺 cmd.exe,
+    Python 子進程繼續活著(尤其有 GUI 的時候 GUI window 留著)。用 psutil 走完整 process tree。
+    """
     with _proc_lock:
         procs = _running_procs.pop(run_id, [])
+    if not procs:
+        return
+    try:
+        import psutil as _psutil
+    except ImportError:
+        _psutil = None
+    killed = 0
     for proc in procs:
+        pid = getattr(proc, "pid", None)
+        if pid is None:
+            continue
+        # 用 psutil 找 children + kill 整棵樹
+        if _psutil is not None:
+            try:
+                parent = _psutil.Process(pid)
+                children = parent.children(recursive=True)
+                for child in children:
+                    try:
+                        child.kill()
+                        killed += 1
+                    except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                        pass
+                try:
+                    parent.kill()
+                    killed += 1
+                except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                    pass
+                continue
+            except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                pass
+            except Exception:
+                pass
+        # psutil 不在 / 失敗時的 fallback:只 kill 直接 proc
         try:
             proc.kill()
+            killed += 1
         except (ProcessLookupError, OSError):
+            pass
+    if killed > 0:
+        try:
+            import logging as _logging
+            _logging.getLogger("pipeline").info(f"🧹 kill_run_processes({run_id}):終結 {killed} 個進程(含子樹)")
+        except Exception:
             pass
 
 def _build_clean_success_stdout(all_stdout: list[str], done_marker_prefix: str) -> str:
@@ -565,6 +607,8 @@ async def execute_step(
     step_name: str,
     run_id: str = "",
     working_dir: Optional[str] = None,
+    background: bool = False,
+    ready_after_seconds: int = 0,
 ) -> ExecResult:
     """
     執行 shell 命令，串流輸出到 logger，回傳完整結果。
@@ -610,6 +654,29 @@ async def execute_step(
         )
         if run_id:
             register_proc(run_id, proc)
+
+        # ── 背景模式:不等 exit、給 daemon 一段時間 boot up 後直接回 success ──
+        if background:
+            if ready_after_seconds > 0:
+                logger.info(f"[{step_name}] 🚀 背景模式:等 {ready_after_seconds}s 讓 daemon 啟動完成…")
+                await asyncio.sleep(ready_after_seconds)
+                # 啟動期間若 proc 已 exit 了、應該當作失敗
+                if proc.returncode is not None:
+                    rc = proc.returncode
+                    logger.warning(f"[{step_name}] ⚠ 背景進程在 {ready_after_seconds}s 內已退出(exit={rc}),非預期 daemon 行為")
+                    return ExecResult(
+                        exit_code=rc if rc is not None else -1,
+                        stdout="(背景進程提早退出)",
+                        stderr=f"進程在 ready_after_seconds={ready_after_seconds} 內就 exit、應該設成非背景或檢查啟動失敗",
+                    )
+            else:
+                logger.info(f"[{step_name}] 🚀 背景模式啟動、不等 exit、立即下一步")
+            # 子程序留著、由 run 結束時統一 kill(register_proc 註冊過了)
+            return ExecResult(
+                exit_code=0,
+                stdout=f"(背景啟動 OK pid={proc.pid})",
+                stderr="",
+            )
 
         async def _drain(stream: asyncio.StreamReader, buf: list[str], tag: str):
             while True:

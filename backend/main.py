@@ -463,6 +463,62 @@ async def stop_computer_use_recording():
     return stop_recording()
 
 
+@app.post("/computer-use/recording/arm-hotkey")
+async def arm_recording_hotkey(req: RecordingStartRequest):
+    """註冊全域熱鍵(預設 F7)按下後自動 start_recording。
+    用途:讓使用者最小化瀏覽器、把焦點留在要錄製的 app、用熱鍵啟動錄製。
+    """
+    from pipeline.recorder import arm_start_hotkey
+    from pathlib import Path as _P
+    out_path = _P(req.output_dir).expanduser()
+    if not out_path.is_absolute():
+        _PROJ = _P(__file__).parent.parent.absolute()
+        out_path = _PROJ / out_path
+    try:
+        return arm_start_hotkey(session_id=req.session_id, output_dir=str(out_path), key="f7")
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/computer-use/recording/disarm-hotkey")
+async def disarm_recording_hotkey():
+    """取消已註冊的全域熱鍵(panel 關閉或開始錄製時呼叫)。"""
+    from pipeline.recorder import disarm_start_hotkey
+    return disarm_start_hotkey()
+
+
+class DuplicateAssetsRequest(BaseModel):
+    src: str   # 原始 assetsDir(相對 or 絕對)
+    dest: str  # 新 assetsDir
+
+
+@app.post("/canvas/duplicate-assets")
+async def duplicate_canvas_assets(req: DuplicateAssetsRequest):
+    """節點複製貼上時、把 computer_use 的 assets 資料夾整份複製到新路徑。
+    防止兩節點共用同一個資料夾(會互覆寫)。"""
+    import shutil
+    from pathlib import Path as _P
+    _PROJ = _P(__file__).parent.parent.absolute()
+
+    def _resolve(p: str) -> _P:
+        pp = _P(p).expanduser()
+        return pp if pp.is_absolute() else (_PROJ / pp)
+
+    src = _resolve(req.src)
+    dest = _resolve(req.dest)
+    if not src.exists() or not src.is_dir():
+        return {"ok": False, "error": f"原始資料夾不存在:{src}", "copied_files": 0}
+    if dest.exists():
+        return {"ok": False, "error": f"目標已存在(避免覆寫):{dest}", "copied_files": 0}
+    try:
+        shutil.copytree(src, dest)
+        # 算 copied file 數
+        n = sum(1 for _ in dest.rglob("*") if _.is_file())
+        return {"ok": True, "src": str(src), "dest": str(dest), "copied_files": n}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "copied_files": 0}
+
+
 @app.get("/computer-use/recording/status")
 async def get_computer_use_recording_status():
     """查詢目前錄製中 session 的即時狀態（前端 polling 用）。"""
@@ -2369,6 +2425,22 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
   timeout: 300
   retry: 2
 ```
+
+### 1b. 背景模式(`background: true`)— GUI / daemon / server
+**使用者說**:「開 GUI app」「啟動視窗」「跑一個 server」「daemon 跑著」「一直開著」「永遠不結束」、
+「打開 X 程式讓後面節點點按鈕」、「launch X 然後自動化」
+這時 script 必須加 `background: true`、否則 workflow 會卡在這 step 等 process 永遠不會 exit。
+
+```yaml
+- name: 開 GUI app
+  batch: python my_app.py
+  background: true             # ← 不等 exit、立即下一步、subprocess 留著給後面節點用
+  ready_after_seconds: 3       # 選填:等 N 秒讓 GUI boot、再下一步(預設 0 = 不等)
+  # workflow 結束時 subprocess 自動 kill、不會殘留
+```
+
+判斷小竅門:使用者描述含「**啟動**」「**開**」「**launch**」「**GUI**」「**server**」「**daemon**」「**永遠**」「**一直**」「**讓 X 開著**」這類字眼 → 主動加 `background: true`。
+反例:「跑」「執行」「處理」「分析」這類「會結束的批次任務」→ **不要**加 `background`(會誤判)。
 
 ## 2. AI 技能節點（skill）
 **使用者說**：「幫我抓 / 摘要 / 處理 / 算」+ **沒現成腳本** → LLM 自動寫 Python

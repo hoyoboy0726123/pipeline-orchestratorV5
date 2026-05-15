@@ -4,8 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow, Background, Controls, MiniMap, Panel,
   addEdge, useNodesState, useEdgesState,
-  BackgroundVariant, MarkerType,
-  type Connection, type Edge, type ReactFlowInstance,
+  BackgroundVariant, MarkerType, NodeToolbar, Position,
+  type Connection, type Edge, type ReactFlowInstance, type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import InsertableEdge from './_insertableEdge'
@@ -405,6 +405,19 @@ export default function PipelinePage() {
   const [nodes, setNodes, onNodesChange] = useNodesState<AppNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // 滑鼠停留節點 id(顯示 hover 浮動複製按鈕用)— 用 ref 計時器延遲清除、給滑鼠時間移到 toolbar
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const hoverLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cancelHoverClear = useCallback(() => {
+    if (hoverLeaveTimerRef.current) {
+      clearTimeout(hoverLeaveTimerRef.current)
+      hoverLeaveTimerRef.current = null
+    }
+  }, [])
+  const clearHoverDelayed = useCallback(() => {
+    cancelHoverClear()
+    hoverLeaveTimerRef.current = setTimeout(() => setHoveredId(null), 200)
+  }, [cancelHoverClear])
   const [pipelineName, setPipelineName] = useState('my-pipeline')
   const [showYaml, setShowYaml]   = useState(false)
   const [showDryRun, setShowDryRun] = useState(false)
@@ -679,6 +692,169 @@ export default function PipelinePage() {
     setNodes(ns => [...ns, newNode])
     setSelectedId(id)
   }, [nodes, setNodes])
+
+  // ── 節點複製貼上 — Ctrl+C / Ctrl+V / hover 按鈕 / 跨 workflow ─────────────
+  // clipboard 存在 localStorage(跨 workflow / 分頁 / refresh 都保留)
+  const CLIPBOARD_KEY = 'pipeline_canvas_clipboard_v1'
+  const copyNode = useCallback((nodeId: string) => {
+    const n = nodes.find(x => x.id === nodeId)
+    if (!n) return
+    try {
+      localStorage.setItem(CLIPBOARD_KEY, JSON.stringify({
+        type: n.type,
+        data: n.data,
+        copiedAt: Date.now(),
+      }))
+      const displayName = (n.data as { name?: string })?.name || n.type
+      toast.success(`📋 已複製:${displayName}`, {
+        description: '在任意處按 Ctrl+V 貼上(可跨工作流)',
+      })
+    } catch (e) {
+      toast.error(`複製失敗:${(e as Error).message}`)
+    }
+  }, [nodes])
+
+  const pasteNode = useCallback(async () => {
+    let raw: string | null
+    try { raw = localStorage.getItem(CLIPBOARD_KEY) } catch { raw = null }
+    if (!raw) {
+      toast.info('剪貼簿是空的')
+      return
+    }
+    let payload: { type: string; data: Record<string, unknown> }
+    try { payload = JSON.parse(raw) } catch {
+      toast.error('剪貼簿資料損毀')
+      return
+    }
+    const newId = `${payload.type}-${Date.now()}`
+    // 算位置:有 hoveredId / selectedId 就在它旁邊、不然在 viewport 中心
+    const ref = nodes.find(n => n.id === (hoveredId || selectedId))
+    const pos = ref
+      ? { x: ref.position.x + 60, y: ref.position.y + 60 }
+      : { x: 100 + nodes.length * 20, y: 200 }
+    // 名稱去重:加 _copy 或 _copy2 ...
+    const newData: Record<string, unknown> = { ...payload.data, index: nodes.length }
+    const baseName = String((payload.data as { name?: string }).name || payload.type)
+    const existingNames = new Set(
+      nodes.map(n => String((n.data as { name?: string }).name || ''))
+    )
+    let candidate = `${baseName}_copy`
+    let n = 2
+    while (existingNames.has(candidate)) candidate = `${baseName}_copy${n++}`
+    newData.name = candidate
+    newData.status = 'idle'
+    newData.errorMsg = ''
+    // assets 處理(computer_use 節點)— 整份資料夾 deep copy、避免兩節點共用同一份
+    const srcAssetsDir = String((payload.data as { assetsDir?: string }).assetsDir || '')
+    if (payload.type === 'computerUse' && srcAssetsDir) {
+      try {
+        const { duplicateCanvasAssets } = await import('@/lib/api')
+        // 新資料夾名稱:原本最後一段(e.g. "桌面自動化 1_assets")換掉
+        const newAssetsDir = srcAssetsDir.replace(/[^/\\]+_assets$/, `${candidate}_assets`)
+                                          .replace(/[^/\\]+$/, `${candidate}_assets`)
+        // 若 srcAssetsDir 不是 _assets 結尾,簡單在後面接 candidate 名:fallback
+        const finalDest = newAssetsDir.includes(candidate)
+          ? newAssetsDir
+          : `${srcAssetsDir.replace(/\/$/, '')}_${Date.now()}`
+        const r = await duplicateCanvasAssets(srcAssetsDir, finalDest)
+        if (r.ok) {
+          newData.assetsDir = finalDest
+          if (r.copied_files > 0) {
+            toast.success(`📋 貼上、assets 連同 ${r.copied_files} 個檔案一起複製`)
+          }
+        } else {
+          // 失敗就讓新節點共用舊 assets(警告)
+          toast.warning(`assets 複製失敗(${r.error})、新節點暫時共用舊資料夾、跑前請手動處理`)
+        }
+      } catch (e) {
+        console.warn('duplicate assets failed:', e)
+      }
+    }
+    const newNode: AppNode = {
+      id: newId,
+      type: payload.type as AppNode['type'],
+      position: pos,
+      data: newData,
+    } as AppNode
+    setNodes(ns => [...ns, newNode])
+    setSelectedId(newId)
+    toast.success(`📋 已貼上:${candidate}`)
+  }, [nodes, hoveredId, selectedId, setNodes])
+
+  // ── 單節點 self-run — 雙向 DFS 收這個節點 + 沿線連到的「整個連通子圖」(前 + 後)
+  // 沒拉線:只跑這個;有連線:跑全部相連的、讓使用者測試 2-N 個串接的小區塊
+  const selfRunNode = useCallback(async (nodeId: string) => {
+    // DFS 雙向(incoming + outgoing edges)收集所有連通節點
+    const connectedIds = new Set<string>([nodeId])
+    const stack = [nodeId]
+    while (stack.length) {
+      const cur = stack.pop()!
+      for (const e of edges) {
+        // 上游:source → target、cur 是 target、加 source
+        if (e.target === cur && !connectedIds.has(e.source)) {
+          connectedIds.add(e.source); stack.push(e.source)
+        }
+        // 下游:cur 是 source、加 target
+        if (e.source === cur && !connectedIds.has(e.target)) {
+          connectedIds.add(e.target); stack.push(e.target)
+        }
+      }
+    }
+    const subset = nodes.filter(n => connectedIds.has(n.id))
+    if (subset.length === 0) {
+      toast.error('找不到節點'); return
+    }
+    const subsetEdges = edges.filter(e => connectedIds.has(e.source) && connectedIds.has(e.target))
+    let steps: ReturnType<typeof flowToSteps>
+    try {
+      steps = flowToSteps(subset, subsetEdges)
+    } catch (e) {
+      toast.error(`生 YAML 失敗:${(e as Error).message}`); return
+    }
+    if (steps.length === 0) {
+      toast.error('subset 沒有可執行 step'); return
+    }
+    const yamlText = stepsToYaml(`${pipelineName}_selfrun`, steps)
+    try {
+      const { startPipeline } = await import('@/lib/api')
+      const r = await startPipeline(yamlText, true, false, activeId ?? undefined)
+      setRunId(r.run_id)
+      setRunStatus('running')
+      setRunning(true)
+      // 啟動 polling、走跟正常 Run 同一條 path 才會看到 log + 自動轉回 idle
+      pollStatus(r.run_id)
+      if (pollRef.current) clearInterval(pollRef.current)
+      pollRef.current = setInterval(() => pollStatus(r.run_id), 1500)
+      toast.success(`▶ 單節點測試啟動(${steps.length} step、下方 Log 會顯示)`)
+    } catch (e) {
+      toast.error(`啟動失敗:${(e as Error).message}`)
+    }
+  }, [nodes, edges, pipelineName, activeId])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 鍵盤監聽:Ctrl+C / Ctrl+V — 排除 input / textarea / contenteditable 等輸入元件
+  useEffect(() => {
+    const isTypingTarget = (t: EventTarget | null): boolean => {
+      if (!(t instanceof HTMLElement)) return false
+      const tag = t.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+      if (t.isContentEditable) return true
+      return false
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      if (isTypingTarget(e.target)) return
+      const k = e.key.toLowerCase()
+      if (k === 'c' && selectedId) {
+        e.preventDefault()
+        copyNode(selectedId)
+      } else if (k === 'v') {
+        e.preventDefault()
+        pasteNode()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedId, copyNode, pasteNode])
 
   // ── Add skill step ──────────────────────────────────────────────────────────
   const addSkillStep = useCallback(() => {
@@ -1437,12 +1613,47 @@ export default function PipelinePage() {
           onConnect={onConnect}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
+          onNodeMouseEnter={(_e, n) => { cancelHoverClear(); setHoveredId(n.id) }}
+          onNodeMouseLeave={clearHoverDelayed}
           onInit={onInit}
           minZoom={0.2}
           maxZoom={2}
           deleteKeyCode={['Delete', 'Backspace']}
           defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
         >
+          {/* hover 浮動工具列 — 跟著滑鼠所在節點顯示;hover 在 toolbar 上會 cancel 延遲清除、不會消失 */}
+          {hoveredId && (
+            <NodeToolbar nodeId={hoveredId} isVisible position={Position.Top} offset={0}>
+              <div
+                onMouseEnter={cancelHoverClear}
+                onMouseLeave={clearHoverDelayed}
+                className="inline-flex items-center gap-0.5 px-1 py-1 rounded-lg bg-white border border-gray-200 shadow-md"
+              >
+                <button
+                  onClick={() => copyNode(hoveredId)}
+                  title="複製此節點(Ctrl+C)"
+                  className="px-2 py-1 rounded text-indigo-600 hover:bg-indigo-50 transition-colors text-sm"
+                >
+                  📋
+                </button>
+                <button
+                  onClick={() => selfRunNode(hoveredId)}
+                  disabled={running}
+                  title="單節點測試:只跑這個節點 + 沿線往前的所有上游"
+                  className="px-2 py-1 rounded text-emerald-600 hover:bg-emerald-50 transition-colors text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  ▶
+                </button>
+                <button
+                  onClick={() => deleteStep(hoveredId)}
+                  title="刪除此節點"
+                  className="px-2 py-1 rounded text-red-500 hover:bg-red-50 transition-colors text-sm"
+                >
+                  🗑
+                </button>
+              </div>
+            </NodeToolbar>
+          )}
           {/* Dotted grid background */}
           <Background
             variant={BackgroundVariant.Dots}

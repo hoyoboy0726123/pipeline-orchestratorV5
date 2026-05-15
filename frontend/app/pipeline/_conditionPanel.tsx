@@ -8,10 +8,11 @@
  *
  * 此節點純 metadata、不執行命令。runner 求值後跳到目標 step name。
  */
-import { useMemo } from 'react'
-import { X, GitBranch, Plus, Trash2 } from 'lucide-react'
+import { useMemo, useState, useEffect } from 'react'
+import { X, GitBranch, Plus, Trash2, Wand2 } from 'lucide-react'
 import type { ConditionData, ConditionNode } from './_helpers'
 import { VariableInput } from './_variablePicker'
+import { getWorkflowVariables, type WorkflowVariablesResult } from '@/lib/api'
 
 const CONDITION_COLOR = '#f97316'  // 橘色 — 跟其他節點區隔
 
@@ -84,6 +85,10 @@ export default function ConditionPanel({
         {/* IF 模式 */}
         {data.mode === 'if' && (
           <>
+            <ConditionBuilder
+              workflowId={workflowId}
+              onApply={(expr) => onUpdate({ expression: expr })}
+            />
             <div>
               <div className="flex items-end justify-between mb-1.5">
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">條件表達式</label>
@@ -97,7 +102,7 @@ export default function ConditionPanel({
                 placeholder={'例:{{ steps.fetch.output.rows | int > 100 }}\n例:{{ "ok" in steps.api.output.stdout }}'}
                 showHint={false}
               />
-              <p className="text-[11px] text-gray-400 mt-1">Jinja2 boolean 表達式;求值後 truthy → on_true、falsy → on_false</p>
+              <p className="text-[11px] text-gray-400 mt-1">Jinja2 boolean 表達式;求值後 truthy → on_true、falsy → on_false。上方「簡易設定」可自動產生、進階使用者也可直接打 Jinja2。</p>
             </div>
 
             <div>
@@ -151,6 +156,167 @@ export default function ConditionPanel({
         {/* 提示 */}
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 leading-relaxed">
           💡 <b>記得在 branch step 加 `next: end`</b> — 否則 branch 跑完會線性走到下一個 step、可能誤跑到對方 branch。
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── 子 component:ConditionBuilder — 視覺化條件組裝(免手寫 Jinja2)─────
+// 三個下拉(變數 → 比較符 → 值)→ 自動產生表達式塞回主編輯區
+// 進階使用者仍可直接編輯 expression 文字、不會被擋
+type OperatorKey =
+  | 'eq' | 'ne'
+  | 'gt' | 'gte' | 'lt' | 'lte'
+  | 'contains' | 'not_contains'
+  | 'truthy' | 'falsy'
+
+const OPERATORS: { key: OperatorKey; label: string; needsValue: boolean }[] = [
+  { key: 'eq',           label: '等於 (==)',            needsValue: true },
+  { key: 'ne',           label: '不等於 (!=)',          needsValue: true },
+  { key: 'gt',           label: '大於 (>)',             needsValue: true },
+  { key: 'gte',          label: '大於等於 (>=)',         needsValue: true },
+  { key: 'lt',           label: '小於 (<)',             needsValue: true },
+  { key: 'lte',          label: '小於等於 (<=)',         needsValue: true },
+  { key: 'contains',     label: '包含 (contains)',      needsValue: true },
+  { key: 'not_contains', label: '不包含 (not in)',      needsValue: true },
+  { key: 'truthy',       label: '有值 / 非空',          needsValue: false },
+  { key: 'falsy',        label: '無值 / 空',            needsValue: false },
+]
+
+function buildExpression(varPath: string, op: OperatorKey, val: string): string {
+  if (!varPath) return ''
+  const v = `${varPath}`
+  // 自動判斷:全數字 → 不加引號、轉 int 比;否則當字串
+  const isNumeric = val.trim() !== '' && /^-?\d+(\.\d+)?$/.test(val.trim())
+  const valQuoted = isNumeric ? val.trim() : `"${val.replace(/"/g, '\\"')}"`
+  switch (op) {
+    case 'eq':
+      return isNumeric
+        ? `{{ ${v} | int == ${val.trim()} }}`
+        : `{{ ${v} == ${valQuoted} }}`
+    case 'ne':
+      return isNumeric
+        ? `{{ ${v} | int != ${val.trim()} }}`
+        : `{{ ${v} != ${valQuoted} }}`
+    case 'gt':  return `{{ ${v} | int > ${val.trim() || '0'} }}`
+    case 'gte': return `{{ ${v} | int >= ${val.trim() || '0'} }}`
+    case 'lt':  return `{{ ${v} | int < ${val.trim() || '0'} }}`
+    case 'lte': return `{{ ${v} | int <= ${val.trim() || '0'} }}`
+    case 'contains':     return `{{ ${valQuoted} in ${v} }}`
+    case 'not_contains': return `{{ ${valQuoted} not in ${v} }}`
+    case 'truthy': return `{{ ${v} }}`
+    case 'falsy':  return `{{ not ${v} }}`
+  }
+}
+
+function ConditionBuilder({
+  workflowId, onApply,
+}: {
+  workflowId?: string
+  onApply: (expression: string) => void
+}) {
+  const [vars, setVars] = useState<WorkflowVariablesResult | null>(null)
+  const [varPath, setVarPath] = useState('')
+  const [op, setOp] = useState<OperatorKey>('gt')
+  const [val, setVal] = useState('')
+
+  useEffect(() => {
+    if (!workflowId) return
+    getWorkflowVariables(workflowId).then(setVars).catch(() => {})
+  }, [workflowId])
+
+  // 攤平所有可選變數(steps.X.output.Y + input.X)
+  const options = useMemo(() => {
+    if (!vars) return [] as { path: string; label: string; detail: string }[]
+    const out: { path: string; label: string; detail: string }[] = []
+    for (const s of vars.available.steps) {
+      for (const f of s.fields) {
+        out.push({
+          path: `steps.${s.name}.output.${f.key}`,
+          label: `${s.name}.${f.key}`,
+          detail: `${s.node_type}${f.source ? ' · ' + f.source : ''}`,
+        })
+      }
+    }
+    for (const i of vars.available.input) {
+      out.push({
+        path: `input.${i.key}`,
+        label: `input.${i.key}`,
+        detail: i.required ? '啟動參數' : '啟動參數(可選)',
+      })
+    }
+    return out
+  }, [vars])
+
+  const currentOp = OPERATORS.find(o => o.key === op)!
+  const preview = varPath ? buildExpression(varPath, op, val) : '(請先選變數)'
+  const canApply = !!varPath && (!currentOp.needsValue || val.trim() !== '')
+
+  return (
+    <div className="border border-orange-200 bg-orange-50/40 rounded-lg p-3 space-y-2">
+      <div className="flex items-center gap-1.5 text-xs font-semibold text-orange-700">
+        <Wand2 className="w-3.5 h-3.5" />
+        <span>簡易設定(不用懂 Jinja2)</span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2">
+        {/* 變數 */}
+        <div>
+          <label className="text-[11px] text-gray-500 block mb-0.5">變數(選上游 step 或啟動參數)</label>
+          <select
+            value={varPath}
+            onChange={e => setVarPath(e.target.value)}
+            className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-orange-400 bg-white"
+          >
+            <option value="">— 選擇變數 —</option>
+            {options.map(o => (
+              <option key={o.path} value={o.path}>{o.label} · {o.detail}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* 比較符 + 值 */}
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="text-[11px] text-gray-500 block mb-0.5">比較</label>
+            <select
+              value={op}
+              onChange={e => setOp(e.target.value as OperatorKey)}
+              className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400 bg-white"
+            >
+              {OPERATORS.map(o => (
+                <option key={o.key} value={o.key}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-[11px] text-gray-500 block mb-0.5">
+              值{currentOp.needsValue ? '' : '(此運算子不用填)'}
+            </label>
+            <input
+              value={val}
+              onChange={e => setVal(e.target.value)}
+              disabled={!currentOp.needsValue}
+              placeholder={currentOp.needsValue ? '例:10 / "ok" / today' : ''}
+              className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-orange-400 bg-white disabled:bg-gray-100 disabled:text-gray-400"
+            />
+          </div>
+        </div>
+
+        {/* 預覽 + 套用 */}
+        <div className="flex items-center gap-2">
+          <div className="flex-1 font-mono text-[11px] bg-white border border-gray-200 rounded-md px-2 py-1 truncate">
+            <span className="text-gray-400">預覽:</span>{' '}
+            <span className="text-gray-800">{preview}</span>
+          </div>
+          <button
+            onClick={() => onApply(buildExpression(varPath, op, val))}
+            disabled={!canApply}
+            className="shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+          >
+            套用
+          </button>
         </div>
       </div>
     </div>

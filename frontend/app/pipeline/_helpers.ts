@@ -23,6 +23,10 @@ export interface StepData extends Record<string, unknown> {
   humanConfirmScreenshot?: boolean     // optional — 是否自動截圖
   humanConfirmPreview?: boolean        // optional — 是否 render 上一步驟輸出檔案預覽
   humanConfirmSendPrevOutput?: boolean // optional — 抵達節點時自動把上一步輸出檔當 document 傳到 TG
+  hcOnTimeout?: 'wait' | 'pass' | 'reject' | 'abort'  // 超時後行動,預設 wait = 永遠等
+  // 背景模式(Script 開 daemon / GUI 用):啟動後不等 exit、立即下一步、subprocess 由 runner 接管
+  background?: boolean
+  readyAfterSeconds?: number   // 背景啟動後等 N 秒讓 daemon ready 再下一步,預設 0
   // 桌面自動化節點（computer_use）
   computerUse?: boolean                  // optional — 桌面自動化步驟
   computerUseActions?: ComputerUseAction[]  // optional — 動作序列
@@ -171,7 +175,8 @@ export interface HumanConfirmData extends Record<string, unknown> {
   screenshot: boolean      // 是否自動截圖並傳送到 Telegram
   previewPrevOutput: boolean  // 是否 render 上一步驟輸出檔案成 PNG 傳 TG
   sendPrevOutput: boolean  // 是否自動把上一步輸出檔當 document 傳到 TG（手機可下載）
-  timeout: number          // 等待超時（秒）
+  timeout: number          // 超時秒數(超時行動 != wait 時有效)
+  hcOnTimeout: 'wait' | 'pass' | 'reject' | 'abort'   // 超時後的行動,預設 'wait' = 永遠等
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -476,6 +481,7 @@ export function newHumanConfirmData(index = 0): HumanConfirmData {
     previewPrevOutput: false,
     sendPrevOutput: false,
     timeout: 3600,
+    hcOnTimeout: 'wait',
     index,
     status: 'idle',
     errorMsg: '',
@@ -696,6 +702,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           previewPrevOutput: s.humanConfirmPreview ?? false,
           sendPrevOutput: s.humanConfirmSendPrevOutput ?? false,
           timeout: s.timeout || 3600,
+          hcOnTimeout: (s.hcOnTimeout as HumanConfirmData['hcOnTimeout']) ?? 'wait',
           index: i,
           status: 'idle' as const,
           errorMsg: '',
@@ -1002,6 +1009,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         humanConfirmPreview: d.previewPrevOutput,
         humanConfirmSendPrevOutput: d.sendPrevOutput,
         timeout: d.timeout,
+        hcOnTimeout: d.hcOnTimeout || 'wait',
         retry: 0,
         index: i,
         status: d.status,
@@ -1095,6 +1103,9 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       retry: d.retry,
       next: d.next || '',
       llmRole: effectiveLlmRole,
+      // 背景模式(daemon / GUI app):不等 exit、立刻下一步
+      background: !!(d as { background?: boolean }).background,
+      readyAfterSeconds: (d as { readyAfterSeconds?: number }).readyAfterSeconds || 0,
       index: i,
       status: d.status,
       errorMsg: d.errorMsg,
@@ -1122,6 +1133,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.humanConfirmPreview) lines.push(`    preview_prev_output: true`)
       if (s.humanConfirmSendPrevOutput) lines.push(`    send_prev_output: true`)
       if (s.timeout && s.timeout !== 3600) lines.push(`    timeout: ${s.timeout}`)
+      if (s.hcOnTimeout && s.hcOnTimeout !== 'wait') lines.push(`    hc_on_timeout: ${s.hcOnTimeout}`)
       if (s.next) lines.push(`    next: ${s.next}`)
       continue
     }
@@ -1339,6 +1351,12 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
     if (s.skill) lines.push(`    skill: ${s.skill}`)
     if (s.readonly) lines.push(`    readonly: true`)
     if (s.askMode) lines.push(`    ask_mode: true`)
+    if (s.background) {
+      lines.push(`    background: true`)
+      if (s.readyAfterSeconds && s.readyAfterSeconds > 0) {
+        lines.push(`    ready_after_seconds: ${s.readyAfterSeconds}`)
+      }
+    }
     if (s.outputPath || s.expect) {
       lines.push(`    output:`)
       if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
@@ -1477,6 +1495,13 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.humanConfirmPreview = /true/.test(t)
       } else if (/^send_prev_output:/.test(t) && cur) {
         cur.humanConfirmSendPrevOutput = /true/.test(t)
+      } else if (/^hc_on_timeout:/.test(t) && cur) {
+        const v = t.replace(/^hc_on_timeout:\s*/, '').replace(/^"|"$/g, '').trim()
+        if (v === 'wait' || v === 'pass' || v === 'reject' || v === 'abort') cur.hcOnTimeout = v
+      } else if (/^background:/.test(t) && cur) {
+        cur.background = /true/.test(t)
+      } else if (/^ready_after_seconds:/.test(t) && cur) {
+        cur.readyAfterSeconds = parseInt(t.replace(/^ready_after_seconds:\s*/, '')) || 0
       } else if (/^web_crawler:/.test(t) && cur) {
         cur.webCrawler = /true/.test(t)
       } else if (/^wc_mode:/.test(t) && cur) {

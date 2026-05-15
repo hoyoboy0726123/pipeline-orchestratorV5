@@ -610,7 +610,13 @@ const ChipTextarea = forwardRef<ChipTextareaHandle, {
         spellCheck={false}
       />
       {isEmpty && placeholder && (
-        <div className="absolute top-1.5 left-2.5 text-sm text-gray-400 pointer-events-none font-mono">
+        <div
+          className="absolute top-1.5 left-2.5 right-2.5 text-sm text-gray-400 pointer-events-none font-mono overflow-hidden"
+          style={{
+            whiteSpace: rows === 1 ? 'nowrap' : 'pre-wrap',
+            textOverflow: 'ellipsis',
+          }}
+        >
           {placeholder}
         </div>
       )}

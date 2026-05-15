@@ -188,6 +188,22 @@ class PipelineStep(BaseModel):
     # 人工確認節點：抵達時自動把上一步的輸出檔案傳到 Telegram（手機可下載）
     # False（預設）= 不自動傳；但 inline keyboard 仍有「📎 上一步輸出」按鈕、需要時點來抓
     send_prev_output: bool = False
+    # 人工確認超時時自動行動(超時秒數沿用 step.timeout):
+    # 'wait'(預設、保留現有行為:永遠等、即使 step.timeout 也忽略)
+    # 'pass'(當作通過、繼續下一步)/'reject'(跳回上一步重做)/'abort'(終止 workflow)
+    hc_on_timeout: str = "wait"
+
+    # ── 背景 step(daemon / GUI app)──────────────────────────────────
+    # True = 啟動 subprocess 後不等它 exit、直接跑下一個 step。
+    # 用途:Script 開了一個 GUI / server / daemon 進程、永遠不結束、
+    #       但後續 step 需要它持續活著(例如 UI 自動化點按那個視窗)。
+    # 設 True 後:
+    #   - runner 不等 process exit、繼續下一個 step
+    #   - subprocess 由 runner 接管、workflow 結束時自動 kill 釋放資源
+    # 預設 False = 跟現有行為一致(等到 exit 才下一步)。
+    # 進階(選填):啟動後等 N 秒讓 daemon ready、再下一步(預設 0 = 不等)。
+    background: bool = False
+    ready_after_seconds: int = 0
     # ── 控制流:任意 step 用 next 顯式跳到下一個 step ── Ticket 2 ───
     # 一般 step 跑完依 YAML 順序前進;設了 next 就改跳到指定 step name。
     # 特殊值 "end" / "__end__" / "" → 結束流程(預設行為:空字串 = 線性下一個)
