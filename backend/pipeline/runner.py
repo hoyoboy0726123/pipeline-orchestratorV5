@@ -2102,6 +2102,47 @@ async def run_pipeline(
             # 上面 validate 前已經算過 _eff_output_path、這邊直接重用、不要重複呼 snapshot diff
             actual_out = _eff_output_path or ""
 
+            # ── skill 顯式 export:讀 workflow dir 的 _step_export.json 併進 step_vars ──
+            # 讓 skill / script 節點能把算好的「具名乾淨值」傳給下游(尤其 condition 節點 —
+            # condition 的 expression 只吃乾淨值、skill 的 stdout 太雜)。
+            # 約定:節點在 workflow dir 寫一個扁平 JSON dict 到 _step_export.json,
+            # runner 讀進該步的 step_vars(→ {{ steps.<name>.output.<key> }})後刪檔、
+            # 避免洩漏到下一步。
+            try:
+                _export_f = _workflow_output_dir(config.name) / "_step_export.json"
+                if _export_f.is_file():
+                    import json as _json
+                    _exported = _json.loads(_export_f.read_text(encoding="utf-8"))
+                    if isinstance(_exported, dict):
+                        for _ek, _ev in _exported.items():
+                            step_step_vars[str(_ek)] = _ev
+                        logger.info(f"[{step.name}] 收到節點 export 變數:{list(_exported.keys())}")
+                    _export_f.unlink()
+            except Exception as _exp_e:
+                logger.warning(f"[{step.name}] 讀 _step_export.json 失敗(忽略):{_exp_e}")
+
+            # ── 自動開放 skill 的 JSON 輸出欄位 → step_vars ──
+            # 若這步的輸出檔是個 JSON 物件(扁平 dict),把它的「純量欄位」收進
+            # step_vars,讓下游(尤其 condition)能直接 {{ steps.X.output.<欄位> }}
+            # 引用 —— skill 只要正常寫它的 JSON 輸出、不用學任何工具或約定。
+            try:
+                if actual_out and str(actual_out).lower().endswith(".json"):
+                    _oj = Path(actual_out)
+                    if _oj.is_file():
+                        import json as _json2
+                        _ojd = _json2.loads(_oj.read_text(encoding="utf-8"))
+                        if isinstance(_ojd, dict):
+                            _promoted = []
+                            for _jk, _jv in _ojd.items():
+                                if (isinstance(_jv, (str, int, float, bool))
+                                        and str(_jk) not in step_step_vars):
+                                    step_step_vars[str(_jk)] = _jv
+                                    _promoted.append(str(_jk))
+                            if _promoted:
+                                logger.info(f"[{step.name}] 自動開放 JSON 輸出欄位:{_promoted}")
+            except Exception as _oj_e:
+                logger.warning(f"[{step.name}] 讀 JSON 輸出欄位失敗(忽略):{_oj_e}")
+
             step_result = StepResult(
                 step_index=run.current_step,
                 step_name=step.name,

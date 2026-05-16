@@ -45,6 +45,9 @@ async def startup():
     from db import init_db
     init_db()
     print("✅ SQLite 資料庫已初始化")
+    # 全新安裝時 seed 預設範例工作流(已 seed 過會自動略過)
+    from seed_examples import seed_example_workflows
+    seed_example_workflows()
     # 自動安裝 skill_packages.txt 中缺少的套件
     from skill_pkg_manager import auto_install_packages
     auto_install_packages()
@@ -1947,6 +1950,19 @@ async def api_workflow_variables(wf_id: str):
                         "source": f"save_as ({a.type})",
                     })
 
+        # skill / script 自動開放的變數:上次 run 的 step_vars
+        # (skill 的 JSON 輸出欄位 / export_var 都會落在 step_vars)
+        if sr and getattr(sr, "step_vars", None):
+            _existing_keys = {f["key"] for f in fields}
+            for _vk, _vv in sr.step_vars.items():
+                if str(_vk) not in _existing_keys:
+                    fields.append({
+                        "key": str(_vk),
+                        "type": "number" if isinstance(_vv, (int, float)) and not isinstance(_vv, bool) else "string",
+                        "last_value": str(_vv),
+                        "source": "節點輸出",
+                    })
+
         avail_steps.append({
             "name": step.name,
             "node_type": _classify_node_type(step),
@@ -2336,6 +2352,7 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 | `script` | `batch`（指令） | — |
 | `visual_validation` | `visual_validation: true` + `vv_prompt` | vv_prompt 必填 |
 | `subagent` | `subagent: true` + `subagent_role` + `batch` | role 沒填走 data_analyst 預設;batch 太籠統 LLM 多輪推理也走不出來 |
+| `condition` | `condition: true` +（`expression`+`on_true`/`on_false`）或（`switch`+`cases`）| on_true/on_false/cases 指到不存在的 step name |
 
 3. **特別針對 `outlook_automation`：使用者給的 email 必填到 `outlook_params.to`**。沒有 email 不要產 YAML、回去問。
 4. **`outlook_params` 一律用 inline JSON 一行寫**（不要多行 YAML 格式 — 前端解析器只認 inline JSON）：
@@ -2413,18 +2430,45 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 
 > 設計變數化的 workflow 時,主動跟使用者確認:「這個值之後會變嗎?要不要做成啟動參數?」如果使用者要排程跑、跨客戶用、或上一步抓的值要餵給後面 → **務必用 `{{ }}`**。
 
+## ⚠️ skill 產 JSON → 下游讀取:先對齊欄位名（過夜測試踩過）
+
+skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興決定的**
+（需求講中文「姓名 / 薪資」→ LLM 多半就產中文 key `姓名` / `薪資`）。
+若下游接一個 **script 節點**、用寫死的 code 去讀（`e['salary']`），key 對不上就 `KeyError`。
+
+兩種正確做法、擇一（不要產「上游 skill 自由輸出 + 下游 script 寫死 key」這種組合）：
+- **上游 skill 的 batch 明確釘死輸出 key 名**：
+  「…輸出 JSON、每筆含欄位 `name` / `dept` / `salary`（就用這三個英文 key）」
+- **下游也用 skill 節點**（而非 script）：skill 的 LLM 會自己 read_file 看實際結構、適應 schema
+
 ---
 
-# 八種節點類型（節點全集）
+# 節點類型（節點全集）
 
 ## 1. 腳本節點（script）
 **使用者說**：「我的 xxx.py 腳本」「執行 xxx 指令」「跑這個批次檔」
 ```yaml
 - name: 抓資料
-  batch: python ~/scripts/fetch.py --date=today
+  batch: |
+    python ~/scripts/fetch.py --date=today
   timeout: 300
   retry: 2
 ```
+
+### ⚠️ script 的 `batch` 寫法鐵則（過夜測試踩過兩個坑、務必遵守）
+
+1. **`batch` 一律用區塊純量 `batch: |`**（換行後縮排寫命令）。
+   裸 `batch: <命令>` 若命令含冒號（Python 的 `with:` / `for:` / `if:` / dict、中文「為:」）
+   會被 YAML 當成 mapping 解析、**整份 YAML 炸掉**（`mapping values are not allowed here`）。
+   用 `|` 一律安全 — 所以**不管命令長什麼樣、永遠用 `batch: |`**。
+
+2. **絕對不要產多行的 `python -c "..."`**。多行 `python -c` 在 Windows 會被 shell
+   在換行處切斷 → **exit 0 卻什麼都沒執行**（靜默失敗、最難抓的那種 bug）。
+   要跑 inline Python：
+   - 簡單邏輯 → 寫成**單行**、用 `;` 串：
+     `python -c "import json; d=json.load(open('x.json')); print(len(d))"`
+   - 稍複雜 / 需要多行 / 含迴圈或 `with` → **改用 skill 節點**（描述需求讓 LLM 寫 .py），
+     不要硬塞多行 `python -c`。
 
 ### 1b. 背景模式(`background: true`)— GUI / daemon / server
 **使用者說**:「開 GUI app」「啟動視窗」「跑一個 server」「daemon 跑著」「一直開著」「永遠不結束」、
@@ -2651,6 +2695,79 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 
 **判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
 
+## 9. 條件節點（condition）— 分支控制流
+**使用者說**：「如果 X 就…否則…」「資料超過 N 筆才寄信」「依狀態走不同步驟」「分支」「失敗就走另一條」
+**純 metadata 節點、不跑任何命令**：runner 求值表達式、再依結果跳到指定的下游步驟。
+**有這個節點、別跟使用者說系統沒有分支功能。**
+
+### ⚠️ 判斷值要怎麼來（最重要、不照做 condition 一定壞）
+
+`expression` / `switch` 只能引用 `output` namespace **真的有的 key**。固定 key：
+- `{{ steps.X.output.stdout }}` — 該步的 stdout
+- `{{ steps.X.output.path }}` — 該步輸出檔的路徑
+- `{{ steps.X.output.status }}` — ⚠️ 這是該步的**驗證狀態**（`ok` / `failed`）、**不是**你資料裡的 status 欄位、不要拿來分流
+- `{{ input.X }}` — 啟動參數
+
+**判斷值有兩種正確做法、擇一：**
+
+**做法 A — `script` 步驟 print 成 stdout(最簡單、script 節點用這個):**
+script 把要判斷的值 `print` 出來,condition 引用 `{{ steps.X.output.stdout }}`。
+
+**做法 B — skill 把判斷值放進它的 JSON 輸出檔(skill 節點要餵 condition 就用這個):**
+skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 skill 的輸出檔
+**若是個 JSON 物件,runner 會自動把裡面的數字 / 文字欄位開放給下游** —— condition 就能用
+`{{ steps.X.output.<欄位名> }}` 引用。所以 skill 的 batch **完全不用提任何系統機制 / 工具名**,
+只要正常講「算出某值、跟其他數字一起存成 stats.json 之類的 JSON 檔」就好。欄位名可中可英。
+```yaml
+- name: 統計
+  skill_mode: true
+  batch: |
+    …算出負評百分比…把數字存成 stats.json、欄位包含「負評百分比」
+  output:
+    path: stats.json
+- name: 判斷
+  condition: true
+  expression: "{{ steps.統計.output.負評百分比 | int > 40 }}"
+```
+
+### IF 模式（`expression` + `on_true` / `on_false`）
+```yaml
+- name: count_orders
+  batch: |
+    python -c "import json; print(len(json.load(open('orders.json'))))"
+- name: check_count
+  condition: true
+  expression: "{{ steps.count_orders.output.stdout | int > 25 }}"   # Jinja2 布林表達式
+  on_true: 批次處理       # 成立 → 跳到這個 step name
+  on_false: 簡易處理      # 不成立 → 跳到這個 step name（留空 = 結束流程）
+```
+
+### Switch 模式（`switch` + `cases`，忽略 `expression`）
+```yaml
+- name: read_status
+  batch: |
+    python -c "print(open('status.txt').read().strip())"   # 把要分流的值 print 成 stdout
+- name: 依狀態分流
+  condition: true
+  switch: "{{ steps.read_status.output.stdout }}"
+  cases: {"paid": 出貨, "pending": 催款, "cancelled": 退款}   # inline JSON 一行寫
+  default: 通報異常       # 沒命中任何 case 的 fallback（留空 = 結束）
+```
+
+### 分支步驟要收尾
+被 `on_true` 指到的步驟跑完後，會線性掉進 YAML 的下一個步驟。
+若不想讓 true 分支跑完又掉進 false 分支，在 true 分支的步驟加 `next: end`：
+```yaml
+- name: 批次處理
+  skill_mode: true
+  batch: |
+    讀上一步的資料做批次處理
+  next: end             # 跑完直接結束、不會再掉進「簡易處理」
+```
+
+**何時用 condition**：使用者明說「如果 / 否則 / 依情況 / 超過就 / 分支」這類條件邏輯時才用。
+單純線性流程不要硬加。
+
 <!--TG_ONLY_BEGIN-->
 ## ⛓️ 派子代理 ad-hoc 執行 vs 建 workflow（重要決策）
 
@@ -2742,7 +2859,9 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 # 共用欄位規則
 
-- `name`：步驟名稱（中文 OK）
+- `name`：步驟名稱（中文 OK）。**不要用空格** — 用底線或連字號（`抓取_PTT_列表`、不要 `抓取 PTT 列表`）。
+  步驟名會被 `{{ steps.<name>.output.path }}` 引用，name 含空格會讓 Jinja 模板解析失敗
+  （`{{ steps.抓取 PTT 列表.output.path }}` → 炸）。condition 的 `on_true`/`on_false`/`cases` 同理
 - `timeout`：秒數。script 300 / skill 600 / human_confirm 3600 / visual_validation 120 / web_crawler 600
 - `retry`：失敗重試次數。各節點預設值（不寫就走預設）：
   - `script`: **1** — 程式碼出錯重跑也是同樣錯，但給一次寫入失敗 / 路徑問題的恢復機會

@@ -1,0 +1,57 @@
+# 範例工作流:負載分級處理
+# ───────────────────────────────────────────────────────────────
+# 示範重點:condition 節點(Switch 模式)如何跟 script 節點結合。
+# 情境:看一個指標(待處理任務數),依「高 / 中 / 低」三個等級走三條不同處理。
+# Switch 模式適合「同一個值、要分成 3 種以上情況」的場景。
+#
+# 關鍵觀念:switch 跟 IF 一樣只能讀 script 步驟 print 出來的 stdout。
+#   先用一個 script 步驟把值轉成等級字串(high/mid/low)、print 出來,
+#   switch 再去比對 cases 裡的 key。
+# ───────────────────────────────────────────────────────────────
+name: 負載分級處理 (範例)
+validate: false
+steps:
+  # 1) 產生一個指標數值(實務上換成「讀你真正的佇列長度 / API 回傳」)
+  - name: 產生待辦數量
+    batch: |
+      python -c "import random; open('queue.txt','w').write(str(random.randint(0,100)))"
+    output:
+      path: queue.txt
+    timeout: 60
+
+  # 2) 把數值轉成等級字串、print 成 stdout
+  - name: 判定負載等級
+    batch: |
+      python -c "n=int(open('queue.txt').read()); print('high' if n>=70 else 'mid' if n>=30 else 'low')"
+    timeout: 60
+
+  # 3) 條件節點(Switch):依等級字串分三路
+  - name: 依負載分流
+    condition: true
+    switch: "{{ steps.判定負載等級.output.stdout }}"
+    cases: {"high": 高負載處理, "mid": 中負載處理, "low": 低負載處理}
+    timeout: 30
+
+  # 4) 三條分支(前兩條跑完要 next: end、否則會線性掉進下一條)
+  - name: 高負載處理
+    batch: |
+      python -c "open('result.txt','w',encoding='utf-8').write('高負載:待辦過多、建議啟動加速處理 / 擴充資源。')"
+    output:
+      path: result.txt
+    next: end
+    timeout: 60
+
+  - name: 中負載處理
+    batch: |
+      python -c "open('result.txt','w',encoding='utf-8').write('中負載:狀態正常、按一般節奏處理即可。')"
+    output:
+      path: result.txt
+    next: end
+    timeout: 60
+
+  - name: 低負載處理
+    batch: |
+      python -c "open('result.txt','w',encoding='utf-8').write('低負載:待辦很少、可安排其他工作或維護。')"
+    output:
+      path: result.txt
+    timeout: 60

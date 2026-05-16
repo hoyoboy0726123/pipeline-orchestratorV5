@@ -586,6 +586,37 @@ def _rewrite_python_cmd(command: str) -> str:
     return f"{prefix}{_quote_path(_SKILL_PYTHON)}{trailing}{rest}"
 
 
+# 整條命令 = `<python> -c "<code>"`(允許前後空白、code 可跨行)
+_PY_DASH_C_RE = _re.compile(r'^\s*(\S.*?)\s+-c\s+(["\'])(.*)\2\s*$', _re.DOTALL)
+_PY_INTERP_RE = _re.compile(
+    r'(?:^|[\\/ "])(?:python3?|py)(?:\.exe)?"?$', _re.IGNORECASE
+)
+
+
+def _maybe_extract_multiline_python_c(command: str):
+    """多行 `python -c "..."` 在 Windows cmd.exe 會被換行切斷 → 只剩第一行送進
+    cmd、其餘靜默丟掉,結果是 exit 0 卻什麼都沒做(過夜測試 BUG 5)。
+
+    偵測到「整條命令就是一個跨行的 python -c」就把程式碼抽出寫進暫存 .py、
+    改成 `<python> "<暫存檔>"`。單行 -c 不受影響、照舊。
+
+    回傳 (改寫後命令, 暫存檔路徑 or None)。暫存檔由 caller 跑完負責刪。
+    """
+    m = _PY_DASH_C_RE.match(command)
+    if not m:
+        return command, None
+    interpreter, _q, code = m.group(1), m.group(2), m.group(3)
+    if "\n" not in code:
+        return command, None  # 單行 -c shell 接得住、不動
+    if not _PY_INTERP_RE.search(interpreter.strip()):
+        return command, None  # 開頭不是 python、避免誤判其他含 -c 的命令
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".py", prefix="step_inline_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(code)
+    return f'{interpreter} {_quote_path(path)}', path
+
+
 @dataclass
 class ExecResult:
     exit_code: int
@@ -631,6 +662,11 @@ async def execute_step(
     # 把指令開頭的 python / python3 / py 換成偵測到的可用 interpreter
     # （避免 shell 解析到 PATH 上沒裝必要套件的那顆 python）
     command = _rewrite_python_cmd(command)
+
+    # 多行 `python -c "..."` 在 Windows cmd 會被換行切斷 → 改寫成暫存 .py 執行
+    command, _inline_tmp = _maybe_extract_multiline_python_c(command)
+    if _inline_tmp:
+        logger.info(f"[{step_name}] 偵測到多行 python -c、已改寫成暫存腳本 {_inline_tmp}")
 
     logger.info(f"[{step_name}] ▶ 開始執行：{command}")
 
@@ -734,6 +770,13 @@ async def execute_step(
     except Exception as e:
         logger.error(f"[{step_name}] 執行異常：{e}")
         return ExecResult(exit_code=-3, stdout="", stderr=str(e))
+
+    finally:
+        if _inline_tmp:
+            try:
+                os.unlink(_inline_tmp)
+            except OSError:
+                pass
 
 
 # ── Skill 模式執行器 ─────────────────────────────────────────────────────────
@@ -1027,6 +1070,47 @@ def _skill_edit_file(input_str: str) -> str:
         return f"[錯誤] JSON 格式錯誤:{e}"
     except Exception as e:
         return f"[錯誤] 編輯失敗:{e.__class__.__name__}: {e}"
+
+
+def _skill_export_var(input_str: str, cwd: Optional[str] = None) -> str:
+    """export_var(name, value) — 把一個算好的值傳給下游節點(尤其 condition 條件節點)。
+
+    JSON input: {"name": "score", "value": 380}
+    實作:寫進 workflow 資料夾的 _step_export.json(扁平 dict);runner 在這一步結束後
+    讀進該步的 step_vars,下游用 {{ steps.<本步驟名>.output.<name> }} 引用。
+    多次呼叫會累積(各自的 name 都留著)。skill 完全不用知道檔名 / 格式。"""
+    import json as _json
+    try:
+        d = _json.loads(input_str)
+    except Exception:
+        return ('[錯誤] export_var 需要 JSON 輸入,格式 '
+                '{"name": "變數名", "value": 值}')
+    if not isinstance(d, dict) or "name" not in d:
+        return ('[錯誤] export_var 需要 "name" 欄位,格式 '
+                '{"name": "變數名", "value": 值}')
+    name = str(d["name"]).strip()
+    if not name:
+        return "[錯誤] export_var 的 name 不能為空"
+    value = d.get("value")
+    try:
+        base = Path(cwd) if cwd else Path(".")
+        export_f = base / "_step_export.json"
+        existing: dict = {}
+        if export_f.is_file():
+            try:
+                _loaded = _json.loads(export_f.read_text(encoding="utf-8"))
+                if isinstance(_loaded, dict):
+                    existing = _loaded
+            except Exception:
+                existing = {}
+        existing[name] = value
+        export_f.write_text(
+            _json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return (f"[export_var] 已匯出 {name} = {value!r}。"
+                f"下游節點可用 steps.<本步驟名>.output.{name} 引用。")
+    except Exception as e:
+        return f"[錯誤] export_var 寫入失敗:{e.__class__.__name__}: {e}"
 
 
 def _skill_grep(input_str: str) -> str:
@@ -1441,6 +1525,8 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
         return _skill_write_file(tool_input)
     elif tool_name == "edit_file":
         return _skill_edit_file(tool_input)
+    elif tool_name == "export_var":
+        return _skill_export_var(tool_input, cwd=cwd)
     elif tool_name == "grep":
         return _skill_grep(tool_input)
     elif tool_name == "glob":
@@ -1988,7 +2074,13 @@ async def execute_step_with_skill(
    <input>{"question":"輸出哪種格式?","options":["PDF","Word","MD"],"context":"資料 120 筆"}</input>
    question 必填(中文、可一次多題)、options 選填(陣列 → UI 顯示按鈕)、context 選填。
    使用者回 → 工具回傳「使用者回答：<答案>」、再依答案繼續。逾時 / 取消 → 用合理預設或 done(success=false)。
-10. done — 完成回報。
+10. export_var — 把這步算好的一個值傳給下游節點(尤其 condition 條件節點)。
+   <input>{"name":"score","value":380}</input>
+   ✓ 用於:這步算出一個數字 / 字串、下游 condition 要拿它判斷分支時。
+   呼叫後下游就能用 {{ steps.<本步驟名>.output.score }} 引用。
+   name 用英文、value 數字或字串皆可;可多次呼叫匯出多個值。
+   ✗ 不用於:傳整份資料(那用輸出檔 + {{ steps.X.output.path }})。
+11. done — 完成回報。
    成功:<input>{"success":true,"summary":"完成了什麼"}</input>
    失敗(已窮盡所有可用工具與方法後):<input>{"success":false,"error":"已試 X/Y/Z 各自失敗原因","missing_packages":["套件A"]}</input>
    - 必須先試完已安裝套件的所有替代方案才呼叫 success=false
