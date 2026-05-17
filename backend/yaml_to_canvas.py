@@ -30,6 +30,9 @@ def _step_to_node(step: dict, idx: int) -> dict:
         "errorMsg": "",
         "timeout": step.get("timeout", 300),
         "retry": step.get("retry", 1),
+        # next:控制流跳轉(condition 分支用 next: end 防掉進對方分支)。
+        # 任何節點都可能有,放 base_data 確保不會在 YAML↔canvas 來回時掉。
+        "next": step.get("next", ""),
     }
     output = step.get("output") or {}
     output_path = output.get("path", "") if isinstance(output, dict) else ""
@@ -78,6 +81,9 @@ def _step_to_node(step: dict, idx: int) -> dict:
             "scrollCount": step.get("wc_scroll_count", 0),
             "targetPostCount": step.get("wc_target_post_count", 0),
             "withChildren": step.get("wc_with_children", False),
+            "childLinkPattern": step.get("wc_child_link_pattern", ""),
+            "maxChildren": step.get("wc_max_children", 10),
+            "videoUrl": step.get("wc_video_url", ""),
             "outputPath": output_path,
         }}
 
@@ -117,6 +123,32 @@ def _step_to_node(step: dict, idx: int) -> dict:
             "readonly": step.get("readonly", False),
             "skill": step.get("skill", ""),
             "askMode": step.get("ask_mode", False),
+        }}
+
+    # condition(條件判斷節點)
+    if step.get("condition"):
+        has_switch = bool(step.get("switch"))
+        return {**common, "type": "condition", "data": {
+            **base_data,
+            "mode": "switch" if has_switch else "if",
+            "expression": step.get("expression", ""),
+            "onTrue": step.get("on_true", ""),
+            "onFalse": step.get("on_false", ""),
+            "switch": step.get("switch", ""),
+            "cases": step.get("cases", {}) or {},
+            "default": step.get("default", ""),
+        }}
+
+    # subagent(多輪代理節點)
+    if step.get("subagent"):
+        return {**common, "type": "subagent", "data": {
+            **base_data,
+            "taskDescription": step.get("batch", ""),
+            "workingDir": step.get("working_dir", ""),
+            "outputPath": output_path,
+            "role": step.get("subagent_role", "data_analyst"),
+            "maxIter": step.get("subagent_max_iter", 5),
+            "llmRole": step.get("llm_role", "primary"),
         }}
 
     # 預設 script step

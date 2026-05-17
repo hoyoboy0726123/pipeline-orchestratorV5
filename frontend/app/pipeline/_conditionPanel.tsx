@@ -1,14 +1,16 @@
 'use client'
 /**
- * Condition 節點面板 — Ticket 2。
+ * Condition 節點面板。
  *
  * 兩個模式:
- * - IF:expression(boolean)決定 on_true / on_false 跳哪
- * - Switch:switch 求值後 str() 比對 cases keys、沒命中走 default
+ * - IF:成立 / 不成立 兩條路
+ * - Switch:依一個值的內容分多條路
  *
- * 此節點純 metadata、不執行命令。runner 求值後跳到目標 step name。
+ * 零術語設計:使用者只用「簡易設定」的下拉就能完成;Jinja2 表達式收在
+ * 「進階」摺疊區。打開既有節點時,簡易設定會反解析現有表達式、自動把
+ * 下拉填好(使用者看到的是「已設定好的成品」)。
  */
-import { useMemo, useState, useEffect } from 'react'
+import { useMemo, useState, useEffect, useRef } from 'react'
 import { X, GitBranch, Plus, Trash2, Wand2 } from 'lucide-react'
 import type { ConditionData, ConditionNode } from './_helpers'
 import { VariableInput } from './_variablePicker'
@@ -45,8 +47,8 @@ export default function ConditionPanel({
         <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
           style={{ background: CONDITION_COLOR }}><GitBranch className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
-          <span className="font-semibold text-gray-800 text-sm block truncate">Condition 控制流</span>
-          <span className="text-xs text-gray-400">求值表達式、跳到指定 step</span>
+          <span className="font-semibold text-gray-800 text-sm block truncate">條件判斷</span>
+          <span className="text-xs text-gray-400">依條件決定接下來走哪一步</span>
         </div>
         <button onClick={onDelete} title="刪除" className="text-gray-300 hover:text-red-400 transition-colors p-1">🗑</button>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors"><X className="w-4 h-4" /></button>
@@ -56,7 +58,7 @@ export default function ConditionPanel({
         {/* 名稱 */}
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">節點名稱</label>
-          <input value={data.name} onChange={e => onUpdate({ name: e.target.value })} className={`${inputCls} font-mono`} placeholder="例:check_size / route_status" />
+          <input value={data.name} onChange={e => onUpdate({ name: e.target.value })} className={inputCls} placeholder="例:判斷資料量 / 依狀態分流" />
         </div>
 
         {/* 模式切換 */}
@@ -70,7 +72,7 @@ export default function ConditionPanel({
                   ? 'bg-orange-600 text-white border-orange-600'
                   : 'text-gray-600 border-gray-200 hover:border-orange-400'
               }`}
-            >🔀 IF(成立 / 不成立)</button>
+            >🔀 成立 / 不成立</button>
             <button
               onClick={() => onUpdate({ mode: 'switch' })}
               className={`flex-1 py-2 rounded-lg text-sm font-medium border transition-colors ${
@@ -78,16 +80,8 @@ export default function ConditionPanel({
                   ? 'bg-orange-600 text-white border-orange-600'
                   : 'text-gray-600 border-gray-200 hover:border-orange-400'
               }`}
-            >🎯 Switch(多分支)</button>
+            >🎯 分多種情況</button>
           </div>
-        </div>
-
-        {/* 判斷值準備提示 — 兩模式共用 */}
-        <div className="bg-sky-50 border border-sky-200 rounded-lg p-3 text-xs text-sky-800 leading-relaxed">
-          ℹ️ 判斷的值只能用「上游步驟產生的變數」。下方下拉若沒有你要的值(例如 skill 算出來的數字),
-          表示還沒有步驟把它變成變數 —— 先加一個 <b>script 步驟</b>把值 <code>print</code> 出來,
-          它的 <code>output.stdout</code> 就會出現在下拉裡。
-          <br />⚠️ <code>output.status</code> 是「步驟驗證狀態(ok / failed)」、<b>不是</b>你資料裡的狀態欄位。
         </div>
 
         {/* IF 模式 */}
@@ -95,33 +89,38 @@ export default function ConditionPanel({
           <>
             <ConditionBuilder
               workflowId={workflowId}
-              onApply={(expr) => onUpdate({ expression: expr })}
+              expression={data.expression || ''}
+              onChange={(expr) => onUpdate({ expression: expr })}
             />
-            <div>
-              <div className="flex items-end justify-between mb-1.5">
-                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">條件表達式</label>
-              </div>
-              <VariableInput
-                value={data.expression || ''}
-                onChange={(v) => onUpdate({ expression: v })}
-                workflowId={workflowId}
-                multiline
-                rows={3}
-                placeholder={'例:{{ steps.count.output.stdout | int > 100 }}\n例:{{ "ok" in steps.api.output.stdout }}'}
-                showHint={false}
-              />
-              <p className="text-[11px] text-gray-400 mt-1">Jinja2 boolean 表達式;求值後 truthy → on_true、falsy → on_false。上方「簡易設定」可自動產生、進階使用者也可直接打 Jinja2。</p>
-            </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">✅ 條件成立(true)→ 跳到</label>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">✅ 成立時 → 接著做</label>
               <StepSelect value={data.onTrue} options={targetOptions} onChange={v => onUpdate({ onTrue: v })} />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">❌ 條件不成立(false)→ 跳到</label>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">❌ 不成立時 → 接著做</label>
               <StepSelect value={data.onFalse} options={targetOptions} onChange={v => onUpdate({ onFalse: v })} />
             </div>
+
+            {/* 進階:直接編輯表達式 */}
+            <details>
+              <summary className="text-[11px] text-gray-400 cursor-pointer select-none hover:text-gray-600">
+                進階:直接編輯條件表達式
+              </summary>
+              <div className="mt-2">
+                <VariableInput
+                  value={data.expression || ''}
+                  onChange={(v) => onUpdate({ expression: v })}
+                  workflowId={workflowId}
+                  multiline
+                  rows={3}
+                  placeholder={'例:{{ steps.統計.output.負評百分比 | int > 40 }}'}
+                  showHint={false}
+                />
+                <p className="text-[11px] text-gray-400 mt-1">給進階使用者:Jinja2 布林表達式。一般情況用上方「簡易設定」即可,不用碰這裡。</p>
+              </div>
+            </details>
           </>
         )}
 
@@ -130,26 +129,12 @@ export default function ConditionPanel({
           <>
             <SwitchBuilder
               workflowId={workflowId}
-              onApply={(expr) => onUpdate({ switch: expr })}
+              switchValue={data.switch || ''}
+              onChange={(expr) => onUpdate({ switch: expr })}
             />
-            <div>
-              <div className="flex items-end justify-between mb-1.5">
-                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">求值表達式</label>
-              </div>
-              <VariableInput
-                value={data.switch || ''}
-                onChange={(v) => onUpdate({ switch: v })}
-                workflowId={workflowId}
-                multiline
-                rows={2}
-                placeholder="例:{{ steps.read_status.output.stdout }}"
-                showHint={false}
-              />
-              <p className="text-[11px] text-gray-400 mt-1">求值結果 str() 後與下方 cases 的 key 比對。上方「簡易設定」可自動產生。</p>
-            </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">分支(cases)</label>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">各種情況 → 接著做</label>
               <CasesEditor
                 cases={data.cases}
                 stepOptions={targetOptions}
@@ -158,25 +143,43 @@ export default function ConditionPanel({
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">⚙️ 預設(default)→ 沒命中時跳到</label>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">⚙️ 其他情況(都不符合)→ 接著做</label>
               <StepSelect value={data.default} options={targetOptions} onChange={v => onUpdate({ default: v })} />
-              <p className="text-[11px] text-gray-400 mt-1">留空 = 沒命中就結束流程</p>
+              <p className="text-[11px] text-gray-400 mt-1">留空 = 都不符合就結束流程</p>
             </div>
+
+            {/* 進階:直接編輯表達式 */}
+            <details>
+              <summary className="text-[11px] text-gray-400 cursor-pointer select-none hover:text-gray-600">
+                進階:直接編輯求值表達式
+              </summary>
+              <div className="mt-2">
+                <VariableInput
+                  value={data.switch || ''}
+                  onChange={(v) => onUpdate({ switch: v })}
+                  workflowId={workflowId}
+                  multiline
+                  rows={2}
+                  placeholder={'例:{{ steps.判定等級.output.等級 }}'}
+                  showHint={false}
+                />
+                <p className="text-[11px] text-gray-400 mt-1">給進階使用者:求值後跟上方各情況的值比對。一般情況用「簡易設定」即可。</p>
+              </div>
+            </details>
           </>
         )}
 
-        {/* 提示 */}
+        {/* 提示 — 白話、不提術語 */}
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 leading-relaxed">
-          💡 <b>記得在 branch step 加 `next: end`</b> — 否則 branch 跑完會線性走到下一個 step、可能誤跑到對方 branch。
+          💡 每條分支跑完後,預設會接著往畫布上的下一個步驟走。若要某條分支跑完就直接結束,
+          到那個步驟的設定裡把「跑完後」設成「結束流程」。
         </div>
       </div>
     </div>
   )
 }
 
-// ── 子 component:ConditionBuilder — 視覺化條件組裝(免手寫 Jinja2)─────
-// 三個下拉(變數 → 比較符 → 值)→ 自動產生表達式塞回主編輯區
-// 進階使用者仍可直接編輯 expression 文字、不會被擋
+// ── 視覺化條件:運算子 ────────────────────────────────────────────────
 type OperatorKey =
   | 'eq' | 'ne'
   | 'gt' | 'gte' | 'lt' | 'lte'
@@ -184,16 +187,16 @@ type OperatorKey =
   | 'truthy' | 'falsy'
 
 const OPERATORS: { key: OperatorKey; label: string; needsValue: boolean }[] = [
-  { key: 'eq',           label: '等於 (==)',            needsValue: true },
-  { key: 'ne',           label: '不等於 (!=)',          needsValue: true },
-  { key: 'gt',           label: '大於 (>)',             needsValue: true },
-  { key: 'gte',          label: '大於等於 (>=)',         needsValue: true },
-  { key: 'lt',           label: '小於 (<)',             needsValue: true },
-  { key: 'lte',          label: '小於等於 (<=)',         needsValue: true },
-  { key: 'contains',     label: '包含 (contains)',      needsValue: true },
-  { key: 'not_contains', label: '不包含 (not in)',      needsValue: true },
-  { key: 'truthy',       label: '有值 / 非空',          needsValue: false },
-  { key: 'falsy',        label: '無值 / 空',            needsValue: false },
+  { key: 'eq',           label: '等於',          needsValue: true },
+  { key: 'ne',           label: '不等於',        needsValue: true },
+  { key: 'gt',           label: '大於',          needsValue: true },
+  { key: 'gte',          label: '大於等於',      needsValue: true },
+  { key: 'lt',           label: '小於',          needsValue: true },
+  { key: 'lte',          label: '小於等於',      needsValue: true },
+  { key: 'contains',     label: '包含文字',      needsValue: true },
+  { key: 'not_contains', label: '不包含文字',    needsValue: true },
+  { key: 'truthy',       label: '有值 / 非空',   needsValue: false },
+  { key: 'falsy',        label: '無值 / 空',     needsValue: false },
 ]
 
 function buildExpression(varPath: string, op: OperatorKey, val: string): string {
@@ -222,6 +225,56 @@ function buildExpression(varPath: string, op: OperatorKey, val: string): string 
   }
 }
 
+// 反解析:把既有的 Jinja2 表達式讀回「變數 / 運算子 / 值」,讓打開面板時
+// 簡易設定的下拉能自動填好(使用者看到已設定好的成品、而不是空白)。
+function parseExpression(expr: string): { varPath: string; op: OperatorKey; val: string } | null {
+  if (!expr) return null
+  const m = expr.trim().match(/^\{\{\s*([\s\S]+?)\s*\}\}$/)
+  if (!m) return null
+  const inner = m[1].trim()
+  let mm: RegExpMatchArray | null
+  // not <var>  → 無值/空
+  mm = inner.match(/^not\s+(.+)$/)
+  if (mm) return { varPath: mm[1].trim(), op: 'falsy', val: '' }
+  // "文字" in <var>  /  "文字" not in <var>
+  mm = inner.match(/^(["'][^"']*["'])\s+(not\s+in|in)\s+(.+)$/)
+  if (mm) return {
+    varPath: mm[3].trim(),
+    op: /not/.test(mm[2]) ? 'not_contains' : 'contains',
+    val: mm[1].replace(/^["']|["']$/g, ''),
+  }
+  // <var> | int <比較> <數字>
+  mm = inner.match(/^(.+?)\s*\|\s*int\s*(>=|<=|==|!=|>|<)\s*(-?\d+(?:\.\d+)?)$/)
+  if (mm) {
+    const map: Record<string, OperatorKey> = { '>': 'gt', '>=': 'gte', '<': 'lt', '<=': 'lte', '==': 'eq', '!=': 'ne' }
+    return { varPath: mm[1].trim(), op: map[mm[2]], val: mm[3] }
+  }
+  // <var> == / != <文字>
+  mm = inner.match(/^(.+?)\s*(==|!=)\s*(["'][^"']*["']|\S+)$/)
+  if (mm) return {
+    varPath: mm[1].trim(),
+    op: mm[2] === '==' ? 'eq' : 'ne',
+    val: mm[3].replace(/^["']|["']$/g, ''),
+  }
+  // 裸 <var>  → 有值/非空
+  if (inner && !/[<>=|]/.test(inner)) return { varPath: inner.trim(), op: 'truthy', val: '' }
+  return null
+}
+
+function parseSwitchValue(expr: string): string {
+  const m = (expr || '').trim().match(/^\{\{\s*([\s\S]+?)\s*\}\}$/)
+  return m ? m[1].trim() : ''
+}
+
+// 把變數路徑轉成好讀的中文標籤
+function friendlyVarLabel(path: string): string {
+  const m = path.match(/^steps\.(.+)\.output\.(.+)$/)
+  if (m) return `${m[1]} ▸ ${m[2]}`
+  const i = path.match(/^input\.(.+)$/)
+  if (i) return `啟動參數:${i[1]}`
+  return path
+}
+
 // ── 共用 hook:抓 workflow 可用變數、攤平成下拉選項 ──────────────────────
 type VarOption = { path: string; label: string; detail: string }
 
@@ -238,7 +291,7 @@ function useVarOptions(workflowId?: string): VarOption[] {
       for (const f of s.fields) {
         out.push({
           path: `steps.${s.name}.output.${f.key}`,
-          label: `${s.name}.${f.key}`,
+          label: friendlyVarLabel(`steps.${s.name}.output.${f.key}`),
           detail: `${s.node_type}${f.source ? ' · ' + f.source : ''}`,
         })
       }
@@ -246,7 +299,7 @@ function useVarOptions(workflowId?: string): VarOption[] {
     for (const i of vars.available.input) {
       out.push({
         path: `input.${i.key}`,
-        label: `input.${i.key}`,
+        label: friendlyVarLabel(`input.${i.key}`),
         detail: i.required ? '啟動參數' : '啟動參數(可選)',
       })
     }
@@ -255,52 +308,73 @@ function useVarOptions(workflowId?: string): VarOption[] {
 }
 
 function ConditionBuilder({
-  workflowId, onApply,
+  workflowId, expression, onChange,
 }: {
   workflowId?: string
-  onApply: (expression: string) => void
+  expression: string
+  onChange: (expression: string) => void
 }) {
-  const options = useVarOptions(workflowId)
+  const apiOptions = useVarOptions(workflowId)
   const [varPath, setVarPath] = useState('')
   const [op, setOp] = useState<OperatorKey>('gt')
   const [val, setVal] = useState('')
 
+  // 打開面板時:把現有表達式反解析回下拉(只跑一次)
+  const parsedOnce = useRef(false)
+  useEffect(() => {
+    if (parsedOnce.current) return
+    parsedOnce.current = true
+    const p = parseExpression(expression)
+    if (p) { setVarPath(p.varPath); setOp(p.op); setVal(p.val) }
+  }, [expression])
+
   const currentOp = OPERATORS.find(o => o.key === op)!
-  const preview = varPath ? buildExpression(varPath, op, val) : '(請先選變數)'
+
+  // 下拉清單:API 變數 + 確保「目前選用的變數」一定在清單裡
+  // (例如範例的變數要跑過一次才會進 API 清單,但既有表達式已選了它)
+  const options = useMemo(() => {
+    if (varPath && !apiOptions.some(o => o.path === varPath)) {
+      return [{ path: varPath, label: friendlyVarLabel(varPath), detail: '目前選用' }, ...apiOptions]
+    }
+    return apiOptions
+  }, [apiOptions, varPath])
+
+  const builtExpr = varPath ? buildExpression(varPath, op, val) : ''
   const canApply = !!varPath && (!currentOp.needsValue || val.trim() !== '')
+  const dirty = builtExpr !== expression && canApply
 
   return (
     <div className="border border-orange-200 bg-orange-50/40 rounded-lg p-3 space-y-2">
       <div className="flex items-center gap-1.5 text-xs font-semibold text-orange-700">
         <Wand2 className="w-3.5 h-3.5" />
-        <span>簡易設定(不用懂 Jinja2)</span>
+        <span>條件設定</span>
       </div>
 
       <div className="grid grid-cols-1 gap-2">
         {/* 變數 */}
         <div>
-          <label className="text-[11px] text-gray-500 block mb-0.5">變數(選上游 step 或啟動參數)</label>
+          <label className="text-[11px] text-gray-500 block mb-0.5">要判斷的值</label>
           <select
             value={varPath}
             onChange={e => setVarPath(e.target.value)}
-            className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-orange-400 bg-white"
+            className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400 bg-white"
           >
-            <option value="">— 選擇變數 —</option>
+            <option value="">— 請選擇 —</option>
             {options.map(o => (
               <option key={o.path} value={o.path}>{o.label} · {o.detail}</option>
             ))}
           </select>
           {options.length === 0 && (
             <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
-              ⚠ 目前沒有可選變數。請先把這個條件節點前面的步驟跑過一次,跑完後就能在這裡選到你要判斷的變數。
+              ⚠ 目前沒有可選的值。請先把這個條件節點前面的步驟跑過一次,跑完後就能在這裡選到你要判斷的值。
             </p>
           )}
         </div>
 
-        {/* 比較符 + 值 */}
+        {/* 比較 + 值 */}
         <div className="grid grid-cols-2 gap-2">
           <div>
-            <label className="text-[11px] text-gray-500 block mb-0.5">比較</label>
+            <label className="text-[11px] text-gray-500 block mb-0.5">比較方式</label>
             <select
               value={op}
               onChange={e => setOp(e.target.value as OperatorKey)}
@@ -313,30 +387,27 @@ function ConditionBuilder({
           </div>
           <div>
             <label className="text-[11px] text-gray-500 block mb-0.5">
-              值{currentOp.needsValue ? '' : '(此運算子不用填)'}
+              比較對象{currentOp.needsValue ? '' : '(不需填)'}
             </label>
             <input
               value={val}
               onChange={e => setVal(e.target.value)}
               disabled={!currentOp.needsValue}
-              placeholder={currentOp.needsValue ? '例:10 / "ok" / today' : ''}
-              className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-orange-400 bg-white disabled:bg-gray-100 disabled:text-gray-400"
+              placeholder={currentOp.needsValue ? '例:40 / 通過' : ''}
+              className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400 bg-white disabled:bg-gray-100 disabled:text-gray-400"
             />
           </div>
         </div>
 
-        {/* 預覽 + 套用 */}
-        <div className="flex items-center gap-2">
-          <div className="flex-1 font-mono text-[11px] bg-white border border-gray-200 rounded-md px-2 py-1 truncate">
-            <span className="text-gray-400">預覽:</span>{' '}
-            <span className="text-gray-800">{preview}</span>
-          </div>
+        {/* 套用 */}
+        <div className="flex items-center justify-end gap-2">
+          {dirty && <span className="text-[11px] text-orange-600">尚未套用變更</span>}
           <button
-            onClick={() => onApply(buildExpression(varPath, op, val))}
+            onClick={() => onChange(buildExpression(varPath, op, val))}
             disabled={!canApply}
-            className="shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            className="px-3 py-1 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
           >
-            套用
+            套用條件
           </button>
         </div>
       </div>
@@ -344,51 +415,65 @@ function ConditionBuilder({
   )
 }
 
-// ── 子 component:SwitchBuilder — 選一個變數當分流依據(免手寫 Jinja2)──
-// Switch 只需要「一個值」、不需要運算子 → 比 ConditionBuilder 簡單:單一變數下拉
+// ── SwitchBuilder — 選一個值當分流依據 ───────────────────────────────────
 function SwitchBuilder({
-  workflowId, onApply,
+  workflowId, switchValue, onChange,
 }: {
   workflowId?: string
-  onApply: (expression: string) => void
+  switchValue: string
+  onChange: (expression: string) => void
 }) {
-  const options = useVarOptions(workflowId)
+  const apiOptions = useVarOptions(workflowId)
   const [varPath, setVarPath] = useState('')
-  const preview = varPath ? `{{ ${varPath} }}` : '(請先選變數)'
+
+  const parsedOnce = useRef(false)
+  useEffect(() => {
+    if (parsedOnce.current) return
+    parsedOnce.current = true
+    const v = parseSwitchValue(switchValue)
+    if (v) setVarPath(v)
+  }, [switchValue])
+
+  const options = useMemo(() => {
+    if (varPath && !apiOptions.some(o => o.path === varPath)) {
+      return [{ path: varPath, label: friendlyVarLabel(varPath), detail: '目前選用' }, ...apiOptions]
+    }
+    return apiOptions
+  }, [apiOptions, varPath])
+
+  const builtExpr = varPath ? `{{ ${varPath} }}` : ''
+  const dirty = builtExpr !== switchValue && !!varPath
 
   return (
     <div className="border border-orange-200 bg-orange-50/40 rounded-lg p-3 space-y-2">
       <div className="flex items-center gap-1.5 text-xs font-semibold text-orange-700">
         <Wand2 className="w-3.5 h-3.5" />
-        <span>簡易設定(不用懂 Jinja2)</span>
+        <span>分流依據</span>
       </div>
       <div>
-        <label className="text-[11px] text-gray-500 block mb-0.5">分流依據(選上游 step 或啟動參數)</label>
+        <label className="text-[11px] text-gray-500 block mb-0.5">依哪一個值來分流</label>
         <select
           value={varPath}
           onChange={e => setVarPath(e.target.value)}
-          className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-orange-400 bg-white"
+          className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400 bg-white"
         >
-          <option value="">— 選擇變數 —</option>
+          <option value="">— 請選擇 —</option>
           {options.map(o => (
             <option key={o.path} value={o.path}>{o.label} · {o.detail}</option>
           ))}
         </select>
         {options.length === 0 && (
           <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
-            ⚠ 目前沒有可選變數。請先把這個條件節點前面的步驟跑過一次,跑完後就能在這裡選到你要判斷的變數。
+            ⚠ 目前沒有可選的值。請先把這個條件節點前面的步驟跑過一次,跑完後就能在這裡選到你要判斷的值。
           </p>
         )}
       </div>
-      <div className="flex items-center gap-2">
-        <div className="flex-1 font-mono text-[11px] bg-white border border-gray-200 rounded-md px-2 py-1 truncate">
-          <span className="text-gray-400">預覽:</span>{' '}
-          <span className="text-gray-800">{preview}</span>
-        </div>
+      <div className="flex items-center justify-end gap-2">
+        {dirty && <span className="text-[11px] text-orange-600">尚未套用變更</span>}
         <button
-          onClick={() => onApply(`{{ ${varPath} }}`)}
+          onClick={() => onChange(`{{ ${varPath} }}`)}
           disabled={!varPath}
-          className="shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+          className="px-3 py-1 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
         >
           套用
         </button>
@@ -397,7 +482,7 @@ function SwitchBuilder({
   )
 }
 
-// ── 子 component:step 名稱下拉(可選)+ 純文字輸入(打字)的 union ──
+// ── step 名稱下拉(可選)+ 純文字輸入(打字)的 union ──
 function StepSelect({ value, options, onChange }: {
   value: string
   options: string[]
@@ -409,18 +494,17 @@ function StepSelect({ value, options, onChange }: {
         list="condition-step-list"
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder="留空 = 結束流程 / 或 'end' / 或下拉選 step"
-        className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400/20"
+        placeholder="留空 = 結束流程;或選一個步驟"
+        className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400/20"
       />
       <datalist id="condition-step-list">
-        <option value="end" />
         {options.map(name => <option key={name} value={name} />)}
       </datalist>
     </div>
   )
 }
 
-// ── Switch cases 編輯器 ─────────────────────────────────────────────────
+// ── Switch 各情況編輯器 ─────────────────────────────────────────────────
 function CasesEditor({ cases, stepOptions, onChange }: {
   cases: Record<string, string>
   stepOptions: string[]
@@ -440,7 +524,7 @@ function CasesEditor({ cases, stepOptions, onChange }: {
     onChange({ ...cases, [key]: val })
   }
   const addCase = () => {
-    const nextKey = `case${entries.length + 1}`
+    const nextKey = `情況${entries.length + 1}`
     onChange({ ...cases, [nextKey]: '' })
   }
   const removeCase = (key: string) => {
@@ -456,20 +540,20 @@ function CasesEditor({ cases, stepOptions, onChange }: {
           <input
             value={k}
             onChange={(e) => updateKey(k, e.target.value)}
-            placeholder="value"
-            className="w-24 shrink-0 border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-orange-400"
+            placeholder="值"
+            className="w-24 shrink-0 border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400"
           />
           <span className="text-xs text-gray-400">→</span>
           <input
             list="condition-step-list"
             value={v}
             onChange={(e) => updateVal(k, e.target.value)}
-            placeholder="step name"
-            className="flex-1 border border-gray-200 rounded-md px-2 py-1 text-xs font-mono outline-none focus:border-orange-400"
+            placeholder="接著做哪一步"
+            className="flex-1 border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400"
           />
           <button
             onClick={() => removeCase(k)}
-            title="刪除這個 case"
+            title="刪除這個情況"
             className="shrink-0 p-1 text-gray-300 hover:text-red-400"
           ><Trash2 className="w-3.5 h-3.5" /></button>
         </div>
@@ -477,7 +561,7 @@ function CasesEditor({ cases, stepOptions, onChange }: {
       <button
         onClick={addCase}
         className="w-full py-1 text-xs text-orange-600 border border-dashed border-orange-300 rounded-md hover:bg-orange-50 transition-colors flex items-center justify-center gap-1"
-      ><Plus className="w-3 h-3" /> 加一個 case</button>
+      ><Plus className="w-3 h-3" /> 加一種情況</button>
     </div>
   )
 }
