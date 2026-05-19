@@ -2272,7 +2272,7 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
                 _rest = str(_v5_root_win)[3:].replace("\\", "/")
                 _v5_root_wsl = f"/mnt/{_drive}/{_rest}"
             except Exception:
-                _v5_root_wsl = "/mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV5"
+                _v5_root_wsl = "/mnt/c/" + Path(__file__).resolve().parents[2].name
             # FIRST_ITER 區塊:沙盒環境規則第一輪講完、後續輪數 strip 省 ~70 行 / 輪
             system_prompt += rf"""
 

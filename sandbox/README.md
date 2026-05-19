@@ -1,10 +1,10 @@
-# Skill Sandbox (V4)
+# Skill Sandbox (V5)
 
 WSL + Docker Engine 沙盒：讓 LLM 生成的 Python / Shell 程式碼隔離執行，不直接碰 Windows host。
 
 ## 為什麼要有這個？
 
-V2 的 skill 節點把 LLM 生的 code 直接以 `subprocess.Popen` 在 Windows host 跑，對完全沒經過審核的程式碼只隔著一個 venv。V3 把這層改成送進容器，LLM 亂刪檔、存取敏感資料都被擋在沙盒內。
+AI 技能節點會執行 LLM 即時生成、未經人工審核的程式碼。沒有沙盒時，這些 code 直接以 `subprocess` 在 Windows host 上跑，只隔著一個 venv。啟用沙盒後，code 改送進容器執行 —— LLM 亂刪檔、存取敏感資料都被擋在沙盒內。
 
 沒有 Docker Desktop、沒有付費授權 — 只靠 Windows 內建的 WSL2 + 在 WSL 內裝 Docker Engine（開源免費）。
 
@@ -12,7 +12,7 @@ V2 的 skill 節點把 LLM 生的 code 直接以 `subprocess.Popen` 在 Windows 
 
 ```
 Windows host
-  └─ FastAPI backend (8001)
+  └─ FastAPI backend (8004)
         └─ wsl docker exec pipeline-sandbox-v5 python /tmp/xxx.py
               │
               └→ WSL2 Ubuntu
@@ -23,8 +23,8 @@ Windows host
                                / python-pptx / pdfplumber / newspaper3k / cloudscraper / feedparser
                              - Node.js + pptxgenjs（對應 `.agents/skills/pptx`）
                              - Bind mounts（三條，路徑全部 1:1 映射，容器內外同路徑）：
-                               • 專案本體：C:\...\pipeline-orchestratorV3
-                                        → /mnt/c/.../pipeline-orchestratorV3
+                               • 專案本體：C:\...\pipeline-orchestratorV5
+                                        → /mnt/c/.../pipeline-orchestratorV5
                                • Agent Skills：C:\Users\<you>\.agents
                                         → /mnt/c/Users/<you>/.agents
                                         (且容器內 ~/.agents 也指向同一地點)
@@ -61,7 +61,7 @@ setup_sandbox.bat --rebuild
 
 ## 每日啟動
 
-**不用手動做任何事**。V3 backend 啟動時會：
+**不用手動做任何事**。backend 啟動時會：
 1. 檢查 WSL 能跑 `wsl docker ps`
 2. 檢查 `pipeline-sandbox-v5` 容器是否在跑，若沒在跑會試著 `docker start`
 3. 前端 Settings 頁會顯示沙盒狀態（綠燈=就緒、紅燈=有問題）

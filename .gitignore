@@ -51,3 +51,14 @@ _test_*.json
 # VLM verifier test image outputs (regenerated each run)
 backend/_test_cu_vlm_images/
 backend/_test_cu_int_assets/
+
+# 開發過程的暫存 / 內部規劃檔(不進公開 repo)
+calculator.py
+calculator_test.py
+mini.py
+HANDOFF.md
+TG_AGENT_UPGRADE_PLAN.md
+autonomous-runtime-implementation.md
+external_projects/
+test-workflows/ai_assistant_test/
+test-workflows/path_detect/

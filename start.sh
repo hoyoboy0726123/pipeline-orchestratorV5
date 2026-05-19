@@ -9,7 +9,7 @@ FRONTEND="$ROOT/frontend"
 echo "🚀 啟動 Pipeline Orchestrator..."
 
 # ── 後端 ─────────────────────────────────────────────────────────
-echo "▶ 啟動後端 (port 8000)..."
+echo "▶ 啟動後端 (port 8004)..."
 cd "$BACKEND"
 
 if [ ! -d ".venv" ]; then
@@ -24,7 +24,7 @@ if [ ! -d ".venv" ]; then
   fi
 fi
 
-.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 &
+.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8004 &
 BACKEND_PID=$!
 echo "  後端 PID: $BACKEND_PID"
 
@@ -45,7 +45,7 @@ echo "  前端 PID: $FRONTEND_PID"
 echo ""
 echo "✅ Pipeline Orchestrator 已啟動"
 echo "   前端：http://localhost:3002"
-echo "   後端：http://localhost:8000"
+echo "   後端：http://localhost:8004"
 echo ""
 echo "按 Ctrl+C 停止所有服務"
 

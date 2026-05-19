@@ -194,7 +194,7 @@ def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
         rest = str(v5_root_win)[3:].replace("\\", "/")
         v5_root_wsl = f"/mnt/{drive}/{rest}"
     except Exception:
-        v5_root_wsl = "/mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV5"
+        v5_root_wsl = "/mnt/c/" + Path(__file__).resolve().parents[2].name
 
     return system_prompt + f"""
 

@@ -1,5 +1,5 @@
 @echo off
-REM Pipeline Orchestrator V4 — 沙盒一鍵安裝（Windows 端入口）
+REM Pipeline Orchestrator V5 — 沙盒一鍵安裝（Windows 端入口）
 REM
 REM 做的事：
 REM   1. 確認 WSL 安裝（沒有就提示使用者執行 `wsl --install` 並重啟）
@@ -14,7 +14,7 @@ SETLOCAL
 SET "EXTRA_ARGS=%*"
 
 echo ==================================================
-echo  Pipeline Orchestrator V4 - Sandbox Setup
+echo  Pipeline Orchestrator V5 - Sandbox Setup
 echo ==================================================
 echo.
 
@@ -68,7 +68,7 @@ echo ==================================================
 echo  All done. Sandbox is ready.
 echo ==================================================
 echo.
-echo Next: start V4 normally (launch_full_project.bat or
+echo Next: start V5 normally (launch_full_project.bat or
 echo uvicorn + npm dev). The backend will auto-detect
 echo the sandbox and route skill code through it when the
 echo "Sandbox execution" toggle is on in Settings.
