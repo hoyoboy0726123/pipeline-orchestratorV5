@@ -1863,18 +1863,25 @@ async def api_workflow_variables(wf_id: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"workflow YAML 解析失敗:{e}")
 
-    # 撈最近一次該 workflow 的 run、用來填 last_value
+    # 撈該 workflow 最近幾次 run、用來填 last_value。
+    # 跨多次 run 合併:某步的變數以「最近一次有跑出該步變數的 run」為準 ——
+    # 這樣就算最新一次 run 是半截 / 失敗,之前跑出來的變數值也不會消失。
     last_run = None
     last_step_by_name: dict = {}
     last_input_params: dict = {}
     try:
-        for r in get_store().list_recent(20):
-            if r.workflow_id == wf_id:
-                last_run = r
-                last_input_params = getattr(r, "input_params", None) or {}
-                for sr in r.step_results:
+        runs = get_store().list_by_workflow(wf_id, 10)  # 新→舊
+        if runs:
+            last_run = runs[0]
+            last_input_params = getattr(runs[0], "input_params", None) or {}
+        for r in runs:
+            for sr in r.step_results:
+                existing = last_step_by_name.get(sr.step_name)
+                if existing is None:
                     last_step_by_name[sr.step_name] = sr
-                break
+                elif not getattr(existing, "step_vars", None) and getattr(sr, "step_vars", None):
+                    # 先前記到的那筆沒有變數、這筆(較舊)有 → 用這筆把變數補回來
+                    last_step_by_name[sr.step_name] = sr
     except Exception:
         pass
 

@@ -1873,6 +1873,58 @@ async def _wait_for_command_approval(
     return decision or "deny"
 
 
+def _read_file_sample(path: str, max_chars: int = 700) -> str:
+    """讀前步驟輸出檔的一小段樣本,給 skill LLM 看「實際格式」——
+    欄位名、值的大小寫、是字串還是數字、檔案結構 —— 讓它不用憑空猜。
+
+    回傳空字串 = 不取樣(檔案不存在 / 二進位 / 太大 / 出錯)。"""
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return ""
+        size = p.stat().st_size
+        ext = p.suffix.lower()
+        if ext == ".json":
+            if size > 3_000_000:
+                return f"(JSON 檔較大 ~{size // 1024} KB、未取樣;動手前請自己讀檔頭確認格式)"
+            import json as _j
+            raw = p.read_text(encoding="utf-8", errors="replace")
+            try:
+                data = _j.loads(raw)
+            except Exception:
+                return raw[:max_chars]
+            if isinstance(data, list):
+                head = data[:2]
+                s = _j.dumps(head, ensure_ascii=False, indent=2)
+                return f"(JSON 陣列、共 {len(data)} 筆,前 {len(head)} 筆:)\n{s[:max_chars]}"
+            if isinstance(data, dict):
+                s = _j.dumps(data, ensure_ascii=False, indent=2)
+                return f"(JSON 物件:)\n{s[:max_chars]}"
+            return raw[:max_chars]
+        if ext in (".csv", ".tsv", ".txt", ".md", ".log"):
+            with p.open("r", encoding="utf-8", errors="replace") as f:
+                buf = f.read(8000)
+            lines = buf.splitlines()[:15]
+            return "(前幾行:)\n" + "\n".join(lines)[:max_chars]
+        if ext in (".xlsx", ".xls"):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+                parts = [f"(Excel、工作表:{', '.join(wb.sheetnames)};第一張表前幾列:)"]
+                ws = wb[wb.sheetnames[0]]
+                for i, row in enumerate(ws.iter_rows(values_only=True)):
+                    if i >= 4:
+                        break
+                    parts.append(str(list(row)))
+                wb.close()
+                return "\n".join(parts)[:max_chars]
+            except Exception:
+                return "(Excel 檔、無法取樣)"
+        return ""  # 二進位 / 不認得的副檔名:不取樣
+    except Exception:
+        return ""
+
+
 async def execute_step_with_skill(
     task_description: str,
     timeout: int,
@@ -2102,13 +2154,13 @@ async def execute_step_with_skill(
 - ❌ 禁止 hardcode 結果(摘要 / 情緒 / 分類):必須讀實際資料 + 程式邏輯處理、不可在原始碼寫死答案 dict / list、會被驗證階段抓
 - 嚴禁 input() / getpass() / sys.stdin.read() — pipeline 非互動環境、會永久卡死
 - 任務需選擇:優先用任務指定;無指定 → 最合理預設值 + summary 註明假設;只有「會嚴重影響結果(覆蓋重要檔、無法回復)」才用 done(success=false)
-- 讀其他檔(csv / xlsx)第一步先 run_python 看前幾行確認欄位、不要猜
+- 讀別的步驟產出的檔(csv / xlsx / json / md 等)第一步先 run_python 看前幾行,確認實際的欄位名、值的格式(大小寫、引號、數字或字串),或文字檔的結構(例:第一行是不是標題)、不要憑空假設
 - 重試:絕不重複同一方法、回顧歷史、用尚未嘗試的不同套件 / 策略;耗盡才 done(success=false) + missing_packages
 
 【工具呼叫格式(最重要)】
 - 每次回覆只一個 tool call、所有程式碼放 <tool> + <input> 標籤內
 - 禁止 markdown ``` 區塊展示程式碼:回覆中不應出現 ``` 符號
-- 不要分「先讀後處理」兩步、邏輯寫在一個 run_python 裡
+- 主處理邏輯集中在一個 run_python、別無謂拆步;但讀「別的步驟產出的檔」時,先 peek 看前幾行確認格式、再寫處理 —— 這個 peek 是必要的(見上)、不算拆步
 - 絕不在 Python 程式碼裡呼叫 done(...) / view_image(...) / read_file(...) — 那是 tool 名、不是函式
 - 程式跑成功 → 下回覆直接 done"""
 
@@ -2309,7 +2361,8 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
     output_hint = f"\n輸出路徑提示：請將結果存到 {output_path}" if output_path else ""
     wd_hint = f"\n工作目錄：{working_dir}（所有相對路徑都相對於此目錄，請使用絕對路徑存取檔案）" if working_dir else ""
 
-    # 組合前步驟的輸出資訊
+    # 組合前步驟的輸出資訊 —— 附上「實際內容樣本」,讓 LLM 一開始就看到真實的
+    # 欄位名 / 值的格式(大小寫…),不用自己猜(猜錯又不當機就會靜默產出爛結果)。
     prev_hint = ""
     if prev_outputs:
         lines = ["\n【前步驟產生的檔案（可直接讀取使用）】"]
@@ -2317,6 +2370,11 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             lines.append(f"- {po['path']}")
             if po.get("schema"):
                 lines.append(f"  欄位/結構：{po['schema']}")
+            sample = _read_file_sample(po.get("path", ""))
+            if sample:
+                lines.append("  ↓ 實際內容樣本（欄位名、值的大小寫一律以此為準、不要自己猜）：")
+                for sl in sample.splitlines():
+                    lines.append(f"    {sl}")
         prev_hint = "\n".join(lines)
 
     # ── 動態注入已安裝的第三方套件清單 ──

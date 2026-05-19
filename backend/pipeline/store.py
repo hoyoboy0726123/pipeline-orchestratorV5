@@ -105,6 +105,22 @@ class RunStore:
             result.append(PipelineRun(**d))
         return result
 
+    def list_by_workflow(self, wf_id: str, limit: int = 10) -> list[PipelineRun]:
+        """只取某 workflow 的 run(新→舊)。給「可用變數」查詢用 ——
+        不受全域 list_recent 視窗影響、跨多次 run 都抓得到。"""
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT data, workflow_id FROM runs WHERE workflow_id=? ORDER BY rowid DESC LIMIT ?",
+            (wf_id, limit),
+        ).fetchall()
+        result = []
+        for data, wid in rows:
+            d = json.loads(data)
+            d["step_results"] = [StepResult(**s) for s in d.get("step_results", [])]
+            d["workflow_id"] = wid
+            result.append(PipelineRun(**d))
+        return result
+
     def delete(self, run_id: str) -> bool:
         conn = get_conn()
         cursor = conn.execute(
