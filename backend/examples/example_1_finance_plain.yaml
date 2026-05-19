@@ -1,0 +1,46 @@
+# 範例工作流:Q1 財務報表(純腳本串接)
+# ───────────────────────────────────────────────────────────────
+# 示範重點:最單純的一條流程 —— 把你手上四支現成的 Python 腳本,
+#   照順序串成一條線跑完。沒有 AI、沒有判斷、沒有分流。
+#
+#   Stage1 產生原始資料 → Stage2 清洗 → Stage3 分析 → Stage4 產報表
+#
+#   每一步都是「腳本節點」,做的事就是執行一支現成的 .py 檔 ——
+#   這正是腳本節點的本來用途:跑你電腦上已經有的程式。
+#
+#   ★ 想知道怎麼讓這條流程「進化」成會判斷、會分流的版本?
+#     打開「Q1 財務健診 + 分流報告」範例對照著看 —— 同樣四支腳本,
+#     中間插一個 AI 技能節點 + 一個條件節點就升級了。
+#
+# ⚠️ 此範例不需要 LLM、不需要連網,純本機腳本就能跑完。
+# ───────────────────────────────────────────────────────────────
+name: Q1 財務報表 (純腳本串接) (範例)
+validate: false
+steps:
+  # 1) 產生 Q1 原始財務交易資料(約 500 筆,含少量髒資料)
+  - name: 產生原始財務資料
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage1_generate_transactions.py"'
+    timeout: 120
+    output:
+      path: raw_transactions.xlsx
+
+  # 2) 資料驗證與清洗(只留下 Approved 的乾淨資料)
+  - name: 資料清洗
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage2_clean_data.py"'
+    timeout: 120
+    output:
+      path: cleaned_transactions.xlsx
+
+  # 3) 財務分析彙總(KPI、部門別、月份趨勢、費用類別),輸出多工作表 Excel
+  - name: 財務分析
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage3_analyze_finance.py"'
+    timeout: 120
+    output:
+      path: financial_summary.xlsx
+
+  # 4) 產生格式化的標準管理報表(含封面、執行摘要、套用樣式)
+  - name: 產生管理報表
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage4_generate_report.py"'
+    timeout: 120
+    output:
+      path: Q1_financial_report.xlsx

@@ -1,0 +1,143 @@
+# 範例工作流:Reddit r/ASUS 口碑分級報告
+# ───────────────────────────────────────────────────────────────
+# 示範重點:爬蟲 → 分析 → 把結果「歸成幾種類別」→ 用 condition 的
+#   Switch(分多種情況)模式分三條路。
+#
+# 跟「Reddit ASUS 版口碑日報」對照著看就懂 IF vs Switch 的差別:
+#   - 那條:看「負評百分比」這個「數字」,大於 40 就警示 → 用 IF
+#   - 這條:把口碑歸成「好評居多 / 負評居多 / 評價分歧」三種「類別」
+#     → 用 Switch
+#   ★ Switch 的關鍵:前面一定要有一步「把資料歸成幾種固定類別」,
+#     這條就是「評定整體口碑」那一步。
+#   ★ 三條分支採「扇形」:每條各自跑完(產生報告 → 排版成 Word)就結束,
+#     不收斂回同一點 —— 對初學者最直覺。
+#
+# ⚠️ 此範例需要:已設定 LLM(skill 節點要用)+ 可連網(爬蟲)。
+# ───────────────────────────────────────────────────────────────
+name: Reddit ASUS 口碑分級報告 (範例)
+validate: false
+steps:
+  # 1) 網頁爬蟲:抓 r/ASUS 列表 + 子頁內文與留言
+  - name: 抓取ASUS版討論
+    web_crawler: true
+    wc_url: "https://www.reddit.com/r/ASUS/"
+    wc_with_children: true
+    wc_max_children: 6
+    timeout: 600
+
+  # 2) 解析成結構化貼文清單
+  - name: 解析貼文清單
+    skill_mode: true
+    skill: scraped-content-parser
+    batch: |
+      解析上一步爬蟲抓回的 Reddit r/ASUS 討論內容,
+      抽出每一篇貼文的標題與內文,輸出結構化 JSON 至 posts.json。
+    output:
+      path: posts.json
+    timeout: 600
+
+  # 3) AI 技能:每篇判斷對 ASUS 產品的情緒
+  - name: 判斷貼文情緒
+    skill_mode: true
+    batch: |
+      讀取 posts.json,為每一篇貼文判斷使用者對 ASUS 產品的整體情緒,
+      輸出 JSON 陣列至 sentiment.json,每篇含三個欄位:
+      - title(貼文標題)
+      - sentiment(只能是 positive / negative / neutral 三者之一)
+      - summary(一句話中文摘要)
+    output:
+      path: sentiment.json
+    timeout: 600
+
+  # 4) AI 技能:把情緒分析結果「歸成一個類別」—— Switch 的關鍵前置步驟。
+  #    依正負面數量判定整體口碑,存成 verdict.json。skill 把 JSON 存好後,
+  #    runner 會自動把裡面的欄位開放給下一步的 Switch 引用。
+  - name: 評定整體口碑
+    skill_mode: true
+    batch: |
+      根據前面步驟分析出來的每篇貼文情緒,數出正面、負面、中立各有幾篇,
+      再判定整體口碑:正面明顯比負面多 → 好評居多;負面明顯比正面多 → 負評居多;
+      兩邊差不多 → 評價分歧。
+      把這四個結果存成 verdict.json,欄位名稱用:正面、負面、中立、口碑。
+    output:
+      path: verdict.json
+    timeout: 600
+
+  # 5) 條件節點(Switch):依「口碑」這個類別,分三條路
+  #    口碑 是上一步 verdict.json 裡的欄位,runner 自動開放、這裡直接引用
+  - name: 依口碑分流
+    condition: true
+    switch: "{{ steps.評定整體口碑.output.口碑 }}"
+    cases: {"好評居多": 產生好評報告, "負評居多": 產生負評警示, "評價分歧": 產生分歧分析}
+    timeout: 30
+
+  # ── 三條分支:每條 = 產生報告 → 各自接一個 Word 步驟 → 結束 ──
+  # 這是「扇形」結構:三條分支各自獨立跑完,不收斂回同一點。
+
+  # 6) 「好評居多」分支 — 產生報告
+  - name: 產生好評報告
+    skill_mode: true
+    batch: |
+      根據前面步驟的整體情緒分佈與每篇貼文情緒,寫一份正面的 ASUS 產品口碑報告至 report.md,
+      內容包含:整體情緒分佈數字、以及正面貼文的標題與亮點。
+    output:
+      path: report.md
+    next: 產出好評日報
+    timeout: 600
+
+  # 7) 好評分支:把報告排版成 Word
+  - name: 產出好評日報
+    skill_mode: true
+    skill: docx
+    batch: |
+      讀取 report.md 的內容,排版成一份正式的 Word 報告,輸出至 好評日報.docx。
+      文件標題為「ASUS 產品好評報告」,標題下方加上產出日期,內文沿用 report.md。
+    output:
+      path: 好評日報.docx
+    next: end
+    timeout: 600
+
+  # 8) 「負評居多」分支 — 產生報告
+  - name: 產生負評警示
+    skill_mode: true
+    batch: |
+      根據前面步驟的整體情緒分佈與每篇貼文情緒,寫一份「ASUS 產品負評警示」報告至 report.md,
+      內容包含:整體情緒分佈數字、以及負面貼文的標題、問題與建議留意處。
+    output:
+      path: report.md
+    next: 產出負評警示日報
+    timeout: 600
+
+  # 9) 負評分支:把報告排版成 Word
+  - name: 產出負評警示日報
+    skill_mode: true
+    skill: docx
+    batch: |
+      讀取 report.md 的內容,排版成一份正式的 Word 報告,輸出至 負評警示日報.docx。
+      文件標題為「ASUS 產品負評警示」,標題下方加上產出日期,內文沿用 report.md。
+    output:
+      path: 負評警示日報.docx
+    next: end
+    timeout: 600
+
+  # 10) 「評價分歧」分支 — 產生報告
+  - name: 產生分歧分析
+    skill_mode: true
+    batch: |
+      根據前面步驟的整體情緒分佈與每篇貼文情緒,寫一份「ASUS 產品評價分歧分析」至 report.md,
+      內容包含:整體情緒分佈數字、以及正反兩面各自代表貼文的標題與觀點。
+    output:
+      path: report.md
+    next: 產出分歧分析日報
+    timeout: 600
+
+  # 11) 分歧分支:把報告排版成 Word
+  - name: 產出分歧分析日報
+    skill_mode: true
+    skill: docx
+    batch: |
+      讀取 report.md 的內容,排版成一份正式的 Word 報告,輸出至 分歧分析日報.docx。
+      文件標題為「ASUS 產品評價分歧分析」,標題下方加上產出日期,內文沿用 report.md。
+    output:
+      path: 分歧分析日報.docx
+    timeout: 600

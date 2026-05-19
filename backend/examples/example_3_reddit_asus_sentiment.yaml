@@ -14,6 +14,8 @@
 #   - condition 節點是轉折點:把真實討論變成一個數字,由它決定走哪條分支
 #   - 兩條分支跑完都用 next 匯流回「產出 Word 日報」(分支收斂)
 #   - 統計交給 script(確定性),skill 只負責寫文字 —— 不讓 LLM 自己數數
+#   - 標題由分支自己寫進 report.md 第一行,共用的 Word 節點「沿用」第一行 ——
+#     共用一個節點、又不必讓 Word 那步的 LLM 重判一次口碑(分支早就判好了)
 #
 # ⚠️ 此範例需要:
 #   - 已設定 LLM(skill 節點要用)—— 到設定頁選一個 model
@@ -84,11 +86,10 @@ steps:
   - name: 產生負評警示
     skill_mode: true
     batch: |
-      讀取 stats.json 取得已經算好的情緒分佈數字,
-      再讀 sentiment.json 取得各貼文標題與情緒。
-      寫一份「ASUS 產品負評警示」中文報告內容至 report.md,內容包含:
-      stats.json 的情緒分佈數字(直接引用、不要自己重數)、
-      點名情緒為負面的貼文標題與摘要、建議留意的產品問題。
+      根據前面步驟分析出來的貼文情緒結果,寫一份「ASUS 產品負評警示」中文報告至 report.md。
+      report.md 的第一行就是這個標題:# ASUS 產品負評警示報告
+      內容包含:整體情緒分佈的數字、逐篇列出負評的貼文(標題與摘要)、
+      以及建議留意的產品問題。
     output:
       path: report.md
     next: 產出Word日報
@@ -98,11 +99,9 @@ steps:
   - name: 產生口碑摘要
     skill_mode: true
     batch: |
-      讀取 stats.json 取得已經算好的情緒分佈數字,
-      再讀 sentiment.json 取得各貼文標題。
-      寫一份中性的 Reddit r/ASUS 每日口碑摘要內容至 report.md,內容包含:
-      stats.json 的情緒分佈數字(直接引用、不要自己重數)、
-      從貼文標題與摘要歸納出的幾個主要討論話題、一段綜合分析。
+      根據前面步驟分析出來的貼文情緒結果,寫一份中性的 Reddit r/ASUS 每日口碑摘要至 report.md。
+      report.md 的第一行就是這個標題:# Reddit r/ASUS 產品口碑日報
+      內容包含:整體情緒分佈的數字、幾個主要討論話題、一段綜合分析。
     output:
       path: report.md
     timeout: 600
@@ -113,8 +112,9 @@ steps:
     skill: docx
     batch: |
       讀取 report.md 的內容,排版成一份正式的 Word 日報,輸出至 日報.docx。
-      文件標題為「Reddit r/ASUS 產品口碑日報」,標題下方加上產出日期,
-      內文沿用 report.md 的段落。
+      文件標題直接沿用 report.md 第一行的標題(去掉開頭的「# 」符號),
+      不要自己重新判斷或改寫標題。標題下方加上產出日期,
+      內文沿用 report.md 第一行之後的段落。
     output:
       path: 日報.docx
     timeout: 600

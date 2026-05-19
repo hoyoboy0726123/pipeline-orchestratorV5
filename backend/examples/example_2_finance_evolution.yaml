@@ -1,0 +1,92 @@
+# 範例工作流:Q1 財務健診 + 分流報告（既有腳本的「進化版」）
+# ───────────────────────────────────────────────────────────────
+# 示範重點:你手上已經有幾支跑得好好的 Python 腳本(這裡用專案內附的
+#   財務四階段腳本),怎麼「不改動原腳本」就把它們升級成有判斷、會分流的流程。
+#
+#   原本:Stage1 → Stage2 → Stage3 → Stage4,一路跑到底、不管結果好壞。
+#   進化:在 Stage3 之後插一個「健康判讀」(AI 技能節點,用白話描述就好)
+#         算出財務狀態,再用「條件節點」分兩條路 ——
+#           費用率偏高 → 成本警示報表(stage5)→ 人工確認(通知主管覆核)
+#           費用率正常 → 標準管理報表(原本的 stage4)
+#
+#   ★ 對照組見「Q1 財務報表(純腳本串接)」範例 —— 那條是原汁原味四支腳本
+#     串成一條線。兩個一起看,就懂 AI 技能節點 + 條件節點怎麼擴充既有流程。
+#   ★ 兩條分支「不對稱」是刻意的:出狀況的那條才需要主管簽核、正常的那條
+#     直接結束 —— 這也是真實流程的樣子。
+#
+# ⚠️ 此範例需要:已設定 LLM(健康判讀那步要用)。若費用率偏高走到警示分支,
+#    人工確認節點會透過 Telegram 通知主管(需先設定 Telegram)。腳本本身不需連網。
+# ───────────────────────────────────────────────────────────────
+name: Q1 財務健診 + 分流報告 (範例)
+validate: false
+steps:
+  # 1) 既有腳本:產生 Q1 原始財務交易資料
+  - name: 產生原始財務資料
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage1_generate_transactions.py"'
+    timeout: 120
+    output:
+      path: raw_transactions.xlsx
+
+  # 2) 既有腳本:資料驗證與清洗
+  - name: 資料清洗
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage2_clean_data.py"'
+    timeout: 120
+    output:
+      path: cleaned_transactions.xlsx
+
+  # 3) 既有腳本:財務分析彙總,輸出多工作表 Excel
+  - name: 財務分析
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage3_analyze_finance.py"'
+    timeout: 120
+    output:
+      path: financial_summary.xlsx
+
+  # 4) AI 技能節點:健康判讀 —— 用白話描述要它做什麼,它讀分析結果、
+  #    判斷財務狀態、寫成一個小 JSON。runner 會自動把 JSON 裡的欄位
+  #    開放給下一步的條件節點引用,不用學任何語法。
+  - name: 健康判讀
+    skill_mode: true
+    batch: |
+      讀取「財務分析」這一步產生的 financial_summary.xlsx。
+      看裡面「KPI 總覽」工作表的「費用率」和「Q1 淨利」這兩個數字。
+      判斷財務狀態:費用率 50 以上算「警示」,低於 50 算「良好」。
+      把結果寫成 finance_verdict.json,只要三個欄位:
+      費用率(數字)、淨利(數字)、財務狀態(只能是「良好」或「警示」)。
+    output:
+      path: finance_verdict.json
+    timeout: 600
+
+  # 5) 條件節點(IF):依「財務狀態」分兩條路
+  #    財務狀態 是上一步 finance_verdict.json 的欄位,runner 自動開放、直接引用
+  - name: 依財務狀況分流
+    condition: true
+    expression: "{{ steps.健康判讀.output.財務狀態 == '警示' }}"
+    on_true: 產生成本警示報表
+    on_false: 產生標準管理報表
+    timeout: 30
+
+  # 6)「警示」分支 —— 新腳本 stage5:挑出最大費用類別,產成本警示報表
+  - name: 產生成本警示報表
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage5_cost_alert.py"'
+    timeout: 120
+    output:
+      path: cost_alert_report.xlsx
+    next: 通知主管覆核成本警示
+
+  # 6b)「警示」分支收尾 —— 人工確認節點:把成本警示報表發給主管、
+  #     暫停流程等主管在 Telegram 上確認知悉,才算結束。
+  - name: 通知主管覆核成本警示
+    human_confirm: true
+    batch: |
+      偵測到本季費用率偏高,已產生「成本警示報表」。
+      請主管確認是否已知悉此成本警示。
+    send_output: true
+    next: end
+    timeout: 3600
+
+  # 7)「良好」分支 —— 既有腳本 stage4:產生格式化的標準管理報表
+  - name: 產生標準管理報表
+    batch: '"__PYTHON__" "__PROJECT_ROOT__/test-workflows/finance/stage4_generate_report.py"'
+    timeout: 120
+    output:
+      path: Q1_financial_report.xlsx

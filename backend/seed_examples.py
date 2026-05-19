@@ -35,9 +35,21 @@ def seed_example_workflows() -> None:
 
         existing = {(w.get("name") or "").strip() for w in (list_workflows() or [])}
         seeded = 0
+        # 範例 YAML 裡的路徑佔位符 → 換成這台安裝環境的實際路徑。
+        # __PROJECT_ROOT__ = 專案根;__PYTHON__ = 跑後端的 Python(venv,
+        # 已裝好 pandas / openpyxl 等套件,確保財務腳本範例能直接跑)。
+        import sys
+        _root = Path(__file__).resolve().parent.parent
+        _subst = {
+            "__PROJECT_ROOT__": str(_root).replace("\\", "/"),
+            "__PYTHON__": str(Path(sys.executable)).replace("\\", "/"),
+        }
+
         for yf in sorted(_EXAMPLES_DIR.glob("*.yaml")):
             try:
                 yaml_content = yf.read_text(encoding="utf-8")
+                for _ph, _val in _subst.items():
+                    yaml_content = yaml_content.replace(_ph, _val)
                 parsed = _yaml.safe_load(yaml_content) or {}
                 wf_name = (parsed.get("name") or yf.stem).strip()
                 if wf_name in existing:
