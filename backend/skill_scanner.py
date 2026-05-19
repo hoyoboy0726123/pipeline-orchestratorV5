@@ -9,7 +9,24 @@ import ast
 import json
 
 
-SKILLS_ROOT = Path.home() / ".agents" / "skills"
+_DEFAULT_SKILLS_ROOT = Path.home() / ".agents" / "skills"
+
+
+def get_skills_root() -> Path:
+    """Skill 檔案目錄。優先序:環境變數 SKILLS_DIR → 設定 skills_dir → 預設 ~/.agents/skills/。
+    讓專案使用者能自選 skill 檔放在哪。"""
+    import os
+    env = (os.getenv("SKILLS_DIR") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    try:
+        from settings import get_settings
+        cfg = (get_settings().get("skills_dir") or "").strip()
+        if cfg:
+            return Path(cfg).expanduser()
+    except Exception:
+        pass
+    return _DEFAULT_SKILLS_ROOT
 
 # Python 內建模組（不需要 pip install）— 動態用 sys.stdlib_module_names 取得，
 # 相容 Python 3.10+；失敗時 fallback 到寫死清單
@@ -98,11 +115,12 @@ def list_available_skills() -> list[dict]:
         "has_assets": False,
     }
     """
-    if not SKILLS_ROOT.exists():
+    root = get_skills_root()
+    if not root.exists():
         return []
 
     skills = []
-    for entry in sorted(SKILLS_ROOT.iterdir()):
+    for entry in sorted(root.iterdir()):
         if not entry.is_dir():
             continue
         skill_md = entry / "SKILL.md"
@@ -125,14 +143,15 @@ def list_available_skills() -> list[dict]:
 
 def _resolve_skill_dir(skill_name: str) -> Optional[Path]:
     """從 skill_name（資料夾名或 frontmatter 的 name）找到 skill 資料夾。"""
-    if not SKILLS_ROOT.exists():
+    root = get_skills_root()
+    if not root.exists():
         return None
-    for entry in SKILLS_ROOT.iterdir():
+    for entry in root.iterdir():
         if not entry.is_dir():
             continue
         if entry.name == skill_name:
             return entry
-    for entry in SKILLS_ROOT.iterdir():
+    for entry in root.iterdir():
         if not entry.is_dir():
             continue
         meta = _parse_frontmatter(entry / "SKILL.md")

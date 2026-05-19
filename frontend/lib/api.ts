@@ -984,6 +984,35 @@ export async function setSandboxMode(mode: 'host' | 'wsl_docker'): Promise<Sandb
   return res.json()
 }
 
+// ── Skill 檔案目錄 ────────────────────────────────────────
+export interface SkillsDirStatus {
+  skills_dir: string        // 使用者設定的自訂路徑（空 = 用預設）
+  resolved: string          // 實際解析到的路徑
+  default?: string          // 預設路徑 ~/.agents/skills/
+  exists: boolean
+  skill_count: number
+  env_override?: boolean    // 是否被環境變數 SKILLS_DIR 覆蓋
+}
+
+export async function getSkillsDir(): Promise<SkillsDirStatus> {
+  const res = await fetchWithRetry(`${BASE}/settings/skills-dir`)
+  if (!res.ok) throw new Error('讀取 Skill 目錄設定失敗')
+  return res.json()
+}
+
+export async function setSkillsDir(skillsDir: string): Promise<SkillsDirStatus> {
+  const res = await fetch(`${BASE}/settings/skills-dir`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skills_dir: skillsDir }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || '設定 Skill 目錄失敗')
+  }
+  return res.json()
+}
+
 export async function pipelineChat(
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,
   workflowId?: string | null,

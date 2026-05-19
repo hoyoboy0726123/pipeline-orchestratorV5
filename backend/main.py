@@ -1067,10 +1067,11 @@ async def delete_computer_use_assets(dir: str):
 @app.get("/skills/available")
 async def get_available_skills():
     """列出使用者安裝的 Claude Code skills（掃 ~/.agents/skills/）。"""
-    from skill_scanner import list_available_skills, SKILLS_ROOT
+    from skill_scanner import list_available_skills, get_skills_root
+    _root = get_skills_root()
     return {
-        "skills_root": str(SKILLS_ROOT),
-        "exists": SKILLS_ROOT.exists(),
+        "skills_root": str(_root),
+        "exists": _root.exists(),
         "skills": list_available_skills(),
     }
 
@@ -1258,6 +1259,50 @@ async def put_sandbox_mode(req: SandboxModeRequest):
         pass
     status = _sandbox.check_status(force_refresh=True)
     return {"mode": updated.get("skill_sandbox_mode", "host"), **status}
+
+
+# ── Skill 檔案目錄設定 ───────────────────────────────────────
+class SkillsDirRequest(BaseModel):
+    skills_dir: str  # 自訂 Skill 目錄絕對路徑;空字串 = 用預設 ~/.agents/skills/
+
+
+@app.get("/settings/skills-dir")
+async def get_skills_dir():
+    """回傳目前 Skill 目錄設定 + 實際解析到的路徑 + 是否存在 + skill 數。"""
+    import os
+    from settings import get_settings
+    from skill_scanner import get_skills_root, list_available_skills, _DEFAULT_SKILLS_ROOT
+    configured = (get_settings().get("skills_dir") or "").strip()
+    resolved = get_skills_root()
+    return {
+        "skills_dir": configured,
+        "resolved": str(resolved),
+        "default": str(_DEFAULT_SKILLS_ROOT),
+        "exists": resolved.exists(),
+        "skill_count": len(list_available_skills()),
+        "env_override": bool((os.getenv("SKILLS_DIR") or "").strip()),
+    }
+
+
+@app.put("/settings/skills-dir")
+async def put_skills_dir(req: SkillsDirRequest):
+    """設定自訂 Skill 目錄。空字串 = 還原預設。指定路徑必須是已存在的資料夾。"""
+    from pathlib import Path as _Path
+    from settings import set_skills_dir
+    from skill_scanner import get_skills_root, list_available_skills
+    path = (req.skills_dir or "").strip()
+    if path:
+        p = _Path(path).expanduser()
+        if not p.is_dir():
+            raise HTTPException(status_code=400, detail=f"找不到資料夾:{p}")
+    set_skills_dir(path)
+    resolved = get_skills_root()
+    return {
+        "skills_dir": path,
+        "resolved": str(resolved),
+        "exists": resolved.exists(),
+        "skill_count": len(list_available_skills()),
+    }
 
 
 # ── Workflows CRUD ──────────────────────────────────────────
@@ -2894,9 +2939,9 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 ## 使用者指定了路徑 → 照用、含絕對路徑
 
-當使用者明說「報告存到 D:\Reports\daily.xlsx」「寫到 ~/Documents/output.md」這類**特定位置**時，
+當使用者明說「報告存到 D:\\Reports\\daily.xlsx」「寫到 ~/Documents/output.md」這類**特定位置**時，
 **直接用使用者給的路徑、包含絕對路徑都 OK**。系統 backend 完全接受絕對路徑：
-- ✅ `output.path: D:\Reports\daily.xlsx`（Windows）
+- ✅ `output.path: D:\\Reports\\daily.xlsx`（Windows）
 - ✅ `output.path: ~/Documents/output.md`（家目錄展開）
 - ✅ `output.path: /shared/reports/daily.csv`（POSIX 絕對）
 
@@ -2904,7 +2949,7 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 ## 重要：legacy script 整合場景 → 一定用絕對路徑
 
-使用者說「我有支舊的 `financial.py`，它寫死輸出到 `D:\Old\out.xlsx`，後面幫我做資料清洗」這種場景：
+使用者說「我有支舊的 `financial.py`，它寫死輸出到 `D:\\Old\\out.xlsx`，後面幫我做資料清洗」這種場景：
 
 **第一步 script 節點的 `output.path` 必須跟 script 內部寫死的位置一致**（用絕對路徑）。
 不這樣寫的話會踩兩個坑：
@@ -2915,9 +2960,9 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 ```yaml
 - name: 跑既有財務系統
-  batch: python D:\LegacyProject\financial.py    # 內部寫死輸出到 D:\Old\out.xlsx
+  batch: python D:\\LegacyProject\\financial.py    # 內部寫死輸出到 D:\\Old\\out.xlsx
   output:
-    path: D:\Old\out.xlsx                        # ← 跟 script 寫的一致
+    path: D:\\Old\\out.xlsx                        # ← 跟 script 寫的一致
 
 - name: 資料清洗
   skill_mode: true

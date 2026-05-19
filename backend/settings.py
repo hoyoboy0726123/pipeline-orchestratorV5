@@ -39,6 +39,9 @@ _DEFAULT = {
     #   "host"       — Windows 原生 subprocess（快、跟 V2 一樣）
     #   "wsl_docker" — 透過 WSL 內的 pipeline-sandbox-v4 容器執行（隔離、需先跑 sandbox/setup_sandbox.bat）
     "skill_sandbox_mode": "host",
+    # Skill 檔案目錄:留空 = 預設 ~/.agents/skills/;可填自訂絕對路徑,
+    # 讓專案使用者把 skill 檔放在自己選的位置。亦可用環境變數 SKILLS_DIR 覆蓋。
+    "skills_dir": "",
     # 網路搜尋（Tavily）：skill agent 需要即時 / 外部資訊時使用
     # key 可先填但預設關閉，避免誤觸扣費
     "tavily_api_key": "",
@@ -169,6 +172,21 @@ def set_skill_sandbox_mode(mode: str) -> dict:
     with _lock:
         existing = _cache if _cache else _load_from_disk()
         existing["skill_sandbox_mode"] = mode
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
+
+
+# ── Skill 檔案目錄（獨立 setter） ──────────────────────────────────
+def set_skills_dir(path: str) -> dict:
+    """設定 Skill 檔案目錄。空字串 = 用預設 ~/.agents/skills/。"""
+    global _cache
+    path = (path or "").strip()
+    with _lock:
+        existing = _cache if _cache else _load_from_disk()
+        existing["skills_dir"] = path
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)

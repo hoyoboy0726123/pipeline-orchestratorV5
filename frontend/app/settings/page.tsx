@@ -15,11 +15,11 @@ import {
   getNodeStatus,
   getHostTools,
   type HostToolsResponse,
-  getSandboxStatus, setSandboxMode,
+  getSandboxStatus, setSandboxMode, getSkillsDir, setSkillsDir,
   type ModelSettings, type AvailableModels, type SkillPackage, type NotificationSettings,
   type WebSearchSettingsInput,
   type LogSuggestion, type AvailableSkill, type SkillDependencies,
-  type UnlistedPackage, type NodeStatus, type SandboxStatus,
+  type UnlistedPackage, type NodeStatus, type SandboxStatus, type SkillsDirStatus,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -32,6 +32,10 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
   const [expanded, setExpanded] = useState<string | null>(null)
   const [depsCache, setDepsCache] = useState<Record<string, SkillDependencies>>({})
   const [scanning, setScanning] = useState<string | null>(null)
+  // Skill 檔案目錄設定（可自訂路徑）
+  const [dirCfg, setDirCfg] = useState<SkillsDirStatus | null>(null)
+  const [dirInput, setDirInput] = useState('')
+  const [savingDir, setSavingDir] = useState(false)
 
   const loadSkills = async () => {
     setLoading(true)
@@ -48,6 +52,31 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
   }
 
   useEffect(() => { loadSkills() }, [])
+
+  const loadDir = async () => {
+    try {
+      const d = await getSkillsDir()
+      setDirCfg(d)
+      setDirInput(d.skills_dir)
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { loadDir() }, [])
+
+  const applyDir = async () => {
+    setSavingDir(true)
+    try {
+      const d = await setSkillsDir(dirInput.trim())
+      setDirCfg(prev => (prev ? { ...prev, ...d } : d))
+      toast.success(
+        (d.skills_dir ? '已套用 Skill 目錄' : '已還原預設目錄') + `，找到 ${d.skill_count} 個 Skill`,
+      )
+      await loadSkills()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setSavingDir(false)
+    }
+  }
 
   // 目前的 sandbox 模式（host / sandbox）— 決定顯示什麼安裝指令給使用者
   const [currentMode, setCurrentMode] = useState<'host' | 'sandbox'>('host')
@@ -144,6 +173,38 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
           className="p-2 text-gray-400 hover:text-purple-600 transition-colors disabled:opacity-50" title="重新掃描">
           <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
         </button>
+      </div>
+
+      {/* Skill 檔案目錄設定 — 讓使用者自選 skill 檔放在哪 */}
+      <div className="bg-white rounded-xl border border-gray-200 p-4 mb-3">
+        <label className="text-sm font-medium text-gray-700 block mb-1">Skill 檔案目錄</label>
+        <p className="text-xs text-gray-400 mb-2">
+          留空 = 用預設{' '}
+          <code className="font-mono bg-gray-100 px-1 rounded">{dirCfg?.default || '~/.agents/skills/'}</code>
+          。可改成你自己存放 Skill 的資料夾。
+        </p>
+        <div className="flex gap-2">
+          <input
+            value={dirInput}
+            onChange={e => setDirInput(e.target.value)}
+            placeholder={dirCfg?.default || '~/.agents/skills/（留空 = 用預設）'}
+            disabled={savingDir || dirCfg?.env_override}
+            className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm font-mono outline-none focus:border-purple-400 disabled:bg-gray-100"
+          />
+          <button onClick={applyDir} disabled={savingDir || dirCfg?.env_override}
+            className="px-4 py-1.5 text-sm rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed">
+            {savingDir ? '套用中…' : '套用'}
+          </button>
+        </div>
+        {dirCfg?.env_override ? (
+          <p className="text-xs text-amber-600 mt-1.5">⚠ 目前被環境變數 SKILLS_DIR 覆蓋,此設定不生效。</p>
+        ) : dirCfg && !dirCfg.exists ? (
+          <p className="text-xs text-red-500 mt-1.5">⚠ 目前的目錄不存在:{dirCfg.resolved}</p>
+        ) : dirCfg ? (
+          <p className="text-xs text-gray-400 mt-1.5">
+            目前使用:<code className="font-mono">{dirCfg.resolved}</code>(找到 {dirCfg.skill_count} 個 Skill)
+          </p>
+        ) : null}
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
