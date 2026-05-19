@@ -276,7 +276,15 @@ function friendlyVarLabel(path: string): string {
 }
 
 // ── 共用 hook:抓 workflow 可用變數、攤平成下拉選項 ──────────────────────
-type VarOption = { path: string; label: string; detail: string }
+// group:'value' = 這步算出來的值(常用、排前面);'status' = 執行狀態(進階)
+type VarOption = { path: string; label: string; detail: string; group: 'value' | 'status' }
+
+// 執行狀態類欄位 → 換成白話標籤(原始 key 是 stdout / exit_code 這種術語)
+const STATUS_FIELD_LABEL: Record<string, string> = {
+  stdout: '畫面輸出的文字',
+  exit_code: '是否執行成功',
+  status: '驗證結果',
+}
 
 function useVarOptions(workflowId?: string): VarOption[] {
   const [vars, setVars] = useState<WorkflowVariablesResult | null>(null)
@@ -289,10 +297,15 @@ function useVarOptions(workflowId?: string): VarOption[] {
     const out: VarOption[] = []
     for (const s of vars.available.steps) {
       for (const f of s.fields) {
+        // path / output.path 是檔案路徑字串,拿去做條件判斷沒意義 —— 不列入
+        if (f.key === 'path') continue
+        const isStatus = f.source === 'stdout' || f.source === 'exit_code' || f.source === 'validation'
+        const fieldLabel = isStatus ? (STATUS_FIELD_LABEL[f.key] ?? f.key) : f.key
         out.push({
           path: `steps.${s.name}.output.${f.key}`,
-          label: friendlyVarLabel(`steps.${s.name}.output.${f.key}`),
-          detail: `${s.node_type}${f.source ? ' · ' + f.source : ''}`,
+          label: `${s.name} ▸ ${fieldLabel}`,
+          detail: '',
+          group: isStatus ? 'status' : 'value',
         })
       }
     }
@@ -301,10 +314,44 @@ function useVarOptions(workflowId?: string): VarOption[] {
         path: `input.${i.key}`,
         label: friendlyVarLabel(`input.${i.key}`),
         detail: i.required ? '啟動參數' : '啟動參數(可選)',
+        group: 'value',
       })
     }
     return out
   }, [vars])
+}
+
+// ── 變數下拉:分「這步算出的值 / 執行狀態(進階)」兩組,常用的排前面 ──────
+function VarSelect({ value, options, onChange }: {
+  value: string
+  options: VarOption[]
+  onChange: (v: string) => void
+}) {
+  const valueOpts = options.filter(o => o.group === 'value')
+  const statusOpts = options.filter(o => o.group === 'status')
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400 bg-white"
+    >
+      <option value="">— 請選擇 —</option>
+      {valueOpts.length > 0 && (
+        <optgroup label="這個步驟算出的值">
+          {valueOpts.map(o => (
+            <option key={o.path} value={o.path}>{o.label}{o.detail ? ' · ' + o.detail : ''}</option>
+          ))}
+        </optgroup>
+      )}
+      {statusOpts.length > 0 && (
+        <optgroup label="執行狀態(進階)">
+          {statusOpts.map(o => (
+            <option key={o.path} value={o.path}>{o.label}</option>
+          ))}
+        </optgroup>
+      )}
+    </select>
+  )
 }
 
 function ConditionBuilder({
@@ -334,7 +381,7 @@ function ConditionBuilder({
   // (例如範例的變數要跑過一次才會進 API 清單,但既有表達式已選了它)
   const options = useMemo(() => {
     if (varPath && !apiOptions.some(o => o.path === varPath)) {
-      return [{ path: varPath, label: friendlyVarLabel(varPath), detail: '目前選用' }, ...apiOptions]
+      return [{ path: varPath, label: friendlyVarLabel(varPath), detail: '目前選用', group: 'value' as const }, ...apiOptions]
     }
     return apiOptions
   }, [apiOptions, varPath])
@@ -354,21 +401,17 @@ function ConditionBuilder({
         {/* 變數 */}
         <div>
           <label className="text-[11px] text-gray-500 block mb-0.5">要判斷的值</label>
-          <select
-            value={varPath}
-            onChange={e => setVarPath(e.target.value)}
-            className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400 bg-white"
-          >
-            <option value="">— 請選擇 —</option>
-            {options.map(o => (
-              <option key={o.path} value={o.path}>{o.label} · {o.detail}</option>
-            ))}
-          </select>
-          {options.length === 0 && (
+          <VarSelect value={varPath} options={options} onChange={setVarPath} />
+          {options.length === 0 ? (
             <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
               ⚠ 目前沒有可選的值。請先把這個條件節點前面的步驟跑過一次,跑完後就能在這裡選到你要判斷的值。
             </p>
-          )}
+          ) : !varPath ? (
+            <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
+              💡 想判斷前面步驟算出的數值(百分比、數量…)?那些要先把工作流跑一次,才會出現在這個清單裡。
+              可以先跑一次工作流,或用下方「進階」直接輸入。
+            </p>
+          ) : null}
         </div>
 
         {/* 比較 + 值 */}
@@ -436,7 +479,7 @@ function SwitchBuilder({
 
   const options = useMemo(() => {
     if (varPath && !apiOptions.some(o => o.path === varPath)) {
-      return [{ path: varPath, label: friendlyVarLabel(varPath), detail: '目前選用' }, ...apiOptions]
+      return [{ path: varPath, label: friendlyVarLabel(varPath), detail: '目前選用', group: 'value' as const }, ...apiOptions]
     }
     return apiOptions
   }, [apiOptions, varPath])
@@ -452,21 +495,17 @@ function SwitchBuilder({
       </div>
       <div>
         <label className="text-[11px] text-gray-500 block mb-0.5">依哪一個值來分流</label>
-        <select
-          value={varPath}
-          onChange={e => setVarPath(e.target.value)}
-          className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-orange-400 bg-white"
-        >
-          <option value="">— 請選擇 —</option>
-          {options.map(o => (
-            <option key={o.path} value={o.path}>{o.label} · {o.detail}</option>
-          ))}
-        </select>
-        {options.length === 0 && (
+        <VarSelect value={varPath} options={options} onChange={setVarPath} />
+        {options.length === 0 ? (
           <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
             ⚠ 目前沒有可選的值。請先把這個條件節點前面的步驟跑過一次,跑完後就能在這裡選到你要判斷的值。
           </p>
-        )}
+        ) : !varPath ? (
+          <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
+            💡 想依前面步驟算出的數值(分數、等級…)來分流?那些要先把工作流跑一次,才會出現在這個清單裡。
+            可以先跑一次工作流,或用下方「進階」直接輸入。
+          </p>
+        ) : null}
       </div>
       <div className="flex items-center justify-end gap-2">
         {dirty && <span className="text-[11px] text-orange-600">尚未套用變更</span>}

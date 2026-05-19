@@ -1,7 +1,7 @@
 'use client'
 import { memo } from 'react'
-import { Handle, Position, type NodeProps, type Node } from '@xyflow/react'
-import { GitBranch } from 'lucide-react'
+import { Handle, Position, useEdges, type NodeProps, type Node } from '@xyflow/react'
+import { GitBranch, AlertTriangle } from 'lucide-react'
 import type { ConditionData } from './_helpers'
 import { useRunStatusStore } from './_runStatus'
 
@@ -14,11 +14,20 @@ const CONDITION_COLOR = '#f97316'  // 橘色
 
 type ConditionNodeType = Node<ConditionData>
 
-function ConditionNodeComponent({ data, selected }: NodeProps<ConditionNodeType>) {
+function ConditionNodeComponent({ id, data, selected }: NodeProps<ConditionNodeType>) {
   const runtime = useRunStatusStore(s => s.stepStatuses[data.name])
   const status = runtime?.status ?? 'idle'
 
-  const color = status === 'failed' ? '#ef4444'
+  // 「還沒設定判斷條件」偵測:有出線、但 IF 的 expression / Switch 的 switch 是空的。
+  // 這種節點後端 runner 會報錯、所以在畫布上提早用紅框 + 警告 icon 標記出來。
+  const edges = useEdges()
+  const hasOutgoing = edges.some(e => e.source === id)
+  const conditionMissing = hasOutgoing && (
+    data.mode === 'if' ? !data.expression?.trim() : !data.switch?.trim()
+  )
+
+  const color = conditionMissing ? '#ef4444'
+    : status === 'failed' ? '#ef4444'
     : status === 'success' ? '#10b981'
     : status === 'running' ? '#f59e0b'
     : CONDITION_COLOR
@@ -37,7 +46,8 @@ function ConditionNodeComponent({ data, selected }: NodeProps<ConditionNodeType>
   return (
     <div className="w-56 rounded-xl overflow-hidden shadow-md transition-shadow"
       style={{
-        border: selected ? `2px solid ${color}` : '2px solid transparent',
+        // 未設定條件 → 永遠紅框(即使沒選取)、讓使用者一眼看到要補設定
+        border: (selected || conditionMissing) ? `2px solid ${color}` : '2px solid transparent',
         boxShadow: selected ? `0 0 0 3px ${color}33, 0 4px 16px rgba(0,0,0,0.12)` : '0 2px 8px rgba(0,0,0,0.10)',
       }}
     >
@@ -56,6 +66,12 @@ function ConditionNodeComponent({ data, selected }: NodeProps<ConditionNodeType>
 
       {/* Body */}
       <div className="bg-white px-3 py-2.5 space-y-1">
+        {conditionMissing && (
+          <div className="flex items-center gap-1 text-[11px] text-red-600 bg-red-50 border border-red-200 rounded px-1.5 py-1 leading-tight">
+            <AlertTriangle className="w-3 h-3 shrink-0" strokeWidth={2.5} />
+            <span>還沒設定判斷條件,點開設定</span>
+          </div>
+        )}
         <p className="text-xs text-orange-600 font-mono truncate" title={summary}>
           {summary}
         </p>

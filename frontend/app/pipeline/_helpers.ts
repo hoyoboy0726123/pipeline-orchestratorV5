@@ -581,6 +581,86 @@ export function newSkillData(index = 0): SkillData {
 const COLORS = ['#6366f1','#0ea5e9','#10b981','#f59e0b','#ec4899','#8b5cf6','#14b8a6','#f97316']
 export const stepColor = (index: number) => COLORS[index % COLORS.length]
 
+// ── 扇形版面 ──────────────────────────────────────────────────────────────────
+// condition(IF / Switch)分支會「扇形」攤開:主線一排、分支對稱往上下展、
+// 每條分支各自往右接成一列。讓使用者一眼看懂「這裡分流、各走各的」。
+const FAN_COL_W = 360
+const FAN_ROW_H = 200
+const FAN_Y0 = 160
+
+// 從 steps 算出每個節點的出邊。
+// condition → 依 cases(Switch)/ onTrue·onFalse(IF) 連到具名目標;
+// 其他節點:next: end → 不連(分支終點);next: <名稱> → 連該節點;無 next → 線性 i→i+1。
+function buildFlowGraph(steps: StepData[]): { out: number[][]; edges: { i: number; j: number }[] } {
+  const n = steps.length
+  const nameToIdx = new Map<string, number>()
+  steps.forEach((s, i) => { if (s.name && !nameToIdx.has(s.name)) nameToIdx.set(s.name, i) })
+  const out: number[][] = steps.map(() => [])
+  const edges: { i: number; j: number }[] = []
+  steps.forEach((s, i) => {
+    const targets: number[] = []
+    if (s.condition) {
+      if (s.switch) {
+        for (const tgt of Object.values(s.cases || {})) {
+          const j = nameToIdx.get(String(tgt))
+          if (j !== undefined) targets.push(j)
+        }
+        if (s.default && nameToIdx.has(s.default)) targets.push(nameToIdx.get(s.default)!)
+      } else {
+        if (s.onTrue && nameToIdx.has(s.onTrue)) targets.push(nameToIdx.get(s.onTrue)!)
+        if (s.onFalse && nameToIdx.has(s.onFalse)) targets.push(nameToIdx.get(s.onFalse)!)
+      }
+    } else {
+      const nxt = s.next
+      if (nxt && nxt.trim().toLowerCase() === 'end') {
+        // 分支終點、不連
+      } else if (nxt) {
+        const j = nameToIdx.get(nxt)
+        if (j !== undefined) targets.push(j)
+      } else if (i + 1 < n) {
+        targets.push(i + 1)
+      }
+    }
+    for (const j of targets) { out[i].push(j); edges.push({ i, j }) }
+  })
+  return { out, edges }
+}
+
+// 算出每個節點的扇形座標:欄(x)= 最長路徑深度;列(y)= DFS,condition 多出邊對稱攤開。
+function fanLayout(n: number, out: number[][]): { x: number; y: number }[] {
+  if (n === 0) return []
+  const col = new Array(n).fill(0)
+  for (let pass = 0; pass < n; pass++) {
+    let changed = false
+    for (let i = 0; i < n; i++) for (const j of out[i]) if (col[j] < col[i] + 1) { col[j] = col[i] + 1; changed = true }
+    if (!changed) break
+  }
+  const lane = new Map<number, number>()
+  const dfs = (i: number, l: number) => {
+    if (lane.has(i)) return
+    lane.set(i, l)
+    const ch = out[i]
+    if (ch.length <= 1) { for (const c of ch) dfs(c, l) }
+    else { const k = ch.length; ch.forEach((c, idx) => dfs(c, l + (idx - (k - 1) / 2))) }
+  }
+  dfs(0, 0)
+  for (let i = 0; i < n; i++) if (!lane.has(i)) lane.set(i, 0)
+  // 匯流置中:多條分支收斂回同一節點時,擺在各前驅的垂直中點、其後單線子節點跟著移。
+  const preds: number[][] = new Array(n).fill(0).map(() => [])
+  for (let i = 0; i < n; i++) for (const j of out[i]) preds[j].push(i)
+  const byCol = [...Array(n).keys()].sort((a, b) => col[a] - col[b])
+  for (const j of byCol) {
+    if (preds[j].length >= 2) {
+      lane.set(j, preds[j].reduce((s, p) => s + lane.get(p)!, 0) / preds[j].length)
+      let cur = j
+      while (out[cur].length === 1 && preds[out[cur][0]].length < 2) {
+        const nx = out[cur][0]; lane.set(nx, lane.get(cur)!); cur = nx
+      }
+    }
+  }
+  return [...Array(n).keys()].map(i => ({ x: col[i] * FAN_COL_W, y: FAN_Y0 + lane.get(i)! * FAN_ROW_H }))
+}
+
 // ── Steps → ReactFlow nodes + edges ──────────────────────────────────────────
 export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[] } {
   const nodes: AppNode[] = steps.map((s, i) => {
@@ -784,11 +864,17 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
     }
   })
 
+  // 分支感知:condition 依 cases/onTrue·onFalse 連線、其餘照 next / 線性。
+  // 同步把節點排成扇形(主線一排、分支對稱攤開),不再全擠成單排線性鏈。
+  const { out, edges: rawEdges } = buildFlowGraph(steps)
+  const positions = fanLayout(steps.length, out)
+  nodes.forEach((node, i) => { node.position = positions[i] })
+
   // 用 insertable type — hover 出 + / 🗑️；箭頭由 ReactFlow defaultEdgeOptions 統一處理
-  const edges: Edge[] = steps.slice(0, -1).map((_, i) => ({
-    id: `e-${i}`,
+  const edges: Edge[] = rawEdges.map(({ i, j }) => ({
+    id: `e-${i}-${j}`,
     source: `step-${i}`,
-    target: `step-${i + 1}`,
+    target: `step-${j}`,
     type: 'insertable',
     animated: steps[i].status === 'running',
     style: { stroke: stepColor(i), strokeWidth: 2 },
@@ -873,12 +959,38 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
   }
   const orderIds = longestFrom(starts[0].id, new Set<string>())
   const ordered: AppNode[] = []
+  const seen = new Set<string>()
   for (const id of orderIds) {
+    const node = execNodes.find(n => n.id === id)
+    if (node) { ordered.push(node); seen.add(id) }
+  }
+
+  // 主路徑外的「分支子節點」也要進 YAML — condition 節點會分多條路、
+  // 不在最長路徑上的分支(例如 onFalse 那條)若被丟掉、runner 就跳不到、
+  // 會報「找不到 step」。所以 BFS 把所有從起點可達的 exec 節點都收進來、
+  // 附在主路徑後面(順序不影響 — runner 靠 name 跳轉、不靠陣列順序)。
+  const reachable: string[] = []
+  {
+    const queue = [starts[0].id]
+    const visited = new Set<string>()
+    while (queue.length) {
+      const cur = queue.shift()!
+      if (visited.has(cur)) continue
+      visited.add(cur)
+      for (const t of adjMulti.get(cur) || []) {
+        if (!visited.has(t)) queue.push(t)
+      }
+    }
+    for (const id of visited) {
+      if (!seen.has(id)) reachable.push(id)
+    }
+  }
+  for (const id of reachable) {
     const node = execNodes.find(n => n.id === id)
     if (node) ordered.push(node)
   }
 
-  // 孤立節點不加入（邊驅動執行；DFS 已偏好最長路徑、避免中間節點被丟掉）
+  // 孤立節點不加入（邊驅動執行）
 
   return ordered.map((n, i) => {
     const aiData = aiDataByPredecessor.get(n.id)

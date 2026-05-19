@@ -643,11 +643,20 @@ export default function PipelinePage() {
   const selectedNode = nodes.find(n => n.id === selectedId)
 
   // ── 從 runStatus store 讀取 edges 動畫狀態 ─────────────────────────────────
+  // 只讓「正在跑的節點」的進入線有動畫 —— 動畫跟著執行進度走,
+  // 還沒跑到 / 不會跑(分支沒選到)的連線維持靜止,跟實際執行相符。
+  // 執行狀態存在 runStatus store(以 step name 為 key),不在 node.data。
   const edgesAnimated = useRunStatusStore(s => s.edgesAnimated)
-  const displayEdges = useMemo(
-    () => edges.map(e => ({ ...e, animated: edgesAnimated } as Edge)),
-    [edges, edgesAnimated],
-  )
+  const stepStatuses = useRunStatusStore(s => s.stepStatuses)
+  const displayEdges = useMemo(() => {
+    if (!edgesAnimated) return edges
+    const runningNodeIds = new Set(
+      nodes
+        .filter(n => stepStatuses[(n.data as { name?: string })?.name ?? '']?.status === 'running')
+        .map(n => n.id),
+    )
+    return edges.map(e => ({ ...e, animated: runningNodeIds.has(e.target) } as Edge))
+  }, [edges, edgesAnimated, nodes, stepStatuses])
 
   // ── 穩定化 ReactFlow callbacks（避免每次 render 產生新函式觸發 ReactFlow 內部 setState）
   const onNodeClick = useCallback((_: React.MouseEvent, node: { id: string }) => setSelectedId(node.id), [])
@@ -1000,6 +1009,97 @@ export default function PipelinePage() {
     return () => window.removeEventListener('pipeline-insert-node-on-edge', handler)
   }, [setNodes, setEdges])
 
+  // ── 刪一條連線(edge 上的 🗑️ 按鈕)──────────────────────────────────────
+  // 若這條線是從 condition 節點拉出去的、連帶把對應的分支設定清掉,
+  // 避免畫布上線沒了、但 onTrue / cases 還殘留舊目標。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { edgeId, source, target } = (e as CustomEvent).detail || {}
+      if (!edgeId) return
+      setNodes(ns => {
+        const srcNode = ns.find(n => n.id === source)
+        const tgtNode = ns.find(n => n.id === target)
+        if (srcNode?.type !== 'condition' || !tgtNode || !('name' in (tgtNode.data ?? {}))) return ns
+        const targetName = (tgtNode.data as any).name as string
+        return ns.map(n => {
+          if (n.id !== source) return n
+          const d = n.data as ConditionData
+          let patch: Partial<ConditionData> | null = null
+          if (d.mode === 'if') {
+            if (d.onTrue === targetName && d.onFalse === targetName) patch = { onTrue: '', onFalse: '' }
+            else if (d.onTrue === targetName) patch = { onTrue: '' }
+            else if (d.onFalse === targetName) patch = { onFalse: '' }
+          } else {
+            const cases = { ...(d.cases || {}) }
+            let changed = false
+            for (const [k, v] of Object.entries(cases)) {
+              if (v === targetName) { delete cases[k]; changed = true }
+            }
+            if (changed) patch = { cases }
+          }
+          return patch ? ({ ...n, data: { ...n.data, ...patch } } as AppNode) : n
+        })
+      })
+      setEdges(es => es.filter(x => x.id !== edgeId))
+    }
+    window.addEventListener('pipeline-delete-edge', handler)
+    return () => window.removeEventListener('pipeline-delete-edge', handler)
+  }, [setNodes, setEdges])
+
+  // ── 面板 → 畫布 同步:condition 的分支設定改了、出線跟著反映 ───────────────
+  // 使用者在面板改 onTrue / onFalse / cases 後,condition 節點的出線要指到正確
+  // 的目標節點(不殘留指向舊目標的線)。拖拉 / 刪線那兩條路徑會同時更新 edge 跟
+  // 分支欄位、所以這裡會是 no-op;只有面板改欄位時才真的補 / 刪 edge。
+  useEffect(() => {
+    const conditionNodes = nodes.filter(n => n.type === 'condition')
+    if (conditionNodes.length === 0) return
+
+    // step name → node id(condition 分支存的是名稱字串)
+    const nameToId = new Map<string, string>()
+    for (const n of nodes) {
+      const nm = (n.data as any)?.name
+      if (typeof nm === 'string' && nm && !nameToId.has(nm)) nameToId.set(nm, n.id)
+    }
+
+    let nextEdges = edges
+    let changed = false
+    for (const cond of conditionNodes) {
+      const d = cond.data as ConditionData
+      // 此 condition 想要的目標 node id 集合
+      const wantNames = d.mode === 'if'
+        ? [d.onTrue, d.onFalse]
+        : [...Object.values(d.cases || {}), d.default]
+      const wantIds = new Set<string>()
+      for (const nm of wantNames) {
+        if (!nm) continue
+        const id = nameToId.get(nm)
+        if (id && id !== cond.id) wantIds.add(id)
+      }
+      const curOut = nextEdges.filter(e => e.source === cond.id)
+      const curTargets = new Set(curOut.map(e => e.target))
+      // 刪掉指向「已不在分支設定裡」的出線
+      const stale = curOut.filter(e => !wantIds.has(e.target))
+      if (stale.length > 0) {
+        const staleIds = new Set(stale.map(e => e.id))
+        nextEdges = nextEdges.filter(e => !staleIds.has(e.id))
+        changed = true
+      }
+      // 補上「分支設定有、但畫布還沒線」的出線
+      for (const tid of wantIds) {
+        if (!curTargets.has(tid)) {
+          nextEdges = [...nextEdges, {
+            id: `e-${cond.id}-${tid}`,
+            source: cond.id,
+            target: tid,
+            ...DEFAULT_EDGE_OPTIONS,
+          }]
+          changed = true
+        }
+      }
+    }
+    if (changed) setEdges(nextEdges)
+  }, [nodes, edges, setEdges])
+
   // ── Delete step（刪除任何節點時自動重新連線前後節點）──────────────────────────
   const deleteStep = useCallback((id: string) => {
     // 若刪的是 computer_use 節點，順便把磁碟上的錨點資料夾清掉避免殘留
@@ -1045,14 +1145,80 @@ export default function PipelinePage() {
   }, [setNodes])
 
   // ── Connect ───────────────────────────────────────────────────────────────
+  // 從 condition 節點拉線 = 直接設定分支:
+  //   IF 模式  → 第一條線寫進 onTrue、第二條寫進 onFalse
+  //   Switch 模式 → 每條線在 cases 加一筆(佔位 key「情況N」、value = 子節點名稱)
+  // 其他節點維持原本「單純連線」行為。
   const onConnect = useCallback((connection: Connection) => {
     const edge: Edge = {
       ...connection,
       id: `e-${connection.source}-${connection.target}`,
       ...DEFAULT_EDGE_OPTIONS,
     }
+
+    const srcNode = nodes.find(n => n.id === connection.source)
+    const tgtNode = nodes.find(n => n.id === connection.target)
+
+    // 一般步驟只能接「一個」下一步 — 只有「條件判斷」節點能分多條路。
+    // 其他節點若已有出線、再拉第二條 → 擋下、不建立、並說明該怎麼做。
+    if (srcNode && srcNode.type !== 'condition'
+        && edges.some(e => e.source === srcNode.id)) {
+      toast.error('一般步驟只能接一個「下一步」。要分成多條路,請改用「條件判斷」節點。')
+      return
+    }
+
+    if (srcNode?.type === 'condition' && tgtNode && 'name' in (tgtNode.data ?? {})) {
+      const cond = srcNode.data as ConditionData
+      const targetName = (tgtNode.data as any).name as string
+      // 已連到這個子節點的出線數(算上即將加入的這條)
+      const existingOut = edges.filter(e => e.source === srcNode.id && e.target !== connection.target)
+      if (cond.mode === 'if') {
+        // 依「目前已有幾條出線」決定這條填 onTrue 還是 onFalse
+        if (existingOut.length === 0 && !cond.onTrue) {
+          updateStep(srcNode.id, { onTrue: targetName } as Partial<ConditionData>)
+        } else if (!cond.onFalse) {
+          updateStep(srcNode.id, { onFalse: targetName } as Partial<ConditionData>)
+        } else {
+          // 兩條都滿了 — 覆寫 onTrue(使用者大概想重設)
+          updateStep(srcNode.id, { onTrue: targetName } as Partial<ConditionData>)
+        }
+      } else {
+        // Switch:拉線時問使用者「當值等於什麼」當作這個 case 的比對值。
+        const cases = { ...(cond.cases || {}) }
+        // 若這個子節點已經是某個 case 的 value,就不重複加(直接建線即可)
+        if (!Object.values(cases).includes(targetName)) {
+          // 還沒設「要依哪個值分流」→ 先請使用者設好,不要在這裡硬問值
+          if (!cond.switch?.trim()) {
+            toast.error('請先點開這個條件節點、設定「要依哪一個值來分流」,再拉分支線。')
+            return
+          }
+          // 取出分流依據的好讀名稱(steps.X.output.Y → 「X 的 Y」)
+          const sm = cond.switch.match(/\{\{\s*([\s\S]+?)\s*\}\}/)
+          const inner = (sm ? sm[1] : cond.switch).trim()
+          const sm2 = inner.match(/^steps\.(.+)\.output\.(.+)$/)
+          const depName = sm2 ? `${sm2[1]} 的「${sm2[2]}」` : inner
+          const answer = window.prompt(
+            `你這個節點是依「${depName}」來分流。\n` +
+            `當「${depName}」的內容等於什麼的時候,要走到「${targetName}」這條路?\n` +
+            `請填那個值實際可能出現的內容(可留空、之後再到節點設定填)。`,
+            '',
+          )
+          if (answer === null) return   // 使用者按取消 → 不建立這條連線
+          let key = answer.trim()
+          if (!key || cases[key] !== undefined) {
+            // 留空 或 與現有 case 撞名 → 退回不重複的「情況N」佔位
+            let n = Object.keys(cases).length + 1
+            while (cases[`情況${n}`] !== undefined) n++
+            key = `情況${n}`
+          }
+          cases[key] = targetName
+          updateStep(srcNode.id, { cases } as Partial<ConditionData>)
+        }
+      }
+    }
+
     setEdges(es => addEdge(edge, es))
-  }, [setEdges])
+  }, [setEdges, nodes, edges, updateStep])
 
   // ── Import from YAML ──────────────────────────────────────────────────────
   // mode: 'new' = 建立新工作流（不碰目前的）；'overwrite' = 覆蓋目前工作流
@@ -1098,9 +1264,9 @@ export default function PipelinePage() {
     if (stepNodes.length === 0) { toast.error('請先新增步驟'); return }
     const steps = flowToSteps(nodes, edges)
     // 空步驟檢查：排除有自己 schema 的節點類型（不靠 batch 跑的）
-    //   computer_use / human_confirm / visual_validation / outlook_automation / web_crawler 都不需要 batch，自有檢查
+    //   condition / computer_use / human_confirm / visual_validation / outlook_automation / web_crawler 都不需要 batch，自有檢查
     const emptyStep = steps.find(s =>
-      !s.batch?.trim() && !s.humanConfirm && !s.computerUse && !s.visualValidation && !s.outlookAutomation && !s.webCrawler
+      !s.batch?.trim() && !s.condition && !s.humanConfirm && !s.computerUse && !s.visualValidation && !s.outlookAutomation && !s.webCrawler
     )
     if (emptyStep) {
       toast.error(`步驟「${emptyStep.name}」尚未設定${emptyStep.skillMode ? '任務描述' : '執行指令'}，請點擊該步驟方塊填入`)
@@ -1144,19 +1310,49 @@ export default function PipelinePage() {
     // 「節點有多個出邊」偵測：使用者插中間節點忘記刪原連線常見坑
     // flowToSteps 改 multimap + DFS 找最長路徑後不會丟掉中間節點，
     // 但仍提醒使用者去把多餘連線清掉、避免將來架構變化又踩雷
+    // 注意:condition 條件節點本來就會分多條路、有多條出線是正常的、不警告
     {
-      const stepNodeIds = new Set(stepNodes.map(n => n.id))
+      const stepNodeIds = new Set(nodes
+        .filter(n => n.type === 'scriptStep' || n.type === 'skillStep' || n.type === 'humanConfirmation'
+          || n.type === 'computerUse' || n.type === 'visualValidation' || n.type === 'outlookAutomation'
+          || n.type === 'webCrawler' || n.type === 'subagent' || n.type === 'condition')
+        .map(n => n.id))
       const branchNames: string[] = []
       for (const n of stepNodes) {
+        if (n.type === 'condition') continue   // 條件節點多出線是預期行為
         const out = edges.filter(e => e.source === n.id && stepNodeIds.has(e.target))
         if (out.length > 1) branchNames.push((n.data as any).name || n.id)
       }
       if (branchNames.length > 0) {
-        toast.warning(
-          `偵測到節點有多個出邊：${branchNames.join('、')}。` +
-          `系統會自動選最長路徑、但建議手動刪掉多餘連線（用 edge 上的 🗑️ 按鈕）`,
+        toast.error(
+          `一般步驟只能接一個「下一步」,但這些步驟接了多條:${branchNames.join('、')}。` +
+          `請滑到多餘的連線上點 🗑️ 刪掉;若你要分成多條路,請改用「條件判斷」節點。`,
+          { duration: 9000 },
+        )
+        return
+      }
+    }
+    // condition 節點未設定判斷條件偵測:有出線但 expression(IF)/ switch(Switch)是空的
+    // → 明確擋下、不靜默跑通(後端 runner 也會報錯、前端提早讓使用者看到)
+    {
+      const unsetConditions: string[] = []
+      for (const n of nodes) {
+        if (n.type !== 'condition') continue
+        const hasOut = edges.some(e => e.source === n.id)
+        if (!hasOut) continue
+        const d = n.data as ConditionData
+        const isUnset = d.mode === 'if'
+          ? !d.expression?.trim()
+          : !d.switch?.trim()
+        if (isUnset) unsetConditions.push(d.name || n.id)
+      }
+      if (unsetConditions.length > 0) {
+        toast.error(
+          `這些條件節點還沒設定判斷條件:${unsetConditions.join('、')}。` +
+          `請點開節點、設定要判斷的內容後再執行。`,
           { duration: 8000 },
         )
+        return
       }
     }
     // 查詢 recipe 狀態，然後顯示選擇 dialog

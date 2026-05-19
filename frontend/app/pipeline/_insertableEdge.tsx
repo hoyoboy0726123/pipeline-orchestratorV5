@@ -1,7 +1,7 @@
 'use client'
 import { useState, useRef, useEffect } from 'react'
 import {
-  BaseEdge, EdgeLabelRenderer, getSmoothStepPath, useReactFlow,
+  BaseEdge, EdgeLabelRenderer, getSmoothStepPath,
   type EdgeProps, type Edge,
 } from '@xyflow/react'
 import { Plus, Trash2, Code2, Sparkles, Hand, Zap, BookOpen, Eye } from 'lucide-react'
@@ -19,7 +19,6 @@ export default function InsertableEdge(props: EdgeProps<Edge>) {
           markerEnd, style, source, target } = props
   const [hover, setHover] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
-  const rf = useReactFlow()
 
   const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX, sourceY, sourcePosition,
@@ -27,7 +26,11 @@ export default function InsertableEdge(props: EdgeProps<Edge>) {
   })
 
   const handleDelete = () => {
-    rf.setEdges(es => es.filter(e => e.id !== id))
+    // 透過事件交給 page.tsx 處理:除了刪 edge,若來源是 condition 節點
+    // 還要連帶清掉對應的分支設定(onTrue / onFalse / cases)。
+    window.dispatchEvent(new CustomEvent('pipeline-delete-edge', {
+      detail: { edgeId: id, source, target },
+    }))
   }
 
   // 取得要新增節點的大概位置（edge 中點）
