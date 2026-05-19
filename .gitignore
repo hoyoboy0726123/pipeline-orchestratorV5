@@ -35,6 +35,7 @@ sandbox/_tmp/
 
 # Claude Code local settings
 .claude/
+CLAUDE.md
 
 # Test output files
 test-workflows/*.xlsx
