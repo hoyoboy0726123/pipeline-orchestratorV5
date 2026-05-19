@@ -68,8 +68,8 @@
 ### 1. 取得原始碼
 
 ```bash
-git clone https://github.com/hoyoboy0726123/pipeline-orchestrator.git
-cd pipeline-orchestrator
+git clone https://github.com/hoyoboy0726123/pipeline-orchestratorV5.git
+cd pipeline-orchestratorV5
 ```
 
 ### 2. 設定環境變數
@@ -173,7 +173,7 @@ sandbox\setup_sandbox.bat
 ## 專案結構
 
 ```
-pipeline-orchestrator/
+pipeline-orchestratorV5/
 ├── backend/                  # FastAPI 後端
 │   ├── main.py               # 所有 REST API 端點
 │   ├── config.py             # 環境變數、路徑、SQLite 設定
