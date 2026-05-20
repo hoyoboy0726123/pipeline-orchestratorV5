@@ -57,7 +57,6 @@ backend/_test_cu_int_assets/
 calculator.py
 calculator_test.py
 mini.py
-HANDOFF.md
 TG_AGENT_UPGRADE_PLAN.md
 autonomous-runtime-implementation.md
 external_projects/
