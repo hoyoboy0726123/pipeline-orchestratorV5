@@ -39,6 +39,7 @@ import OutlookPanel                from './_outlookPanel'
 import WebCrawlerPanel             from './_webCrawlerPanel'
 import SubagentConfigPanel          from './_subagentPanel'
 import ConditionPanel               from './_conditionPanel'
+import HoverScrollRow               from './_hoverScrollRow'
 import Sidebar                from './_sidebar'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
@@ -1865,8 +1866,9 @@ export default function PipelinePage() {
           />
 
           {/* Add node buttons (top-left of canvas) */}
+          {/* HoverScrollRow:小螢幕時按鈕列超過畫面寬度,滑鼠停在左右邊緣會自動橫向捲動,不壓縮按鈕寬度 */}
           <Panel position="top-left">
-            <div className="flex gap-2">
+            <HoverScrollRow>
               <button
                 onClick={addScriptStep}
                 title="新增一個執行 Python 腳本/指令的步驟"
@@ -1937,7 +1939,7 @@ export default function PipelinePage() {
               >
                 <Plus className="w-3.5 h-3.5" /> 🔀 條件分支
               </button>
-            </div>
+            </HoverScrollRow>
           </Panel>
         </ReactFlow>
 
