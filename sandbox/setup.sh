@@ -117,13 +117,17 @@ if [[ -d "$DEFAULT_SKILLS_DIR" ]]; then
     installed=0
     skipped=0
     for src in "$DEFAULT_SKILLS_DIR"/*/; do
+        # 防 glob 沒展開到任何子資料夾時、$src 留下字面 "*/" 害 cp 炸
+        [[ -d "$src" ]] || continue
         name=$(basename "$src")
         target="$AGENTS_DIR/skills/$name"
         if [[ -d "$target" ]]; then
-            ((skipped++))
+            # 注意：用 $((var+1)) 不用 ((var++))。後者在 var=0 那次回傳 exit 1
+            # (舊值 0 被當 false)，搭 set -e 會整個 abort 掉
+            skipped=$((skipped + 1))
         else
             cp -r "$src" "$target"
-            ((installed++))
+            installed=$((installed + 1))
         fi
     done
     if (( installed > 0 )); then
