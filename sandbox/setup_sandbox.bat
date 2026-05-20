@@ -50,7 +50,12 @@ echo Windows project : %WIN_PROJECT%
 echo WSL project     : %WSL_PROJECT%
 echo.
 
-REM ── 4. 執行 WSL 內的安裝腳本
+REM ── 4. 自癒 CRLF:Windows git core.autocrlf=true 預設會把 .sh 從 LF 轉成 CRLF,
+REM    讓 WSL bash 在 "set -euo pipefail" 直接掛掉。在 invoke 之前把整個
+REM    sandbox/ 底下的 .sh 都 sed 一次,idempotent、本來就 LF 的不受影響。
+wsl -e bash -c "find '%WSL_PROJECT%/sandbox' -type f -name '*.sh' -exec sed -i 's/\r$//' {} +" >NUL 2>&1
+
+REM ── 5. 執行 WSL 內的安裝腳本
 echo === Running setup inside WSL ===
 echo (If this is the first time, you may be prompted for your WSL password for sudo)
 echo.
