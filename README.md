@@ -52,7 +52,7 @@
 
 | 項目 | 版本 | 必要性 |
 |------|------|--------|
-| Python | 3.10+ | 必要 |
+| Python | 3.10+（**建議 3.12**）| 必要 |
 | Node.js | 18+ | 必要 |
 | npm | 9+ | 必要 |
 | WSL2 + Docker Engine | — | 選用（只有要用 Skill 沙盒才需要）|
@@ -74,20 +74,25 @@
 ```powershell
 winget install Git.Git -e
 winget install OpenJS.NodeJS.LTS -e
+winget install Python.Python.3.12 -e
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
 **macOS**：
 ```bash
-brew install git node
+brew install git node python@3.12
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 **Linux (Debian / Ubuntu)**：
 ```bash
-sudo apt install -y git nodejs npm
+sudo apt install -y git nodejs npm python3.12 python3.12-venv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
+
+> **為什麼也裝全域 Python?**uv 會在 `uv venv` 時自動下載自己的 Python(放在 uv 私有目錄,不污染 PATH);但建議**另外裝一份 Python 3.12 到全域**,給你之後寫其他 Python 程式、開 IDE、跑 ad-hoc 腳本用 —— 兩份並存、互不干擾。
+>
+> **為什麼是 3.12?**這個專案需要 3.10+,而 3.12 是當前綜合最佳:套件 wheel 齊全(裝得快、極少從原始碼編譯)、效能比 3.10 / 3.11 好,又比 3.13 成熟、不會踩到剛出爐的相容性坑。
 
 > 沒有 winget(舊版 Windows 10)?從這 3 個官網下載安裝即可：
 > [Git](https://git-scm.com/download/win) · [Node.js LTS](https://nodejs.org/) · [uv](https://docs.astral.sh/uv/getting-started/installation/)
