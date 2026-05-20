@@ -206,6 +206,25 @@ def _invalidate_docker_prefix_cache() -> None:
 
 
 # ── 狀態檢查 ───────────────────────────────────────────────────────
+# 上次成功在容器跑完 docker exec 的時間戳。剛剛成功跑過 = 沙盒鐵定還活著,
+# ensure_running 短路跳過慢探測。WSL VM 在連續呼叫之間偶有冷啟動延遲、
+# wsl --status 超過 10s timeout、check_status 整套要 20s+ 才回 unhealthy、
+# 連續 skill 步驟全部誤 fallback 到 host(明明沙盒 ON、log 卻一直在 host 跑)。
+_LAST_HEALTHY_EXEC_TS: float = 0.0
+# 60s:給足下一個 skill 工具呼叫間隔。LLM 步驟通常 30-90s,設 60s 不會卡到
+# 真的需要重探的情境(容器中途被砍/WSL shutdown),但能擋連續呼叫的雜訊。
+_RECENT_EXEC_TTL: float = 60.0
+
+
+def _mark_sandbox_healthy() -> None:
+    """成功跑完一次 docker exec 後喊一聲、把短路 cache 更新。
+    讓下一個 skill 工具呼叫不用再花 ~20s 重做慢探測。
+    『成功』定義:subprocess 有完整跑完(timeout 不算)— 即使 Python 在容器內
+    raise Exception、返回 non-zero rc,也代表容器是通的、沙盒鐵定還活著。"""
+    global _LAST_HEALTHY_EXEC_TS
+    _LAST_HEALTHY_EXEC_TS = time.time()
+
+
 _STATUS_CACHE: dict = {"ts": 0.0, "data": None}
 # 分別 TTL：
 #   健康 → cache 久一點（30s），因為剛確認好幾秒內不用重查，避免每個 skill tool 都多跑 ~1s WSL probe
@@ -321,6 +340,11 @@ def ensure_running() -> tuple[bool, str]:
     先用 cache（健康 30s 內免重查）→ 不 healthy 才強制 refresh → 還是不行的話
     對瞬時失敗（例如 WSL 冷啟動 timeout）再重試一次，避免單次慢就誤判 fallback。
     """
+    # 短路:剛剛成功跑過 docker exec → 沙盒鐵定還活著、跳過全套慢探測
+    # 這是擋「wsl --status 偶發冷啟動延遲拖到 20s+ 害連續 skill 步驟都誤 fallback」的關鍵防線
+    if time.time() - _LAST_HEALTHY_EXEC_TS < _RECENT_EXEC_TTL:
+        return True, ""
+
     status = check_status(force_refresh=False)
     if status["ready"]:
         return True, ""
@@ -439,6 +463,9 @@ def _run_subprocess_inner(
                 log.warning(f"[sandbox] register_cb 失敗：{e}")
         try:
             stdout_b, stderr_b = proc.communicate(timeout=timeout)
+            # subprocess 跑完整(沒 timeout)= 沙盒鐵定通,更新短路 cache
+            # 即使 returncode != 0(Python 在容器內 raise Exception)也算通
+            _mark_sandbox_healthy()
             return SandboxResult(
                 stdout=_decode_subprocess_output(stdout_b),
                 stderr=_decode_subprocess_output(stderr_b),
