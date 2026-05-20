@@ -114,30 +114,45 @@ def translate_shell_paths(cmd_str: str) -> str:
     return _SHELL_DRIVE_RE.sub(_sub, cmd_str)
 
 
-# ── subprocess 輸出解碼:wsl.exe 預設輸出 UTF-16 LE(尤其中文 locale 的錯誤訊息),
-#    一律當 utf-8 讀會跳出「每字夾 □」mojibake。先用 BOM / 奇數位置 null byte 啟發式
-#    判定 UTF-16 LE、否則退 utf-8。
+# ── subprocess 輸出解碼:Windows wsl.exe / 其他內建工具,不同情境輸出不同編碼:
+#    - 對 terminal 輸出 UTF-16 LE
+#    - 對 pipe 輸出 系統本地碼頁 mbcs(中文 Windows = CP950 / Big5)
+#    一律當 utf-8 讀會跳「每字夾 □」或「字被 ? 替換」的 mojibake。
+#    依序試:UTF-16 LE(BOM 或 sample 含 >5% \x00 byte)→ utf-8 → mbcs。
+#    utf-8 解出來 U+FFFD 比例過高 → 改用 mbcs 結果。
 def _decode_subprocess_output(b: bytes) -> str:
     if not b:
         return ""
+    # 1. UTF-16 LE 偵測:BOM
     if b.startswith(b"\xff\xfe"):
         try:
             return b.decode("utf-16-le", errors="replace").lstrip("﻿")
         except Exception:
             pass
-    sample = b[:32]
-    odd_positions = list(range(1, len(sample), 2))
-    if odd_positions:
-        null_count = sum(1 for i in odd_positions if sample[i] == 0)
-        if null_count >= len(odd_positions) * 0.6:
+    # 2. UTF-16 LE 偵測:sample 含 >5% \x00 byte
+    #    (utf-8 文字輸出基本沒 null byte;UTF-16 LE 只要混到 ASCII 字元必然產生 null)
+    sample = b[:64]
+    null_in_sample = sum(1 for byte in sample if byte == 0)
+    if null_in_sample >= max(1, len(sample) * 0.05):
+        try:
+            return b.decode("utf-16-le", errors="replace")
+        except Exception:
+            pass
+    # 3. utf-8;若解出來 U+FFFD 比例 >5%(代表大量 byte 無效)→ 改用 mbcs(系統本地碼頁)
+    try:
+        utf8_decoded = b.decode("utf-8", errors="replace")
+        repl_ratio = utf8_decoded.count("�") / max(len(utf8_decoded), 1)
+        if repl_ratio > 0.05:
             try:
-                return b.decode("utf-16-le", errors="replace")
+                return b.decode("mbcs", errors="replace")
             except Exception:
                 pass
-    try:
-        return b.decode("utf-8", errors="replace")
+        return utf8_decoded
     except Exception:
-        return b.decode("mbcs", errors="replace")
+        try:
+            return b.decode("mbcs", errors="replace")
+        except Exception:
+            return repr(b)
 
 
 # ── wsl 指令呼叫封裝 ───────────────────────────────────────────────
