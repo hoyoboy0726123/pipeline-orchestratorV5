@@ -63,6 +63,81 @@
 
 ---
 
+## 快速開始（uv，推薦）
+
+從**完全空機**到跑起來 —— 只裝 3 個工具（Git、Node.js、uv），其餘 uv 處理（含 Python 本身）。
+
+### 1. 裝工具
+
+**Windows**（一般使用者 PowerShell，不需 admin）：
+
+```powershell
+winget install Git.Git -e
+winget install OpenJS.NodeJS.LTS -e
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**macOS**：
+```bash
+brew install git node
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Linux (Debian / Ubuntu)**：
+```bash
+sudo apt install -y git nodejs npm
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+> 沒有 winget(舊版 Windows 10)?從這 3 個官網下載安裝即可：
+> [Git](https://git-scm.com/download/win) · [Node.js LTS](https://nodejs.org/) · [uv](https://docs.astral.sh/uv/getting-started/installation/)
+>
+> **裝完後重開終端機**(PATH 才會吃到新工具)。
+
+### 2. 抓專案 + 裝依賴
+
+```bash
+git clone https://github.com/hoyoboy0726123/pipeline-orchestratorV5.git
+cd pipeline-orchestratorV5
+
+# 後端 —— uv 會自動下載 Python 3.12,你不用先裝 Python
+cd backend
+uv venv --python 3.12 .venv
+uv pip install -r requirements.txt
+cp .env.example .env          # Windows: copy .env.example .env
+cd ..
+
+# 前端
+cd frontend
+npm install
+cd ..
+```
+
+### 3. 設 API Key
+
+編輯 `backend/.env`,至少填一個:
+
+```env
+GROQ_API_KEY=...       # https://console.groq.com/keys (免費額度)
+GEMINI_API_KEY=...     # https://aistudio.google.com/apikey (免費)
+```
+
+### 4. 啟動
+
+```bash
+# Windows
+launch_full_project.bat
+
+# macOS / Linux
+chmod +x start.sh && ./start.sh
+```
+
+開瀏覽器到 **http://localhost:3002**,完成。
+
+> Skill 沙盒(選用,讓 AI 生成的 code 跑在容器內)的安裝見下方「安裝步驟」第 5 步。
+
+---
+
 ## 安裝步驟
 
 ### 1. 取得原始碼
