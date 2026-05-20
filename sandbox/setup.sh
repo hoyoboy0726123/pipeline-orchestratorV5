@@ -247,3 +247,13 @@ echo "✓ 沙盒就緒！"
 echo "  容器名：$CONTAINER"
 $DOCKER inspect "$CONTAINER" --format '{{range .Mounts}}    {{.Source}} → {{.Destination}}{{"\n"}}{{end}}' 2>/dev/null || true
 echo "══════════════════════════════════════════════════════"
+
+# ── 6. 寫旗標讓 setup_sandbox.bat 知道要不要提醒使用者關閉 WSL
+# 條件：當前還在用 sudo 跑 docker (代表 docker group 還沒 reload)
+# 旗標檔讀完即刪、不留下殘留
+FLAG_FILE="$PROJECT_DIR/sandbox/.needs_wsl_shutdown"
+if [[ "$DOCKER" == "sudo docker" ]]; then
+    touch "$FLAG_FILE" 2>/dev/null || true
+else
+    rm -f "$FLAG_FILE" 2>/dev/null || true
+fi

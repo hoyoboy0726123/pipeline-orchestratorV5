@@ -33,6 +33,9 @@ pipelines/
 # Sandbox LLM 暫存程式碼（V3）
 sandbox/_tmp/
 
+# Sandbox installer 互動旗標檔(setup.sh 寫、setup_sandbox.bat 讀完即刪)
+sandbox/.needs_wsl_shutdown
+
 # Claude Code local settings
 .claude/
 CLAUDE.md

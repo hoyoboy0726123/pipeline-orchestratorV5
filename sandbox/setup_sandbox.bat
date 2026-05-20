@@ -74,6 +74,31 @@ echo ==================================================
 echo  All done. Sandbox is ready.
 echo ==================================================
 echo.
+
+REM ── 偵測:Docker 剛裝、docker group 還沒生效 → 需要 wsl --shutdown
+IF EXIST "%~dp0.needs_wsl_shutdown" (
+    echo ==================================================
+    echo  [!] 重要:WSL 需要重啟一次再啟動專案
+    echo ==================================================
+    echo.
+    echo  Docker 剛剛安裝、把你加進 docker group,但目前 WSL session
+    echo  還是舊權限。不重啟 WSL 直接啟動 backend,每次 skill 節點都
+    echo  會卡 sudo 密碼。
+    echo.
+    SET /P SHUTDOWN_ANS="現在自動關閉 WSL 嗎? (Y/N, 預設 Y): "
+    IF /I NOT "%SHUTDOWN_ANS%"=="N" (
+        echo.
+        echo ==^> wsl --shutdown ...
+        wsl --shutdown
+        echo (V) WSL 已關閉。下次啟動專案時自動 reload,docker 免 sudo。
+    ) ELSE (
+        echo.
+        echo [i] 記得手動跑: wsl --shutdown
+    )
+    del "%~dp0.needs_wsl_shutdown" >NUL 2>&1
+    echo.
+)
+
 echo Next: start V5 normally (launch_full_project.bat or
 echo uvicorn + npm dev). The backend will auto-detect
 echo the sandbox and route skill code through it when the
