@@ -39,6 +39,7 @@ from .sandbox import (
     _docker_exec_cmd,
     _write_code_tempfile,
     windows_to_wsl_path,
+    _decode_subprocess_output,
 )
 
 log = logging.getLogger(__name__)
@@ -861,8 +862,9 @@ def _stream_subprocess(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,    # 合併，所有輸出走同一條 pipe
-            text=True, encoding="utf-8", errors="replace",
-            bufsize=1,                   # line-buffered（搭配腳本 -u 才有效）
+            # 不指定 text/encoding,用 bytes;每行讀進來後用 _decode_subprocess_output
+            # 自動偵測編碼(wsl.exe 失敗時輸出 UTF-16 LE、容器內 python 走 utf-8)
+            bufsize=1,                   # line-buffered(搭配腳本 -u 才有效)
         )
     except FileNotFoundError:
         return _err(url, "找不到 wsl 指令；確認你在 Windows host 跑 backend", tier="crawl4ai")
@@ -872,6 +874,7 @@ def _stream_subprocess(
     deadline = time.time() + timeout
     last_json: Optional[dict] = None
     raw_lines: list[str] = []
+    raw_lines_bytes: list[bytes] = []  # 失敗路徑時整段 join 解碼,UTF-16 LE 不會被 \n byte 切壞
 
     try:
         while True:
@@ -885,8 +888,8 @@ def _stream_subprocess(
                 logger.warning(f"[{step_name}] Crawl4AI timeout（{timeout}s），已強制終止")
                 return _err(url, f"Crawl4AI timeout（{timeout}s）", tier="crawl4ai")
 
-            line = proc.stdout.readline()
-            if not line:
+            line_b = proc.stdout.readline()
+            if not line_b:
                 # EOF（process 結束）或空字串
                 if proc.poll() is not None:
                     break
@@ -894,7 +897,9 @@ def _stream_subprocess(
                 time.sleep(0.05)
                 continue
 
-            line = line.rstrip("\r\n")
+            raw_lines_bytes.append(line_b)
+            # 每行各自智能解碼:utf-8 直接過、UTF-16 LE 也偵測得到(這層為了 live log)
+            line = _decode_subprocess_output(line_b).rstrip("\r\n")
             if not line:
                 continue
             raw_lines.append(line)
@@ -923,7 +928,12 @@ def _stream_subprocess(
 
     # 全部讀完，確認 last_json
     if last_json is None:
-        tail = "\n".join(raw_lines[-20:])
+        # 把所有 raw bytes 串起來一次解碼。UTF-16 LE 情況下 readline 會在 \n byte 切到
+        # 字元中間造成每行 mojibake;整段一次解就正確。再取最後 20 行(非空)。
+        all_bytes = b"".join(raw_lines_bytes)
+        full_text = _decode_subprocess_output(all_bytes)
+        tail_lines = [l for l in full_text.splitlines() if l.strip()][-20:]
+        tail = "\n".join(tail_lines)
         return _err(url, f"沙盒回傳沒有 JSON 結果（exit={proc.returncode}）。最後 20 行：\n{tail}",
                     tier="crawl4ai")
     if not last_json.get("ok"):
