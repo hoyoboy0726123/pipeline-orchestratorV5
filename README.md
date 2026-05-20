@@ -60,6 +60,7 @@
 選用：
 - [uv](https://docs.astral.sh/uv/) — 更快的 Python 套件管理工具
 - Telegram Bot — 遠端通知與人工確認操作
+- LibreOffice — 視覺驗證 / 人工確認預覽 `.pptx` / `.docx` 時用(沒裝會 fallback 純文字 PNG、VLM 評不過)。Windows:`winget install -e --id TheDocumentFoundation.LibreOffice`
 
 ---
 
@@ -111,8 +112,9 @@ git clone https://github.com/hoyoboy0726123/pipeline-orchestratorV5.git
 cd pipeline-orchestratorV5
 
 # 後端 —— uv 會自動下載 Python 3.12,你不用先裝 Python
+# 注意:--seed 會把 pip 種進 venv(後端 skill 套件自動安裝會用到、缺了會炸)
 cd backend
-uv venv --python 3.12 .venv
+uv venv --seed --python 3.12 .venv
 uv pip install -r requirements.txt
 cp .env.example .env          # Windows: copy .env.example .env
 cd ..
