@@ -902,6 +902,13 @@ def _stream_subprocess(
             line = _decode_subprocess_output(line_b).rstrip("\r\n")
             if not line:
                 continue
+            # UTF-16 LE 失敗路徑:wsl.exe 的中文錯誤訊息被 readline 在 \n byte 切到字元
+            # 中間 → per-line 解碼會混亂(無法正確 align UTF-16 pair)。這層偵測 mojibake
+            # 並 silent drop;最終失敗訊息的 tail 會把整段 raw bytes join 起來重新解碼,
+            # 不會丟失資訊。
+            mojibake_score = sum(1 for c in line if c == "\x00" or c == "�")
+            if mojibake_score > len(line) * 0.15:
+                continue
             raw_lines.append(line)
 
             # 嘗試解析成 JSON dict（最後一行的結構化結果）
