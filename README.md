@@ -72,11 +72,16 @@
 **Windows**（一般使用者 PowerShell，不需 admin）：
 
 ```powershell
+# 一次性放行使用者 PowerShell 指令碼(否則之後 npm install 會被擋)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
 winget install Git.Git -e
 winget install OpenJS.NodeJS.LTS -e
 winget install Python.Python.3.12 -e
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
+
+> 上面第一行不執行的話,之後 `npm install` 會跳「**因為這個系統上已停用指令碼執行**」錯誤 —— npm 是 PowerShell `.ps1` wrapper、Windows 預設禁跑。
 
 **macOS**：
 ```bash
