@@ -877,6 +877,13 @@ def _stream_subprocess(
     raw_lines_bytes: list[bytes] = []  # 失敗路徑時整段 join 解碼,UTF-16 LE 不會被 \n byte 切壞
 
     try:
+        # 編碼感知 chunk 讀:第一個 chunk 偵測 utf-8 / UTF-16 LE,後續用對應的 line sep 切行
+        # - utf-8 路徑(container 正常):line sep = b"\n",per-line utf-8 decode
+        #   行為跟原本 readline + utf-8 decode 完全等價
+        # - UTF-16 LE 路徑(wsl.exe 中文錯誤訊息):line sep = b"\n\x00",per-line utf-16-le decode
+        #   行不會被 \n byte 切到字元中間、live log 也能正確顯示中文
+        buffer = b""
+        encoding: Optional[str] = None  # 'utf-8' / 'utf-16-le',第一個夠長的 chunk 偵測
         while True:
             if time.time() > deadline:
                 # 超時：強制砍 + 收尾
@@ -888,43 +895,70 @@ def _stream_subprocess(
                 logger.warning(f"[{step_name}] Crawl4AI timeout（{timeout}s），已強制終止")
                 return _err(url, f"Crawl4AI timeout（{timeout}s）", tier="crawl4ai")
 
-            line_b = proc.stdout.readline()
-            if not line_b:
-                # EOF（process 結束）或空字串
+            chunk = proc.stdout.read1(4096)  # 有資料或 EOF 才回;BufferedReader 都吃得到
+            if not chunk:
                 if proc.poll() is not None:
                     break
-                # 還在跑、暫無輸出 → 短 sleep 避免 100% CPU 空轉
                 time.sleep(0.05)
                 continue
 
-            raw_lines_bytes.append(line_b)
-            # 每行各自智能解碼:utf-8 直接過、UTF-16 LE 也偵測得到(這層為了 live log)
-            line = _decode_subprocess_output(line_b).rstrip("\r\n")
-            if not line:
-                continue
-            # UTF-16 LE 失敗路徑:wsl.exe 的中文錯誤訊息被 readline 在 \n byte 切到字元
-            # 中間 → per-line 解碼會混亂(無法正確 align UTF-16 pair)。這層偵測 mojibake
-            # 並 silent drop;最終失敗訊息的 tail 會把整段 raw bytes join 起來重新解碼,
-            # 不會丟失資訊。
-            mojibake_score = sum(1 for c in line if c == "\x00" or c == "�")
-            if mojibake_score > len(line) * 0.15:
-                continue
-            raw_lines.append(line)
+            buffer += chunk
+            raw_lines_bytes.append(chunk)
 
-            # 嘗試解析成 JSON dict（最後一行的結構化結果）
-            stripped = line.strip()
-            if stripped.startswith("{") and stripped.endswith("}"):
+            # 偵測編碼:BOM 直接判定 UTF-16 LE;否則樣本中奇數位置多為 \x00 → UTF-16 LE;其餘 utf-8
+            if encoding is None:
+                if buffer.startswith(b"\xff\xfe"):
+                    encoding = "utf-16-le"
+                    buffer = buffer[2:]
+                elif len(buffer) >= 16:
+                    sample = buffer[:64]
+                    odd = list(range(1, len(sample), 2))
+                    null_count = sum(1 for i in odd if sample[i] == 0)
+                    encoding = "utf-16-le" if (odd and null_count >= len(odd) * 0.6) else "utf-8"
+                # 不足 16 byte 還沒判定 → 等下一個 chunk
+
+            if encoding is None:
+                continue
+
+            line_sep = b"\x0a\x00" if encoding == "utf-16-le" else b"\n"
+            while True:
+                idx = buffer.find(line_sep)
+                if idx == -1:
+                    break
+                line_bytes = buffer[:idx]
+                buffer = buffer[idx + len(line_sep):]
                 try:
-                    parsed = json.loads(stripped)
-                    if isinstance(parsed, dict) and ("ok" in parsed or "error" in parsed):
-                        last_json = parsed
-                        # 結果 JSON 不丟 log（會洗版且使用者看不懂）
-                        continue
-                except json.JSONDecodeError:
-                    pass
+                    line = line_bytes.decode(encoding, errors="replace").rstrip("\r")
+                except Exception:
+                    continue
+                if not line:
+                    continue
+                raw_lines.append(line)
 
-            # 進度行：直接 logger.info → 寫進 run log → frontend polling 拿到
-            logger.info(f"[{step_name}]   {line}")
+                # 嘗試解析成 JSON dict（最後一行的結構化結果）
+                stripped = line.strip()
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    try:
+                        parsed = json.loads(stripped)
+                        if isinstance(parsed, dict) and ("ok" in parsed or "error" in parsed):
+                            last_json = parsed
+                            # 結果 JSON 不丟 log（會洗版且使用者看不懂）
+                            continue
+                    except json.JSONDecodeError:
+                        pass
+
+                # 進度行：直接 logger.info → 寫進 run log → frontend polling 拿到
+                logger.info(f"[{step_name}]   {line}")
+
+        # 收尾:buffer 還有殘餘(沒以 line sep 結尾的最後一段)
+        if buffer and encoding is not None:
+            try:
+                tail_line = buffer.decode(encoding, errors="replace").rstrip("\r\n")
+                if tail_line:
+                    raw_lines.append(tail_line)
+                    logger.info(f"[{step_name}]   {tail_line}")
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"[{step_name}] 讀取沙盒 stdout 例外：{e}")
         try:
