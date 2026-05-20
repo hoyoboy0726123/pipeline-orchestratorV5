@@ -114,6 +114,32 @@ def translate_shell_paths(cmd_str: str) -> str:
     return _SHELL_DRIVE_RE.sub(_sub, cmd_str)
 
 
+# ── subprocess 輸出解碼:wsl.exe 預設輸出 UTF-16 LE(尤其中文 locale 的錯誤訊息),
+#    一律當 utf-8 讀會跳出「每字夾 □」mojibake。先用 BOM / 奇數位置 null byte 啟發式
+#    判定 UTF-16 LE、否則退 utf-8。
+def _decode_subprocess_output(b: bytes) -> str:
+    if not b:
+        return ""
+    if b.startswith(b"\xff\xfe"):
+        try:
+            return b.decode("utf-16-le", errors="replace").lstrip("﻿")
+        except Exception:
+            pass
+    sample = b[:32]
+    odd_positions = list(range(1, len(sample), 2))
+    if odd_positions:
+        null_count = sum(1 for i in odd_positions if sample[i] == 0)
+        if null_count >= len(odd_positions) * 0.6:
+            try:
+                return b.decode("utf-16-le", errors="replace")
+            except Exception:
+                pass
+    try:
+        return b.decode("utf-8", errors="replace")
+    except Exception:
+        return b.decode("mbcs", errors="replace")
+
+
 # ── wsl 指令呼叫封裝 ───────────────────────────────────────────────
 def _run_wsl(args: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
     """執行 `wsl.exe <args>`，回傳 (returncode, stdout, stderr)。"""
@@ -121,12 +147,10 @@ def _run_wsl(args: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
         proc = subprocess.run(
             ["wsl", *args],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
         )
-        return proc.returncode, (proc.stdout or ""), (proc.stderr or "")
+        # wsl.exe 預設輸出 UTF-16 LE(中文 locale 錯誤訊息尤其),用 _decode_subprocess_output 自動偵測
+        return proc.returncode, _decode_subprocess_output(proc.stdout), _decode_subprocess_output(proc.stderr)
     except FileNotFoundError:
         return -1, "", "wsl.exe not found — Windows 可能沒裝 WSL"
     except subprocess.TimeoutExpired:
@@ -390,9 +414,8 @@ def _run_subprocess_inner(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            # 不指定 text/encoding,以 bytes 接;之後用 _decode_subprocess_output 自動偵測
+            # UTF-16 LE / utf-8(wsl.exe 失敗時 stderr 是 UTF-16 LE、容器內 python 輸出是 utf-8)
         )
         if register_cb and run_id:
             try:
@@ -400,8 +423,12 @@ def _run_subprocess_inner(
             except Exception as e:
                 log.warning(f"[sandbox] register_cb 失敗：{e}")
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            return SandboxResult(stdout=stdout, stderr=stderr, returncode=proc.returncode)
+            stdout_b, stderr_b = proc.communicate(timeout=timeout)
+            return SandboxResult(
+                stdout=_decode_subprocess_output(stdout_b),
+                stderr=_decode_subprocess_output(stderr_b),
+                returncode=proc.returncode,
+            )
         except subprocess.TimeoutExpired:
             try:
                 proc.kill()
