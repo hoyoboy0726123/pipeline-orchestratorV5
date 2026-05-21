@@ -14,11 +14,13 @@
 """
 import os
 
-# paddlepaddle 3.3 + oneDNN 後端在某些 op 還沒實作 (NotImplementedError:
-# ConvertPirAttribute2RuntimeAttribute not support pir::ArrayAttribute<pir::DoubleAttribute>),
-# 關掉 mkldnn / onednn 走標準 CPU executor 跳過這個 bug。
+# paddlepaddle 3.x 引入 PIR (Paddle Intermediate Representation) 新執行器,
+# 跟 oneDNN 組合時某些 attribute 還沒實作 (ConvertPirAttribute2RuntimeAttribute
+# not support pir::ArrayAttribute<pir::DoubleAttribute>)。要關掉的是 PIR、
+# 而不是只關 mkldnn。三條同時設,確保走 legacy executor。
+os.environ["FLAGS_enable_pir_in_executor"] = "0"
+os.environ["FLAGS_enable_pir_api"] = "0"
 os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["FLAGS_use_onednn"] = "0"
 
 import asyncio
 import sys
