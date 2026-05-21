@@ -77,27 +77,52 @@ def run_paddle_ocr(bgr: np.ndarray) -> list[dict]:
         sys.exit(1)
 
     print("\n初始化 PaddleOCR (首次會下載模型、可能等 1-3 分鐘)...")
-    # ch 是繁簡通吃的中文模型;use_angle_cls 對旋轉文字、Start Menu 不需要關掉省時間
-    ocr = PaddleOCR(use_angle_cls=False, lang="ch", show_log=False)
+    # paddleocr 3.x 把舊參數刪掉了,用最小設定:lang="ch" 繁簡通吃
+    ocr = PaddleOCR(lang="ch")
     print("PaddleOCR ready")
 
     print("跑 OCR...")
     t0 = time.time()
-    result = ocr.ocr(bgr, cls=False)
+    # 新版用 .predict(),舊版用 .ocr() — 兩個都試
+    if hasattr(ocr, "predict"):
+        result = ocr.predict(bgr)
+    else:
+        result = ocr.ocr(bgr)
     print(f"PaddleOCR 完成 ({time.time() - t0:.1f}s)")
 
+    # 結果格式新舊不同,做兩種解析嘗試
     items: list[dict] = []
-    if result and result[0]:
-        for line in result[0]:
-            box, (text, conf) = line
-            # box 是 4 點多邊形 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-            xs = [p[0] for p in box]
-            ys = [p[1] for p in box]
-            x = int(min(xs))
-            y = int(min(ys))
-            w = int(max(xs) - x)
-            h = int(max(ys) - y)
-            items.append({"text": text, "x": x, "y": y, "w": w, "h": h, "confidence": conf})
+    try:
+        # 新版 (paddleocr 3.x):result 是 list[dict],每個 dict 有 'rec_texts'、'rec_scores'、'rec_polys'
+        if result and isinstance(result, list) and len(result) > 0:
+            first = result[0]
+            if isinstance(first, dict) and "rec_texts" in first:
+                texts = first.get("rec_texts", [])
+                scores = first.get("rec_scores", [])
+                polys = first.get("rec_polys") or first.get("dt_polys", [])
+                for i, text in enumerate(texts):
+                    conf = float(scores[i]) if i < len(scores) else 0.0
+                    if i < len(polys):
+                        poly = polys[i]
+                        xs = [float(p[0]) for p in poly]
+                        ys = [float(p[1]) for p in poly]
+                        x = int(min(xs)); y = int(min(ys))
+                        w = int(max(xs) - x); h = int(max(ys) - y)
+                    else:
+                        x = y = w = h = 0
+                    items.append({"text": text, "x": x, "y": y, "w": w, "h": h, "confidence": conf})
+            elif isinstance(first, list):
+                # 舊版格式:[[box, (text, conf)], ...]
+                for line in first:
+                    if not line: continue
+                    box, (text, conf) = line[0], line[1]
+                    xs = [p[0] for p in box]; ys = [p[1] for p in box]
+                    x = int(min(xs)); y = int(min(ys))
+                    w = int(max(xs) - x); h = int(max(ys) - y)
+                    items.append({"text": text, "x": x, "y": y, "w": w, "h": h, "confidence": conf})
+    except Exception as e:
+        print(f"[!] 解析 paddle 結果失敗: {e}")
+        print(f"[!] 原始結果類型: {type(result)}, 內容前 500 字: {str(result)[:500]}")
     return items
 
 
