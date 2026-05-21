@@ -135,9 +135,19 @@ def run_paddle_ocr(bgr: np.ndarray) -> list[dict]:
     第一次跑會 lazy download 模型(~250MB)、可能要 1-3 分鐘。"""
     try:
         from paddleocr import PaddleOCR
-    except ImportError:
-        print("\n[X] paddleocr 沒裝。先跑:")
-        print('    & "backend\\.venv\\Scripts\\python.exe" -m pip install paddleocr')
+    except Exception as e:
+        print(f"\n[X] paddleocr import 失敗: {type(e).__name__}")
+        print(f"    錯誤訊息: {e}")
+        print("\n完整 traceback:")
+        import traceback
+        traceback.print_exc()
+        print("\n額外診斷:嘗試 import paddle 看是否 paddle 本體有問題...")
+        try:
+            import paddle
+            print(f"  paddle 可 import,版本: {paddle.__version__}")
+        except Exception as e2:
+            print(f"  paddle import 也失敗: {type(e2).__name__}: {e2}")
+            traceback.print_exc()
         sys.exit(1)
 
     print("\n初始化 PaddleOCR (首次會下載模型、可能等 1-3 分鐘)...")
