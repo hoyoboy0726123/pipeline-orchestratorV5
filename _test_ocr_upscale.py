@@ -48,33 +48,58 @@ def main() -> None:
     h, w = bgr.shape[:2]
     print(f"\n原圖尺寸: {w}x{h}")
 
-    # 2x Lanczos 上採樣
-    print("做 2x Lanczos 上採樣...")
-    upscaled = cv2.resize(bgr, (w * 2, h * 2), interpolation=cv2.INTER_LANCZOS4)
-    print(f"上採樣後尺寸: {upscaled.shape[1]}x{upscaled.shape[0]}")
-    cv2.imwrite("_test_orig.png", bgr)
-    cv2.imwrite("_test_upscaled.png", upscaled)
+    # 4 種 preprocessing 變體
+    variants: dict[str, np.ndarray] = {}
+    variants["原圖"] = bgr
+
+    # 變體 A: 2x Lanczos
+    variants["2x_Lanczos"] = cv2.resize(bgr, (w * 2, h * 2), interpolation=cv2.INTER_LANCZOS4)
+
+    # 變體 B: 2x Cubic (比 Lanczos 平滑、無 ringing 偽影)
+    variants["2x_Cubic"] = cv2.resize(bgr, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+
+    # 變體 C: 2x Cubic + Unsharp Mask 銳化(放大後增強邊緣)
+    cubic = variants["2x_Cubic"]
+    blurred = cv2.GaussianBlur(cubic, (0, 0), sigmaX=1.5)
+    variants["2x_Cubic+Sharp"] = cv2.addWeighted(cubic, 1.6, blurred, -0.6, 0)
+
+    # 變體 D: 灰階 + 2x Cubic + Unsharp Mask(把 Mica 色彩干擾砍掉)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray_2x = cv2.resize(gray, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+    gray_blur = cv2.GaussianBlur(gray_2x, (0, 0), sigmaX=1.5)
+    gray_sharp = cv2.addWeighted(gray_2x, 1.6, gray_blur, -0.6, 0)
+    variants["灰階+2x+Sharp"] = cv2.cvtColor(gray_sharp, cv2.COLOR_GRAY2BGR)
+
+    # 變體 E: 2x Cubic + 強對比拉伸 (對 Mica 半透明特別有效)
+    contrast = cv2.convertScaleAbs(cubic, alpha=1.4, beta=-30)  # alpha 對比、beta 亮度
+    variants["2x_Cubic+Contrast"] = contrast
+
+    for name, img_v in variants.items():
+        if name != "原圖":
+            cv2.imwrite(f"_test_{name}.png", img_v)
+
+    print("\n生成 5 個 variant:", list(variants.keys()))
 
     sys.path.insert(0, str(Path(__file__).parent / "backend"))
     from pipeline.ocr import _recognize
 
-    # Round 1: 原圖
-    print("\n" + "=" * 72)
-    print("Round 1: 原圖 OCR")
-    print("=" * 72)
-    t0 = time.time()
-    words_orig = asyncio.run(_recognize(bgr, "zh-Hant-TW"))
-    t_orig = time.time() - t0
-    print(f"耗時 {t_orig:.2f}s,共讀到 {len(words_orig)} 個 word")
+    # 跑每個 variant 的 OCR
+    results: dict[str, list[dict]] = {}
+    times: dict[str, float] = {}
+    for name, img_v in variants.items():
+        print(f"\n--- OCR variant: {name} ---")
+        t0 = time.time()
+        words = asyncio.run(_recognize(img_v, "zh-Hant-TW"))
+        elapsed = time.time() - t0
+        results[name] = words
+        times[name] = elapsed
+        print(f"耗時 {elapsed:.2f}s, 讀到 {len(words)} 個 word")
 
-    # Round 2: 2x 上採樣
-    print("\n" + "=" * 72)
-    print("Round 2: 2x Lanczos Upscale OCR")
-    print("=" * 72)
-    t0 = time.time()
-    words_2x = asyncio.run(_recognize(upscaled, "zh-Hant-TW"))
-    t_2x = time.time() - t0
-    print(f"耗時 {t_2x:.2f}s,共讀到 {len(words_2x)} 個 word")
+    # 把 variants 也存成 alias 方便後面用
+    words_orig = results["原圖"]
+    words_2x = results["2x_Lanczos"]
+    t_orig = times["原圖"]
+    t_2x = times["2x_Lanczos"]
 
     # 比對
     targets_zh = ["檔案總管", "時鐘", "記事本", "設定", "相片", "小算盤", "小畫家", "剪取工具"]
@@ -87,44 +112,53 @@ def main() -> None:
         """寬鬆:目標的任一字出現在 OCR words 裡(去重)。"""
         return sorted({w["text"] for w in words if w["text"] in t and len(w["text"]) >= 1})
 
-    print("\n" + "=" * 72)
-    print("比對結果(整詞匹配 = OCR 一個 word 內必須含完整目標)")
-    print("=" * 72)
-    print(f"{'目標':<20} {'原圖':<10} {'2x upscale':<10}")
-    print("-" * 72)
-    improved = []
+    # 整詞匹配表 — 5 個 variant 並排
+    print("\n" + "=" * 100)
+    print("整詞匹配(OCR 一個 word 內必須含完整目標)")
+    print("=" * 100)
+    cols = list(results.keys())
+    header = f"{'目標':<18}" + "".join(f"{c:<18}" for c in cols)
+    print(header)
+    print("-" * 100)
+    integer_winners: dict[str, list[str]] = {c: [] for c in cols}
     for t in targets_zh + targets_en:
-        h1 = hits_for(words_orig, t)
-        h2 = hits_for(words_2x, t)
-        s1 = "OK" if h1 else "X"
-        s2 = "OK" if h2 else "X"
-        marker = " ★" if not h1 and h2 else ("" if h1 == h2 else " ~")
-        print(f"  {t:<18} {s1:<8} {s2:<8}{marker}")
-        if not h1 and h2:
-            improved.append(t)
+        row = f"  {t:<16}"
+        for c in cols:
+            h = hits_for(results[c], t)
+            sym = "OK" if h else "X"
+            row += f"{sym:<18}"
+            if h:
+                integer_winners[c].append(t)
+        print(row)
 
-    print("\n" + "=" * 72)
-    print("拆字寬鬆比對(目標的任一字是否出現,看複雜字被吞的情況)")
-    print("=" * 72)
-    print(f"{'目標':<20} {'原圖讀到字':<30} {'2x upscale 讀到字':<30}")
-    print("-" * 72)
+    # 拆字級表
+    print("\n" + "=" * 100)
+    print("拆字級寬鬆匹配(目標各字被哪些 variant 偵測到)")
+    print("=" * 100)
+    print(f"{'目標':<16}" + "".join(f"{c:<18}" for c in cols))
+    print("-" * 100)
     for t in targets_zh:
-        c1 = hits_chars(words_orig, t)
-        c2 = hits_chars(words_2x, t)
-        new = [c for c in c2 if c not in c1]
-        marker = f"  +{'/'.join(new)}" if new else ""
-        print(f"  {t:<18} {''.join(c1):<28} {''.join(c2):<28}{marker}")
+        row = f"  {t:<14}"
+        for c in cols:
+            cs = "".join(hits_chars(results[c], t))
+            row += f"{cs:<18}"
+        print(row)
 
-    print("\n" + "=" * 72)
-    print("結論")
-    print("=" * 72)
-    if improved:
-        print(f"OK 2x upscale 救回 {len(improved)} 個目標: {improved}")
-        print(f"   原圖 OCR {t_orig:.2f}s → 2x upscale {t_2x:.2f}s (慢了 {t_2x/t_orig:.1f}x)")
-        print(f"   建議:V5 OCR 預處理層加入 2x Lanczos upscale")
+    # 結論
+    print("\n" + "=" * 100)
+    print("結論:每個 variant 各救到幾個整詞目標 + OCR 耗時")
+    print("=" * 100)
+    for c in cols:
+        n = len(integer_winners[c])
+        won = integer_winners[c]
+        print(f"  {c:<22}  整詞命中 {n:>2} / 13  耗時 {times[c]:>5.2f}s  目標: {won}")
+
+    best = max(cols, key=lambda c: len(integer_winners[c]))
+    print(f"\n→ 最佳 variant: 【{best}】、命中 {len(integer_winners[best])} 個整詞")
+    if best == "原圖":
+        print("  原圖本身就最好、preprocessing 沒幫助")
     else:
-        print("X 2x upscale 沒救回任何目標 - 純放大不夠、可能還需要 sharpening / contrast")
-        print(f"   原圖讀 {len(words_orig)} 詞、2x 讀 {len(words_2x)} 詞")
+        print(f"  建議:V5 OCR 加入此預處理路徑,代價慢了 {times[best]/times['原圖']:.1f}x")
 
 
 if __name__ == "__main__":
