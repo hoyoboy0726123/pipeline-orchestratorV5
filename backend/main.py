@@ -2356,10 +2356,32 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 
 | 使用者意圖 | 你的動作 |
 |---|---|
-| 「幫我加一步 X」 | get_workflow_yaml → 改好 → save_workflow_yaml(confirm=False) → 文字確認 |
-| 「OK 套用吧」（在你已詢問後）| save_workflow_yaml(confirm=True) |
+| 「幫我加一步 X」(改既有 workflow) | get_workflow_yaml → 改好 → **直接 emit YAML_READY block + 改了哪幾處** → **不**呼叫 save_workflow_yaml(前端會渲染「覆蓋目前」按鈕、使用者點了會直接寫) |
+| 使用者貼了 YAML、說「幫我套上去」 | 同上 — emit YAML_READY、不呼叫 tool |
 | 「跑這個 workflow」 | start_workflow(confirm=False) → 文字確認 → 等同意 → start_workflow(confirm=True) |
-| 「套用後直接跑」 | save(confirm=False) → 確認 → save(confirm=True) → start(confirm=False) → 確認 → start(confirm=True) |
+| 「套用後直接跑」 | emit YAML_READY → 等使用者點「覆蓋目前」→ 收到使用者下一個訊息(例:「OK 跑」)→ start_workflow(confirm=False) → 確認 → start_workflow(confirm=True) |
+
+🔴 **改既有 workflow 時的鐵律(很多 model 在這裡犯錯)**:
+
+**正確流程 — 直接 emit YAML_READY、讓前端按鈕處理寫入**:
+- 改好 YAML 後直接回:
+  ```
+  把第 N 步 X 改成 Y、整體變動:[簡述]
+
+  YAML_READY
+  ```yaml
+  name: ...
+  ...
+  ```
+  ```
+- 前端看到 YAML_READY block 會自動渲染「⚠ 覆蓋目前」按鈕、使用者點下去就會寫入、無需 LLM 再呼叫工具
+- **不要**用 save_workflow_yaml(confirm=False) → 文字確認 → save_workflow_yaml(confirm=True) 那套舊兩步協議(不可靠、LLM 經常忘了第二步、空口宣稱已套用實際沒寫)
+
+**save_workflow_yaml(confirm=True) 何時用** = 唯有「使用者明確說我不要按鈕、直接幫我寫」這種特殊情境。預設**永遠走 YAML_READY emit + 前端按鈕**。
+
+**最高優先級違規**:emit 純文字「✅ 已套用」/「✅ 已寫入」/「✅ 已改好」**但**這個 turn 沒有 (a) emit YAML_READY block 也沒有 (b) save_workflow_yaml(confirm=True) tool call。
+- 這代表你**口頭宣稱寫入但實際沒寫**、使用者畫布沒變、繼續錯下去
+- 修正:檢視自己 turn 內,如果沒 emit YAML_READY 也沒呼 confirm=True、**不要說已套用**;要說「我準備好新 YAML、請看下方紅框按鈕點『覆蓋目前』即可套用」
 
 ## 工具使用原則
 
@@ -3700,6 +3722,35 @@ async def _chat_agent_loop(
     has_yaml = "YAML_READY" in content
     yaml_content = None
     yaml_error = None
+
+    # ── 偵測 LLM 違規:口頭宣稱「已套用 / 已寫入」但實際沒呼叫 save_workflow_yaml(confirm=True)
+    # 也沒 emit YAML_READY block (讓前端按鈕處理寫入)。這個 bug 很常出現:
+    # LLM 預覽完 (confirm=False) 後使用者說 yes、LLM 沒呼叫 confirm=True 就回「已套用」。
+    # 偵測到 → reply 前面附 warning、明確告訴使用者「實際沒寫、請重試」、避免誤以為已套用
+    if not has_yaml:
+        _claim_patterns = ("已套用", "已寫入", "已改好", "套用完成", "改好了", "已經改", "已經套用", "已經寫入", "完成套用")
+        _claimed = any(p in content for p in _claim_patterns)
+        if _claimed:
+            # 掃 lc_messages 看這個 turn 有沒有真的 save_workflow_yaml(confirm=True) tool call
+            _actually_wrote = False
+            for _m in lc_messages:
+                _tcs = getattr(_m, "tool_calls", None) or []
+                for _tc in _tcs:
+                    _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
+                    _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
+                    if _tname in ("save_workflow_yaml", "create_workflow_yaml") and (_targs or {}).get("confirm") is True:
+                        _actually_wrote = True
+                        break
+                if _actually_wrote:
+                    break
+            if not _actually_wrote:
+                _log.warning("[/pipeline/chat] LLM 宣稱已套用但 turn 內沒 confirm=True tool call 也沒 YAML_READY、附 warning prefix")
+                content = (
+                    "⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。"
+                    "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。\n\n"
+                    "(原回覆:)\n" + content
+                )
+
     if has_yaml:
         match = re.search(r"```yaml\n([\s\S]+?)```", content)
         if match:
@@ -3865,6 +3916,31 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
     has_yaml = "YAML_READY" in content
     yaml_content = None
     yaml_error = None
+
+    # 同 _chat_agent_loop 的偵測:口頭宣稱已套用但實際沒寫 → 加 warning
+    if not has_yaml:
+        _claim_patterns = ("已套用", "已寫入", "已改好", "套用完成", "改好了", "已經改", "已經套用", "已經寫入", "完成套用")
+        _claimed = any(p in content for p in _claim_patterns)
+        if _claimed:
+            _actually_wrote = False
+            for _m in lc_messages:
+                _tcs = getattr(_m, "tool_calls", None) or []
+                for _tc in _tcs:
+                    _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
+                    _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
+                    if _tname in ("save_workflow_yaml", "create_workflow_yaml") and (_targs or {}).get("confirm") is True:
+                        _actually_wrote = True
+                        break
+                if _actually_wrote:
+                    break
+            if not _actually_wrote:
+                _log.warning("[/pipeline/chat/stream] LLM 宣稱已套用但實際沒呼叫 confirm=True 也沒 YAML_READY、附 warning prefix")
+                content = (
+                    "⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。"
+                    "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。\n\n"
+                    "(原回覆:)\n" + content
+                )
+
     if has_yaml:
         match = re.search(r"```yaml\n([\s\S]+?)```", content)
         if match:
