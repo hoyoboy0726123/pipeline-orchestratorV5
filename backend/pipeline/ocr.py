@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -138,8 +137,8 @@ def _get_engine(lang_tag: Optional[str] = None):
     return engine
 
 
-async def _recognize_windows(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
-    """跑 Windows.Media.Ocr,回傳 [{text, x, y, w, h, line_text, line_index}]。"""
+async def _recognize(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
+    """對圖片跑 OCR 並攤平成 [{text, x, y, w, h, line_text, line_index}]。"""
     bitmap = await _encode_to_bitmap(img_bgr)
     engine = _get_engine(lang_tag)
     result = await engine.recognize_async(bitmap)
@@ -159,71 +158,6 @@ async def _recognize_windows(img_bgr: np.ndarray, lang_tag: Optional[str] = None
                 "line_index": i,
             })
     return items
-
-
-# ── 引擎 dispatcher ───────────────────────────────────────────────────────
-# 環境變數 OCR_ENGINE = "windows" (default) / "paddle"
-# paddle 對中文整詞識別準確率遠勝 Windows OCR(尤其是 Mica 半透明背景),
-# 但首次 init 30-60s、單次推論也比 Windows OCR 慢 5-10x。
-# Settings 整合先放著,當前用 env var 切換最快驗證。
-_OCR_ENGINE_CHOICE = (os.environ.get("OCR_ENGINE") or "windows").strip().lower()
-
-
-async def _recognize(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
-    """OCR 入口、依 OCR_ENGINE 設定路由到 Windows OCR 或 PaddleOCR。
-    回傳格式統一:[{text, x, y, w, h, line_text, line_index}]。"""
-    if _OCR_ENGINE_CHOICE == "paddle":
-        try:
-            from pipeline.ocr_paddle import recognize_paddle, is_available
-            if is_available():
-                # paddleocr 是同步 API,把它包進 thread executor 避免擋 event loop
-                import asyncio as _asyncio
-                loop = _asyncio.get_event_loop()
-                return await loop.run_in_executor(None, recognize_paddle, img_bgr, lang_tag)
-            log.warning("[ocr] OCR_ENGINE=paddle 但 paddleocr 沒裝、fallback 到 Windows OCR")
-        except Exception as e:
-            log.warning(f"[ocr] paddle engine 載入失敗 ({type(e).__name__}: {e})、fallback 到 Windows OCR")
-    return await _recognize_windows(img_bgr, lang_tag)
-
-
-# ── 簡繁體歸一化 ───────────────────────────────────────────────────────────
-# PaddleOCR 中文模型訓練語料以簡體為主、會把繁體「盤」識別成簡體「盘」。
-# 使用者目標通常是繁體(因為他眼睛看到的 UI 是繁體),直接 == 比對會 miss。
-# 比對前把雙邊都歸一化到簡體再比、最公平。
-#
-# 用 opencc-python-reimplemented(純 Python、~1MB)。沒裝就 fallback 到不歸一化
-# (Windows OCR 路徑不受影響、Paddle 路徑會多一些 char-level miss、但不會掛)。
-_OPENCC_T2S = None
-_OPENCC_LOADED = False
-
-
-def _get_t2s_converter():
-    """lazy 載入 opencc Traditional-to-Simplified 轉換器。"""
-    global _OPENCC_T2S, _OPENCC_LOADED
-    if _OPENCC_LOADED:
-        return _OPENCC_T2S
-    _OPENCC_LOADED = True
-    try:
-        from opencc import OpenCC
-        _OPENCC_T2S = OpenCC("t2s")
-        log.info("[ocr] opencc t2s converter 載入成功、簡繁體歸一化啟用")
-    except Exception as e:
-        log.debug(f"[ocr] opencc 沒裝、簡繁體歸一化 disabled: {e}")
-        _OPENCC_T2S = None
-    return _OPENCC_T2S
-
-
-def _normalize_cjk(s: str) -> str:
-    """把字串歸一化(目前是繁→簡)。沒 opencc 就原樣回傳。"""
-    if not s:
-        return s
-    cc = _get_t2s_converter()
-    if cc is None:
-        return s
-    try:
-        return cc.convert(s)
-    except Exception:
-        return s
 
 
 # ── 文字匹配邏輯 ───────────────────────────────────────────────────────────
@@ -246,37 +180,27 @@ def _find_target_in_words(words: list[dict], target: str) -> Optional[tuple[dict
     if not t:
         return None
 
-    # 簡繁歸一版本(opencc 沒裝就跟原值一樣、不影響原本邏輯)
-    t_norm_cjk = _normalize_cjk(t)
-
-    # 1. 精確匹配(原值 OR 歸一化版本)
+    # 1. 精確匹配
     for w in words:
-        wt = w["text"]
-        if wt == t:
+        if w["text"] == t:
             return w, 1.0
-        if t_norm_cjk != t and _normalize_cjk(wt) == t_norm_cjk:
-            return w, 0.95
 
-    # 2. 目標是 word 的子字串(單向、檢查原值 + 歸一化)
+    # 2. 目標是 word 的子字串（單向）
     for w in words:
         wt = w["text"]
         if wt and t in wt:
             return w, 0.9
-        if wt and t_norm_cjk != t and t_norm_cjk in _normalize_cjk(wt):
-            return w, 0.85
 
-    # 3. 跨詞匹配 — 把一行所有 word 拼起來(去空白)再比對,抓 CJK 被 OCR 拆字
+    # 3. 跨詞匹配 — 把一行所有 word 拼起來（去空白）再比對，可抓到 CJK 被 OCR 拆字
     by_line: dict[int, list[dict]] = {}
     for w in words:
         by_line.setdefault(w["line_index"], []).append(w)
     t_nospace = "".join(t.split())
-    t_nospace_norm = _normalize_cjk(t_nospace) if t_nospace else t_nospace
     for idx, line_words in by_line.items():
+        # 忽略 line.text（可能 CJK 字間有空格），改用 word.text 直接拼接
         joined_nospace = "".join(w["text"] for w in line_words).replace(" ", "")
-        joined_nospace_norm = _normalize_cjk(joined_nospace) if joined_nospace else joined_nospace
-        matched = (t_nospace and t_nospace in joined_nospace) or \
-                  (t_nospace_norm != t_nospace and t_nospace_norm in joined_nospace_norm)
-        if matched:
+        if t_nospace and t_nospace in joined_nospace:
+            # 找出覆蓋目標起始位置的 words（保守：回整行合併 bbox）
             xs = [w["x"] for w in line_words]
             ys = [w["y"] for w in line_words]
             rights = [w["x"] + w["w"] for w in line_words]
@@ -292,16 +216,13 @@ def _find_target_in_words(words: list[dict], target: str) -> Optional[tuple[dict
             }
             return merged, 0.8
 
-    # 4. 模糊(忽略大小寫 + 去空白;單向:target 是 word 的子字、原值 + 歸一化)
+    # 4. 模糊（忽略大小寫 + 去空白；單向：target 是 word 的子字）
     t_norm = "".join(t.split()).lower()
-    t_norm_cjk_lower = _normalize_cjk(t_norm) if t_norm else t_norm
     if t_norm:
         for w in words:
             wn = "".join(w["text"].split()).lower()
             if wn and t_norm in wn:
                 return w, 0.6
-            if wn and t_norm_cjk_lower != t_norm and t_norm_cjk_lower in _normalize_cjk(wn):
-                return w, 0.55
 
     return None
 
