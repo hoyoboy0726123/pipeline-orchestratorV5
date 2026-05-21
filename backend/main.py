@@ -12,6 +12,40 @@ try:
 except Exception:
     pass
 
+# ── DPI awareness（Windows）─────────────────────────────────────
+# 必須在 import mss / pyautogui / ctypes 任何螢幕相關模組之前呼叫,
+# 不然子模組 cache 住 DPI-unaware 的螢幕 metric、改不過來。
+#
+# 為什麼要做：DPI-unaware process 在高 DPI 螢幕上 Windows 會「撒謊」、
+# 回邏輯(虛擬)像素 — 不同 scaling 機台之間邏輯像素不一致、跨機器搬
+# workflow 會整個錯位到左上(C: 150% 邏輯 1280×720、D: 125% 邏輯
+# 1536×864、同一組 (x,y) 在兩台對應的物理位置完全不同)。
+#
+# 設成 PROCESS_PER_MONITOR_DPI_AWARE_V2 = -4 (新 API,Win10 1703+)
+# fallback：PROCESS_PER_MONITOR_DPI_AWARE = 2 (Win 8.1+)
+# fallback：SetProcessDPIAware (Win Vista+)
+#
+# 設定後：mss.grab、pyautogui.click、GetCursorPos 全部用物理座標、
+# 跨機器只要物理螢幕解析度一致就能相容。
+#
+# ⚠ 副作用：舊的(本修復前錄製的)workflow 座標是邏輯像素、修完
+# 在同台機器上也會錯位、必須重錄一次。
+if _sys.platform == "win32":
+    try:
+        import ctypes as _ctypes
+        # 優先用最新 API（per-monitor v2）
+        _DPI_PER_MONITOR_AWARE_V2 = -4
+        _user32 = _ctypes.windll.user32
+        if hasattr(_user32, "SetProcessDpiAwarenessContext"):
+            _user32.SetProcessDpiAwarenessContext(_DPI_PER_MONITOR_AWARE_V2)
+        elif hasattr(_ctypes.windll.shcore, "SetProcessDpiAwareness"):
+            _ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
+        else:
+            _user32.SetProcessDPIAware()
+    except Exception:
+        # 設不到不致命、只是回退到原本 DPI-unaware 行為
+        pass
+
 import asyncio
 import json
 import os
