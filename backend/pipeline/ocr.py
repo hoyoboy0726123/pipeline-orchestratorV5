@@ -1,24 +1,27 @@
 """
-Windows 內建 OCR (Windows.Media.Ocr) 整合。
+OCR 整合 — V5 用 RapidOCR (PaddleOCR 模型 ONNX 版) 為唯一引擎。
 
-computer_use 節點的 click_image 動作若填了 ocr_text，就走這裡：
+computer_use 節點的 click_image 動作若填了 ocr_text、就走這裡:
   1. 在錄製座標附近或整個桌面擷取螢幕
-  2. 跑 Windows OCR 取得 [(文字, bbox)]
+  2. 跑 RapidOCR 取得 [(文字, bbox)]
   3. 找到含目標文字的 bbox → 回傳該 bbox 中心作為點擊座標
 
-WinRT 的 OCR API 本身是 async，對外提供同步 `find_text_on_screen()` 呼叫，
-內部用 asyncio.run() 封裝，讓 computer_use.execute_action（同步）能直接用。
+為什麼用 RapidOCR 而不是 Windows.Media.Ocr:Windows OCR 在 < 150% scaling
+時對複雜中文字(檔/總/盤/畫等多筆畫字)會直接漏字偵測,Mica 半透明背景
+上更糟。RapidOCR 用同款 PaddleOCR 訓練好的模型(ONNX 化),跨任何
+scaling / OS 都穩定整詞識別。依賴只剩 onnxruntime ~50MB + 模型 ~15MB。
 
-設計目標：
-  - 0 外部 binary 依賴（Windows 自帶）
-  - 支援 zh-Hant-TW + en-US（你的系統已安裝）
-  - 跟 find_template 並列：回傳 OcrMatch 結構 ≈ CV 的 MatchResult
+對外 API 維持 async(historical reason — WinRT 那版必須 async,改 RapidOCR
+之後其實同步就好,但保留 async 介面不破壞既有 caller)。
+
+設計目標:
+  - 跨 scaling / 跨 OS 中文整詞穩定識別
+  - 跟 find_template 並列:回傳 OcrMatch 結構 ≈ CV 的 MatchResult
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -27,163 +30,27 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
-# ── OCR engine 選擇 ───────────────────────────────────────────────────────
-# 環境變數 OCR_ENGINE = "windows" (default) / "rapid"
-# - windows: Windows.Media.Ocr,內建零依賴、150%+ scaling 中文 OK,但 125% 以下
-#            Mica 半透明背景複雜中文字會漏字
-# - rapid:   RapidOCR(PaddleOCR 模型 ONNX 化),依賴 ~100MB onnxruntime,
-#            中文整詞識別跨任何 scaling 都穩,慢約 7x(實測 OCR ~1s vs 7s)
-_OCR_ENGINE_CHOICE = (os.environ.get("OCR_ENGINE") or "windows").strip().lower()
-
-
 @dataclass
 class OcrMatch:
-    """OCR 結果，結構對齊 CV 的 MatchResult 以便上層統一處理。"""
+    """OCR 結果,結構對齊 CV 的 MatchResult 以便上層統一處理。"""
     found: bool
     center: tuple[int, int] = (0, 0)            # 絕對桌面座標
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)  # (left, top, width, height) in screen coord
-    text: str = ""                              # 實際 OCR 到的文字（可能含目標的 superset）
-    confidence: float = 0.0                     # 匹配信心：1.0=精確、0.8=包含、0.6=模糊
+    text: str = ""                              # 實際 OCR 到的文字(可能含目標的 superset)
+    confidence: float = 0.0                     # 匹配信心:1.0=精確、0.8=包含、0.6=模糊
     reason: str = ""                            # 失敗時的訊息
-    ocr_words_count: int = 0                    # OCR 總共讀到多少詞（debug 用）
+    ocr_words_count: int = 0                    # OCR 總共讀到多少詞(debug 用)
 
 
-# ── WinRT async 封裝 ─────────────────────────────────────────────────────────
-
-async def _encode_to_bitmap(img_bgr: np.ndarray):
-    """BGR numpy array → WinRT SoftwareBitmap（經由 PNG in-memory stream）"""
-    import cv2
-    from winrt.windows.graphics.imaging import BitmapDecoder
-    from winrt.windows.storage.streams import (
-        InMemoryRandomAccessStream,
-        DataWriter,
-    )
-
-    # Python bytes → WinRT stream
-    ok, buf = cv2.imencode(".png", img_bgr)
-    if not ok:
-        raise RuntimeError("cv2.imencode 失敗")
-    png_bytes = bytes(buf.tobytes())
-
-    stream = InMemoryRandomAccessStream()
-    writer = DataWriter(stream.get_output_stream_at(0))
-    writer.write_bytes(png_bytes)
-    await writer.store_async()
-    await writer.flush_async()
-    writer.detach_stream()
-    stream.seek(0)
-
-    decoder = await BitmapDecoder.create_async(stream)
-    return await decoder.get_software_bitmap_async()
-
-
-def _get_engine(lang_tag: Optional[str] = None):
-    """取得 OcrEngine；優先指定語言、找不到時 fuzzy match 系統已安裝清單、
-    最後 fallback 使用者設定的語言。
-
-    為什麼要 fuzzy:Windows OCR 包用 `zh-TW` / `zh-HK` / `zh-CN` 命名,但
-    很多上層 code(包括 V5 computer_use)習慣 `zh-Hant-TW` / `zh-Hant`
-    這種 BCP-47 完整寫法。`try_create_from_language('zh-Hant-TW')` 在只
-    安裝 `zh-TW` 包的機器會回 None、上層默默 fallback 到 en-US,結果
-    OCR 用英文 engine 讀中文 → 整片中文變成 'MicrosoftEdgeäFfi±E;tÉE'
-    這種錯亂結果。"""
-    from winrt.windows.media.ocr import OcrEngine
-    from winrt.windows.globalization import Language
-
-    engine = None
-    if lang_tag:
-        # 1. 先試完整 tag(維持原行為,Windows 認得就用)
-        try:
-            engine = OcrEngine.try_create_from_language(Language(lang_tag))
-        except Exception as e:
-            log.debug(f"[ocr] try_create_from_language({lang_tag}) 例外:{e}")
-
-        # 2. 找不到 → fuzzy 比對系統 available 清單
-        # 規則:把 tag 拆成 lowercase 後綴比對,例如:
-        #   'zh-Hant-TW' → 嘗試 endswith('-tw') 的 available tag(zh-TW)
-        #   'zh-Hant'    → 嘗試 'zh-Hant' / 'zh-TW' / 'zh-HK'(任何 zh 開頭的繁體)
-        #   'zh-CN'      → 直接命中,跳過
-        if engine is None:
-            try:
-                available = list(OcrEngine.available_recognizer_languages)
-            except Exception:
-                available = []
-            req_lower = lang_tag.lower().replace("_", "-")
-            req_parts = req_lower.split("-")
-            best_match = None
-            # 收集 available 語言的 (tag_lower, original_obj),按相關性排序
-            candidates = []
-            for lang in available:
-                lt = (lang.language_tag or "").lower()
-                if not lt:
-                    continue
-                # 完全相等(理論上前面 try_create 就拿到了、這裡兜底)
-                if lt == req_lower:
-                    candidates.append((100, lang))
-                    continue
-                # 國別後綴相同(zh-Hant-TW vs zh-TW、en-US vs en-US 都中)
-                if len(req_parts) >= 2 and lt.endswith("-" + req_parts[-1]):
-                    candidates.append((90, lang))
-                    continue
-                # 語系前綴相同(zh-Hant 主語系 zh,匹配任何 zh-* 起頭)
-                if lt.startswith(req_parts[0] + "-") or lt == req_parts[0]:
-                    candidates.append((80, lang))
-                    continue
-            if candidates:
-                candidates.sort(key=lambda x: -x[0])
-                best_match = candidates[0][1]
-                try:
-                    engine = OcrEngine.try_create_from_language(best_match)
-                    if engine is not None:
-                        log.info(f"[ocr] 請求 '{lang_tag}' 找不到、fuzzy 命中已裝的 '{best_match.language_tag}'")
-                except Exception as e:
-                    log.debug(f"[ocr] fuzzy create({best_match.language_tag}) 例外:{e}")
-
-    # 3. 完全找不到 → 退使用者設定檔語言
-    if engine is None:
-        engine = OcrEngine.try_create_from_user_profile_languages()
-    if engine is None:
-        raise RuntimeError("無法建立任何 OcrEngine(可能未安裝 OCR 語言包)")
-    return engine
-
-
-async def _recognize_windows(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
-    """跑 Windows.Media.Ocr,回傳 [{text, x, y, w, h, line_text, line_index}]。"""
-    bitmap = await _encode_to_bitmap(img_bgr)
-    engine = _get_engine(lang_tag)
-    result = await engine.recognize_async(bitmap)
-
-    items: list[dict] = []
-    for i, line in enumerate(result.lines):
-        line_text = line.text or ""
-        for word in line.words:
-            r = word.bounding_rect
-            items.append({
-                "text": word.text or "",
-                "x": int(r.x),
-                "y": int(r.y),
-                "w": int(r.width),
-                "h": int(r.height),
-                "line_text": line_text,
-                "line_index": i,
-            })
-    return items
-
+# ── OCR engine 入口 ───────────────────────────────────────────────────────
 
 async def _recognize(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
-    """OCR 入口、依 OCR_ENGINE 設定路由到 Windows OCR 或 RapidOCR。
-    回傳格式統一:[{text, x, y, w, h, line_text, line_index}]。"""
-    if _OCR_ENGINE_CHOICE == "rapid":
-        try:
-            from pipeline.ocr_rapid import recognize_rapid, is_available
-            if is_available():
-                # RapidOCR 是同步 API、丟 thread executor 不擋 event loop
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(None, recognize_rapid, img_bgr, lang_tag)
-            log.warning("[ocr] OCR_ENGINE=rapid 但 rapidocr 沒裝、fallback 到 Windows OCR")
-        except Exception as e:
-            log.warning(f"[ocr] rapid engine 載入失敗 ({type(e).__name__}: {e})、fallback 到 Windows OCR")
-    return await _recognize_windows(img_bgr, lang_tag)
+    """跑 RapidOCR、回傳 [{text, x, y, w, h, line_text, line_index, confidence}]。
+    lang_tag 參數忽略(RapidOCR 中文模型本來就支援繁簡英多語)。
+    RapidOCR 是同步 API,用 run_in_executor 丟 thread 不擋 event loop。"""
+    from pipeline.ocr_rapid import recognize_rapid
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, recognize_rapid, img_bgr, lang_tag)
 
 
 # ── 簡繁歸一化 ───────────────────────────────────────────────────────────
@@ -487,18 +354,26 @@ def find_text_on_screen(
 # ── 啟動自檢 ───────────────────────────────────────────────────────────────
 
 def probe() -> dict:
-    """Backend 啟動時呼叫，檢查 OCR 是否可用。回傳給 UI 當 status。"""
+    """Backend 啟動時呼叫,檢查 OCR 是否可用。回傳給 UI 當 status。
+    只檢查 rapidocr 套件能不能 import,不真的 init 引擎(那會載模型 ~5-10s)。"""
     try:
-        from winrt.windows.media.ocr import OcrEngine
-        langs = list(OcrEngine.available_recognizer_languages)
-        tags = [l.language_tag for l in langs]
+        from pipeline.ocr_rapid import is_available
+        if is_available():
+            return {
+                "available": True,
+                "engine": "RapidOCR",
+                "languages": ["ch (中英文通用)"],
+            }
         return {
-            "available": True,
-            "languages": tags,
+            "available": False,
+            "engine": "RapidOCR",
+            "languages": [],
+            "error": "rapidocr 套件未安裝 — 跑 pip install -r backend/requirements.txt 補裝",
         }
     except Exception as e:
         return {
             "available": False,
+            "engine": "RapidOCR",
             "languages": [],
             "error": f"{type(e).__name__}: {e}",
         }

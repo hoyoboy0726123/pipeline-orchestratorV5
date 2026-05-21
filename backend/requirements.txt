@@ -41,11 +41,12 @@ httpx
 trafilatura
 html2text
 
-# Windows 內建 OCR（computer_use 節點 OCR 比對用；Windows-only，非 Windows 環境會被跳過）
-# 透過 WinRT 存取 Windows.Media.Ocr API — 無須安裝 Tesseract 等外部 binary
-winrt-Windows.Media.Ocr; sys_platform == "win32"
-winrt-Windows.Graphics.Imaging; sys_platform == "win32"
-winrt-Windows.Storage.Streams; sys_platform == "win32"
-winrt-Windows.Globalization; sys_platform == "win32"
-winrt-Windows.Foundation; sys_platform == "win32"
-winrt-Windows.Foundation.Collections; sys_platform == "win32"
+# computer_use 節點 OCR 比對用 — RapidOCR(PaddleOCR 模型轉 ONNX 版)
+# 之前用 Windows.Media.Ocr 在 <150% scaling 對複雜中文(檔/總/盤/畫等)漏字,
+# 在 Mica 半透明背景上更糟。RapidOCR 跨 scaling / 跨 OS 都穩定整詞識別、
+# 依賴只剩 onnxruntime ~50MB + 模型 ~15MB,首次跑會下載模型。
+rapidocr
+onnxruntime
+# 簡繁體歸一化 — RapidOCR 中文模型訓練語料以簡體為主,target 通常是繁體
+# (例如「軟」會被讀成「软」、「畫」讀成「画」),歸一後雙邊都轉簡體再比對
+opencc-python-reimplemented
