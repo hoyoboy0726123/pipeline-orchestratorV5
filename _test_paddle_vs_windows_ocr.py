@@ -12,6 +12,14 @@
 目的:確認 PaddleOCR 是不是真的能讀整詞「時鐘 / 記事本 / Outlook」、
      而不像 Windows OCR 拆成單字或漏字。確認可行才花時間整合進 V5。
 """
+import os
+
+# paddlepaddle 3.3 + oneDNN 後端在某些 op 還沒實作 (NotImplementedError:
+# ConvertPirAttribute2RuntimeAttribute not support pir::ArrayAttribute<pir::DoubleAttribute>),
+# 關掉 mkldnn / onednn 走標準 CPU executor 跳過這個 bug。
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["FLAGS_use_onednn"] = "0"
+
 import asyncio
 import sys
 import time
@@ -60,10 +68,64 @@ def capture_screen() -> np.ndarray:
 
 
 def run_windows_ocr(bgr: np.ndarray) -> list[dict]:
-    """跑 V5 已存在的 Windows.Media.Ocr。回傳 [{text, x, y, w, h}]"""
-    sys.path.insert(0, str(Path(__file__).parent / "backend"))
-    from pipeline.ocr import _recognize
-    return asyncio.run(_recognize(bgr, "zh-Hant-TW"))
+    """跑 Windows.Media.Ocr。回傳 [{text, x, y, w, h}]。
+
+    繞過 V5 backend (pipeline.ocr 會把整串 telegram/runner 都拖進來),
+    直接呼叫底層 winrt API,避免 .venv_paddle 沒裝 V5 backend deps 時 crash。
+    """
+    try:
+        from winrt.windows.media.ocr import OcrEngine
+        from winrt.windows.globalization import Language
+        from winrt.windows.graphics.imaging import BitmapDecoder
+        from winrt.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
+    except ImportError as e:
+        print(f"  [skip] winrt 模組沒裝在這個 venv (預期): {e}")
+        return []
+
+    async def _do():
+        ok, buf = cv2.imencode(".png", bgr)
+        if not ok:
+            return []
+        png_bytes = bytes(buf.tobytes())
+        stream = InMemoryRandomAccessStream()
+        writer = DataWriter(stream.get_output_stream_at(0))
+        writer.write_bytes(png_bytes)
+        await writer.store_async()
+        await writer.flush_async()
+        writer.detach_stream()
+        stream.seek(0)
+        decoder = await BitmapDecoder.create_async(stream)
+        bitmap = await decoder.get_software_bitmap_async()
+
+        # fuzzy match zh-Hant-TW → zh-TW etc.
+        engine = None
+        for tag in ("zh-Hant-TW", "zh-TW", "zh-Hant"):
+            try:
+                engine = OcrEngine.try_create_from_language(Language(tag))
+                if engine:
+                    break
+            except Exception:
+                pass
+        if engine is None:
+            engine = OcrEngine.try_create_from_user_profile_languages()
+        if engine is None:
+            return []
+
+        result = await engine.recognize_async(bitmap)
+        items: list[dict] = []
+        for i, line in enumerate(result.lines):
+            for word in line.words:
+                r = word.bounding_rect
+                items.append({
+                    "text": word.text or "",
+                    "x": int(r.x), "y": int(r.y),
+                    "w": int(r.width), "h": int(r.height),
+                    "line_index": i,
+                    "line_text": line.text or "",
+                })
+        return items
+
+    return asyncio.run(_do())
 
 
 def run_paddle_ocr(bgr: np.ndarray) -> list[dict]:
