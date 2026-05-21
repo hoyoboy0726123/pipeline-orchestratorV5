@@ -68,20 +68,72 @@ async def _encode_to_bitmap(img_bgr: np.ndarray):
 
 
 def _get_engine(lang_tag: Optional[str] = None):
-    """取得 OcrEngine；優先指定語言、找不到就 fallback 到使用者設定的語言清單。"""
+    """取得 OcrEngine；優先指定語言、找不到時 fuzzy match 系統已安裝清單、
+    最後 fallback 使用者設定的語言。
+
+    為什麼要 fuzzy:Windows OCR 包用 `zh-TW` / `zh-HK` / `zh-CN` 命名,但
+    很多上層 code(包括 V5 computer_use)習慣 `zh-Hant-TW` / `zh-Hant`
+    這種 BCP-47 完整寫法。`try_create_from_language('zh-Hant-TW')` 在只
+    安裝 `zh-TW` 包的機器會回 None、上層默默 fallback 到 en-US,結果
+    OCR 用英文 engine 讀中文 → 整片中文變成 'MicrosoftEdgeäFfi±E;tÉE'
+    這種錯亂結果。"""
     from winrt.windows.media.ocr import OcrEngine
     from winrt.windows.globalization import Language
 
     engine = None
     if lang_tag:
+        # 1. 先試完整 tag(維持原行為,Windows 認得就用)
         try:
             engine = OcrEngine.try_create_from_language(Language(lang_tag))
         except Exception as e:
-            log.debug(f"[ocr] try_create_from_language({lang_tag}) 失敗：{e}")
+            log.debug(f"[ocr] try_create_from_language({lang_tag}) 例外:{e}")
+
+        # 2. 找不到 → fuzzy 比對系統 available 清單
+        # 規則:把 tag 拆成 lowercase 後綴比對,例如:
+        #   'zh-Hant-TW' → 嘗試 endswith('-tw') 的 available tag(zh-TW)
+        #   'zh-Hant'    → 嘗試 'zh-Hant' / 'zh-TW' / 'zh-HK'(任何 zh 開頭的繁體)
+        #   'zh-CN'      → 直接命中,跳過
+        if engine is None:
+            try:
+                available = list(OcrEngine.available_recognizer_languages)
+            except Exception:
+                available = []
+            req_lower = lang_tag.lower().replace("_", "-")
+            req_parts = req_lower.split("-")
+            best_match = None
+            # 收集 available 語言的 (tag_lower, original_obj),按相關性排序
+            candidates = []
+            for lang in available:
+                lt = (lang.language_tag or "").lower()
+                if not lt:
+                    continue
+                # 完全相等(理論上前面 try_create 就拿到了、這裡兜底)
+                if lt == req_lower:
+                    candidates.append((100, lang))
+                    continue
+                # 國別後綴相同(zh-Hant-TW vs zh-TW、en-US vs en-US 都中)
+                if len(req_parts) >= 2 and lt.endswith("-" + req_parts[-1]):
+                    candidates.append((90, lang))
+                    continue
+                # 語系前綴相同(zh-Hant 主語系 zh,匹配任何 zh-* 起頭)
+                if lt.startswith(req_parts[0] + "-") or lt == req_parts[0]:
+                    candidates.append((80, lang))
+                    continue
+            if candidates:
+                candidates.sort(key=lambda x: -x[0])
+                best_match = candidates[0][1]
+                try:
+                    engine = OcrEngine.try_create_from_language(best_match)
+                    if engine is not None:
+                        log.info(f"[ocr] 請求 '{lang_tag}' 找不到、fuzzy 命中已裝的 '{best_match.language_tag}'")
+                except Exception as e:
+                    log.debug(f"[ocr] fuzzy create({best_match.language_tag}) 例外:{e}")
+
+    # 3. 完全找不到 → 退使用者設定檔語言
     if engine is None:
         engine = OcrEngine.try_create_from_user_profile_languages()
     if engine is None:
-        raise RuntimeError("無法建立任何 OcrEngine（可能未安裝 OCR 語言包）")
+        raise RuntimeError("無法建立任何 OcrEngine(可能未安裝 OCR 語言包)")
     return engine
 
 
