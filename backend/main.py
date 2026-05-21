@@ -33,15 +33,39 @@ except Exception:
 if _sys.platform == "win32":
     try:
         import ctypes as _ctypes
-        # 優先用最新 API（per-monitor v2）
-        _DPI_PER_MONITOR_AWARE_V2 = -4
-        _user32 = _ctypes.windll.user32
-        if hasattr(_user32, "SetProcessDpiAwarenessContext"):
-            _user32.SetProcessDpiAwarenessContext(_DPI_PER_MONITOR_AWARE_V2)
-        elif hasattr(_ctypes.windll.shcore, "SetProcessDpiAwareness"):
-            _ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
-        else:
-            _user32.SetProcessDPIAware()
+
+        def _try_set_dpi_awareness() -> bool:
+            """嘗試三層 fallback、回傳是否真的設成功(用 GetProcessDpiAwareness 反查)。"""
+            user32 = _ctypes.windll.user32
+            # 1. SetProcessDpiAwarenessContext (Win10 1703+) — 接 HANDLE(指標) 不是 int
+            #    所以一定要走 c_void_p、不然 ctypes 預設 c_int 傳整數會 fail silently
+            if hasattr(user32, "SetProcessDpiAwarenessContext"):
+                user32.SetProcessDpiAwarenessContext.argtypes = [_ctypes.c_void_p]
+                user32.SetProcessDpiAwarenessContext.restype = _ctypes.c_int
+                # -4 = PER_MONITOR_AWARE_V2
+                if user32.SetProcessDpiAwarenessContext(_ctypes.c_void_p(-4)):
+                    return True
+                # -3 = PER_MONITOR_AWARE(舊版 v1)— v2 不支援時退一步
+                if user32.SetProcessDpiAwarenessContext(_ctypes.c_void_p(-3)):
+                    return True
+            # 2. SetProcessDpiAwareness (Win8.1+)
+            try:
+                shcore = _ctypes.windll.shcore
+                if hasattr(shcore, "SetProcessDpiAwareness"):
+                    # 2 = PROCESS_PER_MONITOR_DPI_AWARE。回傳 HRESULT,0 = S_OK
+                    if shcore.SetProcessDpiAwareness(2) == 0:
+                        return True
+            except Exception:
+                pass
+            # 3. SetProcessDPIAware (Win Vista+,system-wide aware,粗糙但聊勝於無)
+            try:
+                if user32.SetProcessDPIAware():
+                    return True
+            except Exception:
+                pass
+            return False
+
+        _try_set_dpi_awareness()
     except Exception:
         # 設不到不致命、只是回退到原本 DPI-unaware 行為
         pass
