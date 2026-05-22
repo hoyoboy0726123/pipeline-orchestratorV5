@@ -71,18 +71,36 @@ def recognize_rapid(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list
     所以 line_text 跟 text 一樣,line_index 用 detection 順序當 index。
     """
     engine = _get_rapid_engine()
-    result = engine(img_bgr)
+
+    # 防呆檢查:確保 image 是 uint8 BGR 3-channel ndarray
+    try:
+        h_img, w_img = img_bgr.shape[:2]
+        channels = img_bgr.shape[2] if len(img_bgr.shape) >= 3 else 1
+        log.info(f"[ocr_rapid] 輸入影像: {w_img}x{h_img} channels={channels} dtype={img_bgr.dtype}")
+    except Exception as e:
+        log.warning(f"[ocr_rapid] 無法讀 image shape: {e}")
+
+    # 新版 RapidOCR 3.x 偏好 .predict(),舊版用 __call__
+    if hasattr(engine, "predict"):
+        result = engine.predict(img_bgr)
+        log.info(f"[ocr_rapid] 用 engine.predict()、result type={type(result).__name__}")
+    else:
+        result = engine(img_bgr)
+        log.info(f"[ocr_rapid] 用 engine(__call__)、result type={type(result).__name__}")
 
     items: list[dict] = []
 
     # RapidOCR 新版 (>= 3.x):RapidOCROutput 物件,有 .boxes / .txts / .scores
     # RapidOCR 舊版 (rapidocr-onnxruntime ~1.x):回 (list[(box, text, score)], info_dict)
     try:
+        parsed_via = "none"
         if hasattr(result, "txts"):
-            # 新版
+            # 新版 RapidOCROutput
+            parsed_via = "new-RapidOCROutput"
             texts = getattr(result, "txts", []) or []
             scores = getattr(result, "scores", []) or []
             boxes = getattr(result, "boxes", []) or []
+            log.info(f"[ocr_rapid] new-format: {len(texts)} texts, {len(scores)} scores, {len(boxes)} boxes")
             for i, text in enumerate(texts):
                 if not text:
                     continue
@@ -103,7 +121,9 @@ def recognize_rapid(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list
                     "confidence": conf,
                 })
         elif isinstance(result, tuple) and len(result) >= 1 and result[0]:
-            # 舊版
+            # 舊版 (rapidocr-onnxruntime): (list, time_info)
+            parsed_via = "old-tuple"
+            log.info(f"[ocr_rapid] old-format: result[0] has {len(result[0])} lines")
             for i, line in enumerate(result[0]):
                 if not line or len(line) < 3:
                     continue
@@ -121,8 +141,40 @@ def recognize_rapid(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list
                     "line_index": i,
                     "confidence": float(conf),
                 })
+        elif isinstance(result, list):
+            # 最新版 paddleocr/rapidocr 可能回 list[dict],dict 含 rec_texts/rec_scores/rec_polys
+            parsed_via = "list-of-dicts"
+            log.info(f"[ocr_rapid] list-format: len={len(result)}")
+            for first in result:
+                if isinstance(first, dict) and "rec_texts" in first:
+                    texts = first.get("rec_texts", []) or []
+                    scores = first.get("rec_scores", []) or []
+                    polys = first.get("rec_polys") or first.get("dt_polys", []) or []
+                    log.info(f"[ocr_rapid] list-item dict: {len(texts)} texts")
+                    for i, text in enumerate(texts):
+                        if not text:
+                            continue
+                        conf = float(scores[i]) if i < len(scores) else 0.0
+                        if i < len(polys):
+                            poly = polys[i]
+                            xs = [float(p[0]) for p in poly]
+                            ys = [float(p[1]) for p in poly]
+                            x, y = int(min(xs)), int(min(ys))
+                            w, h = int(max(xs) - x), int(max(ys) - y)
+                        else:
+                            x = y = w = h = 0
+                        items.append({
+                            "text": text,
+                            "x": x, "y": y, "w": w, "h": h,
+                            "line_text": text,
+                            "line_index": i,
+                            "confidence": conf,
+                        })
+        log.info(f"[ocr_rapid] 解析路徑={parsed_via}、回傳 {len(items)} 個 word")
+        if not items:
+            log.warning(f"[ocr_rapid] 解出 0 個 item。原始 result repr(前 800): {repr(result)[:800]}")
     except Exception as e:
         log.warning(f"[ocr_rapid] 解析 result 結構失敗:{type(e).__name__}: {e}")
-        log.warning(f"[ocr_rapid] 原始 result type={type(result)} 前 500 字:{str(result)[:500]}")
+        log.warning(f"[ocr_rapid] 原始 result type={type(result)} repr 前 800 字:{repr(result)[:800]}")
 
     return items
