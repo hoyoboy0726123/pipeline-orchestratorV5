@@ -703,13 +703,26 @@ def execute_action(
             ocr_text = (action.get("ocr_text") or "").strip()
             ocr_will_run = use_ocr and bool(ocr_text)
 
-            # ── UIA-first 三層 fallback (Phase 0) ─────────────────────────
-            # 錄製時 recorder 在 mouse-down 同時抓 UIA element info、存進 action["ui"]。
-            # 如果有、就先試 UIA — 命中直接 click 中心、不必跑 CV/OCR。
-            # 跳過條件:使用者明確設了 vlm_mode (走 VLM 路徑) — VLM 是顯式 opt-in、尊重使用者。
+            # ── UIA-first 三層 fallback (Phase 0)、僅在「使用者沒顯式選 primary」時跑 ──
+            # 設計理念:UIA 是「給沒設定的使用者用的默認最高命中率方法」,
+            # 一旦使用者顯式打開了 CV / OCR / VLM, 表示他知道自己要什麼、
+            # 就尊重他的選擇、UIA 不要搶在前面。
+            #
+            # 三層 fallback (預設模式) 的順序:
+            #   UIA → CV template → 強制座標
+            # 只要使用者顯式打開任一 primary, UIA 全跳、退原 V5 邏輯。
             ui_info = action.get("ui") if isinstance(action.get("ui"), dict) else None
-            if ui_info and vlm_mode == "off":
-                logger.info(f"[computer_use]   [UIA-first] 偵測到 ui 欄位,嘗試 UIA 定位: name='{ui_info.get('name', '')[:40]}' type='{ui_info.get('control_type', '')}' auto_id='{ui_info.get('automation_id', '')[:30]}'")
+            # use_coord=True 是 V5 預設 (純座標短路);
+            # 使用者按「🔍 圖像比對」toggle 就 use_coord=False = 顯式選 CV
+            user_chose_explicit = (
+                vlm_mode != "off"
+                or use_ocr
+                or action.get("use_coord", True) is False
+            )
+            uia_first_attempted = False  # 標記是否進過 UIA-first phase, 後面要決定要不要走 CV 三層 fallback
+            if ui_info and not user_chose_explicit:
+                logger.info(f"[computer_use]   [UIA-first] 偵測到 ui 欄位 + 使用者未選 primary, 嘗試 UIA 定位: name='{ui_info.get('name', '')[:40]}' type='{ui_info.get('control_type', '')}' auto_id='{ui_info.get('automation_id', '')[:30]}'")
+                uia_first_attempted = True
                 find_click_point = None
                 try:
                     from pipeline.uia_lookup import find_click_point as _fcp
@@ -721,7 +734,7 @@ def execute_action(
                     except Exception as _e2:
                         logger.warning(f"[computer_use]   [UIA-first] 載入 uia_lookup 模組失敗:{type(_e2).__name__}: {_e2} (上游 {type(_e1).__name__}: {_e1})")
                 if find_click_point is None:
-                    logger.info(f"[computer_use]   [UIA-first] uia_lookup 不可用、退到 CV/OCR/座標")
+                    logger.info(f"[computer_use]   [UIA-first] uia_lookup 不可用、退 CV 模板比對 → 強制座標")
                 else:
                     try:
                         point = find_click_point(ui_info, timeout=2.0)
@@ -737,8 +750,14 @@ def execute_action(
                         duration = int((time.time() - t0) * 1000)
                         logger.info(f"[computer_use]   ✓ {msg}(UIA-first、{duration}ms)")
                         return ActionResult(True, index, atype, msg, duration)
-                    # UIA 沒中 — log + fall through 到 CV/OCR/座標 三層 fallback
-                    logger.info(f"[computer_use]   [UIA-first] 沒命中 '{ui_info.get('name', '')[:40]}' → 退到 CV/OCR/座標")
+                    # UIA 沒中 — log + fall through 到 CV 模板比對 (因為 uia_first_attempted=True 強迫走 CV、不短路座標)
+                    logger.info(f"[computer_use]   [UIA-first] 沒命中 '{ui_info.get('name', '')[:40]}' → 退 CV 模板比對 → 強制座標")
+            elif ui_info and user_chose_explicit:
+                # 有 UIA 資訊但使用者顯式選了別的 primary、log 一下尊重原則, 不跑 UIA
+                _chosen = ("VLM" if vlm_mode != "off"
+                           else "OCR" if use_ocr
+                           else "CV 圖像比對")
+                logger.info(f"[computer_use]   [UIA-first] 跳過 — 使用者顯式選了 {_chosen} primary, 尊重使用者")
 
             # ── VLM 模式 1：description → OCR ──
             # bug 修補：之前讀錯欄位（讀紅框 search_region），這個模式既然走 OCR，
@@ -821,7 +840,12 @@ def execute_action(
             # 注意：get 第二引數 True 表示若 action 根本沒 use_coord 欄位，也視為座標模式
             # OCR 有啟用就跳過座標短路，讓 OCR 先試（失敗再依 ocr_cv_fallback 決定退不退）
             # vlm_mode=anchor_pick 要走 CV，必須跳過座標短路
-            if vlm_mode != "anchor_pick" and action.get("use_coord", True) and has_coord and not ocr_will_run:
+            # UIA-first 已嘗試 (uia_first_attempted=True) → 不短路、強制繼續走 CV 模板比對 (UIA 沒中後的三層 fallback Phase 2)
+            if (vlm_mode != "anchor_pick"
+                and action.get("use_coord", True)
+                and has_coord
+                and not ocr_will_run
+                and not uia_first_attempted):
                 _do_click(pg, int(fx), int(fy), button, clicks, hold_sec, modifiers)
                 hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
                 msg = f"[強制座標]{mods_tag} 點擊 ({fx},{fy}) button={button} clicks={clicks}{hold_tag}"
