@@ -205,7 +205,11 @@ export interface ComputerUseAction {
   button?: 'left' | 'right' | 'middle'
   clicks?: number
   description?: string
-  use_coord?: boolean   // 勾起 = 強制用絕對座標，跳過圖像比對
+  // 三層 fallback toggle (UIA / CV / 強制座標), 預設全 True = UIA → CV → 強制座標
+  // 對應 backend ComputerUseAction.{use_uia, use_cv, use_coord}; 細節見 panel 註解
+  use_uia?: boolean     // UIA element 結構定位(預設 True)
+  use_cv?: boolean      // CV 圖像比對(預設 True)
+  use_coord?: boolean   // 強制座標最終 fallback(預設 True、舊欄位、語意改成「最終座標 fallback 啟用」)
   hold_sec?: number     // click 長按時間（>0 時回放走 mouseDown→sleep→mouseUp）
   modifiers?: string[]  // click 時按著的修飾鍵（如 ["ctrl"]、["ctrl","shift"]）
   use_ocr?: boolean     // click_image 顯式 OCR 啟用（勾選才跑 OCR，避免 silent 填字但沒觸發）

@@ -260,14 +260,15 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     saveCustomTemplates(next)
   }
 
-  const toggleUseCoord = (i: number) => {
+  // 三層 fallback (UIA / CV / 座標) 各自獨立 toggle, 預設全 True
+  // 對應 backend ComputerUseAction.{use_uia, use_cv, use_coord}
+  // 全勾 = UIA → CV → 強制座標 (預設); 取消某層改變鏈, 全關 = 該 action 失敗
+  const toggleLayer = (i: number, field: 'use_uia' | 'use_cv' | 'use_coord') => {
     const next = [...(data.actions || [])]
-    const cur = { ...next[i] }
-    // 預設視為 true（座標模式）；toggle 後：true → false（圖像）、false → true（座標）
-    // 三個 primary mode 獨立不互斥：use_ocr 跟 ocr_text 保留著，下次再切回 OCR 勾選
-    // 文字就還在，不用重打
-    const currentlyUsingCoord = cur.use_coord !== false
-    cur.use_coord = !currentlyUsingCoord
+    const cur: any = { ...next[i] }
+    // 預設視為 True (所有欄位都是預設 true)
+    const currentlyOn = cur[field] !== false
+    cur[field] = !currentlyOn
     next[i] = cur
     onUpdate({ actions: next })
   }
@@ -485,29 +486,46 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         {a.type}
                       </span>
                       {a.image && <span className="text-[11px] text-gray-500 truncate">{a.image}</span>}
-                      {/* 圖像比對 toggle。OCR 啟用時不管 use_coord 是 true/false 都顯示為 dimmed
-                          —— primary method 是 OCR，圖像比對是「可選 fallback」by 步驟層級 ocr_cv_fallback 控制 */}
-                      {a.type === 'click_image' && (() => {
-                        const usingCoord = a.use_coord !== false
+                      {/* 三層 fallback toggle (UIA / CV / 強制座標)
+                          預設全勾 = UIA → CV → 強制座標(使用者零學習成本、最高命中率)
+                          OCR 或 VLM 啟用時整組 disabled——那兩個自帶 primary 邏輯、三層不適用
+                          只勾單一 = 嚴格模式(沒中就 fail)、組合 = 自定義 fallback 鏈 */}
+                      {(a.type === 'click_image' || a.type === 'click_at') && (() => {
                         const ocrActive = a.use_ocr === true
-                        return (
-                          <button onClick={() => toggleUseCoord(i)}
-                            disabled={ocrActive}
-                            title={ocrActive
-                              ? 'OCR 啟用中；圖像比對是否作為 OCR 失敗後的 fallback，由步驟層級「OCR 比對設定」的 ocr_cv_fallback 決定'
-                              : (usingCoord
-                                ? '目前用絕對座標點擊（預設、快速）；按一下切到圖像比對（視窗位置會變時用）'
-                                : '目前用圖像比對；按一下切回絕對座標')}
+                        const vlmActive = (a.vlm_mode || 'off') !== 'off'
+                        const explicitPrimary = ocrActive || vlmActive
+                        const useUia = (a as any).use_uia !== false
+                        const useCv = (a as any).use_cv !== false
+                        const useCoord = (a as any).use_coord !== false
+                        const layerBtn = (label: string, field: 'use_uia' | 'use_cv' | 'use_coord', on: boolean, hint: string) => (
+                          <button
+                            key={field}
+                            type="button"
+                            onClick={() => toggleLayer(i, field)}
+                            disabled={explicitPrimary}
+                            title={explicitPrimary
+                              ? `${ocrActive ? 'OCR' : 'VLM'} 啟用中、三層 fallback 不適用`
+                              : hint}
                             className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
-                              ocrActive
+                              explicitPrimary
                                 ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
-                                : (!usingCoord
-                                  ? 'bg-amber-100 border-amber-300 text-amber-800'
-                                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400')
+                                : on
+                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400'
                             }`}
                           >
-                            {ocrActive ? '圖像比對（OCR 接管中）' : (!usingCoord ? '🔍 圖像比對' : '圖像比對')}
+                            <span className="font-mono mr-0.5">{on ? '☑' : '☐'}</span>{label}
                           </button>
+                        )
+                        return (
+                          <>
+                            {layerBtn('🪟 UIA', 'use_uia', useUia,
+                              '啟用 UIA element 結構定位(視窗位置變化最穩、自家程式有 AutomationId 命中率最高)。取消 = 跳過 UIA 直接走下一層')}
+                            {a.type === 'click_image' && layerBtn('🔍 CV', 'use_cv', useCv,
+                              '啟用 CV 圖像比對(用錄製的錨點圖找)。取消 = 跳過 CV、UIA 沒中直接退強制座標')}
+                            {layerBtn('📍 座標', 'use_coord', useCoord,
+                              '啟用強制座標(最終 fallback、直接點錄製的 x/y)。取消 = 前面層失敗就立即 fail、不退座標')}
+                          </>
                         )
                       })()}
                       {/* 手動編輯錨點（click_image/drag 有 full_image 時才顯示） */}
