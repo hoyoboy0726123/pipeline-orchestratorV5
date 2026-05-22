@@ -1,18 +1,22 @@
 """
-Windows 內建 OCR (Windows.Media.Ocr) 整合。
+OCR 整合 — V5 用 RapidOCR (PaddleOCR 模型 ONNX 版) 為唯一引擎。
 
-computer_use 節點的 click_image 動作若填了 ocr_text，就走這裡：
+computer_use 節點的 click_image 動作若填了 ocr_text、就走這裡:
   1. 在錄製座標附近或整個桌面擷取螢幕
-  2. 跑 Windows OCR 取得 [(文字, bbox)]
+  2. 跑 RapidOCR 取得 [(文字, bbox)]
   3. 找到含目標文字的 bbox → 回傳該 bbox 中心作為點擊座標
 
-WinRT 的 OCR API 本身是 async，對外提供同步 `find_text_on_screen()` 呼叫，
-內部用 asyncio.run() 封裝，讓 computer_use.execute_action（同步）能直接用。
+為什麼用 RapidOCR 而不是 Windows.Media.Ocr:Windows OCR 在 < 150% scaling
+時對複雜中文字(檔/總/盤/畫等多筆畫字)會直接漏字偵測,Mica 半透明背景
+上更糟。RapidOCR 用同款 PaddleOCR 訓練好的模型(ONNX 化),跨任何
+scaling / OS 都穩定整詞識別。依賴只剩 onnxruntime ~50MB + 模型 ~15MB。
 
-設計目標：
-  - 0 外部 binary 依賴（Windows 自帶）
-  - 支援 zh-Hant-TW + en-US（你的系統已安裝）
-  - 跟 find_template 並列：回傳 OcrMatch 結構 ≈ CV 的 MatchResult
+對外 API 維持 async(historical reason — WinRT 那版必須 async,改 RapidOCR
+之後其實同步就好,但保留 async 介面不破壞既有 caller)。
+
+設計目標:
+  - 跨 scaling / 跨 OS 中文整詞穩定識別
+  - 跟 find_template 並列:回傳 OcrMatch 結構 ≈ CV 的 MatchResult
 """
 from __future__ import annotations
 
@@ -28,84 +32,65 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class OcrMatch:
-    """OCR 結果，結構對齊 CV 的 MatchResult 以便上層統一處理。"""
+    """OCR 結果,結構對齊 CV 的 MatchResult 以便上層統一處理。"""
     found: bool
     center: tuple[int, int] = (0, 0)            # 絕對桌面座標
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)  # (left, top, width, height) in screen coord
-    text: str = ""                              # 實際 OCR 到的文字（可能含目標的 superset）
-    confidence: float = 0.0                     # 匹配信心：1.0=精確、0.8=包含、0.6=模糊
+    text: str = ""                              # 實際 OCR 到的文字(可能含目標的 superset)
+    confidence: float = 0.0                     # 匹配信心:1.0=精確、0.8=包含、0.6=模糊
     reason: str = ""                            # 失敗時的訊息
-    ocr_words_count: int = 0                    # OCR 總共讀到多少詞（debug 用）
+    ocr_words_count: int = 0                    # OCR 總共讀到多少詞(debug 用)
 
 
-# ── WinRT async 封裝 ─────────────────────────────────────────────────────────
-
-async def _encode_to_bitmap(img_bgr: np.ndarray):
-    """BGR numpy array → WinRT SoftwareBitmap（經由 PNG in-memory stream）"""
-    import cv2
-    from winrt.windows.graphics.imaging import BitmapDecoder
-    from winrt.windows.storage.streams import (
-        InMemoryRandomAccessStream,
-        DataWriter,
-    )
-
-    # Python bytes → WinRT stream
-    ok, buf = cv2.imencode(".png", img_bgr)
-    if not ok:
-        raise RuntimeError("cv2.imencode 失敗")
-    png_bytes = bytes(buf.tobytes())
-
-    stream = InMemoryRandomAccessStream()
-    writer = DataWriter(stream.get_output_stream_at(0))
-    writer.write_bytes(png_bytes)
-    await writer.store_async()
-    await writer.flush_async()
-    writer.detach_stream()
-    stream.seek(0)
-
-    decoder = await BitmapDecoder.create_async(stream)
-    return await decoder.get_software_bitmap_async()
-
-
-def _get_engine(lang_tag: Optional[str] = None):
-    """取得 OcrEngine；優先指定語言、找不到就 fallback 到使用者設定的語言清單。"""
-    from winrt.windows.media.ocr import OcrEngine
-    from winrt.windows.globalization import Language
-
-    engine = None
-    if lang_tag:
-        try:
-            engine = OcrEngine.try_create_from_language(Language(lang_tag))
-        except Exception as e:
-            log.debug(f"[ocr] try_create_from_language({lang_tag}) 失敗：{e}")
-    if engine is None:
-        engine = OcrEngine.try_create_from_user_profile_languages()
-    if engine is None:
-        raise RuntimeError("無法建立任何 OcrEngine（可能未安裝 OCR 語言包）")
-    return engine
-
+# ── OCR engine 入口 ───────────────────────────────────────────────────────
 
 async def _recognize(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
-    """對圖片跑 OCR 並攤平成 [{text, x, y, w, h, line_text, line_index}]。"""
-    bitmap = await _encode_to_bitmap(img_bgr)
-    engine = _get_engine(lang_tag)
-    result = await engine.recognize_async(bitmap)
+    """跑 RapidOCR、回傳 [{text, x, y, w, h, line_text, line_index, confidence}]。
+    lang_tag 參數忽略(RapidOCR 中文模型本來就支援繁簡英多語)。
+    RapidOCR 是同步 API,用 run_in_executor 丟 thread 不擋 event loop。"""
+    from pipeline.ocr_rapid import recognize_rapid
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, recognize_rapid, img_bgr, lang_tag)
 
-    items: list[dict] = []
-    for i, line in enumerate(result.lines):
-        line_text = line.text or ""
-        for word in line.words:
-            r = word.bounding_rect
-            items.append({
-                "text": word.text or "",
-                "x": int(r.x),
-                "y": int(r.y),
-                "w": int(r.width),
-                "h": int(r.height),
-                "line_text": line_text,
-                "line_index": i,
-            })
-    return items
+
+# ── 簡繁歸一化 ───────────────────────────────────────────────────────────
+# RapidOCR / PaddleOCR 中文模型訓練語料以簡體為主、會把繁體「軟」識別成
+# 「软」、「畫」識別成「画」等。使用者目標通常是繁體(因為他眼睛看到的
+# UI 是繁體),直接 == 比對會 miss。比對前把雙邊都歸一化到簡體再比、最公平。
+#
+# 用 opencc-python-reimplemented(純 Python、~1MB)。沒裝就 fallback 到不歸一
+# 化(Windows OCR 路徑不受影響、Rapid 路徑會多一些 char-level miss,但不會掛)。
+_OPENCC_T2S = None
+_OPENCC_LOADED = False
+
+
+def _get_t2s_converter():
+    """lazy 載入 opencc Traditional-to-Simplified 轉換器。"""
+    global _OPENCC_T2S, _OPENCC_LOADED
+    if _OPENCC_LOADED:
+        return _OPENCC_T2S
+    _OPENCC_LOADED = True
+    try:
+        from opencc import OpenCC
+        _OPENCC_T2S = OpenCC("t2s")
+        log.info("[ocr] opencc t2s converter 載入成功、簡繁歸一化啟用")
+    except Exception as e:
+        log.debug(f"[ocr] opencc 沒裝、簡繁歸一化 disabled: {e}")
+        _OPENCC_T2S = None
+    return _OPENCC_T2S
+
+
+def _normalize_cjk(s: str) -> str:
+    """把字串歸一化(目前是繁→簡)。沒 opencc 就原樣回傳。"""
+    if not s:
+        return s
+    cc = _get_t2s_converter()
+    if cc is None:
+        return s
+    try:
+        return cc.convert(s)
+    except Exception:
+        return s
 
 
 # ── 文字匹配邏輯 ───────────────────────────────────────────────────────────
@@ -128,27 +113,37 @@ def _find_target_in_words(words: list[dict], target: str) -> Optional[tuple[dict
     if not t:
         return None
 
-    # 1. 精確匹配
-    for w in words:
-        if w["text"] == t:
-            return w, 1.0
+    # 簡繁歸一版本(opencc 沒裝就跟原值一樣、不影響原本邏輯)
+    t_norm_cjk = _normalize_cjk(t)
 
-    # 2. 目標是 word 的子字串（單向）
+    # 1. 精確匹配(原值 OR 歸一化版本)
+    for w in words:
+        wt = w["text"]
+        if wt == t:
+            return w, 1.0
+        if t_norm_cjk != t and _normalize_cjk(wt) == t_norm_cjk:
+            return w, 0.95
+
+    # 2. 目標是 word 的子字串(單向、檢查原值 + 歸一化)
     for w in words:
         wt = w["text"]
         if wt and t in wt:
             return w, 0.9
+        if wt and t_norm_cjk != t and t_norm_cjk in _normalize_cjk(wt):
+            return w, 0.85
 
-    # 3. 跨詞匹配 — 把一行所有 word 拼起來（去空白）再比對，可抓到 CJK 被 OCR 拆字
+    # 3. 跨詞匹配 — 把一行所有 word 拼起來(去空白)再比對,抓 CJK 被 OCR 拆字
     by_line: dict[int, list[dict]] = {}
     for w in words:
         by_line.setdefault(w["line_index"], []).append(w)
     t_nospace = "".join(t.split())
+    t_nospace_norm = _normalize_cjk(t_nospace) if t_nospace else t_nospace
     for idx, line_words in by_line.items():
-        # 忽略 line.text（可能 CJK 字間有空格），改用 word.text 直接拼接
         joined_nospace = "".join(w["text"] for w in line_words).replace(" ", "")
-        if t_nospace and t_nospace in joined_nospace:
-            # 找出覆蓋目標起始位置的 words（保守：回整行合併 bbox）
+        joined_nospace_norm = _normalize_cjk(joined_nospace) if joined_nospace else joined_nospace
+        matched = (t_nospace and t_nospace in joined_nospace) or \
+                  (t_nospace_norm != t_nospace and t_nospace_norm in joined_nospace_norm)
+        if matched:
             xs = [w["x"] for w in line_words]
             ys = [w["y"] for w in line_words]
             rights = [w["x"] + w["w"] for w in line_words]
@@ -164,13 +159,16 @@ def _find_target_in_words(words: list[dict], target: str) -> Optional[tuple[dict
             }
             return merged, 0.8
 
-    # 4. 模糊（忽略大小寫 + 去空白；單向：target 是 word 的子字）
+    # 4. 模糊(忽略大小寫 + 去空白;單向:target 是 word 的子字、原值 + 歸一化)
     t_norm = "".join(t.split()).lower()
+    t_norm_cjk_lower = _normalize_cjk(t_norm) if t_norm else t_norm
     if t_norm:
         for w in words:
             wn = "".join(w["text"].split()).lower()
             if wn and t_norm in wn:
                 return w, 0.6
+            if wn and t_norm_cjk_lower != t_norm and t_norm_cjk_lower in _normalize_cjk(wn):
+                return w, 0.55
 
     return None
 
@@ -356,18 +354,26 @@ def find_text_on_screen(
 # ── 啟動自檢 ───────────────────────────────────────────────────────────────
 
 def probe() -> dict:
-    """Backend 啟動時呼叫，檢查 OCR 是否可用。回傳給 UI 當 status。"""
+    """Backend 啟動時呼叫,檢查 OCR 是否可用。回傳給 UI 當 status。
+    只檢查 rapidocr 套件能不能 import,不真的 init 引擎(那會載模型 ~5-10s)。"""
     try:
-        from winrt.windows.media.ocr import OcrEngine
-        langs = list(OcrEngine.available_recognizer_languages)
-        tags = [l.language_tag for l in langs]
+        from pipeline.ocr_rapid import is_available
+        if is_available():
+            return {
+                "available": True,
+                "engine": "RapidOCR",
+                "languages": ["ch (中英文通用)"],
+            }
         return {
-            "available": True,
-            "languages": tags,
+            "available": False,
+            "engine": "RapidOCR",
+            "languages": [],
+            "error": "rapidocr 套件未安裝 — 跑 pip install -r backend/requirements.txt 補裝",
         }
     except Exception as e:
         return {
             "available": False,
+            "engine": "RapidOCR",
             "languages": [],
             "error": f"{type(e).__name__}: {e}",
         }

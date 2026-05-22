@@ -114,30 +114,45 @@ def translate_shell_paths(cmd_str: str) -> str:
     return _SHELL_DRIVE_RE.sub(_sub, cmd_str)
 
 
-# ── subprocess 輸出解碼:wsl.exe 預設輸出 UTF-16 LE(尤其中文 locale 的錯誤訊息),
-#    一律當 utf-8 讀會跳出「每字夾 □」mojibake。先用 BOM / 奇數位置 null byte 啟發式
-#    判定 UTF-16 LE、否則退 utf-8。
+# ── subprocess 輸出解碼:Windows wsl.exe / 其他內建工具,不同情境輸出不同編碼:
+#    - 對 terminal 輸出 UTF-16 LE
+#    - 對 pipe 輸出 系統本地碼頁 mbcs(中文 Windows = CP950 / Big5)
+#    一律當 utf-8 讀會跳「每字夾 □」或「字被 ? 替換」的 mojibake。
+#    依序試:UTF-16 LE(BOM 或 sample 含 >5% \x00 byte)→ utf-8 → mbcs。
+#    utf-8 解出來 U+FFFD 比例過高 → 改用 mbcs 結果。
 def _decode_subprocess_output(b: bytes) -> str:
     if not b:
         return ""
+    # 1. UTF-16 LE 偵測:BOM
     if b.startswith(b"\xff\xfe"):
         try:
             return b.decode("utf-16-le", errors="replace").lstrip("﻿")
         except Exception:
             pass
-    sample = b[:32]
-    odd_positions = list(range(1, len(sample), 2))
-    if odd_positions:
-        null_count = sum(1 for i in odd_positions if sample[i] == 0)
-        if null_count >= len(odd_positions) * 0.6:
+    # 2. UTF-16 LE 偵測:sample 含 >5% \x00 byte
+    #    (utf-8 文字輸出基本沒 null byte;UTF-16 LE 只要混到 ASCII 字元必然產生 null)
+    sample = b[:64]
+    null_in_sample = sum(1 for byte in sample if byte == 0)
+    if null_in_sample >= max(1, len(sample) * 0.05):
+        try:
+            return b.decode("utf-16-le", errors="replace")
+        except Exception:
+            pass
+    # 3. utf-8;若解出來 U+FFFD 比例 >5%(代表大量 byte 無效)→ 改用 mbcs(系統本地碼頁)
+    try:
+        utf8_decoded = b.decode("utf-8", errors="replace")
+        repl_ratio = utf8_decoded.count("�") / max(len(utf8_decoded), 1)
+        if repl_ratio > 0.05:
             try:
-                return b.decode("utf-16-le", errors="replace")
+                return b.decode("mbcs", errors="replace")
             except Exception:
                 pass
-    try:
-        return b.decode("utf-8", errors="replace")
+        return utf8_decoded
     except Exception:
-        return b.decode("mbcs", errors="replace")
+        try:
+            return b.decode("mbcs", errors="replace")
+        except Exception:
+            return repr(b)
 
 
 # ── wsl 指令呼叫封裝 ───────────────────────────────────────────────
@@ -191,6 +206,25 @@ def _invalidate_docker_prefix_cache() -> None:
 
 
 # ── 狀態檢查 ───────────────────────────────────────────────────────
+# 上次成功在容器跑完 docker exec 的時間戳。剛剛成功跑過 = 沙盒鐵定還活著,
+# ensure_running 短路跳過慢探測。WSL VM 在連續呼叫之間偶有冷啟動延遲、
+# wsl --status 超過 10s timeout、check_status 整套要 20s+ 才回 unhealthy、
+# 連續 skill 步驟全部誤 fallback 到 host(明明沙盒 ON、log 卻一直在 host 跑)。
+_LAST_HEALTHY_EXEC_TS: float = 0.0
+# 60s:給足下一個 skill 工具呼叫間隔。LLM 步驟通常 30-90s,設 60s 不會卡到
+# 真的需要重探的情境(容器中途被砍/WSL shutdown),但能擋連續呼叫的雜訊。
+_RECENT_EXEC_TTL: float = 60.0
+
+
+def _mark_sandbox_healthy() -> None:
+    """成功跑完一次 docker exec 後喊一聲、把短路 cache 更新。
+    讓下一個 skill 工具呼叫不用再花 ~20s 重做慢探測。
+    『成功』定義:subprocess 有完整跑完(timeout 不算)— 即使 Python 在容器內
+    raise Exception、返回 non-zero rc,也代表容器是通的、沙盒鐵定還活著。"""
+    global _LAST_HEALTHY_EXEC_TS
+    _LAST_HEALTHY_EXEC_TS = time.time()
+
+
 _STATUS_CACHE: dict = {"ts": 0.0, "data": None}
 # 分別 TTL：
 #   健康 → cache 久一點（30s），因為剛確認好幾秒內不用重查，避免每個 skill tool 都多跑 ~1s WSL probe
@@ -306,6 +340,11 @@ def ensure_running() -> tuple[bool, str]:
     先用 cache（健康 30s 內免重查）→ 不 healthy 才強制 refresh → 還是不行的話
     對瞬時失敗（例如 WSL 冷啟動 timeout）再重試一次，避免單次慢就誤判 fallback。
     """
+    # 短路:剛剛成功跑過 docker exec → 沙盒鐵定還活著、跳過全套慢探測
+    # 這是擋「wsl --status 偶發冷啟動延遲拖到 20s+ 害連續 skill 步驟都誤 fallback」的關鍵防線
+    if time.time() - _LAST_HEALTHY_EXEC_TS < _RECENT_EXEC_TTL:
+        return True, ""
+
     status = check_status(force_refresh=False)
     if status["ready"]:
         return True, ""
@@ -424,6 +463,9 @@ def _run_subprocess_inner(
                 log.warning(f"[sandbox] register_cb 失敗：{e}")
         try:
             stdout_b, stderr_b = proc.communicate(timeout=timeout)
+            # subprocess 跑完整(沒 timeout)= 沙盒鐵定通,更新短路 cache
+            # 即使 returncode != 0(Python 在容器內 raise Exception)也算通
+            _mark_sandbox_healthy()
             return SandboxResult(
                 stdout=_decode_subprocess_output(stdout_b),
                 stderr=_decode_subprocess_output(stderr_b),

@@ -33,6 +33,9 @@ pipelines/
 # Sandbox LLM 暫存程式碼（V3）
 sandbox/_tmp/
 
+# Sandbox installer 互動旗標檔(setup.sh 寫、setup_sandbox.bat 讀完即刪)
+sandbox/.needs_wsl_shutdown
+
 # Claude Code local settings
 .claude/
 CLAUDE.md
@@ -49,6 +52,11 @@ test-workflows/*.xlsx
 
 # Throwaway test fixtures (curl POST payloads)
 _test_*.json
+# Throwaway debug scripts at repo root (OCR diagnostics, capture tests etc.)
+_test_*.py
+_test_*.png
+_dev_*.py
+_dev_*.png
 # VLM verifier test image outputs (regenerated each run)
 backend/_test_cu_vlm_images/
 backend/_test_cu_int_assets/

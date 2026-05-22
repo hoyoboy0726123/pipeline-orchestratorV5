@@ -36,6 +36,24 @@ Windows host
 2. 如果提示沒 WSL，按提示在管理員 PowerShell 執行 `wsl --install` 並重啟，然後再跑一次 `setup_sandbox.bat`
 3. 完成後可看到 `✓ 沙盒就緒！`
 
+## 預設 skill
+
+`setup_sandbox.bat` 安裝時會把 `default_skills/` 底下的兩個 V5 專屬 skill 複製到
+`C:\Users\<你>\.agents\skills\`（已存在的不覆蓋）：
+
+| Skill | 功能 |
+|---|---|
+| `scraped-content-parser` | 爬蟲節點抓回來的留言/評論/商品列表等重複性內容結構化成 JSON |
+| `python-cli-extractor`   | 把使用者既有的 Python GUI/Streamlit/Flask 專案無破壞性接進 V5 pipeline |
+
+**Office 三件套（docx / pptx / xlsx）不附 — 是 Anthropic 官方專有授權、禁止 redistribute**。
+要用 docx / pptx 自己從 Claude Code 安裝：
+```
+# 透過 Claude Code 的 skill marketplace 或官方 plugin 安裝
+# https://docs.claude.com/en/docs/agents-and-tools/agent-skills
+```
+裝到 `C:\Users\<你>\.agents\skills\docx\` 跟 `.\pptx\` 即可被本系統使用。
+
 ## 升級已安裝的沙盒（改了 Dockerfile / requirements.txt 之後）
 
 預設重跑 `setup_sandbox.bat` **不會** rebuild（偵測到 image 存在就跳過，避免每次啟動都等 10 分鐘）。

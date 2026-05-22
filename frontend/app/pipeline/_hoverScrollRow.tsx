@@ -1,57 +1,61 @@
 'use client'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 /**
- * 一條水平 toolbar:子元素保持原本寬度,當總寬超過容器時,
- * 兩端會浮出半透明的 ‹ / › 提示;**滑鼠停在那個提示區**就會
- * 連續往那個方向捲動(rAF + transform、無壓縮按鈕)。
- *
- * 用途:canvas 左上角新增節點的按鈕列 —— 小螢幕時按鈕會超出視野,
- * 不想壓縮按鈕,改成 hover 邊緣自動捲動。
+ * 一條水平 toolbar:子元素保持原寬度(w-max、不壓縮)。
+ * 容器寬度動態量「從容器左邊到視窗右邊的可用空間」、超過就 overflow:hidden 裁掉。
+ * 被裁的方向會浮出明顯的圓形 chevron 按鈕:
+ *   - 滑鼠停在按鈕上 → 連續往那方向滾(rAF)
+ *   - 點按鈕 → 跳一步(~180px、200ms 過渡)
  */
 export default function HoverScrollRow({
   children,
   className = '',
   speed = 5,
-  edgeWidth = 56,
 }: {
   children: React.ReactNode
   className?: string
-  speed?: number       // 每幀像素數
-  edgeWidth?: number   // 兩端 hover 觸發區寬度
+  speed?: number  // 每幀像素
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const trackRef = useRef<HTMLDivElement>(null)
-  const scrollXRef = useRef(0)            // 真正的位置(以 ref 為主、避免每幀 setState)
+  const scrollXRef = useRef(0)
   const maxOverflowRef = useRef(0)
   const hoverDirRef = useRef<'left' | 'right' | null>(null)
   const rafRef = useRef<number | null>(null)
-  // 只用兩個 boolean state 給「箭頭要不要顯示」用,避免每幀重 render
   const [canLeft, setCanLeft] = useState(false)
   const [canRight, setCanRight] = useState(false)
 
-  // 量內外寬、決定可滾範圍;同時 re-clamp scrollX
-  useEffect(() => {
-    const measure = () => {
-      const inner = trackRef.current?.scrollWidth ?? 0
-      const outer = containerRef.current?.clientWidth ?? 0
-      const overflow = Math.max(0, inner - outer)
-      maxOverflowRef.current = overflow
-      // 視窗變窄、原本的 scrollX 超出新範圍 → 夾回去
-      if (scrollXRef.current < -overflow) {
-        scrollXRef.current = -overflow
-        if (trackRef.current) trackRef.current.style.transform = `translateX(${-overflow}px)`
-      }
-      setCanLeft(scrollXRef.current < 0)
-      setCanRight(scrollXRef.current > -overflow)
+  const measure = useCallback(() => {
+    const c = containerRef.current
+    const t = trackRef.current
+    if (!c || !t) return
+    // 動態算容器最大寬度:從容器自己的左邊到視窗右邊扣 1rem 邊距
+    const rect = c.getBoundingClientRect()
+    const available = Math.max(200, Math.floor(window.innerWidth - rect.left - 16))
+    c.style.maxWidth = `${available}px`
+    // 量 overflow
+    const inner = t.scrollWidth
+    const outer = c.clientWidth
+    const overflow = Math.max(0, inner - outer)
+    maxOverflowRef.current = overflow
+    if (scrollXRef.current < -overflow) {
+      scrollXRef.current = -overflow
+      t.style.transform = `translateX(${-overflow}px)`
     }
+    setCanLeft(scrollXRef.current < 0)
+    setCanRight(scrollXRef.current > -overflow)
+  }, [])
+
+  useEffect(() => {
     measure()
     const ro = new ResizeObserver(measure)
     if (containerRef.current) ro.observe(containerRef.current)
     if (trackRef.current) ro.observe(trackRef.current)
     window.addEventListener('resize', measure)
     return () => { ro.disconnect(); window.removeEventListener('resize', measure) }
-  }, [children])
+  }, [measure])
 
   const startHover = (dir: 'left' | 'right') => {
     hoverDirRef.current = dir
@@ -67,11 +71,10 @@ export default function HoverScrollRow({
       if (next !== cur) {
         scrollXRef.current = next
         if (trackRef.current) trackRef.current.style.transform = `translateX(${next}px)`
-        // 只在「箭頭要不要顯示」變了才 setState、避免每幀 re-render
         const newLeft = next < 0
         const newRight = next > -max
-        if (newLeft !== canLeft) setCanLeft(newLeft)
-        if (newRight !== canRight) setCanRight(newRight)
+        setCanLeft(prev => prev === newLeft ? prev : newLeft)
+        setCanRight(prev => prev === newRight ? prev : newRight)
       }
       rafRef.current = requestAnimationFrame(tick)
     }
@@ -79,15 +82,27 @@ export default function HoverScrollRow({
   }
   const stopHover = () => { hoverDirRef.current = null }
 
-  // 元件卸載清掉 rAF
+  const jumpStep = (dir: 'left' | 'right') => {
+    const STEP = 180
+    const cur = scrollXRef.current
+    const max = maxOverflowRef.current
+    const next = dir === 'right' ? Math.max(-max, cur - STEP) : Math.min(0, cur + STEP)
+    scrollXRef.current = next
+    const t = trackRef.current
+    if (t) {
+      t.style.transition = 'transform 200ms ease'
+      t.style.transform = `translateX(${next}px)`
+      setTimeout(() => { if (t) t.style.transition = 'none' }, 220)
+    }
+    setCanLeft(next < 0)
+    setCanRight(next > -max)
+  }
+
+  // 卸載清掉 rAF
   useEffect(() => () => { if (rafRef.current != null) cancelAnimationFrame(rafRef.current) }, [])
 
   return (
-    <div
-      ref={containerRef}
-      className={`relative overflow-hidden ${className}`}
-      style={{ maxWidth: 'calc(100vw - 4rem)' }}
-    >
+    <div ref={containerRef} className={`relative overflow-hidden ${className}`}>
       <div
         ref={trackRef}
         className="flex gap-2 w-max"
@@ -96,34 +111,44 @@ export default function HoverScrollRow({
         {children}
       </div>
 
-      {/* 左側 hover 區(可滾左才顯示)*/}
+      {/* 左側裝飾漸層(pointer-events: none、不擋按鈕點擊)*/}
       {canLeft && (
         <div
+          className="absolute left-0 top-0 bottom-0 pointer-events-none"
+          style={{ width: 56, background: 'linear-gradient(to right, rgba(255,255,255,0.92) 35%, rgba(255,255,255,0))' }}
+        />
+      )}
+      {/* 左側按鈕:停=連續滾、點=跳一步 */}
+      {canLeft && (
+        <button
           onMouseEnter={() => startHover('left')}
           onMouseLeave={stopHover}
-          className="absolute left-0 top-0 bottom-0 flex items-center justify-start pl-1.5 cursor-w-resize select-none"
-          style={{
-            width: edgeWidth,
-            background: 'linear-gradient(to right, rgba(255,255,255,0.95) 30%, rgba(255,255,255,0))',
-          }}
+          onClick={() => jumpStep('left')}
+          title="拖回左邊(停在這裡會自動滾)"
+          className="absolute left-1 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-white border border-gray-300 shadow-md flex items-center justify-center text-gray-600 hover:text-blue-600 hover:border-blue-300 transition-colors z-10"
         >
-          <span className="text-gray-500 text-xl font-semibold leading-none">‹</span>
-        </div>
+          <ChevronLeft className="w-4 h-4" />
+        </button>
       )}
 
-      {/* 右側 hover 區(可滾右才顯示)*/}
+      {/* 右側裝飾漸層 */}
       {canRight && (
         <div
+          className="absolute right-0 top-0 bottom-0 pointer-events-none"
+          style={{ width: 56, background: 'linear-gradient(to left, rgba(255,255,255,0.92) 35%, rgba(255,255,255,0))' }}
+        />
+      )}
+      {/* 右側按鈕 */}
+      {canRight && (
+        <button
           onMouseEnter={() => startHover('right')}
           onMouseLeave={stopHover}
-          className="absolute right-0 top-0 bottom-0 flex items-center justify-end pr-1.5 cursor-e-resize select-none"
-          style={{
-            width: edgeWidth,
-            background: 'linear-gradient(to left, rgba(255,255,255,0.95) 30%, rgba(255,255,255,0))',
-          }}
+          onClick={() => jumpStep('right')}
+          title="拖向右邊(停在這裡會自動滾)"
+          className="absolute right-1 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-white border border-gray-300 shadow-md flex items-center justify-center text-gray-600 hover:text-blue-600 hover:border-blue-300 transition-colors z-10"
         >
-          <span className="text-gray-500 text-xl font-semibold leading-none">›</span>
-        </div>
+          <ChevronRight className="w-4 h-4" />
+        </button>
       )}
     </div>
   )

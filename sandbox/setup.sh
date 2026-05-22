@@ -91,7 +91,54 @@ else
     echo "  （改了 Dockerfile / requirements.txt 要生效，加 --rebuild 重跑本腳本）"
 fi
 
-# ── 4. 啟動 / 重建容器
+# ── 4. 計算 AGENTS_DIR（永遠都做、後面 default_skills 安裝跟 container mount 都要用）
+# 找出 Windows 使用者 home 對應的 WSL 路徑（/mnt/c/Users/XXX）
+WIN_USER=$(echo "$PROJECT_DIR" | sed -n 's|^/mnt/\([a-z]\)/Users/\([^/]*\)/.*|\2|p')
+DRIVE_LETTER=$(echo "$PROJECT_DIR" | sed -n 's|^/mnt/\([a-z]\)/.*|\1|p')
+if [[ -n "$WIN_USER" && -n "$DRIVE_LETTER" ]]; then
+    USER_HOME_WSL="/mnt/$DRIVE_LETTER/Users/$WIN_USER"
+else
+    # 專案不在 /mnt/c/Users/... 下（例如放在 D:\ 或其他位置）
+    # → 仍讓 ~/.agents 有 fallback，指到 Windows 預設 C:\Users\<current>\.agents
+    USER_HOME_WSL="/mnt/c/Users/$(cmd.exe /c 'echo %USERNAME%' 2>/dev/null | tr -d '\r')"
+    echo "ℹ 專案不在 /mnt/<drive>/Users/... 下，.agents 將定位到：$USER_HOME_WSL"
+fi
+AGENTS_DIR="$USER_HOME_WSL/.agents"
+mkdir -p "$AGENTS_DIR/skills"
+
+# ── 4b. 安裝預設 skill（idempotent、不覆蓋使用者已有版本）
+# repo 內的 default_skills/ 是專案的「出廠技能包」（兩個 V5 專屬 skill）：
+#   • scraped-content-parser — 爬蟲節點抓回來的原始內容結構化
+#   • python-cli-extractor   — 把現成的 Python GUI/Web app 無破壞性接進 V5 pipeline
+# Office 三件套（docx/pptx/xlsx）使用者自己從 Anthropic / Claude Code 安裝、不 bundle。
+# 已存在的 skill 一律跳過、保留使用者的版本（可能他自己改過或升過級）
+DEFAULT_SKILLS_DIR="$PROJECT_DIR/default_skills"
+if [[ -d "$DEFAULT_SKILLS_DIR" ]]; then
+    installed=0
+    skipped=0
+    for src in "$DEFAULT_SKILLS_DIR"/*/; do
+        # 防 glob 沒展開到任何子資料夾時、$src 留下字面 "*/" 害 cp 炸
+        [[ -d "$src" ]] || continue
+        name=$(basename "$src")
+        target="$AGENTS_DIR/skills/$name"
+        if [[ -d "$target" ]]; then
+            # 注意：用 $((var+1)) 不用 ((var++))。後者在 var=0 那次回傳 exit 1
+            # (舊值 0 被當 false)，搭 set -e 會整個 abort 掉
+            skipped=$((skipped + 1))
+        else
+            cp -r "$src" "$target"
+            installed=$((installed + 1))
+        fi
+    done
+    if (( installed > 0 )); then
+        echo "✓ 已安裝 $installed 個預設 skill 到 $AGENTS_DIR/skills/"
+    fi
+    if (( skipped > 0 )); then
+        echo "  ($skipped 個 skill 已存在、保留使用者版本)"
+    fi
+fi
+
+# ── 5. 啟動 / 重建容器
 if $DOCKER ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     # 已存在 → 確認是否 running
     if $DOCKER ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
@@ -105,28 +152,9 @@ else
     # ── Bind mount 策略 ──────────────────────────────────────────
     # 需要讓容器看到三類檔案（都用「同路徑映射」，不翻譯路徑）：
     #   (1) 專案本體：$PROJECT_DIR（讓使用者工作流產出存 ai_output/ 時兩邊同步）
-    #   (2) Agent Skills：$USER_HOME_WSL/.agents/（skill 掛載時 LLM 呼叫 scripts/）
+    #   (2) Agent Skills：$AGENTS_DIR（skill 掛載時 LLM 呼叫 scripts/）
     #   (3) 容器內的 $HOME 也指到同一份 .agents，這樣 Path.home() / ".agents"
     #       在容器跟 Windows 都指向同一個地方
-    # 找出 Windows 使用者 home 對應的 WSL 路徑（/mnt/c/Users/XXX）
-    WIN_USER=$(echo "$PROJECT_DIR" | sed -n 's|^/mnt/\([a-z]\)/Users/\([^/]*\)/.*|\2|p')
-    DRIVE_LETTER=$(echo "$PROJECT_DIR" | sed -n 's|^/mnt/\([a-z]\)/.*|\1|p')
-    if [[ -n "$WIN_USER" && -n "$DRIVE_LETTER" ]]; then
-        USER_HOME_WSL="/mnt/$DRIVE_LETTER/Users/$WIN_USER"
-    else
-        # 專案不在 /mnt/c/Users/... 下（例如放在 D:\ 或其他位置）
-        # → 仍讓 ~/.agents 有 fallback，指到 Windows 預設 C:\Users\<current>\.agents
-        USER_HOME_WSL="/mnt/c/Users/$(cmd.exe /c 'echo %USERNAME%' 2>/dev/null | tr -d '\r')"
-        echo "  ⚠ 專案不在 C:\\Users\\... 下，.agents 掛載將嘗試：$USER_HOME_WSL"
-    fi
-    AGENTS_DIR="$USER_HOME_WSL/.agents"
-
-    # 若 .agents 尚未建立（使用者還沒裝任何 skill）就建空資料夾避免 mount 失敗
-    if [[ ! -d "$AGENTS_DIR" ]]; then
-        echo "  ℹ .agents 資料夾尚未存在，建立空白目錄：$AGENTS_DIR"
-        mkdir -p "$AGENTS_DIR/skills"
-    fi
-
     $DOCKER run -d \
         --name "$CONTAINER" \
         --restart unless-stopped \
@@ -223,3 +251,13 @@ echo "✓ 沙盒就緒！"
 echo "  容器名：$CONTAINER"
 $DOCKER inspect "$CONTAINER" --format '{{range .Mounts}}    {{.Source}} → {{.Destination}}{{"\n"}}{{end}}' 2>/dev/null || true
 echo "══════════════════════════════════════════════════════"
+
+# ── 6. 寫旗標讓 setup_sandbox.bat 知道要不要提醒使用者關閉 WSL
+# 條件：當前還在用 sudo 跑 docker (代表 docker group 還沒 reload)
+# 旗標檔讀完即刪、不留下殘留
+FLAG_FILE="$PROJECT_DIR/sandbox/.needs_wsl_shutdown"
+if [[ "$DOCKER" == "sudo docker" ]]; then
+    touch "$FLAG_FILE" 2>/dev/null || true
+else
+    rm -f "$FLAG_FILE" 2>/dev/null || true
+fi

@@ -39,6 +39,7 @@ from .sandbox import (
     _docker_exec_cmd,
     _write_code_tempfile,
     windows_to_wsl_path,
+    _decode_subprocess_output,
 )
 
 log = logging.getLogger(__name__)
@@ -861,8 +862,9 @@ def _stream_subprocess(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,    # 合併，所有輸出走同一條 pipe
-            text=True, encoding="utf-8", errors="replace",
-            bufsize=1,                   # line-buffered（搭配腳本 -u 才有效）
+            # 不指定 text/encoding,用 bytes;每行讀進來後用 _decode_subprocess_output
+            # 自動偵測編碼(wsl.exe 失敗時輸出 UTF-16 LE、容器內 python 走 utf-8)
+            bufsize=1,                   # line-buffered(搭配腳本 -u 才有效)
         )
     except FileNotFoundError:
         return _err(url, "找不到 wsl 指令；確認你在 Windows host 跑 backend", tier="crawl4ai")
@@ -872,47 +874,75 @@ def _stream_subprocess(
     deadline = time.time() + timeout
     last_json: Optional[dict] = None
     raw_lines: list[str] = []
+    raw_lines_bytes: list[bytes] = []  # 失敗路徑時整段 join 解碼,UTF-16 LE 不會被 \n byte 切壞
 
     try:
+        # 一行一行讀,**每行各自**用 _decode_subprocess_output 自動偵測編碼
+        # (utf-8 / UTF-16 LE / mbcs)。原因:同一 subprocess 可能先吐 utf-8
+        # (我們 python 腳本自己的 print)後接 UTF-16 LE(wsl.exe 失敗訊息),
+        # 不能整流鎖一種編碼。
+        #
+        # 切行用 `\n`(byte 0x0a)。UTF-16 LE 的 line ending 是 \n\x00,
+        # 找到 \n 後若下一 byte 是 \x00 就一起跳掉,以免下一行從半個字開始。
+        buffer = b""
         while True:
             if time.time() > deadline:
-                # 超時：強制砍 + 收尾
+                # 超時:強制砍 + 收尾
                 try:
                     proc.kill()
                     proc.wait(timeout=3.0)
                 except Exception:
                     pass
-                logger.warning(f"[{step_name}] Crawl4AI timeout（{timeout}s），已強制終止")
-                return _err(url, f"Crawl4AI timeout（{timeout}s）", tier="crawl4ai")
+                logger.warning(f"[{step_name}] Crawl4AI timeout({timeout}s),已強制終止")
+                return _err(url, f"Crawl4AI timeout({timeout}s)", tier="crawl4ai")
 
-            line = proc.stdout.readline()
-            if not line:
-                # EOF（process 結束）或空字串
+            chunk = proc.stdout.read1(4096)
+            if not chunk:
                 if proc.poll() is not None:
                     break
-                # 還在跑、暫無輸出 → 短 sleep 避免 100% CPU 空轉
                 time.sleep(0.05)
                 continue
 
-            line = line.rstrip("\r\n")
-            if not line:
-                continue
-            raw_lines.append(line)
+            buffer += chunk
+            raw_lines_bytes.append(chunk)
 
-            # 嘗試解析成 JSON dict（最後一行的結構化結果）
-            stripped = line.strip()
-            if stripped.startswith("{") and stripped.endswith("}"):
-                try:
-                    parsed = json.loads(stripped)
-                    if isinstance(parsed, dict) and ("ok" in parsed or "error" in parsed):
-                        last_json = parsed
-                        # 結果 JSON 不丟 log（會洗版且使用者看不懂）
-                        continue
-                except json.JSONDecodeError:
-                    pass
+            while True:
+                idx = buffer.find(b"\n")
+                if idx == -1:
+                    break
+                line_bytes = buffer[:idx]
+                next_pos = idx + 1
+                # UTF-16 LE 的 \n\x00:下一 byte 是 \x00 就跳掉(避免下一行起手是孤立的 \x00)
+                if next_pos < len(buffer) and buffer[next_pos] == 0:
+                    next_pos += 1
+                buffer = buffer[next_pos:]
 
-            # 進度行：直接 logger.info → 寫進 run log → frontend polling 拿到
-            logger.info(f"[{step_name}]   {line}")
+                line = _decode_subprocess_output(line_bytes).rstrip("\r")
+                if not line:
+                    continue
+                raw_lines.append(line)
+
+                # 嘗試解析成 JSON dict(最後一行的結構化結果)
+                stripped = line.strip()
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    try:
+                        parsed = json.loads(stripped)
+                        if isinstance(parsed, dict) and ("ok" in parsed or "error" in parsed):
+                            last_json = parsed
+                            # 結果 JSON 不丟 log(會洗版且使用者看不懂)
+                            continue
+                    except json.JSONDecodeError:
+                        pass
+
+                # 進度行:直接 logger.info → 寫進 run log → frontend polling 拿到
+                logger.info(f"[{step_name}]   {line}")
+
+        # process 結束,buffer 殘餘(沒以 \n 結尾的最後一段)也 flush 出去
+        if buffer:
+            tail_line = _decode_subprocess_output(buffer).rstrip("\r\n")
+            if tail_line:
+                raw_lines.append(tail_line)
+                logger.info(f"[{step_name}]   {tail_line}")
     except Exception as e:
         logger.error(f"[{step_name}] 讀取沙盒 stdout 例外：{e}")
         try:
@@ -923,7 +953,12 @@ def _stream_subprocess(
 
     # 全部讀完，確認 last_json
     if last_json is None:
-        tail = "\n".join(raw_lines[-20:])
+        # 把所有 raw bytes 串起來一次解碼。UTF-16 LE 情況下 readline 會在 \n byte 切到
+        # 字元中間造成每行 mojibake;整段一次解就正確。再取最後 20 行(非空)。
+        all_bytes = b"".join(raw_lines_bytes)
+        full_text = _decode_subprocess_output(all_bytes)
+        tail_lines = [l for l in full_text.splitlines() if l.strip()][-20:]
+        tail = "\n".join(tail_lines)
         return _err(url, f"沙盒回傳沒有 JSON 結果（exit={proc.returncode}）。最後 20 行：\n{tail}",
                     tier="crawl4ai")
     if not last_json.get("ok"):
