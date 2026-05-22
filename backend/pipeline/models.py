@@ -127,6 +127,13 @@ class ComputerUseAction(BaseModel):
     # 不是讓 VLM 決定座標、不是讓它執行動作；只回傳 {"pass": bool, "reason": str}
     # 模型本身不支援視覺時，呼叫會直接報錯（不靜默 fallback）
     vlm_prompt: str = ""
+    # ── UIA-first 三層 fallback(click_image / click_at 用)─────────
+    # 錄製時(recorder.py)在 mouse-down 同時呼 uiautomation.ControlFromPoint 抓的元素資訊。
+    # 回放時 computer_use Phase 0 先用這資訊找元素、找到就點(跨機台、跨 scaling 最穩);
+    # 找不到才退到 CV 模板比對 → OCR → 強制座標的下層 fallback。
+    # 跟下面 UIA 純粹型 action(uia_click/uia_send_keys)那組 control/save_as 等是兩回事 —
+    # 那組是進階使用者手動透過 UIA Inspector 設定的、這組是錄製時自動抓的(無感)。
+    ui: dict = {}                 # {"name", "control_type", "automation_id", "window_title", "rect"} 任一/全有
     # ── UIA action 專用欄位(uia_click / uia_send_keys / uia_get_text 等用)──
     # control 識別:by Name / AutomationId / ControlType、可組合
     control: dict = {}           # {"type": "Button", "name": "儲存", "auto_id": "save-btn", "depth": 10}
