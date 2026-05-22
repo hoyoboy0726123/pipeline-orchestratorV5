@@ -703,6 +703,33 @@ def execute_action(
             ocr_text = (action.get("ocr_text") or "").strip()
             ocr_will_run = use_ocr and bool(ocr_text)
 
+            # ── UIA-first 三層 fallback (Phase 0) ─────────────────────────
+            # 錄製時 recorder 在 mouse-down 同時抓 UIA element info、存進 action["ui"]。
+            # 如果有、就先試 UIA — 命中直接 click 中心、不必跑 CV/OCR。
+            # 跳過條件:使用者明確設了 vlm_mode (走 VLM 路徑) — VLM 是顯式 opt-in、尊重使用者。
+            ui_info = action.get("ui") if isinstance(action.get("ui"), dict) else None
+            if ui_info and vlm_mode == "off":
+                try:
+                    from pipeline.uia_lookup import find_click_point
+                except Exception:
+                    try:
+                        from .uia_lookup import find_click_point  # type: ignore
+                    except Exception:
+                        find_click_point = None  # type: ignore
+                if find_click_point is not None:
+                    point = find_click_point(ui_info, timeout=2.0)
+                    if point:
+                        cx, cy = point
+                        _do_click(pg, cx, cy, button, clicks, hold_sec, modifiers)
+                        hold_tag_u = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                        msg = (f"{mods_tag} UIA 命中 '{ui_info.get('name', '')[:40]}' "
+                               f"({ui_info.get('control_type', '')}) @ ({cx},{cy}){hold_tag_u}")
+                        duration = int((time.time() - t0) * 1000)
+                        logger.info(f"[computer_use]   ✓ {msg}(UIA-first、{duration}ms)")
+                        return ActionResult(True, index, atype, msg, duration)
+                    # UIA 沒中 — log + fall through 到 CV/OCR/座標 三層 fallback
+                    logger.info(f"[computer_use]   UIA 沒命中 '{ui_info.get('name', '')[:40]}' → 退到 CV/OCR/座標")
+
             # ── VLM 模式 1：description → OCR ──
             # bug 修補：之前讀錯欄位（讀紅框 search_region），這個模式既然走 OCR，
             # 區域就應該讀使用者在編輯器拉的「藍框」（ocr_box_*），跟純 OCR 路徑一致
@@ -982,6 +1009,29 @@ def execute_action(
             hold_sec = float(action.get("hold_sec", 0) or 0)
             modifiers = list(action.get("modifiers", []) or [])
             mods_tag = f"[{'+'.join(modifiers)}]" if modifiers else ""
+
+            # UIA-first:即使是 click_at,有錄到 ui 就先試 UIA
+            ui_info = action.get("ui") if isinstance(action.get("ui"), dict) else None
+            if ui_info:
+                try:
+                    from pipeline.uia_lookup import find_click_point as _uia_find
+                except Exception:
+                    try:
+                        from .uia_lookup import find_click_point as _uia_find  # type: ignore
+                    except Exception:
+                        _uia_find = None  # type: ignore
+                if _uia_find is not None:
+                    point = _uia_find(ui_info, timeout=2.0)
+                    if point:
+                        cx, cy = point
+                        _do_click(pg, cx, cy, button, clicks, hold_sec, modifiers)
+                        hold_tag_u = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                        msg = (f"{mods_tag} UIA 命中 '{ui_info.get('name', '')[:40]}' "
+                               f"@ ({cx},{cy}){hold_tag_u}")
+                        duration = int((time.time() - t0) * 1000)
+                        logger.info(f"[computer_use]   ✓ {msg}(UIA-first、{duration}ms)")
+                        return ActionResult(True, index, atype, msg, duration)
+                    logger.info(f"[computer_use]   UIA 沒命中 → 退到原座標")
             _do_click(pg, x, y, button, clicks, hold_sec, modifiers)
             hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
             msg = f"{mods_tag} 點擊絕對座標 ({x}, {y}){hold_tag}"

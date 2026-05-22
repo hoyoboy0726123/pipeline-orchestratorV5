@@ -77,6 +77,18 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // VLM 把關 Phase 1 摺疊（預設收折、進階功能）
   const [vlmOpen, setVlmOpen] = useState(false)
   // 4 種 VLM 功能決策樹摺疊（預設收折、給混淆的人查）
+  // 進階選項顯示開關 — 預設關、用 localStorage 記住使用者偏好
+  // 關閉時:藏「Pixel/UIA 模式切換」按鈕(強制 Pixel 模式、錄製會自動抓 UIA + CV 三層 fallback)
+  // 開啟時:顯示模式切換、使用者可手動切到 UIA Inspector 進階功能
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem('computer_use_show_advanced') === '1'
+  })
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('computer_use_show_advanced', showAdvanced ? '1' : '0')
+    }
+  }, [showAdvanced])
 
   // 預設錄製輸出目錄
   const defaultAssetsDir = data.assetsDir ||
@@ -286,44 +298,69 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           <input value={data.name} onChange={e => onUpdate({ name: e.target.value })} className={`${inputCls} font-mono`} />
         </div>
 
-        {/* 模式切換:Pixel(錄製座標) vs UIA(讀 GUI 結構) */}
-        <div className="rounded-xl border border-gray-200 overflow-hidden flex">
-          <button
-            type="button"
-            onClick={() => onUpdate({ cuMode: 'pixel' })}
-            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
-              (data.cuMode || 'pixel') === 'pixel'
-                ? 'bg-purple-600 text-white'
-                : 'bg-white text-gray-600 hover:bg-purple-50'
-            }`}
-          >
-            🎯 Pixel 模式<span className="text-[10px] block mt-0.5 opacity-80">錄製座標 + CV/OCR/VLM</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onUpdate({ cuMode: 'uia' })}
-            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
-              data.cuMode === 'uia'
-                ? 'bg-purple-600 text-white'
-                : 'bg-white text-gray-600 hover:bg-purple-50'
-            }`}
-          >
-            🪟 UIA 模式<span className="text-[10px] block mt-0.5 opacity-80">讀 GUI 結構、座標漂免疫</span>
-          </button>
-        </div>
+        {/* 模式切換:Pixel(錄製座標) vs UIA(讀 GUI 結構) — 進階選項、預設藏起來
+            預設只顯示 Pixel 模式(自動三層 fallback:UIA→CV→座標、無腦用)。
+            想用獨立 UIA Inspector 才需要打開「顯示進階選項」。 */}
+        {showAdvanced ? (
+          <>
+            <div className="rounded-xl border border-gray-200 overflow-hidden flex">
+              <button
+                type="button"
+                onClick={() => onUpdate({ cuMode: 'pixel' })}
+                className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                  (data.cuMode || 'pixel') === 'pixel'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white text-gray-600 hover:bg-purple-50'
+                }`}
+              >
+                🎯 Pixel 模式<span className="text-[10px] block mt-0.5 opacity-80">錄製座標 + CV/OCR/VLM</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdate({ cuMode: 'uia' })}
+                className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                  data.cuMode === 'uia'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white text-gray-600 hover:bg-purple-50'
+                }`}
+              >
+                🪟 UIA 模式<span className="text-[10px] block mt-0.5 opacity-80">讀 GUI 結構、座標漂免疫</span>
+              </button>
+            </div>
 
-        {/* UIA 模式:走 inspector 抓元素、選元素、加動作 */}
-        {data.cuMode === 'uia' && (
-          <UiaInspectorPanel
-            uiaWindow={data.uiaWindow || ''}
-            onUpdateWindow={(w) => onUpdate({ uiaWindow: w })}
-            onAddAction={(action) => {
-              const next = [...(data.actions || []), action]
-              onUpdate({ actions: next })
-            }}
-            workflowId={workflowId}
-          />
+            {/* UIA 模式:走 inspector 抓元素、選元素、加動作 */}
+            {data.cuMode === 'uia' && (
+              <UiaInspectorPanel
+                uiaWindow={data.uiaWindow || ''}
+                onUpdateWindow={(w) => onUpdate({ uiaWindow: w })}
+                onAddAction={(action) => {
+                  const next = [...(data.actions || []), action]
+                  onUpdate({ actions: next })
+                }}
+                workflowId={workflowId}
+              />
+            )}
+          </>
+        ) : (
+          // 隱藏進階模式時、確保 cuMode 是 pixel(避免進階關閉但 cuMode 還停在 uia 導致面板亂)
+          (() => {
+            if (data.cuMode === 'uia') onUpdate({ cuMode: 'pixel' })
+            return null
+          })()
         )}
+
+        {/* 顯示進階選項 toggle — 樸素小字、不擋路 */}
+        <div className="flex items-center justify-end">
+          <label className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-600 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showAdvanced}
+              onChange={e => setShowAdvanced(e.target.checked)}
+              className="w-3 h-3 accent-purple-500"
+            />
+            顯示進階選項(UIA Inspector、模式切換)
+          </label>
+        </div>
 
         {/* 錄製按鈕 — 只 Pixel 模式才顯示 */}
         {(data.cuMode || 'pixel') === 'pixel' && (
