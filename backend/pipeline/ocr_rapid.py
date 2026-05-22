@@ -95,11 +95,15 @@ def recognize_rapid(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list
     try:
         parsed_via = "none"
         if hasattr(result, "txts"):
-            # 新版 RapidOCROutput
+            # 新版 RapidOCROutput — 注意 boxes/scores 可能是 numpy ndarray,
+            # 不能用 `or []` (ndarray 拒絕 boolean evaluation),用 None 比對處理
             parsed_via = "new-RapidOCROutput"
-            texts = getattr(result, "txts", []) or []
-            scores = getattr(result, "scores", []) or []
-            boxes = getattr(result, "boxes", []) or []
+            texts = getattr(result, "txts", None)
+            scores = getattr(result, "scores", None)
+            boxes = getattr(result, "boxes", None)
+            if texts is None: texts = []
+            if scores is None: scores = []
+            if boxes is None: boxes = []
             log.info(f"[ocr_rapid] new-format: {len(texts)} texts, {len(scores)} scores, {len(boxes)} boxes")
             for i, text in enumerate(texts):
                 if not text:
@@ -147,9 +151,14 @@ def recognize_rapid(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list
             log.info(f"[ocr_rapid] list-format: len={len(result)}")
             for first in result:
                 if isinstance(first, dict) and "rec_texts" in first:
-                    texts = first.get("rec_texts", []) or []
-                    scores = first.get("rec_scores", []) or []
-                    polys = first.get("rec_polys") or first.get("dt_polys", []) or []
+                    # 同樣不能 `or []`,ndarray 拒絕 boolean
+                    texts = first.get("rec_texts")
+                    scores = first.get("rec_scores")
+                    polys = first.get("rec_polys")
+                    if polys is None: polys = first.get("dt_polys")
+                    if texts is None: texts = []
+                    if scores is None: scores = []
+                    if polys is None: polys = []
                     log.info(f"[ocr_rapid] list-item dict: {len(texts)} texts")
                     for i, text in enumerate(texts):
                         if not text:
