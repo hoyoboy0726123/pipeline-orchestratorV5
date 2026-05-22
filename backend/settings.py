@@ -49,6 +49,10 @@ _DEFAULT = {
     # 完整內容模式：ON 時 Tavily 直接回文章原文（Agent 不用寫爬蟲）
     # 代價：一次回傳 ~15000 字，需要雲端大 context 模型；本地 Ollama 8B 小 context 會爆
     "web_search_full_content_default": False,
+    # 含 computer_use 節點的工作流啟動時自動縮小前景視窗(通常是 V5 瀏覽器)、
+    # 結束後自動還原。避免 V5 視窗擋住要自動化的目標 app。
+    # 預設 OFF — 使用者自己決定要不要打擾桌面。並發 workflow 用 ref-count 處理。
+    "auto_minimize_for_computer_use": False,
 }
 
 _cache: Optional[dict] = None
@@ -172,6 +176,21 @@ def set_skill_sandbox_mode(mode: str) -> dict:
     with _lock:
         existing = _cache if _cache else _load_from_disk()
         existing["skill_sandbox_mode"] = mode
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
+
+
+# ── computer_use 啟動時自動縮視窗 (獨立 setter) ───────────────────
+def set_auto_minimize_for_computer_use(enabled: bool) -> dict:
+    """切換 computer_use workflow 啟動時、自動縮小前景視窗。"""
+    global _cache
+    enabled = bool(enabled)
+    with _lock:
+        existing = _cache if _cache else _load_from_disk()
+        existing["auto_minimize_for_computer_use"] = enabled
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)

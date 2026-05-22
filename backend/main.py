@@ -1286,6 +1286,25 @@ async def get_sandbox_status(refresh: bool = False):
     }
 
 
+class AutoMinimizeRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/settings/auto-minimize-for-computer-use")
+async def get_auto_minimize_for_computer_use():
+    """回傳『含 computer_use 節點的工作流啟動時自動縮小前景視窗』設定。"""
+    from settings import get_settings
+    return {"enabled": bool(get_settings().get("auto_minimize_for_computer_use", False))}
+
+
+@app.put("/settings/auto-minimize-for-computer-use")
+async def put_auto_minimize_for_computer_use(req: AutoMinimizeRequest):
+    """切換『含 computer_use 節點的工作流啟動時自動縮小前景視窗』設定。"""
+    from settings import set_auto_minimize_for_computer_use
+    updated = set_auto_minimize_for_computer_use(req.enabled)
+    return {"enabled": bool(updated.get("auto_minimize_for_computer_use", False))}
+
+
 class SandboxModeRequest(BaseModel):
     mode: str  # "host" | "wsl_docker"
 

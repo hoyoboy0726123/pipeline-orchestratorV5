@@ -1185,9 +1185,43 @@ async def run_pipeline(
     run_id: Optional[str] = None,
     start_from_step: int = 0,
 ) -> str:
+    """執行(或恢復)一個 pipeline 的對外入口。
+
+    包薄殼 wrapper、處理「computer_use workflow 啟動時自動縮小前景視窗」
+    的 setup/teardown(setting 開啟才生效),實際邏輯在 _run_pipeline_inner。
+
+    Wrapper 用 reference counting 處理並發:多個 workflow 同時跑時、
+    第一個 minimize、最後一個 restore;中間呼叫只是 +1/-1 ref count。
     """
-    執行（或恢復）一個 pipeline。
-    """
+    from . import window_helper
+    try:
+        from settings import get_settings
+        _s = get_settings()
+        _auto_min = bool(_s.get("auto_minimize_for_computer_use", False))
+    except Exception:
+        _auto_min = False
+    _do_minimize = _auto_min and window_helper.config_has_computer_use(config_dict)
+    if _do_minimize:
+        window_helper.request_minimize()
+    try:
+        return await _run_pipeline_inner(
+            config_dict=config_dict,
+            chat_id=chat_id,
+            run_id=run_id,
+            start_from_step=start_from_step,
+        )
+    finally:
+        if _do_minimize:
+            window_helper.request_restore()
+
+
+async def _run_pipeline_inner(
+    config_dict: dict,
+    chat_id: int,
+    run_id: Optional[str] = None,
+    start_from_step: int = 0,
+) -> str:
+    """執行(或恢復)一個 pipeline 的實作本體。對外請呼叫 run_pipeline。"""
     store = get_store()
 
     # 建立或恢復 run

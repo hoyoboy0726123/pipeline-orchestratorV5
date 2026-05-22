@@ -1092,6 +1092,93 @@ function WebSearchSection() {
 }
 
 
+// ── computer_use 自動縮視窗設定 ────────────────────────────────────────────────
+function ComputerUseAutoMinimizeSection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [toggling, setToggling] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/backend/settings/auto-minimize-for-computer-use')
+      .then(r => r.json())
+      .then(d => setEnabled(!!d.enabled))
+      .catch(() => setEnabled(false))
+  }, [])
+
+  const toggle = async () => {
+    if (enabled === null || toggling) return
+    setToggling(true)
+    const next = !enabled
+    try {
+      const res = await fetch('/api/backend/settings/auto-minimize-for-computer-use', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setEnabled(!!data.enabled)
+      toast.success(next ? '已啟用 — workflow 開跑會自動縮小視窗' : '已關閉')
+    } catch (e) {
+      toast.error('設定切換失敗')
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  if (enabled === null) return null
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
+          <Shield className="w-5 h-5 text-amber-700" />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">桌面自動化執行體驗</h2>
+          <p className="text-sm text-gray-500">含 computer_use 節點的工作流啟動時的視窗行為</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="p-5 flex items-start justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-sm font-semibold text-gray-800">
+                工作流啟動時自動縮小前景視窗
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              當你按執行 / 排程觸發一個含 <code className="bg-gray-100 px-1 rounded">computer_use</code> 節點的工作流時、
+              自動把當下的前景視窗(通常就是 V5 瀏覽器)縮到最小、避免擋住自動化的目標 app。
+              工作流結束(成功 / 失敗)後會自動還原。並發多個工作流時用 ref-count 處理、不會反覆 minimize/restore。
+            </p>
+          </div>
+          <button
+            onClick={toggle}
+            disabled={toggling}
+            className={cn(
+              'relative w-12 h-7 rounded-full transition-colors shrink-0',
+              enabled ? 'bg-amber-500' : 'bg-gray-300',
+              toggling && 'opacity-50 cursor-not-allowed'
+            )}
+          >
+            <span className={cn(
+              'absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform',
+              enabled ? 'translate-x-5' : 'translate-x-0'
+            )} />
+          </button>
+        </div>
+        <div className="px-5 py-3 bg-gray-50/50 text-xs text-gray-500 space-y-1 border-t border-gray-100">
+          <p>• 預設關閉、要用再開,純 Windows 平台有效(Mac/Linux backend 會自動跳過)</p>
+          <p>• 只縮「當下前景視窗」、不會強制關使用者其他工作中的視窗</p>
+          <p>• 失敗(找不到前景或 API 例外)會 log warning 不擋 workflow 執行</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Skill Sandbox Section (V3) ────────────────────────────────────────────────
 function SandboxSection() {
   const [status, setStatus] = useState<SandboxStatus | null>(null)
@@ -1957,6 +2044,9 @@ export default function SettingsPage() {
 
         {/* Skill Sandbox (V3) */}
         <SandboxSection />
+
+        {/* computer_use 自動縮視窗 */}
+        <ComputerUseAutoMinimizeSection />
 
         {/* 提示 */}
         <div className="mt-4 text-xs text-gray-500 space-y-1">
