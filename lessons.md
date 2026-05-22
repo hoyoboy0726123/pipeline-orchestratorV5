@@ -90,3 +90,32 @@ if not ok:
 $bpid = (Get-NetTCPConnection -LocalPort 8004 -State Listen).OwningProcess
 & ".\.venv\Scripts\python.exe" -c "import ctypes; h=ctypes.windll.kernel32.OpenProcess(0x1000,False,$bpid); a=ctypes.c_int(); ctypes.windll.shcore.GetProcessDpiAwareness(h,ctypes.byref(a)); print(a.value)"
 ```
+
+---
+
+## 2026-05-23:Pydantic BaseModel 預設默默丟未宣告欄位,新加 action 欄位記得進 schema
+
+**症狀**:錄製端把 UIA element info 寫進 YAML(`ui: {name: ..., control_type: ...}`),
+肉眼確認 YAML 檔有,但回放時 `action.get("ui")` 永遠 None、UIA-first phase 在
+if 條件就 silent skip,連 log 都不出。
+
+**根因**:V5 的 action 走 `ComputerUseAction(BaseModel)` Pydantic 模型。YAML 載入後
+經 `PipelineConfig.from_dict() → PipelineStep.actions: list[ComputerUseAction]` 解析,
+Pydantic 預設行為(`model_config` 沒設 `extra=...` 時)會**默默丟掉未宣告的欄位**。
+
+`ui` 在 YAML 有,但 schema 沒宣告 → Pydantic instantiate 時 silently drop →
+`model_dump()` 出來的 dict 沒這個 key → execute_action 永遠看不到。
+
+**修法**:在 `ComputerUseAction` schema 顯式宣告 `ui: dict = {}` 欄位、Pydantic 才會
+收。即使只是透傳用的雜資料、也要進 schema。
+
+**衍生規則**(這個專案以後遇到):
+- 任何錄製端 / AI 助手 / YAML 想塞給 action 的新欄位、都要**先在 `ComputerUseAction`
+  schema 加上**(`dict = {}` / `list = []` / 字面型別都行)
+- 同規則適用 `PipelineStep` 跟 `PipelineConfig`
+- 想要 strict 一點、避免下次又踩同坑,可以給 model_config 設 `extra="forbid"`,
+  寫一個未宣告欄位直接 raise — 但這會打到很多現有 workflow,保守做法是 case-by-case 補
+- debug 類似問題,優先加「無條件 log 一行 action keys 進來時長什麼樣」,不要把 log
+  鎖在 `if condition:` 內,silent skip 最難 debug
+
+**Commit**:`345d555`(fix 加 ui 欄位)、`e81e1c6`(加 verbose log 才暴露 silent skip)
