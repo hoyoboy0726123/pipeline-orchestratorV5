@@ -33,6 +33,8 @@ pynput
 mss
 opencv-python
 numpy
+# UIA 自動化 (錄製時抓 UI element + 回放 UIA-first 三層 fallback) — Windows only、非 Windows 平台會跳過
+uiautomation; sys_platform == "win32"
 
 # 網頁爬蟲節點（web_crawler）host 端依賴 — V5 新增
 # crawl4ai 跑在沙盒、host 不裝（500MB chromium 不必兩邊都有）；

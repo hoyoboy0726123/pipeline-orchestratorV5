@@ -709,15 +709,25 @@ def execute_action(
             # 跳過條件:使用者明確設了 vlm_mode (走 VLM 路徑) — VLM 是顯式 opt-in、尊重使用者。
             ui_info = action.get("ui") if isinstance(action.get("ui"), dict) else None
             if ui_info and vlm_mode == "off":
+                logger.info(f"[computer_use]   [UIA-first] 偵測到 ui 欄位,嘗試 UIA 定位: name='{ui_info.get('name', '')[:40]}' type='{ui_info.get('control_type', '')}' auto_id='{ui_info.get('automation_id', '')[:30]}'")
+                find_click_point = None
                 try:
-                    from pipeline.uia_lookup import find_click_point
-                except Exception:
+                    from pipeline.uia_lookup import find_click_point as _fcp
+                    find_click_point = _fcp
+                except Exception as _e1:
                     try:
-                        from .uia_lookup import find_click_point  # type: ignore
-                    except Exception:
-                        find_click_point = None  # type: ignore
-                if find_click_point is not None:
-                    point = find_click_point(ui_info, timeout=2.0)
+                        from .uia_lookup import find_click_point as _fcp  # type: ignore
+                        find_click_point = _fcp
+                    except Exception as _e2:
+                        logger.warning(f"[computer_use]   [UIA-first] 載入 uia_lookup 模組失敗:{type(_e2).__name__}: {_e2} (上游 {type(_e1).__name__}: {_e1})")
+                if find_click_point is None:
+                    logger.info(f"[computer_use]   [UIA-first] uia_lookup 不可用、退到 CV/OCR/座標")
+                else:
+                    try:
+                        point = find_click_point(ui_info, timeout=2.0)
+                    except Exception as _e3:
+                        logger.warning(f"[computer_use]   [UIA-first] find_click_point 例外:{type(_e3).__name__}: {_e3}")
+                        point = None
                     if point:
                         cx, cy = point
                         _do_click(pg, cx, cy, button, clicks, hold_sec, modifiers)
@@ -728,7 +738,7 @@ def execute_action(
                         logger.info(f"[computer_use]   ✓ {msg}(UIA-first、{duration}ms)")
                         return ActionResult(True, index, atype, msg, duration)
                     # UIA 沒中 — log + fall through 到 CV/OCR/座標 三層 fallback
-                    logger.info(f"[computer_use]   UIA 沒命中 '{ui_info.get('name', '')[:40]}' → 退到 CV/OCR/座標")
+                    logger.info(f"[computer_use]   [UIA-first] 沒命中 '{ui_info.get('name', '')[:40]}' → 退到 CV/OCR/座標")
 
             # ── VLM 模式 1：description → OCR ──
             # bug 修補：之前讀錯欄位（讀紅框 search_region），這個模式既然走 OCR，
