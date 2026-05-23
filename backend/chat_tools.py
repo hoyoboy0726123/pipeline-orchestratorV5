@@ -166,6 +166,46 @@ def get_run_log(run_id: str, max_chars: int = 12000) -> str:
     return text
 
 
+def _validate_subagent_roles_in_yaml(yaml_content: str) -> Optional[str]:
+    """掃 YAML 內所有 subagent step、檢查 subagent_role 都存在於可用清單。
+
+    回 None = 沒問題;回 string = 錯誤訊息(列未知 role + 可選 role + 提示)。
+
+    為什麼擋在 save/create_workflow_yaml 寫入前:
+    - AI 助手有時直接寫 subagent_role: boss 但根本沒先 create_subagent_role 建過
+    - 雖然 step 執行時會 fail、但那是 workflow 跑到該步才爆、使用者已浪費 token
+    - 寫入時就擋下、AI 收到錯誤訊息會回去先建 role 再重寫 yaml
+    """
+    try:
+        import yaml as _yaml
+        parsed = _yaml.safe_load(yaml_content) or {}
+        steps = parsed.get("steps") or parsed.get("pipeline", {}).get("steps") or []
+        used_roles: set[str] = set()
+        for s in steps:
+            if not isinstance(s, dict):
+                continue
+            if s.get("subagent") is True or s.get("subagent_role"):
+                rid = (s.get("subagent_role") or "").strip()
+                if rid:
+                    used_roles.add(rid)
+        if not used_roles:
+            return None
+        from pipeline.subagent_runner import load_roles
+        available = set(load_roles().keys())
+        unknown = sorted(used_roles - available)
+        if unknown:
+            return (
+                f"YAML 含未存在的 subagent_role: {unknown}。\n"
+                f"可用 role (內建 + 自訂):{sorted(available)}。\n"
+                f"請**先**呼叫 create_subagent_role 工具(走兩步 confirm 協議)把這些 role 建好、"
+                f"再重新呼叫本工具寫入 YAML。"
+            )
+        return None
+    except Exception:
+        # YAML 解析失敗會在後續 PipelineConfig 驗證階段擋下、這裡不重複報
+        return None
+
+
 @tool
 def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> str:
     """把 YAML 套用到指定工作流（覆蓋原 YAML + 重建畫布節點）。
@@ -212,6 +252,11 @@ def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> 
         PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
     except Exception as e:
         return f"YAML schema 驗證失敗、不寫入：{type(e).__name__}: {str(e)[:200]}"
+
+    # subagent_role 存在性預驗(寫入前擋下、防 AI 漏建 role 直接寫 workflow)
+    _role_err = _validate_subagent_roles_in_yaml(yaml_content)
+    if _role_err:
+        return f"⛔ subagent_role 驗證失敗、不寫入:\n{_role_err}"
 
     new_nodes = len(new_canvas.get("nodes") or [])
     old_yaml = wf.get("yaml") or ""
@@ -303,6 +348,11 @@ def create_workflow_yaml(name: str, yaml_content: str, confirm: bool = False) ->
         PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
     except Exception as e:
         return f"YAML schema 驗證失敗、不建:{type(e).__name__}: {str(e)[:200]}"
+
+    # subagent_role 存在性預驗(建立前擋下、防 AI 漏建 role 直接建 workflow)
+    _role_err = _validate_subagent_roles_in_yaml(yaml_content)
+    if _role_err:
+        return f"⛔ subagent_role 驗證失敗、不建:\n{_role_err}"
 
     new_nodes = len(new_canvas.get("nodes") or [])
     if not confirm:

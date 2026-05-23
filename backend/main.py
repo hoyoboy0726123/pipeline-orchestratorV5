@@ -2990,6 +2990,33 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 **判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
 
+### ⛔ 順序鐵律(踩線會被擋、整個 turn 浪費)
+
+**寫 workflow YAML 含 `subagent_role: X` 前、X 必須已經存在**。順序:
+
+```
+1. 看「可用 Subagent role 清單」段落確認有沒有 X
+2. 沒有 X → 先用 create_subagent_role(confirm=False) 預覽 →
+   使用者 yes → create_subagent_role(confirm=True) 真寫(等 ✅ 已新增訊息)
+3. 重新 list_subagent_roles 確認 X 已進清單(可選、保險用)
+4. 才能 emit YAML_READY 或呼 save_workflow_yaml / create_workflow_yaml
+```
+
+**save_workflow_yaml / create_workflow_yaml 會做 server-side 預驗**:YAML 內任何 `subagent_role:` 不在清單就直接 reject、不寫入。
+所以跳過 step 1-2 直接寫 YAML = 一定被擋 + 浪費一輪 tool call。
+
+**錯誤示範**(使用者要求「建主管 / 員工角色、做某 workflow」):
+- ❌ 直接 emit YAML_READY 含 `subagent_role: boss` (沒先 create_subagent_role) → server reject
+- ❌ create_subagent_role(confirm=True) 沒先預覽就直接寫 → 違反兩步協議
+
+**正確示範**(同情境):
+1. 跟使用者解釋「我要先建 2 個 role、再寫 workflow」
+2. create_subagent_role(confirm=False) 預覽 boss → 等使用者 yes
+3. create_subagent_role(confirm=True) 真寫 boss → ✅
+4. create_subagent_role(confirm=False) 預覽 employee → 等 yes
+5. create_subagent_role(confirm=True) 真寫 employee → ✅
+6. **現在才** emit YAML_READY 含 `subagent_role: boss` / `subagent_role: employee`
+
 ### 🚫 role 名只能用「實際存在的」、不可自編
 
 **內建 5 個 role**:`data_analyst` / `coder` / `researcher` / `critic` / `planner`
