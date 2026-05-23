@@ -273,6 +273,14 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     onUpdate({ actions: next })
   }
 
+  // Preset 一鍵設好 3 個 toggle (對應 4 個常見模式:全 / 純UIA / 純CV / 純座標)
+  // 舊「圖像比對」單鍵的等價回歸:點「🔍 純 CV」一鍵切到純 CV 模式
+  const applyLayerPreset = (i: number, uia: boolean, cv: boolean, coord: boolean) => {
+    const next = [...(data.actions || [])]
+    next[i] = { ...next[i], use_uia: uia, use_cv: cv, use_coord: coord } as any
+    onUpdate({ actions: next })
+  }
+
   return (
     <div className="absolute top-0 right-0 h-full w-[420px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
       {/* Header */}
@@ -513,8 +521,41 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                             <span className="font-mono mr-0.5">{on ? '☑' : '☐'}</span>{label}
                           </button>
                         )
+                        // Preset chip:常見模式一鍵切到對應的 3-toggle 組合(舊「圖像比對」單鍵等價回歸)
+                        const isAll = useUia && useCv && useCoord
+                        const isUiaOnly = useUia && !useCv && !useCoord
+                        const isCvOnly = !useUia && useCv && !useCoord
+                        const isCoordOnly = !useUia && !useCv && useCoord
+                        const presetBtn = (label: string, active: boolean, onClick: () => void, hint: string) => (
+                          <button
+                            type="button"
+                            onClick={onClick}
+                            disabled={explicitPrimary}
+                            title={explicitPrimary
+                              ? `${ocrActive ? 'OCR' : 'VLM'} 啟用中、模式 preset 不適用`
+                              : hint}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                              explicitPrimary
+                                ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
+                                : active
+                                  ? 'bg-purple-500 text-white border-purple-500'
+                                  : 'bg-white text-gray-500 border-gray-200 hover:border-purple-300 hover:text-purple-600'
+                            }`}
+                          >{label}</button>
+                        )
                         return (
                           <>
+                            {/* 模式快速 preset(一鍵切常見組合) */}
+                            {presetBtn('全 (三層)', isAll, () => applyLayerPreset(i, true, true, true),
+                              '預設三層 fallback:UIA → CV → 強制座標,命中率最高(等同 3 個 checkbox 全勾)')}
+                            {presetBtn('🪟 純 UIA', isUiaOnly, () => applyLayerPreset(i, true, false, false),
+                              '純 UIA 嚴格模式:只用 UI 結構定位、找不到立即 fail(適合自家程式 + 有 AutomationId)')}
+                            {a.type === 'click_image' && presetBtn('🔍 純 CV', isCvOnly, () => applyLayerPreset(i, false, true, false),
+                              '純圖像比對嚴格模式:只用錨點圖、找不到立即 fail(適合視窗位置會變、不靠 UIA)')}
+                            {presetBtn('📍 純 座標', isCoordOnly, () => applyLayerPreset(i, false, false, true),
+                              '純座標模式:直接點錄製的 x/y、不嘗試任何識別(最快、視窗位置固定才安全)')}
+                            <span className="text-[10px] text-gray-300 select-none">|</span>
+                            {/* 3 細項 checkbox(進階組合微調) */}
                             {layerBtn('🪟 UIA', 'use_uia', useUia,
                               '啟用 UIA element 結構定位(視窗位置變化最穩、自家程式有 AutomationId 命中率最高)。取消 = 跳過 UIA 直接走下一層')}
                             {a.type === 'click_image' && layerBtn('🔍 CV', 'use_cv', useCv,
