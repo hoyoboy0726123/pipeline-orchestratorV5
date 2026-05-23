@@ -350,19 +350,6 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           })()
         )}
 
-        {/* 顯示進階選項 toggle — 樸素小字、不擋路 */}
-        <div className="flex items-center justify-end">
-          <label className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-600 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showAdvanced}
-              onChange={e => setShowAdvanced(e.target.checked)}
-              className="w-3 h-3 accent-purple-500"
-            />
-            顯示進階選項(UIA Inspector、模式切換)
-          </label>
-        </div>
-
         {/* 錄製按鈕 — 只 Pixel 模式才顯示 */}
         {(data.cuMode || 'pixel') === 'pixel' && (
         <div className="p-3 rounded-lg border border-purple-200 bg-purple-50/50 space-y-2">
@@ -408,14 +395,23 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               {statusText}
             </p>
           )}
-          <p className="text-[11px] text-gray-500 leading-relaxed">
-            按下開始後切換到要自動化的應用操作即可。點擊時會擷取周圍 240×80 的錨點 + 整個螢幕截圖（存在 <code className="font-mono text-purple-700">assets_dir</code> 中，日後可點「✏️ 編輯錨點」手動調整範圍）。按 F9 或這個按鈕可停止。
-          </p>
         </div>
         )}
 
         {/* 動作列表 */}
         <div>
+          {/* 顯示進階選項 toggle — 從上面挪過來、放動作序列上方,跟列表視覺上一組 */}
+          <div className="flex items-center justify-end mb-1.5">
+            <label className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showAdvanced}
+                onChange={e => setShowAdvanced(e.target.checked)}
+                className="w-3 h-3 accent-purple-500"
+              />
+              顯示進階選項(UIA Inspector、模式切換)
+            </label>
+          </div>
           <div className="flex items-center justify-between mb-2">
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
               動作序列（{data.actions?.length ?? 0}）
