@@ -1,5 +1,6 @@
 data_analyst:
   description: 資料分析師 — 處理 csv/xlsx、產 markdown/xlsx/png
+  label: 資料分析師
   tools:
   - run_python
   - read_file
@@ -61,6 +62,7 @@ data_analyst:
     回繁體中文、reply 永遠短。
 coder:
   description: 程式工程師 — 寫 Python script、debug 到通為止
+  label: 程式工程師
   tools:
   - run_python
   - run_shell
@@ -120,6 +122,7 @@ coder:
     回繁體中文、reply 永遠短。
 researcher:
   description: 研究員 — 用 web_search 收料、產 markdown 摘要、不下決策
+  label: 研究員
   tools:
   - web_search
   - read_file
@@ -179,6 +182,7 @@ researcher:
     回繁體中文、reply 永遠短。
 critic:
   description: 審稿人 — 純唯讀、挑錯、給可執行修正指引(不是抽象建議)
+  label: 審稿人
   tools:
   - read_file
   - done
@@ -249,6 +253,7 @@ critic:
     回繁體中文。
 planner:
   description: 規劃師 — 拆任務、產 markdown 計畫（無 tool、純推理 + done）
+  label: 規劃師
   tools:
   - done
   system_prompt: |
