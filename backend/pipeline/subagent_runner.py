@@ -356,6 +356,12 @@ async def run_subagent(
     _NO_TOOL_LIMIT = 2  # 連 2 輪無 tool 就中止
     _PROSE_REPLY_THRESHOLD = 1500  # 單輪 reply > 1500 字但沒 tool 視為「prose 違規」直接算 +1
 
+    # 假 done 計數器:LLM done(success=true) 但 output_path 檔不存在 → reject done、注入
+    # reminder 強迫補 run_python(SKILL 模式從 V3 就有的守門、subagent 補上)。比 runner-level
+    # 整步 retry 省 50-70% token,因為不必整個 step 從頭跑。
+    fake_done_count = 0
+    _FAKE_DONE_LIMIT = 2  # 連 2 次假 done 就停止注入 reminder、讓 runner 走 step retry
+
     for i in range(max_iter):
         iteration = i + 1
         log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter}")
@@ -484,6 +490,24 @@ async def run_subagent(
                     or done_data.get("error")
                     or "(空 done)"
                 )
+                # 假 done 守門:success=true 但 output_path 檔不存在 → reject、注入 reminder
+                # 強迫 LLM 補 run_python 真寫檔(SKILL 模式對應的 executor.py:2701)。
+                # 連 _FAKE_DONE_LIMIT 次都假 done → 讓 runner 走 step retry(走 #144 防線)
+                if (success and output_path and Path(output_path).expanduser().exists() is False
+                        and fake_done_count < _FAKE_DONE_LIMIT):
+                    fake_done_count += 1
+                    log.warning(
+                        f"[{step_name}] ⛔ Subagent 想 done(success=true) 但 output 檔 {output_path} 不存在"
+                        f"、reject + reminder({fake_done_count}/{_FAKE_DONE_LIMIT})"
+                    )
+                    messages.append(HumanMessage(content=reply))
+                    messages.append(HumanMessage(content=(
+                        f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在!"
+                        f"\n必須先用 <tool>run_python</tool> 實際跑 code 把產物寫到那個路徑(用 Path(...).write_text() / df.to_excel() / fig.savefig() 等)、"
+                        f"\n然後再 self-check Path('{output_path}').exists() == True 才能 done(success=true)。"
+                        f"\n不准只展示 code、必須真跑、跑完 print 確認檔存在。"
+                    )))
+                    continue
                 tool_calls_made.append({"name": "done", "input_preview": tool_input[:200], "result_preview": ""})
                 log.info(f"[{step_name}] ✅ Subagent 主動 done（success={success}）")
                 break
