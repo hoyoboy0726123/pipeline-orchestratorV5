@@ -1134,6 +1134,150 @@ async def get_available_skills():
     }
 
 
+# ── Subagent role CRUD ────────────────────────────────────────────────
+# 內建 5 個 role 永遠在、不可改不可刪。自訂 role 寫到 ~/ai_output/custom_subagent_roles.yaml,
+# 跟內建 merge 出最終可用 role 清單。前端設定頁 / AI 助手 create_subagent_role 工具都走這幾個 endpoint。
+
+class SubagentRolePayload(BaseModel):
+    role_id: str          # 英文 snake_case、不可跟內建撞名
+    label: str            # 中文顯示名(畫布看的)
+    description: str      # 一句話用途(下拉提示)
+    tools: list[str]      # 從 SELECTABLE_TOOLS 挑、done 會自動加
+    system_prompt: str    # role 看到的第一條指令
+
+
+def _validate_role_payload(p: SubagentRolePayload, *, allow_existing: bool = False) -> Optional[str]:
+    """回 error message string、None = OK。"""
+    import re as _re
+    from pipeline.subagent_runner import BUILTIN_ROLE_IDS, SELECTABLE_TOOLS, load_custom_roles
+    if not p.role_id:
+        return "role_id 不能空"
+    if not _re.match(r"^[a-z][a-z0-9_]{1,39}$", p.role_id):
+        return "role_id 必須英文 snake_case (小寫開頭、長 2-40、只能含 a-z 0-9 _)"
+    if p.role_id in BUILTIN_ROLE_IDS:
+        return f"role_id '{p.role_id}' 是內建角色名、不可使用"
+    if not allow_existing and p.role_id in load_custom_roles():
+        return f"role_id '{p.role_id}' 已存在自訂角色;要改用 PUT /subagent/roles/{p.role_id}"
+    if not p.label or not p.label.strip():
+        return "label(中文顯示名)不能空"
+    if not p.description or not p.description.strip():
+        return "description(一句話用途)不能空"
+    if not isinstance(p.tools, list):
+        return "tools 必須是 list"
+    _bad = [t for t in p.tools if t not in SELECTABLE_TOOLS]
+    if _bad:
+        return f"tools 含未知工具 {_bad};可選:{SELECTABLE_TOOLS}"
+    if not p.system_prompt or len(p.system_prompt.strip()) < 30:
+        return "system_prompt 太短(至少 30 字)、要寫清楚角色職能 + 工作流"
+    return None
+
+
+@app.get("/subagent/roles")
+async def list_subagent_roles():
+    """列所有 role(內建 + 自訂)、含 source 標籤跟 selectable tools 清單。"""
+    from pipeline.subagent_runner import (
+        load_roles, load_custom_roles, BUILTIN_ROLE_IDS, SELECTABLE_TOOLS,
+    )
+    all_roles = load_roles()
+    custom_ids = set(load_custom_roles().keys())
+    out = []
+    for rid, cfg in all_roles.items():
+        out.append({
+            "role_id": rid,
+            "label": cfg.get("label") or cfg.get("description", rid),
+            "description": cfg.get("description", ""),
+            "tools": list(cfg.get("tools", [])),
+            "system_prompt": cfg.get("system_prompt", ""),
+            "source": "custom" if rid in custom_ids else "builtin",
+            "is_builtin": rid in BUILTIN_ROLE_IDS,
+        })
+    out.sort(key=lambda r: (0 if r["is_builtin"] else 1, r["role_id"]))
+    # selectable_tools 給前端 checkbox 用、含每個工具的中文說明
+    tool_descs = {
+        "run_python": "在沙盒內跑 Python(讀寫檔、計算、產出都靠這個)",
+        "run_shell": "在沙盒內跑 shell 命令(grep / find / git / curl)",
+        "read_file": "唯讀單檔(最多 100 行)",
+        "web_search": "Tavily 網路搜尋(需設定頁啟用 + 填 key)",
+        "view_image": "VLM 看圖(描述、辨識內容)",
+        "ask_user": "跑到一半問使用者問題",
+    }
+    return {
+        "roles": out,
+        "selectable_tools": [
+            {"id": t, "description": tool_descs.get(t, "")}
+            for t in SELECTABLE_TOOLS
+        ],
+        "builtin_ids": sorted(BUILTIN_ROLE_IDS),
+    }
+
+
+@app.post("/subagent/roles")
+async def create_subagent_role_endpoint(payload: SubagentRolePayload):
+    """新增自訂 role。內建名衝突 / 已存在 / 欄位不合法皆 422。"""
+    from pipeline.subagent_runner import load_custom_roles, save_custom_roles
+    err = _validate_role_payload(payload, allow_existing=False)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    roles = load_custom_roles()
+    # done 永遠加進去
+    tools = list(payload.tools)
+    if "done" not in tools:
+        tools.append("done")
+    roles[payload.role_id] = {
+        "label": payload.label.strip(),
+        "description": payload.description.strip(),
+        "tools": tools,
+        "system_prompt": payload.system_prompt,
+    }
+    save_custom_roles(roles)
+    return {"ok": True, "role_id": payload.role_id, "total_custom": len(roles)}
+
+
+@app.put("/subagent/roles/{role_id}")
+async def update_subagent_role(role_id: str, payload: SubagentRolePayload):
+    """編輯自訂 role(內建不可改)。"""
+    from pipeline.subagent_runner import (
+        load_custom_roles, save_custom_roles, BUILTIN_ROLE_IDS,
+    )
+    if role_id in BUILTIN_ROLE_IDS:
+        raise HTTPException(status_code=403, detail=f"內建角色 '{role_id}' 不可編輯")
+    if payload.role_id != role_id:
+        raise HTTPException(status_code=400, detail="URL 的 role_id 跟 payload 不一致")
+    roles = load_custom_roles()
+    if role_id not in roles:
+        raise HTTPException(status_code=404, detail=f"自訂角色 '{role_id}' 不存在")
+    err = _validate_role_payload(payload, allow_existing=True)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    tools = list(payload.tools)
+    if "done" not in tools:
+        tools.append("done")
+    roles[role_id] = {
+        "label": payload.label.strip(),
+        "description": payload.description.strip(),
+        "tools": tools,
+        "system_prompt": payload.system_prompt,
+    }
+    save_custom_roles(roles)
+    return {"ok": True, "role_id": role_id}
+
+
+@app.delete("/subagent/roles/{role_id}")
+async def delete_subagent_role(role_id: str):
+    """刪自訂 role(內建不可刪)。"""
+    from pipeline.subagent_runner import (
+        load_custom_roles, save_custom_roles, BUILTIN_ROLE_IDS,
+    )
+    if role_id in BUILTIN_ROLE_IDS:
+        raise HTTPException(status_code=403, detail=f"內建角色 '{role_id}' 不可刪除")
+    roles = load_custom_roles()
+    if role_id not in roles:
+        raise HTTPException(status_code=404, detail=f"自訂角色 '{role_id}' 不存在")
+    del roles[role_id]
+    save_custom_roles(roles)
+    return {"ok": True, "deleted": role_id, "remaining_custom": len(roles)}
+
+
 @app.get("/skills/{skill_name}/dependencies")
 async def scan_skill_deps(skill_name: str):
     """掃描指定 skill 的 Python / Node.js 依賴。
@@ -2846,6 +2990,35 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 **判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
 
+### 🚫 role 名只能用「實際存在的」、不可自編
+
+**內建 5 個 role**:`data_analyst` / `coder` / `researcher` / `critic` / `planner`
+**自訂 role**(若使用者透過設定頁 / 你呼叫 `create_subagent_role` 加過)會出現在動態注入的「可用 role 清單」段。
+
+**規則**:
+- 在 workflow YAML 寫 `subagent_role: <name>` 之前、必須先確認 `<name>` 在可用清單裡
+- 不准用「financial_analyst」「marketing_expert」「主管」這種沒登記的名字、會觸發 backend `UnknownRoleError`、整個 step 失敗
+- 使用者要的能力沒有對應 role → **用 `create_subagent_role` 工具新增**(兩步確認、見下節)、再寫進 YAML
+- 不確定能不能對應、優先選最接近的內建 role(例如「主管審員工報告」→ `critic`)、把職能特化寫進 `batch` 任務描述、不要為每個語境造新 role
+
+### 🆕 新增自訂角色(`create_subagent_role` 工具、兩步確認)
+
+當使用者明確說「我要一個新角色」、或內建 5 個 role 都不適合時:
+
+1. **confirm=False** 呼叫 → 拿到 preview(role_id、label、tools、system_prompt 摘要)
+2. 用文字告訴使用者「我要新增角色 X、職能是 Y、會有這些工具:[...]、確認?」
+3. 等使用者明確說 yes / 好 / 確認
+4. **confirm=True** 再呼一次真寫入
+5. 寫完才能在 workflow YAML 用該 role
+
+**自訂 role 規範**:
+- `role_id`:英文 snake_case(例 `boss`、`employee`、`legal_reviewer`)、跟內建命名一致
+- `label`:中文顯示名(畫布上看到的、例「主管」「員工」)
+- `description`:一句話用途(下拉提示用)
+- `tools`:從 7 個內建工具挑(`run_python` / `run_shell` / `read_file` / `web_search` / `view_image` / `ask_user` / `done`),`done` 永遠加進去
+- `system_prompt`:必含「最高優先級違規規則」段落(reply 含 `<tool>`、reply 短、產物寫進指定 path),否則新 role 一定走進 prose 死循環
+- **不要為了 batch 描述方便就建 role**:role 是長期 reusable 的、不是一次性任務描述
+
 ### 🛑 寫 subagent workflow 常見錯誤(必看、不照做使用者一定踩坑)
 
 從歷史失敗紀錄歸納、寫 subagent step 時請務必避開:
@@ -3410,6 +3583,30 @@ def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
                      "把使用者提供的資訊填到 `outlook_params` 裡。**沒有合適模板**才退而填空 `outlook_template:` "
                      "改用 `batch:` 自由描述需求走 LLM 路徑。")
         parts.append("\n".join(lines))
+    except Exception:
+        pass
+    # ── Subagent 可用 role 清單(內建 + 自訂、動態)──────────────────
+    # 規範跟 BUILTIN_ROLE_IDS / 自訂 yaml 對齊,AI 助手不准用清單外的 role 名
+    try:
+        from pipeline.subagent_runner import load_roles, BUILTIN_ROLE_IDS
+        all_roles = load_roles()
+        if all_roles:
+            lines = ["", "## 可用 Subagent role 清單(寫 `subagent_role:` 只能用這些)", ""]
+            for rid in sorted(all_roles.keys(), key=lambda r: (0 if r in BUILTIN_ROLE_IDS else 1, r)):
+                cfg = all_roles[rid]
+                src_tag = "(內建)" if rid in BUILTIN_ROLE_IDS else "(自訂)"
+                desc = (cfg.get("description") or cfg.get("label") or "").strip()
+                tools_list = cfg.get("tools", [])
+                lines.append(f"- **`{rid}`** {src_tag} — {desc}")
+                lines.append(f"  - 工具:{tools_list}")
+            lines.append("")
+            lines.append(
+                "**規則**:寫 `subagent_role: X` 之前 X 必須在上面清單裡。"
+                "若使用者要的能力沒對應 role、用 `create_subagent_role` 工具新增"
+                "(兩步協議:confirm=False 預覽 → 使用者 yes → confirm=True 真寫)、"
+                "寫好之後新 role 立刻可在 workflow YAML 使用。"
+            )
+            parts.append("\n".join(lines))
     except Exception:
         pass
     # ── 今日日期(讓 web_search query 能用最新年份)──────────────────

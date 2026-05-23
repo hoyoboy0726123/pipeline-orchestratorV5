@@ -331,6 +331,114 @@ def create_workflow_yaml(name: str, yaml_content: str, confirm: bool = False) ->
 
 
 @tool
+def create_subagent_role(
+    role_id: str,
+    label: str,
+    description: str,
+    tools: list[str],
+    system_prompt: str,
+    confirm: bool = False,
+) -> str:
+    """**建立**自訂 subagent role(寫到 ~/ai_output/custom_subagent_roles.yaml)。
+
+    ⚠️ 這是寫操作、**必須走兩步協議**:
+
+    **步驟 1 (confirm=False、預覽)**:
+      - 驗欄位、檢查 role_id 沒撞名、tools 都合法
+      - 用純文字向使用者確認:「我要新增角色 X、職能 Y、工具 [a, b, c],確認?」
+
+    **步驟 2 (confirm=True、實寫)**:
+      - 使用者明確同意後才設 True
+
+    使用時機:
+    - 使用者要的 subagent 能力沒對應的內建 / 已存自訂 role(boss / employee / legal_reviewer 等)
+    - 內建 5 個 role(data_analyst/coder/researcher/critic/planner)職能太通用、需要特化
+
+    不建議建 role 的場景(優先用內建 + 在 batch 描述特化):
+    - 一次性任務(role 是 reusable 長期物件、不是任務描述)
+    - 跟內建只差工具子集(直接用內建即可、subagent_runner 還是會白名單過濾)
+
+    Args:
+        role_id: 英文 snake_case (e.g. 'boss', 'legal_reviewer'),不可跟內建 ID 撞名
+        label: 中文顯示名 (e.g. '主管', '法務審稿員')
+        description: 一句話用途 (出現在 UI 下拉提示)
+        tools: 從 ['run_python', 'run_shell', 'read_file', 'web_search', 'view_image', 'ask_user']
+               挑、`done` 會自動加進去
+        system_prompt: role 看到的第一條 system message,必含「最高優先級違規規則」段落
+                      (reply 必須含 <tool>、reply 短 < 500 字、產物寫進指定 path)
+        confirm: False = 預覽 / True = 真寫入
+
+    回傳:預覽資訊 / 寫入結果 / 錯誤訊息
+    """
+    from pipeline.subagent_runner import (
+        BUILTIN_ROLE_IDS, SELECTABLE_TOOLS, load_custom_roles, save_custom_roles,
+    )
+    import re as _re
+
+    role_id = (role_id or "").strip()
+    label = (label or "").strip()
+    description = (description or "").strip()
+    system_prompt = system_prompt or ""
+
+    # 1. 欄位驗證
+    if not _re.match(r"^[a-z][a-z0-9_]{1,39}$", role_id):
+        return "role_id 必須英文 snake_case (小寫開頭、長 2-40、只能含 a-z 0-9 _)、不能空"
+    if role_id in BUILTIN_ROLE_IDS:
+        return f"role_id '{role_id}' 是內建角色名、不可使用。內建有:{sorted(BUILTIN_ROLE_IDS)}"
+    if not label:
+        return "label(中文顯示名)不能空"
+    if not description:
+        return "description(一句話用途)不能空"
+    if not isinstance(tools, list):
+        return "tools 必須是 list (例 ['run_python', 'read_file'])"
+    _bad = [t for t in tools if t not in SELECTABLE_TOOLS]
+    if _bad:
+        return f"tools 含未知工具 {_bad};可選:{SELECTABLE_TOOLS}(done 會自動加)"
+    if len(system_prompt.strip()) < 30:
+        return "system_prompt 太短(至少 30 字)、要寫清楚角色職能 + 工作流 + 最高優先級違規規則"
+
+    # 2. 撞名檢查
+    existing = load_custom_roles()
+    if role_id in existing:
+        return (
+            f"自訂角色 '{role_id}' 已存在。\n"
+            f"要編輯請告訴使用者去設定頁的『Subagent 角色管理』、或刪除舊的再呼本工具。"
+        )
+
+    # 3. confirm=False → preview
+    _tools_with_done = list(tools)
+    if "done" not in _tools_with_done:
+        _tools_with_done.append("done")
+    if not confirm:
+        return (
+            f"[PREVIEW 不寫] 將新增自訂角色:\n"
+            f"  role_id: {role_id}\n"
+            f"  label: {label}\n"
+            f"  description: {description}\n"
+            f"  tools: {_tools_with_done}\n"
+            f"  system_prompt: ({len(system_prompt)} 字、開頭 100 字: {system_prompt[:100]!r})\n"
+            f"\n⚠️ 請取得使用者明確同意(『yes』『建』『OK』等)後、再次呼叫本工具並設 confirm=True。"
+        )
+
+    # 4. confirm=True → 真寫
+    try:
+        existing[role_id] = {
+            "label": label,
+            "description": description,
+            "tools": _tools_with_done,
+            "system_prompt": system_prompt,
+        }
+        save_custom_roles(existing)
+        return (
+            f"✅ 已新增自訂角色 '{role_id}' ({label})\n"
+            f"tools: {_tools_with_done}\n"
+            f"請告訴使用者:角色已可用、現在 workflow YAML 可以寫 subagent_role: {role_id}"
+        )
+    except Exception as e:
+        return f"寫入失敗:{type(e).__name__}: {str(e)[:200]}"
+
+
+@tool
 async def start_workflow(query: str, confirm: bool = False) -> str:
     """啟動指定工作流(實際跑 pipeline)。
 
@@ -1945,6 +2053,7 @@ CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
     list_workflow_variables,                 # 列工作流可用變數(規劃 / 修改用)
     save_workflow_yaml, create_workflow_yaml, start_workflow,    # 寫工具(走 two-step approval)
+    create_subagent_role,                    # 新增自訂 subagent role(走 two-step approval)
     send_file_to_tg,                         # 送檔到 TG(走 two-step approval)
     web_search,                              # 網路搜尋(限定工作流相關研究)
     list_schedules, schedule_workflow, cancel_schedule,  # 排程相關(write 走 two-step)

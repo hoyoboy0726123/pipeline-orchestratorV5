@@ -27,6 +27,24 @@ logger = logging.getLogger(__name__)
 
 ROLES_YAML_PATH = Path(__file__).resolve().parent.parent / "subagent_roles.yaml"
 
+# 自訂 role 寫到 user 家目錄 ai_output 下、跟其他 v5 user data 一起、不污染 repo
+# load_roles() 會 merge 兩個 yaml(自訂 **不能** override 內建、避免 AI / user 把內建搞壞)
+def _custom_roles_path() -> Path:
+    try:
+        from config import OUTPUT_BASE_PATH  # ~/ai_output
+        base = Path(OUTPUT_BASE_PATH)
+    except Exception:
+        base = Path.home() / "ai_output"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "custom_subagent_roles.yaml"
+
+
+# 內建 role 名單 — 自訂不可使用這 5 個 ID,避免 override
+BUILTIN_ROLE_IDS = {"data_analyst", "coder", "researcher", "critic", "planner"}
+
+# 自訂 role 可選的工具白名單(跟 _KNOWN_TOOLS 對齊、扣掉 done 因為它永遠 ON)
+SELECTABLE_TOOLS = ["run_python", "run_shell", "read_file", "web_search", "view_image", "ask_user"]
+
 # Subagent 一律允許的工具（即使 role 沒列、也讓 LLM 用 done 終止）
 _ALWAYS_ALLOWED = {"done"}
 
@@ -113,28 +131,82 @@ class SubagentResult:
 
 
 def load_roles() -> dict[str, dict]:
-    """載入角色配置。失敗回 fallback。"""
+    """載入內建 + 自訂 role,merge 成單一 dict。
+
+    自訂 role(來自 ~/ai_output/custom_subagent_roles.yaml)**不能** override 內建
+    (避免 AI / user 把 data_analyst 等改壞)。同 ID 的自訂會被忽略 + log warning。
+    """
+    # 內建
     try:
         with open(ROLES_YAML_PATH, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            builtin = yaml.safe_load(f) or {}
     except Exception as e:
-        logger.warning(f"[subagent] 載入 {ROLES_YAML_PATH} 失敗: {e}、用 fallback role")
-        return {
+        logger.warning(f"[subagent] 載入內建 {ROLES_YAML_PATH} 失敗: {e}、用 fallback role")
+        builtin = {
             "data_analyst": {
                 "description": "fallback",
                 "tools": ["run_python", "read_file", "done"],
                 "system_prompt": "你是資料分析師、在 sandbox 內處理資料。回繁體中文。",
             }
         }
+    # 自訂(如果存在)
+    custom_path = _custom_roles_path()
+    if custom_path.exists():
+        try:
+            with open(custom_path, encoding="utf-8") as f:
+                custom = yaml.safe_load(f) or {}
+            for rid, cfg in custom.items():
+                if rid in builtin:
+                    logger.warning(
+                        f"[subagent] 自訂 role '{rid}' 跟內建同名、忽略自訂(內建不可被 override)"
+                    )
+                    continue
+                builtin[rid] = cfg
+        except Exception as e:
+            logger.warning(f"[subagent] 載入自訂 {custom_path} 失敗: {e}、只用內建")
+    return builtin
+
+
+def load_custom_roles() -> dict[str, dict]:
+    """只取自訂(不含內建),供 CRUD endpoint 用。"""
+    custom_path = _custom_roles_path()
+    if not custom_path.exists():
+        return {}
+    try:
+        with open(custom_path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def save_custom_roles(roles: dict[str, dict]) -> None:
+    """寫回自訂 role yaml(覆蓋整檔)。"""
+    custom_path = _custom_roles_path()
+    with open(custom_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(roles, f, allow_unicode=True, sort_keys=False)
+
+
+class UnknownRoleError(ValueError):
+    """Subagent role name 不在內建 / 自訂清單裡。"""
+    pass
 
 
 def get_role(role_name: str) -> dict:
-    """取單一角色設定、找不到回 data_analyst（保證可用）。"""
+    """取單一角色設定、找不到 raise UnknownRoleError 列可選 role 並提示新增方式。
+
+    舊版邏輯是 silent fallback 到 data_analyst,結果使用者以為「AI 助手自行新增了角色」
+    跑得起來但實際是當 data_analyst 跑;改成明確 raise、避免幻覺。
+    """
     roles = load_roles()
     if role_name in roles:
         return roles[role_name]
-    logger.warning(f"[subagent] 角色 '{role_name}' 不存在、退回 data_analyst")
-    return roles.get("data_analyst") or list(roles.values())[0]
+    available = sorted(roles.keys())
+    raise UnknownRoleError(
+        f"未知 subagent role '{role_name}'。"
+        f"可用 role:{available}。"
+        f"想新增請(a)在設定頁的『Subagent 角色管理』新增,"
+        f"或(b)用 AI 助手呼叫 create_subagent_role 工具(兩步確認)。"
+    )
 
 
 def list_role_names() -> list[str]:
@@ -244,7 +316,15 @@ async def run_subagent(
     )
 
     log = step_logger or logger
-    role = get_role(role_name)
+    try:
+        role = get_role(role_name)
+    except UnknownRoleError as e:
+        # 不存在的 role 直接 step fail、不 silent fallback 到 data_analyst
+        log.error(f"[{step_name}] ✗ {e}")
+        return SubagentResult(
+            success=False, final_message="", iterations=0,
+            tool_calls_made=[], error=str(e),
+        )
     allowed_tools = set(role.get("tools", [])) | _ALWAYS_ALLOWED
 
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
