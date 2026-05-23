@@ -1968,11 +1968,33 @@ async def _run_pipeline_inner(
                 # 把 subagent 的 token usage / tool 呼叫時間軸記到該 step、StepResult 結尾寫入
                 step_token_usage = sub_result.token_usage or {}
                 step_tool_calls = list(sub_result.tool_calls_made or [])
+
+                # ⛔ Hallucination 防護:subagent done(success=true) 但 output 檔不存在 → 強制 failed
+                #
+                # 真實案例:LLM 在 boss role 寫了 4000-6000 字計畫 reply、直接呼 done(success=true)、
+                # 從沒呼 run_python 寫檔。runner 看 sub_result.success=True 標 ✅ 通過、
+                # 但下個 step 找不到 final_report.md 才爆。修法:這層強制 check 檔在不在、
+                # 不在就 override 成 failed、訊息列「LLM 宣稱完成但 output 不存在」。
+                _hallucinated = False
+                if sub_result.success and _resolved_out:
+                    if not Path(_resolved_out).exists():
+                        _hallucinated = True
+                        logger.error(
+                            f"[{step.name}] ⛔ Subagent 宣稱 done(success=true) 但 output 檔不存在:{_resolved_out}\n"
+                            f"   LLM 可能寫了 reply 但跳過 run_python 寫檔的步驟、或寫到別處去了。"
+                        )
+                        sub_result.success = False
+                        sub_result.error = (
+                            f"hallucinated_done:LLM 主動 done(success=true) 但 output 檔 {_resolved_out} 不存在。"
+                            f"請改進 role 系統提示要求 done 前先 Path(output).exists() 自驗。"
+                        )
+
                 exec_result = _ExecResult(
                     exit_code=0 if sub_result.success else 1,
                     stdout=(
                         f"[subagent/{step.subagent_role}] {sub_result.final_message}\n"
                         f"\n(iters={sub_result.iterations}, tools={_tools_used})"
+                        + (f"\n⚠ 偵測到 hallucinated done、已 override 為失敗" if _hallucinated else "")
                     ),
                     stderr="" if sub_result.success else (sub_result.error or "subagent 執行失敗"),
                 )

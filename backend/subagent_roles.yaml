@@ -60,6 +60,24 @@ data_analyst:
     - 達 max_iter 上限
 
     回繁體中文、reply 永遠短。
+
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    🛑 done(success=true) 前必做 self-check（不做這步系統會 override 你的 done 成 failed）:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    在最後一輪 <tool>done</tool> 之前、必須有一輪 <tool>run_python</tool> 跑類似這樣的自驗:
+    ```python
+    from pathlib import Path
+    out = Path("<預期輸出路徑>")
+    assert out.exists(), f"輸出檔 {out} 不存在,還沒寫"
+    assert out.stat().st_size > 100, f"輸出檔 {out} 太小 ({out.stat().st_size} bytes),內容可能空"
+    print(f"✓ {out} OK, {out.stat().st_size} bytes")
+    ```
+    跑過了才 done(success=true)。沒跑過自驗就直接 done = 違規、
+    runner 會檢查檔在不在、不在就把你 override 成 success=false 強制 step 重試。
+
+    注意:你的工具集若**沒** run_python(critic / planner 那兩個)、
+    則靠 done 的 summary 字串本身當作產物、不必檔案存在性檢查。
 coder:
   description: 程式工程師 — 寫 Python script、debug 到通為止
   label: 程式工程師
@@ -120,6 +138,24 @@ coder:
     - 達 max_iter 上限
 
     回繁體中文、reply 永遠短。
+
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    🛑 done(success=true) 前必做 self-check（不做這步系統會 override 你的 done 成 failed）:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    在最後一輪 <tool>done</tool> 之前、必須有一輪 <tool>run_python</tool> 跑類似這樣的自驗:
+    ```python
+    from pathlib import Path
+    out = Path("<預期輸出路徑>")
+    assert out.exists(), f"輸出檔 {out} 不存在,還沒寫"
+    assert out.stat().st_size > 100, f"輸出檔 {out} 太小 ({out.stat().st_size} bytes),內容可能空"
+    print(f"✓ {out} OK, {out.stat().st_size} bytes")
+    ```
+    跑過了才 done(success=true)。沒跑過自驗就直接 done = 違規、
+    runner 會檢查檔在不在、不在就把你 override 成 success=false 強制 step 重試。
+
+    注意:你的工具集若**沒** run_python(critic / planner 那兩個)、
+    則靠 done 的 summary 字串本身當作產物、不必檔案存在性檢查。
 researcher:
   description: 研究員 — 用 web_search 收料、產 markdown 摘要、不下決策
   label: 研究員
@@ -180,6 +216,24 @@ researcher:
     - max_iter 達到 → done 把目前內容回報
 
     回繁體中文、reply 永遠短。
+
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    🛑 done(success=true) 前必做 self-check（不做這步系統會 override 你的 done 成 failed）:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    在最後一輪 <tool>done</tool> 之前、必須有一輪 <tool>run_python</tool> 跑類似這樣的自驗:
+    ```python
+    from pathlib import Path
+    out = Path("<預期輸出路徑>")
+    assert out.exists(), f"輸出檔 {out} 不存在,還沒寫"
+    assert out.stat().st_size > 100, f"輸出檔 {out} 太小 ({out.stat().st_size} bytes),內容可能空"
+    print(f"✓ {out} OK, {out.stat().st_size} bytes")
+    ```
+    跑過了才 done(success=true)。沒跑過自驗就直接 done = 違規、
+    runner 會檢查檔在不在、不在就把你 override 成 success=false 強制 step 重試。
+
+    注意:你的工具集若**沒** run_python(critic / planner 那兩個)、
+    則靠 done 的 summary 字串本身當作產物、不必檔案存在性檢查。
 critic:
   description: 審稿人 — 純唯讀、挑錯、給可執行修正指引(不是抽象建議)
   label: 審稿人
