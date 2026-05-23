@@ -1711,7 +1711,28 @@ def check_subagent_status(task_id: str = "") -> str:
         out.append(f"tokens: input={tu.get('input_tokens', 0)} output={tu.get('output_tokens', 0)} total={tu.get('total_tokens', 0)} model={tu.get('model', '')!r}")
     if r.get("error"):
         out.append(f"error: {r['error'][:300]}")
-    out.append(f"\nsummary:\n{r.get('summary', '(空)')}")
+    _summary = r.get('summary', '(空)')
+    out.append(f"\nsummary:\n{_summary}")
+
+    # ⛔ Hallucination 偵測:子代理 summary 宣稱「已送到 TG」但沒走 V5 統一傳檔工具
+    #   → 真實案例:coder 子代理自己 import requests 呼 TG Bot API、寫 summary 「ok=true、message_id=X」
+    #     但實際可能沒真送或送錯 chat_id、使用者沒收到。AI 助手字面採信轉述 user 就誤導。
+    #   解法:server 這層偵測 + AI 助手讀到自動加 disclaimer。
+    _SEND_CLAIMS = (
+        "已送", "已傳", "已寄", "已發送", "已成功傳送", "成功傳送", "傳送成功",
+        "API ok", "ok=true", "ok: true", "ok\":true", "ok\": true",
+        "message_id", "messageid", "sendDocument", "send_document 成功",
+    )
+    _has_send_claim = any(k.lower() in _summary.lower() for k in _SEND_CLAIMS)
+    _used_v5_tool = "send_subagent_file_to_tg" in tools or "send_file_to_tg" in tools
+    if _has_send_claim and not _used_v5_tool:
+        out.append(
+            "\n⚠️ HALLUCINATION 警示:子代理 summary 宣稱『已傳送/API ok/message_id』、"
+            "但 tools used 不含 send_subagent_file_to_tg(V5 統一傳檔工具)。\n"
+            "  子代理可能自己 import requests 呼 TG Bot API、結果未經系統驗證、實際是否到達未知。\n"
+            "  AI 助手轉述使用者時請加 disclaimer『子代理自報、實際請確認』、"
+            "或改用 send_subagent_file_to_tg 工具重傳一次保證到達。"
+        )
     return "\n".join(out)
 
 

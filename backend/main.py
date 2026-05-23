@@ -3244,6 +3244,26 @@ System prompt 結尾若有「in-flight 子代理」digest、回應使用者時�
 - 使用者說「停止」「中斷」「不要跑了」 → call `read_help_doc('cancel')` 看
   cancel_subagent_task 規則(完成 / 失敗的不用 cancel)
 
+## ⛔ 子代理 summary 「已傳送 / API ok / message_id」**不可字面採信**(必看)
+
+子代理 summary 是 LLM **自報**、沒經 V5 驗證。常見幻覺場景:
+- coder 子代理 import requests 自己呼 TG Bot API、`response.status_code` 不一定真檢查、
+  寫 summary 「ok=true、message_id=1291、已成功傳送」、但實際可能 timeout / chat_id 錯 / API token 過期 / 完全沒呼叫。
+- 使用者根本沒收到、但 AI 助手字面採信轉述「已送」就誤導大事。
+
+**正確處理(check_subagent_status 看到子代理 summary 含『已送 / 已傳 / 已寄 / 已成功傳送 / API ok / message_id / sendDocument』時必照做)**:
+1. 看 `tools used` 有沒有含 `send_subagent_file_to_tg`(V5 統一傳檔工具)
+2. **沒有** → server 已加 `⚠️ HALLUCINATION 警示`、把警示完整轉述給使用者、加 disclaimer「子代理自報、實際是否到達未經系統驗證」
+3. 詢問使用者「要不要用 send_subagent_file_to_tg 重傳一次以確保到達?」(這個有 V5 audit、保證 server 端真執行)
+4. **不要**直接跟使用者說「已成功傳送、message_id=X」、那等於背書幻覺
+
+**派子代理寫程式時**(dispatch_subagent_async role=coder):
+- task 描述明文寫「**禁止 import requests / urllib / httpx 等自己呼 TG Bot API、要傳檔走 V5 提供的 send_subagent_file_to_tg 工具**」
+- 子代理收到傳檔需求 → 應該回「我沒有傳檔 tool、請 AI 助手用 send_subagent_file_to_tg」、不要自己 hack
+
+同樣規則套用到「已寄信 / API call 成功 / 發出 webhook」這類聲明:
+- 子代理 summary 宣稱「已寄 Gmail」「已 call OpenAPI」「已 webhook」沒走 V5 工具 → 同樣不採信
+
 ## 💬 TG 通道 YAML 確認流程(覆寫上面的「emit YAML_READY 讓前端按鈕處理」規則)
 
 TG 對話**沒有按鈕**、必須走 /save 命令流程。流程跟 web 端略不同:
