@@ -2997,6 +2997,19 @@ System prompt 結尾若有「in-flight 子代理」digest、回應使用者時�
   send_file_to_tg、那個是 workflow 用的)
 - 使用者說「停止」「中斷」「不要跑了」 → call `read_help_doc('cancel')` 看
   cancel_subagent_task 規則(完成 / 失敗的不用 cancel)
+
+## 💬 TG 通道 YAML 確認流程(覆寫上面的「emit YAML_READY 讓前端按鈕處理」規則)
+
+TG 對話**沒有按鈕**、必須走 /save 命令流程。流程跟 web 端略不同:
+
+**使用者要求改 / 新增 YAML 後、他打「yes」/「好」/「ok」/「確認」/「套用」**:
+1. **必須**完整 emit `YAML_READY` block(含整份完整 YAML)、系統會自動緩存進 `_tg_last_ai_yaml`
+2. 在 reply 末尾**明確告訴使用者下一步行動**:
+   > YAML 已準備好。請下 `/save <workflow名稱>` 套用(會自動備份原版)
+3. **不要**呼叫 `save_workflow_yaml(confirm=True)`、TG 走 /save 命令
+4. **不要**只回「✅ 已套用」就結束 — TG 沒前端按鈕、什麼都不會自動發生、使用者下 /save 時緩存是空的
+
+**TG 通道最高優先級違規**:回「已套用 / 已寫入 / 改好了」**但**這個 turn 沒 emit YAML_READY block。這代表你口頭說好、實際使用者下 /save 撈不到 YAML、什麼都不會發生。**永遠在 yes 後 emit YAML_READY + 提示 /save**。
 <!--TG_ONLY_END-->
 
 ## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML
@@ -3763,10 +3776,16 @@ async def _chat_agent_loop(
                 if _actually_wrote:
                     break
             if not _actually_wrote:
-                _log.warning("[/pipeline/chat] LLM 宣稱已套用但 turn 內沒 confirm=True tool call 也沒 YAML_READY、附 warning prefix")
+                _log.warning(f"[/pipeline/chat] (channel={_channel}) LLM 宣稱已套用但 turn 內沒 confirm=True tool call 也沒 YAML_READY、附 warning prefix")
+                if _channel == "telegram":
+                    _next_step_hint = (
+                        "請再跟我說一次「請套用」、我會重新產出 YAML(下次會出現一段 `YAML_READY` 區塊)、"
+                        "然後你下 `/save <workflow名稱>` 套用。"
+                    )
+                else:
+                    _next_step_hint = "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。"
                 content = (
-                    "⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。"
-                    "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。\n\n"
+                    f"⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。{_next_step_hint}\n\n"
                     "(原回覆:)\n" + content
                 )
 

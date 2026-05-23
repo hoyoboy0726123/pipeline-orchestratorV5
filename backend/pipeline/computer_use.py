@@ -1015,29 +1015,39 @@ def execute_action(
                     fail_msg = m.reason
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
-                # Fallback 判斷（四個條件皆需 True 才退回座標）：
-                #   1. 有錄製座標 (has_coord)
-                #   2. allow_coord_fallback：系統層級信心（螢幕解析度跟錄製時相同）
-                #   3. cv_coord_fallback：使用者步驟層級意願（step toggle，預設 On）
-                #   4. use_coord_layer：使用者 action 層級「強制座標」 toggle(三層 fallback 的最後一層)
-                if has_coord and allow_coord_fallback and cv_coord_fallback and use_coord_layer:
-                    logger.warning(f"[computer_use]   ⚠ 圖像比對失敗（{m.reason}），退回錄製座標 ({fx},{fy})")
+                # Fallback 判斷(分三層 gate):
+                #   1. has_coord:有錄製座標(沒有就根本退不了)
+                #   2. allow_coord_fallback:系統層級信心(螢幕解析度跟錄製時相同)
+                #   3. use_coord_layer:action 層級「📍 強制座標」 toggle(三層 fallback 的最後一層)
+                #
+                # step-level cv_coord_fallback 只在「使用者顯式進入進階模式」時生效:
+                #   - OCR primary (use_ocr=True)
+                #   - CV-only 自定義 (use_uia=False)
+                # 預設三層 fallback (UIA ☑ + CV ☑ + 座標 ☑) 完全忽略 cv_coord_fallback、
+                # 避免 step-level 跟 action-level 兩個 toggle 互相干擾、使用者全勾預設卻退不到座標的 bug。
+                is_explicit_advanced = use_ocr or (not use_uia_layer)
+                step_level_blocks_fallback = is_explicit_advanced and not cv_coord_fallback
+
+                if (has_coord and allow_coord_fallback and use_coord_layer
+                        and not step_level_blocks_fallback):
+                    logger.warning(f"[computer_use]   ⚠ 圖像比對失敗({m.reason}),退回錄製座標 ({fx},{fy})")
                     _do_click(pg, int(fx), int(fy), button, clicks, hold_sec, modifiers)
                     hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
-                    msg = f"[fallback]{mods_tag} 點擊絕對座標 ({fx},{fy}){hold_tag}（原圖 {img_name} 找不到）"
+                    msg = f"[fallback]{mods_tag} 點擊絕對座標 ({fx},{fy}){hold_tag}(原圖 {img_name} 找不到)"
                 elif has_coord and not allow_coord_fallback:
-                    fail_msg = (f"找不到錨點圖 {img_name}（{m.reason}），且目前螢幕解析度與錄製時不同，"
-                        f"絕對座標 ({fx},{fy}) 不可信,請重錄或調整到原螢幕布局")
+                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且目前螢幕解析度與錄製時不同,"
+                        f"絕對座標 ({fx},{fy}) 不可信、請重錄或調整到原螢幕布局")
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
                 elif has_coord and not use_coord_layer:
-                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且使用者關閉了 action 的「強制座標」 toggle。"
+                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且使用者關閉了 action 的「📍 強制座標」 toggle。"
                         f"若要容錯請到 panel 打開該 toggle。")
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
-                elif has_coord and not cv_coord_fallback:
-                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且使用者關閉了步驟層級「CV 失敗退回座標」。"
-                        f"若要容錯請到 panel 打開該 toggle。")
+                elif has_coord and step_level_blocks_fallback:
+                    _mode = "OCR 進階模式" if use_ocr else "CV-only 模式"
+                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且在 {_mode} 下使用者關閉了步驟層級「CV 失敗退回座標」。"
+                        f"若要容錯請到 panel 的 CV 設定打開該 toggle。")
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
                 else:
