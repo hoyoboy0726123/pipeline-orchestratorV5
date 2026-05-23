@@ -270,6 +270,12 @@ async def run_subagent(
     # 累計每輪 LLM 的 token usage（subagent 整段執行的總成本）
     accumulated_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "model": ""}
 
+    # 連續無 tool 計數器:LLM 連 N 輪沒呼工具就強制終止、避免 prose 死循環(常見:
+    # LLM 把分析報告直接寫在 reply 而不寫進檔案、validator 看不到產物就把 step 打 fail)
+    consecutive_no_tool = 0
+    _NO_TOOL_LIMIT = 2  # 連 2 輪無 tool 就中止
+    _PROSE_REPLY_THRESHOLD = 1500  # 單輪 reply > 1500 字但沒 tool 視為「prose 違規」直接算 +1
+
     for i in range(max_iter):
         iteration = i + 1
         log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter}")
@@ -342,13 +348,45 @@ async def run_subagent(
         tool_calls = _parse_skill_tool_calls(reply)
 
         if not tool_calls:
-            # 沒 tool 呼叫：要求補一次、若再沒有就把這段當最終回覆
+            # 沒 tool 呼叫:累計違規、連 _NO_TOOL_LIMIT 次強制中止避免 prose 死循環
+            consecutive_no_tool += 1
+            is_prose = len(reply) > _PROSE_REPLY_THRESHOLD
+            log.warning(
+                f"[{step_name}] ⚠ Subagent 第 {iteration} 輪沒呼工具"
+                f"(reply {len(reply)} 字{'、屬 prose 違規' if is_prose else ''})、"
+                f"累計 {consecutive_no_tool}/{_NO_TOOL_LIMIT}"
+            )
+            if consecutive_no_tool >= _NO_TOOL_LIMIT:
+                err_msg = (
+                    f"連續 {_NO_TOOL_LIMIT} 輪沒呼叫任何 tool 或 done、強制終止避免死循環。"
+                    f"LLM 可能把分析/結論直接寫在 reply 而不是用 run_python 寫到檔案。"
+                )
+                log.error(f"[{step_name}] ✗ {err_msg}")
+                final_message = f"(被系統終止)最後一輪 reply 前 200 字:\n{reply[:200]}"
+                return SubagentResult(
+                    success=False, final_message=final_message, iterations=iteration,
+                    tool_calls_made=tool_calls_made, error="consecutive_no_tool_calls",
+                    token_usage=accumulated_usage,
+                )
             if i == max_iter - 1:
                 final_message = reply
                 break
             messages.append(HumanMessage(content=reply))
-            messages.append(HumanMessage(content="請使用 <tool>...</tool> 格式呼叫工具、或 <tool>done</tool> 回 JSON 結束。"))
+            # 違規累積時提示越來越強硬
+            if consecutive_no_tool == 1:
+                reminder = "請使用 <tool>...</tool> 格式呼叫工具、或 <tool>done</tool> 回 JSON 結束。"
+            else:
+                reminder = (
+                    f"[最後一次警告] 你已連 {consecutive_no_tool} 輪沒呼叫任何工具。"
+                    f"下一輪 reply 必須含 <tool>run_python</tool> / <tool>read_file</tool> 之一"
+                    f"或 <tool>done</tool>、否則系統會強制終止 step。"
+                    f"分析結論不要寫在 reply 裡、寫進 run_python 的 Path.write_text() 存進指定檔。"
+                )
+            messages.append(HumanMessage(content=reminder))
             continue
+
+        # 有 tool 呼叫 → 重置 no-tool 計數
+        consecutive_no_tool = 0
 
         # 一次只處理第一個 tool（避免 LLM 同時 run_python + done 製造假成功）
         first = _renormalize_tool_call(tool_calls[0], reply)

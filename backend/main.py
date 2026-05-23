@@ -2846,6 +2846,52 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 **判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
 
+### 🛑 寫 subagent workflow 常見錯誤(必看、不照做使用者一定踩坑)
+
+從歷史失敗紀錄歸納、寫 subagent step 時請務必避開:
+
+**錯誤 1:沒寫 `output:` 區塊或 path 錯**
+- subagent step 跑完、validator 找不到產物 → step 自動標記失敗 → 整個 pipeline 卡住等使用者決策
+- 修法:每個 subagent step **一定**寫 `output: path: <相對檔名>`、把絕對路徑提示給 subagent
+- ❌ 漏 output 區塊
+- ✅ `output: path: analysis.md` (相對路徑、走 workflow output dir)
+
+**錯誤 2:`subagent_max_iter` 設太低**
+- 預設 5、實際 data_analyst / coder 經常需要 6-10 輪(讀資料 → 試錯 → 寫產物 → 驗證 → done)
+- max_iter 用完 = step 失敗
+- 修法:**data_analyst / coder 至少 8、複雜任務 10-12**;critic / planner 維持 3-5 就夠
+
+**錯誤 3:`batch` 描述太籠統 → LLM 多輪推理走不出來**
+- 「分析這份資料」→ LLM 不知道要分析什麼、要產什麼格式、寫到哪
+- 修法:`batch` 一定要含:
+  - **明確問題**(要找出什麼)
+  - **產出格式**(markdown / xlsx / png?)
+  - **輸出檔名**(跟 `output.path` 對齊、讓 LLM 心裡知道存哪)
+- ✅ `「讀 sales.xlsx 找 Q1 環比下滑最嚴重的 3 個品類、產出趨勢折線圖 + 文字結論到 analysis.md」`
+- ❌ `「分析銷售資料」`
+
+**錯誤 4:任務跨多個 step 但檔案路徑沒接好**
+- step 1 產 `draft.md`、step 2 想讀但 batch 沒講路徑 → subagent 第 1 輪 reply 就花在猜檔名
+- 修法:step 2+ 的 `batch` 開頭明寫「讀前一步產物 `<path>`」
+
+**錯誤 5:不該用 subagent 的場景硬用**
+- 任務本質固定流程(每天日報、固定 KPI 計算)→ 用 skill + Recipe 更穩、token 省 80%
+- subagent 適合「探索 / 試錯」、不是「重複跑」
+
+**錯誤 6:subagent 鏈條太長 (>4 個 subagent step) 沒拆批**
+- 連 4 個 subagent step 一起跑 = 高機率某步失敗、整條重來貴
+- 修法:超過 3 個 subagent step 的 workflow、建議拆成「先跑一段確認 → 滿意再跑下一段」、或改用 ad-hoc dispatch_subagent_async chain mode
+
+### 系統會強制終止的情況(使用者看到「step 失敗」的常見根因)
+
+| 系統行為 | 觸發條件 |
+|---|---|
+| `consecutive_no_tool_calls` 中止 | LLM 連 2 輪沒呼任何 tool(常見:把分析寫在 reply 不寫進檔案)|
+| `reached_max_iter_without_done` | max_iter 用完還沒 call done(常見:max_iter 太低)|
+| step validator fail | subagent 跑完但 output.path 檔不存在(常見:漏寫 output.path、或 batch 沒講要寫到哪)|
+
+寫 subagent workflow 給使用者前、自己跑一次「mental dry-run」確認上面 6 個錯都避開、再 emit YAML_READY。
+
 ## 9. 條件節點（condition）— 分支控制流
 **使用者說**：「如果 X 就…否則…」「資料超過 N 筆才寄信」「依狀態走不同步驟」「分支」「失敗就走另一條」
 **純 metadata 節點、不跑任何命令**：runner 求值表達式、再依結果跳到指定的下游步驟。
