@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 import { X, FolderOpen, ChevronDown, ChevronUp, Brain } from 'lucide-react'
 import type { SubagentData, SubagentNode } from './_helpers'
-import { fsBrowse } from '@/lib/api'
+import { fsBrowse, listSubagentRoles, type SubagentRole } from '@/lib/api'
 import { toast } from 'sonner'
 import { VariableButton } from './_variablePicker'
 import LlmRoleSelector from './_llmRoleSelector'
@@ -118,7 +118,17 @@ export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete,
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [browserTarget, setBrowserTarget] = useState<'output' | 'workingDir' | null>(null)
 
-  const roleInfo = ROLE_INFO[data.role] || ROLE_INFO.data_analyst
+  // 從後端動態抓所有 role(內建 + 自訂)、把 hardcoded ROLE_INFO 當 fallback
+  const [apiRoles, setApiRoles] = useState<SubagentRole[]>([])
+  useEffect(() => {
+    listSubagentRoles().then(r => setApiRoles(r.roles)).catch(() => {})
+  }, [])
+
+  // role 顯示資訊:優先用後端拿到的、找不到才退到內建 hardcode、再不到才退 data_analyst
+  const _apiRole = apiRoles.find(r => r.role_id === data.role)
+  const roleInfo = _apiRole
+    ? { label: _apiRole.label, tools: _apiRole.tools, hint: _apiRole.description }
+    : (ROLE_INFO[data.role] || ROLE_INFO.data_analyst)
 
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/20 bg-white'
 
@@ -165,8 +175,13 @@ export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete,
               onChange={e => onUpdate({ role: e.target.value })}
               className={`${inputCls} font-mono`}
             >
-              {Object.entries(ROLE_INFO).map(([k, v]) => (
-                <option key={k} value={k}>{v.label}（{k}）</option>
+              {/* 後端有回 → 用後端清單(含自訂);沒回 → 退到 hardcode 5 個內建 */}
+              {(apiRoles.length > 0 ? apiRoles : Object.entries(ROLE_INFO).map(([k, v]) => ({
+                role_id: k, label: v.label, is_builtin: true,
+              } as Pick<SubagentRole, 'role_id' | 'label' | 'is_builtin'>))).map(r => (
+                <option key={r.role_id} value={r.role_id}>
+                  {r.label}({r.role_id}){r.is_builtin ? '' : ' • 自訂'}
+                </option>
               ))}
             </select>
             <div className="mt-2 p-2.5 rounded-lg bg-indigo-50 border border-indigo-100 text-xs leading-relaxed">

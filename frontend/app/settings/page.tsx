@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain, Package, Plus, Trash2, Loader2, Sparkles, MessageSquare, Bell, Search, Shield } from 'lucide-react'
+import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain, Package, Plus, Trash2, Loader2, Sparkles, MessageSquare, Bell, Search, Shield, Users, Edit2, X as XIcon } from 'lucide-react'
 import Link from 'next/link'
 import { toast, Toaster } from 'sonner'
 import {
@@ -11,6 +11,8 @@ import {
   getWebSearchSettings, saveWebSearchSettings,
   analyzeRecentLogs,
   listAvailableSkills, scanSkillDependencies,
+  listSubagentRoles, createSubagentRole, updateSubagentRole, deleteSubagentRole,
+  type SubagentRole, type SubagentRolePayload, type SelectableTool,
   scanUnlistedPackages, adoptExistingPackage,
   getNodeStatus,
   getHostTools,
@@ -397,6 +399,393 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
 
 
 // ── Skill Packages Section ────────────────────────────────────────────────────
+// ── Subagent 角色管理 ───────────────────────────────────────────────────────
+// 內建 5 role 不可改不可刪、自訂可 CRUD
+// 工具用 checkbox 多選 (done 永遠隱式 ON)
+const ROLE_PROMPT_TEMPLATE = `你是 [角色職能描述]、負責 [主要工作]。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ 最高優先級違規(連 2 輪犯規系統會強制終止 step):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 每一輪 reply 必須含 <tool>...</tool> 標籤(或 <tool>done</tool>)
+2. reply 必須短(< 500 字),分析 / 結論 / 報告寫進 run_python 的 Path.write_text(),不要寫在 reply 裡
+3. 產物必須寫到指定的 output_path、不寫檔 = step fail
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+任務原則:
+- [這個 role 的核心邏輯]
+- [工作流程順序]
+
+工作流(每步要 tool):
+1. <tool>...</tool> — [第一步做什麼]
+2. <tool>...</tool> — [第二步做什麼]
+3. <tool>done</tool> — \`{"success": true, "summary": "..."}\`
+
+停止條件:
+- [何時 done]
+- 達 max_iter 上限
+
+回繁體中文、reply 永遠短。`
+
+interface RoleFormState {
+  role_id: string
+  label: string
+  description: string
+  tools: string[]
+  system_prompt: string
+}
+
+function emptyRoleForm(): RoleFormState {
+  return { role_id: '', label: '', description: '', tools: [], system_prompt: '' }
+}
+
+function SubagentRolesSection() {
+  const [roles, setRoles] = useState<SubagentRole[]>([])
+  const [selectableTools, setSelectableTools] = useState<SelectableTool[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null) // null = 新增、有值 = 編輯該 id
+  const [form, setForm] = useState<RoleFormState>(emptyRoleForm())
+  const [saving, setSaving] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [expandedSP, setExpandedSP] = useState<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const r = await listSubagentRoles()
+      setRoles(r.roles)
+      setSelectableTools(r.selectable_tools)
+    } catch (e) {
+      toast.error('載入 subagent role 失敗:' + (e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  const startCreate = () => {
+    setEditingId(null)
+    setForm(emptyRoleForm())
+    setShowForm(true)
+  }
+
+  const startEdit = (r: SubagentRole) => {
+    if (r.is_builtin) return
+    setEditingId(r.role_id)
+    setForm({
+      role_id: r.role_id,
+      label: r.label,
+      description: r.description,
+      tools: r.tools.filter(t => t !== 'done'),
+      system_prompt: r.system_prompt,
+    })
+    setShowForm(true)
+  }
+
+  const cancelForm = () => {
+    setShowForm(false)
+    setEditingId(null)
+    setForm(emptyRoleForm())
+  }
+
+  const toggleTool = (t: string) => {
+    setForm(prev => ({
+      ...prev,
+      tools: prev.tools.includes(t)
+        ? prev.tools.filter(x => x !== t)
+        : [...prev.tools, t],
+    }))
+  }
+
+  const applyTemplate = () => {
+    if (form.system_prompt.trim() && !confirm('已有內容、要替換成範本?')) return
+    setForm(prev => ({ ...prev, system_prompt: ROLE_PROMPT_TEMPLATE }))
+  }
+
+  const submit = async () => {
+    if (saving) return
+    setSaving(true)
+    try {
+      const payload: SubagentRolePayload = {
+        role_id: form.role_id.trim(),
+        label: form.label.trim(),
+        description: form.description.trim(),
+        tools: form.tools,
+        system_prompt: form.system_prompt,
+      }
+      if (editingId) {
+        await updateSubagentRole(editingId, payload)
+        toast.success(`已更新自訂角色 '${editingId}'`)
+      } else {
+        await createSubagentRole(payload)
+        toast.success(`已新增自訂角色 '${payload.role_id}'`)
+      }
+      cancelForm()
+      await load()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const onDelete = async (r: SubagentRole) => {
+    if (r.is_builtin) return
+    if (!confirm(`確定刪除自訂角色 '${r.role_id}' (${r.label})?`)) return
+    setDeletingId(r.role_id)
+    try {
+      await deleteSubagentRole(r.role_id)
+      toast.success(`已刪除 '${r.role_id}'`)
+      await load()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  const builtins = roles.filter(r => r.is_builtin)
+  const customs = roles.filter(r => !r.is_builtin)
+
+  return (
+    <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 mb-4">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Users className="w-4 h-4 text-indigo-600" />
+          <h2 className="text-base font-semibold text-gray-900">Subagent 角色管理</h2>
+        </div>
+        {!showForm && (
+          <button
+            onClick={startCreate}
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+          >
+            <Plus className="w-3.5 h-3.5" /> 新增角色
+          </button>
+        )}
+      </div>
+
+      <p className="text-xs text-gray-500 mb-3">
+        Subagent 節點用「角色」決定 system prompt + 可用工具。
+        內建 5 個不可改;自訂角色 AI 助手呼叫 <code className="bg-gray-100 px-1 rounded">create_subagent_role</code> 也會出現在這。
+      </p>
+
+      {/* 新增 / 編輯表單 */}
+      {showForm && (
+        <div className="mb-4 p-4 rounded-xl border-2 border-indigo-300 bg-indigo-50/30">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-indigo-900">
+              {editingId ? `編輯角色 '${editingId}'` : '新增自訂角色'}
+            </h3>
+            <button onClick={cancelForm} className="text-gray-400 hover:text-gray-700">
+              <XIcon className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                Role ID <span className="text-red-500">*</span>
+                <span className="text-gray-400 ml-1">(英文 snake_case、不可改、yaml 鍵)</span>
+              </label>
+              <input
+                value={form.role_id}
+                onChange={(e) => setForm({ ...form, role_id: e.target.value })}
+                placeholder="例: boss, legal_reviewer, supervisor"
+                disabled={!!editingId}
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono disabled:bg-gray-100"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                中文顯示名 <span className="text-red-500">*</span>
+                <span className="text-gray-400 ml-1">(畫布上看到的)</span>
+              </label>
+              <input
+                value={form.label}
+                onChange={(e) => setForm({ ...form, label: e.target.value })}
+                placeholder="例: 主管, 法務審稿員"
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                用途描述 <span className="text-red-500">*</span>
+                <span className="text-gray-400 ml-1">(一句話、出現在工具提示)</span>
+              </label>
+              <input
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                placeholder="例: 審視員工方案、做最終決策"
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                可用工具 <span className="text-gray-400 ml-1">(done 永遠 ON、不顯示)</span>
+              </label>
+              <div className="space-y-1.5 bg-white rounded-lg border border-gray-200 p-3">
+                {selectableTools.map(t => (
+                  <label key={t.id} className="flex items-start gap-2 cursor-pointer hover:bg-gray-50 -mx-1 px-1 py-0.5 rounded">
+                    <input
+                      type="checkbox"
+                      checked={form.tools.includes(t.id)}
+                      onChange={() => toggleTool(t.id)}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-mono text-gray-800">{t.id}</div>
+                      <div className="text-[11px] text-gray-500">{t.description}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-medium text-gray-600">
+                  System Prompt <span className="text-red-500">*</span>
+                  <span className="text-gray-400 ml-1">(role 看到的第一條指令、至少 30 字)</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={applyTemplate}
+                  className="text-[11px] px-2 py-0.5 rounded border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+                >
+                  使用範本
+                </button>
+              </div>
+              <textarea
+                value={form.system_prompt}
+                onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+                placeholder="點「使用範本」可填入含『最高優先級違規規則』的起手範本、然後改成你要的角色"
+                rows={12}
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-xs font-mono outline-none focus:border-indigo-400"
+              />
+              <p className="text-[11px] text-gray-500 mt-1">
+                💡 強烈建議含「最高優先級違規規則」段落(避免 LLM 寫長 prose 不呼工具的死循環)。
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={cancelForm}
+                className="px-3 py-1.5 text-xs rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={submit}
+                disabled={saving}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+                {editingId ? '儲存' : '建立'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 內建 role */}
+      <div className="mb-3">
+        <div className="text-[11px] uppercase font-semibold text-gray-400 mb-1.5 tracking-wider">內建角色(5 個、不可改不可刪)</div>
+        {loading ? (
+          <div className="text-xs text-gray-400 italic">載入中...</div>
+        ) : (
+          <div className="space-y-1.5">
+            {builtins.map(r => (
+              <div key={r.role_id} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-mono text-gray-800">{r.role_id}</span>
+                      <span className="text-xs text-gray-600">— {r.label}</span>
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">{r.description}</div>
+                    <div className="text-[11px] text-gray-400 mt-0.5 font-mono truncate">tools: {r.tools.join(', ')}</div>
+                  </div>
+                  <button
+                    onClick={() => setExpandedSP(expandedSP === r.role_id ? null : r.role_id)}
+                    className="text-[11px] px-2 py-0.5 rounded border border-gray-200 text-gray-600 hover:bg-white"
+                  >
+                    {expandedSP === r.role_id ? '收起' : '看 prompt'}
+                  </button>
+                </div>
+                {expandedSP === r.role_id && (
+                  <pre className="mt-2 text-[10px] font-mono bg-white border border-gray-200 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto">
+                    {r.system_prompt}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 自訂 role */}
+      <div>
+        <div className="text-[11px] uppercase font-semibold text-gray-400 mb-1.5 tracking-wider">
+          自訂角色({customs.length} 個)
+        </div>
+        {customs.length === 0 ? (
+          <div className="text-xs text-gray-400 italic py-2">
+            尚無自訂角色。點上方「新增角色」、或讓 AI 助手用 <code className="bg-gray-100 px-1 rounded">create_subagent_role</code> 工具幫你建。
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            {customs.map(r => (
+              <div key={r.role_id} className="rounded-lg border border-indigo-200 bg-indigo-50/30 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-mono text-indigo-900">{r.role_id}</span>
+                      <span className="text-xs text-indigo-700">— {r.label}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">自訂</span>
+                    </div>
+                    <div className="text-[11px] text-gray-600 mt-0.5">{r.description}</div>
+                    <div className="text-[11px] text-gray-400 mt-0.5 font-mono truncate">tools: {r.tools.join(', ')}</div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setExpandedSP(expandedSP === r.role_id ? null : r.role_id)}
+                      className="text-[11px] px-2 py-0.5 rounded border border-gray-200 text-gray-600 hover:bg-white"
+                    >
+                      {expandedSP === r.role_id ? '收起' : '看 prompt'}
+                    </button>
+                    <button
+                      onClick={() => startEdit(r)}
+                      className="p-1 text-indigo-600 hover:bg-indigo-100 rounded"
+                      title="編輯"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => onDelete(r)}
+                      disabled={deletingId === r.role_id}
+                      className="p-1 text-red-600 hover:bg-red-100 rounded disabled:opacity-50"
+                      title="刪除"
+                    >
+                      {deletingId === r.role_id
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Trash2 className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+                {expandedSP === r.role_id && (
+                  <pre className="mt-2 text-[10px] font-mono bg-white border border-gray-200 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto">
+                    {r.system_prompt}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
 function SkillPackagesSection() {
   const [packages, setPackages] = useState<SkillPackage[]>([])
   const [loading, setLoading] = useState(true)
@@ -2032,6 +2421,9 @@ export default function SettingsPage() {
             toast.error((e as Error).message)
           }
         }} />
+
+        {/* Subagent 角色管理 */}
+        <SubagentRolesSection />
 
         {/* Skill Packages */}
         <SkillPackagesSection />

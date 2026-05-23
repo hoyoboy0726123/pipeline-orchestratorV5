@@ -183,6 +183,76 @@ export async function scanSkillDependencies(displayName: string): Promise<SkillD
   return res.json()
 }
 
+// ── Subagent role CRUD ────────────────────────────────────────────
+export interface SubagentRole {
+  role_id: string
+  label: string
+  description: string
+  tools: string[]
+  system_prompt: string
+  source: 'builtin' | 'custom'
+  is_builtin: boolean
+}
+export interface SelectableTool {
+  id: string
+  description: string
+}
+export interface SubagentRolesResponse {
+  roles: SubagentRole[]
+  selectable_tools: SelectableTool[]
+  builtin_ids: string[]
+}
+export interface SubagentRolePayload {
+  role_id: string
+  label: string
+  description: string
+  tools: string[]
+  system_prompt: string
+}
+
+export async function listSubagentRoles(): Promise<SubagentRolesResponse> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles`)
+  if (!res.ok) throw new Error('載入 subagent role 清單失敗')
+  return res.json()
+}
+
+async function _readErrorDetail(res: Response): Promise<string> {
+  try {
+    const data = await res.json()
+    return data?.detail || `HTTP ${res.status}`
+  } catch {
+    return `HTTP ${res.status}`
+  }
+}
+
+export async function createSubagentRole(payload: SubagentRolePayload): Promise<{ ok: boolean; role_id: string; total_custom: number }> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await _readErrorDetail(res))
+  return res.json()
+}
+
+export async function updateSubagentRole(roleId: string, payload: SubagentRolePayload): Promise<{ ok: boolean; role_id: string }> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles/${encodeURIComponent(roleId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await _readErrorDetail(res))
+  return res.json()
+}
+
+export async function deleteSubagentRole(roleId: string): Promise<{ ok: boolean; deleted: string; remaining_custom: number }> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles/${encodeURIComponent(roleId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await _readErrorDetail(res))
+  return res.json()
+}
+
 // ── Log Analysis ────────────────────────────────────────────
 export interface LogSuggestion { module: string; pip_name: string; found_in: string[] }
 export interface LogAnalysis { analyzed: number; files: { name: string; size: number; has_errors: boolean }[]; suggestions: LogSuggestion[] }
