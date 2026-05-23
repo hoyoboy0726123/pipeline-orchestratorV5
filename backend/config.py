@@ -33,6 +33,52 @@ PIPELINE_DIR       = Path(os.getenv("PIPELINE_DIR", "~/pipelines")).expanduser()
 OUTPUT_BASE_PATH.mkdir(parents=True, exist_ok=True)
 PIPELINE_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# ── Auto-migration:舊 backend/ai_output → 新 OUTPUT_BASE_PATH(僅一次) ──
+# 背景:V5 內部統一 OUTPUT_BASE_PATH 之前(commit 53ed100 / 2026-05-24 前)、
+# 設定 .env OUTPUT_BASE_PATH=./ai_output 的 user、實際 DB / 產物存到 backend/ai_output/。
+# 統一後新預設是 repo_root/ai_output/、舊資料變孤兒、user 看到 workflow 全消失。
+# 這層在啟動時主動偵測 + 搬遷,搬一次就放 .migrated 旗標、不會重跑。
+def _auto_migrate_legacy_ai_output():
+    legacy = (_REPO_ROOT / "backend" / "ai_output").resolve()
+    new = OUTPUT_BASE_PATH
+    if legacy == new:
+        return  # 路徑相同、不必搬
+    flag = new / ".migrated_from_backend"
+    if flag.exists():
+        return  # 已搬過
+    if not legacy.exists() or not legacy.is_dir():
+        return  # 沒舊資料、不必搬
+    # 舊位置有 pipeline.db 才視為「真有 user 資料」(避免 backend/ai_output 是空殼仍誤搬)
+    if not (legacy / "pipeline.db").exists():
+        return
+    # 新位置如果已有 pipeline.db 視為 user 已手動處理過、跳過避免覆寫
+    if (new / "pipeline.db").exists():
+        return
+    import shutil as _sh
+    print(f"\n{'='*60}")
+    print(f"[V5 auto-migrate] 偵測到舊 ai_output 在 {legacy}")
+    print(f"  搬遷到新位置 {new} ...")
+    print(f"{'='*60}\n")
+    try:
+        for item in legacy.iterdir():
+            target = new / item.name
+            if target.exists():
+                continue   # 同名跳過(優先保新 / seed)
+            try:
+                _sh.move(str(item), str(target))
+            except Exception as _e:
+                print(f"  ⚠ 搬 {item.name} 失敗: {_e}")
+        flag.write_text("migrated by config.py auto-migration")
+        print(f"\n[V5 auto-migrate] ✅ 搬遷完成、舊資料夾保留(只搬內容)、可手動刪 {legacy}\n")
+    except Exception as e:
+        print(f"\n[V5 auto-migrate] ⚠ 搬遷部分失敗:{e}、建議手動 robocopy。\n")
+
+try:
+    _auto_migrate_legacy_ai_output()
+except Exception as _e:
+    print(f"[V5 auto-migrate] ⚠ 略過(發生例外):{_e}")
+
 def check_config() -> list[str]:
     missing = []
     if not GROQ_API_KEY:
