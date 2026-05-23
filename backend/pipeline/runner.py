@@ -487,12 +487,53 @@ _TG_DOC_MAX_BYTES = 50 * 1024 * 1024
 
 
 def _workflow_output_dir(workflow_name: str):
-    """回傳 ai_output/<workflow_name>/ 的絕對路徑（不存在也回，由呼叫端決定怎麼處理）。"""
-    from pathlib import Path as _P
+    """回傳 <OUTPUT_BASE_PATH>/<workflow_name>/ 的絕對路徑(不存在也回、由呼叫端處理)。
+
+    重要:統一用 config.OUTPUT_BASE_PATH、不再從 __file__ 推 proj_root + 'ai_output',
+    避免 chat_tools / send_file_to_tg 用 OUTPUT_BASE_PATH 找檔、workflow 卻寫到別處的 bug。
+    """
     if not workflow_name:
         return None
-    proj_root = _P(__file__).parent.parent.parent.absolute()
-    return proj_root / "ai_output" / workflow_name
+    from config import OUTPUT_BASE_PATH
+    return OUTPUT_BASE_PATH / workflow_name
+
+
+# 副檔名猜測:batch 含哪個關鍵字 → 推測該副檔名(沒填 step.output.path 時用)
+_EXT_KEYWORDS: list[tuple[str, str]] = [
+    (".pptx", "pptx"), (".pptx", "投影片"), (".pptx", "簡報"), (".pptx", "PPT"), (".pptx", "ppt"),
+    (".docx", "docx"), (".docx", "Word"), (".docx", "word"),
+    (".xlsx", "xlsx"), (".xlsx", "excel"), (".xlsx", "Excel"), (".xlsx", "表格"),
+    (".csv", "csv"), (".csv", "CSV"),
+    (".png", ".png"), (".png", "圖表"), (".png", "折線圖"), (".png", "長條圖"), (".png", "散佈"), (".png", "繪圖"),
+    (".pdf", ".pdf"), (".pdf", "PDF"),
+    (".json", "JSON"), (".json", ".json"),
+    (".html", ".html"), (".html", "HTML"),
+]
+
+
+def _safe_step_filename(step_name: str) -> str:
+    """把中文 / 空白 / 特殊字元的 step_name 轉成安全檔名 base(無副檔名)。"""
+    import re as _re
+    safe = _re.sub(r"[^\w一-鿿-]+", "_", (step_name or "").strip())
+    safe = safe.strip("_") or "step_output"
+    return safe[:60]   # 太長截掉
+
+
+def _derive_default_output_path(step, workflow_dir: str) -> tuple[str, str]:
+    """step.output.path 沒設時、自動推一個合理路徑給 LLM 知道存哪。
+
+    Returns: (resolved_abs_path, ext_used)
+    """
+    from pathlib import Path as _P
+    # 猜副檔名:掃 batch 找關鍵字、找不到預設 .md(skill 寫產物最常用 markdown)
+    batch_lower = (step.batch or "").lower()
+    ext = ".md"
+    for _ext, kw in _EXT_KEYWORDS:
+        if kw.lower() in batch_lower:
+            ext = _ext
+            break
+    fname = _safe_step_filename(step.name) + ext
+    return str(_P(workflow_dir).absolute() / fname), ext
 
 
 # 用來判斷哪些檔案是「真正的步驟產出」、哪些是雜訊（log / preview / 內部 DB 檔）
@@ -579,8 +620,7 @@ def _latest_workflow_output_file(workflow_name: str):
     from pathlib import Path as _P
     if not workflow_name:
         return None
-    proj_root = _P(__file__).parent.parent.parent.absolute()
-    wf_dir = proj_root / "ai_output" / workflow_name
+    wf_dir = _workflow_output_dir(workflow_name)
     if not wf_dir.exists() or not wf_dir.is_dir():
         return None
     skip_prefixes = ("screenshot_",)
@@ -882,9 +922,9 @@ def _find_prev_output_file(run, config) -> Optional[str]:
     try:
         from pathlib import Path as _P
         import time as _t
+        from config import OUTPUT_BASE_PATH as _OUT_BASE
 
-        # 策略 1：看 step.output.path（同 _resolve_path / _deterministic_validate 規則）
-        proj_root = _P(__file__).parent.parent.parent.absolute()
+        # 策略 1:看 step.output.path(同 _resolve_path / _deterministic_validate 規則)
         idx = run.current_step - 1
         while idx >= 0:
             st = config.steps[idx]
@@ -896,17 +936,16 @@ def _find_prev_output_file(run, config) -> Optional[str]:
                 if not p.is_absolute():
                     parts = p.parts
                     if parts and parts[0] == "ai_output":
-                        p = proj_root / p
+                        # 相容舊 YAML 寫法:ai_output/xxx 視為相對 OUTPUT_BASE_PATH 的父
+                        p = _OUT_BASE.parent / p
                     else:
-                        p = proj_root / "ai_output" / run.pipeline_name / p
+                        p = _OUT_BASE / run.pipeline_name / p
                 if p.exists() and p.is_file():
                     return str(p)
             idx -= 1
 
-        # 策略 2：預設目錄最新檔
-        # 規則跟 main.py / take_screenshots 一致：ai_output/<pipeline_name>/
-        proj_root = _P(__file__).parent.parent.parent.absolute()
-        wf_dir = proj_root / "ai_output" / run.pipeline_name
+        # 策略 2:預設目錄最新檔
+        wf_dir = _OUT_BASE / run.pipeline_name
         if not wf_dir.exists() or not wf_dir.is_dir():
             return None
         # 過濾規則：
@@ -1129,16 +1168,16 @@ def _deterministic_validate(step, exec_result, logger, workflow_name: str = "") 
             suggestion="Recipe 執行失敗，建議改用完整模式重跑",
         )
 
-    # 2. 輸出檔存在 + 大小（路徑用跟 run_pipeline _resolve_path 一致的規則）
+    # 2. 輸出檔存在 + 大小(路徑用跟 run_pipeline _resolve_path 一致的規則)
     if step.output and step.output.path:
         p = _Path(step.output.path).expanduser()
         if not p.is_absolute():
-            proj_root = _Path(__file__).parent.parent.parent.absolute()
+            from config import OUTPUT_BASE_PATH as _OUT_BASE
             parts = p.parts
             if parts and parts[0] == "ai_output":
-                p = proj_root / p
+                p = _OUT_BASE.parent / p
             elif workflow_name:
-                p = proj_root / "ai_output" / workflow_name / p
+                p = _OUT_BASE / workflow_name / p
         if not p.exists():
             return ValidationResult(
                 status="failed",
@@ -1906,7 +1945,12 @@ async def _run_pipeline_inner(
                 # 跳過 recipe cache（多輪結果非確定性）、跳過 validator（loop 內已自我驗證）
                 from .subagent_runner import run_subagent
                 from .executor import ExecResult as _ExecResult
-                _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                if step.output and step.output.path:
+                    _resolved_out = str(_resolve_path(step.output.path))
+                else:
+                    # 沒設 output.path → 自動 derive 到 workflow_dir 下、給 LLM 明確存哪
+                    _resolved_out, _ext = _derive_default_output_path(step, wd)
+                    logger.info(f"[{step.name}] step.output.path 未設,自動 derive → {_resolved_out} (副檔名 {_ext} 由 batch 關鍵字推測)")
                 sub_result = await run_subagent(
                     role_name=step.subagent_role or "data_analyst",
                     task=step.batch,
@@ -1935,8 +1979,14 @@ async def _run_pipeline_inner(
             elif step.skill_mode:
                 # recipe key 使用「索引:名稱」避免同名步驟互相覆蓋
                 recipe_step_key = f"{step_num}:{step.name}"
-                # 把 output_path 解析成絕對路徑傳給 LLM，避免 LLM 搞不清楚相對於哪個 cwd
-                _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                # 把 output_path 解析成絕對路徑傳給 LLM、避免 LLM 搞不清楚相對於哪個 cwd
+                if step.output and step.output.path:
+                    _resolved_out = str(_resolve_path(step.output.path))
+                else:
+                    # 沒設 output.path → 自動 derive 到 workflow_dir 下、給 LLM 明確存哪
+                    # 對應「不指定輸出路徑 = 落在工作流資料夾」的核心設計精神
+                    _resolved_out, _ext = _derive_default_output_path(step, wd)
+                    logger.info(f"[{step.name}] step.output.path 未設、自動 derive → {_resolved_out} (副檔名 {_ext} 由 batch 關鍵字推測)")
                 # 判斷此 step 之後有沒有外部 AI validator 會跑、用於 skill loop 內 output-driven hint
                 # validator 跑的條件(對齊 validator 分派邏輯 line 1974/1993):
                 #   pipeline.validate=True AND (有 expect 描述 OR 此為 skill 節點)

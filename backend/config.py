@@ -14,10 +14,19 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TIMEZONE           = os.getenv("TIMEZONE", "Asia/Taipei")
-# 強制 absolute:.env 設相對路徑時(例如 OUTPUT_BASE_PATH=ai_output)、Path 會保留相對形式、
-# 之後傳到 sandbox docker exec -w 會炸「Cwd must be an absolute path (OCI runtime exec)」。
-# .resolve() 把相對 path 解到當下 cwd 後變 absolute、行為跟之前一致只是物件形式變了
-OUTPUT_BASE_PATH   = Path(os.getenv("OUTPUT_BASE_PATH", "~/ai_output")).expanduser().resolve()
+# OUTPUT_BASE_PATH 解析規則:
+#   1. .env 顯式設絕對路徑 → 用該路徑
+#   2. .env 設相對路徑 → 視為相對 repo_root(不是 backend cwd!)、解成 repo_root/<rel>
+#   3. .env 沒設 → 預設 repo_root/ai_output(對齊 pipeline/runner.py 內 _workflow_output_dir
+#      的 hardcoded 計算結果、避免 workflow runner 跟 chat_tools 兩條路徑解到不同地方)
+# 強制 absolute 確保之後傳到 sandbox docker exec -w 不會炸「Cwd must be an absolute path」。
+_REPO_ROOT = Path(__file__).parent.parent.resolve()   # backend/config.py → backend/ → repo_root/
+_OUTPUT_ENV = os.getenv("OUTPUT_BASE_PATH", "").strip()
+if _OUTPUT_ENV:
+    _p = Path(_OUTPUT_ENV).expanduser()
+    OUTPUT_BASE_PATH = _p if _p.is_absolute() else (_REPO_ROOT / _p).resolve()
+else:
+    OUTPUT_BASE_PATH = (_REPO_ROOT / "ai_output").resolve()
 SCHEDULER_DB_PATH  = OUTPUT_BASE_PATH / "pipeline_scheduler.db"
 PIPELINE_DIR       = Path(os.getenv("PIPELINE_DIR", "~/pipelines")).expanduser()
 

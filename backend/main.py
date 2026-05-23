@@ -1959,9 +1959,9 @@ async def api_pipeline_dryrun(req: DryRunRequest):
     # 把已知 step_name → StepResult 整理出來,新 render 的 step 要更新或追加
     _by_name = {sr.step_name: i for i, sr in enumerate(running_results)}
 
-    # 為了預覽 working_dir,模擬 runner 的計算邏輯(包括跨 step 沿用)
-    _proj_root = _P(__file__).parent.parent.absolute()
-    _wf_default_wd = str(_proj_root / "ai_output" / config.name)
+    # 為了預覽 working_dir,模擬 runner 的計算邏輯(用 OUTPUT_BASE_PATH 統一)
+    from config import OUTPUT_BASE_PATH as _OUT_BASE
+    _wf_default_wd = str(_OUT_BASE / config.name)
     _prev_wd: str = ""
 
     # 預先計算「哪些 step 有 output.path 設」、給警告用
@@ -2021,7 +2021,7 @@ async def api_pipeline_dryrun(req: DryRunRequest):
             # 用 rendered 後的 output.path(可能含 {{ }} 解開)算 parent
             _p = _P(rendered_output_path)
             if not _p.is_absolute():
-                _p = _proj_root / "ai_output" / config.name / _p
+                _p = _OUT_BASE / config.name / _p
             _wd = str(_p.parent.absolute())
         if not _wd and _prev_wd:
             _wd = _prev_wd
