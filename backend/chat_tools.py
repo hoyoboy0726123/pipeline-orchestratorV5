@@ -852,17 +852,22 @@ def send_file_to_tg(workflow_query: str, filename: str = "", confirm: bool = Fal
         return f"檔案 {size_kb:,.1f} KB 超過 TG 50 MB 上限、無法送"
 
     try:
-        from pipeline.runner import _get_tg_token, _get_tg_chat_id
+        from pipeline.runner import _get_tg_token, _get_tg_chat_id, _prepare_tg_file_with_bom
         from telegram import Bot
-        import asyncio
+        import asyncio, os as _os, logging as _logging
         token = _get_tg_token()
         chat_id = _get_tg_chat_id()
         if not token or not chat_id:
             return "Telegram 未設定 (token / chat_id 缺)、無法送"
 
+        # 文字檔(.md / .txt / .csv …)送 TG 前注入 UTF-8 BOM、避免 iOS TG 解成 Big5 亂碼
+        _send_path, _temp_to_cleanup = _prepare_tg_file_with_bom(
+            str(target), _logging.getLogger("chat_tools"), target.name,
+        )
+
         async def _do_send():
             async with Bot(token=token) as bot:
-                with open(target, "rb") as f:
+                with open(_send_path, "rb") as f:
                     await bot.send_document(
                         chat_id=chat_id,
                         document=f,
@@ -885,6 +890,13 @@ def send_file_to_tg(workflow_query: str, filename: str = "", confirm: bool = Fal
                 loop.run_until_complete(_do_send())
         except RuntimeError:
             asyncio.run(_do_send())
+
+        # cleanup BOM-injected temp(若有)
+        if _temp_to_cleanup:
+            try:
+                _os.unlink(_temp_to_cleanup)
+            except Exception:
+                pass
 
         return (
             f"✅ 已送 {target.name} 到 Telegram (chat_id={chat_id})\n"
@@ -1660,17 +1672,22 @@ def send_subagent_file_to_tg(task_id: str, filename: str = "", confirm: bool = F
         return f"❌ {size_kb:,.1f} KB 超過 TG 50 MB 上限"
 
     try:
-        from pipeline.runner import _get_tg_token, _get_tg_chat_id
+        from pipeline.runner import _get_tg_token, _get_tg_chat_id, _prepare_tg_file_with_bom
         from telegram import Bot
-        import asyncio as _asyncio
+        import asyncio as _asyncio, os as _os, logging as _logging
         token = _get_tg_token()
         chat_id = _get_tg_chat_id()
         if not token or not chat_id:
             return "❌ Telegram 未設定(token / chat_id 缺)、無法送"
 
+        # 文字檔送 TG 前注入 UTF-8 BOM、避免 iOS TG 解成 Big5 亂碼
+        _send_path, _temp_to_cleanup = _prepare_tg_file_with_bom(
+            str(target), _logging.getLogger("chat_tools"), target.name,
+        )
+
         async def _do_send():
             async with Bot(token=token) as bot:
-                with open(target, "rb") as f:
+                with open(_send_path, "rb") as f:
                     await bot.send_document(
                         chat_id=chat_id,
                         document=f,
@@ -1690,6 +1707,13 @@ def send_subagent_file_to_tg(task_id: str, filename: str = "", confirm: bool = F
                 loop.run_until_complete(_do_send())
         except RuntimeError:
             _asyncio.run(_do_send())
+
+        # cleanup BOM-injected temp(若有)
+        if _temp_to_cleanup:
+            try:
+                _os.unlink(_temp_to_cleanup)
+            except Exception:
+                pass
 
         return f"✅ 已送出 {target.name} ({size_kb:,.1f} KB) 到 Telegram"
     except Exception as e:

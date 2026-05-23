@@ -749,6 +749,57 @@ def _resolve_step_output_for_tg(
     return None, None, f"不認識的路徑類型：{p}"
 
 
+#
+# UTF-8 BOM injection 共用 helper(給 runner + chat_tools 兩處 send_document 用)
+#
+# 為什麼要這層:iOS Telegram 文件預覽器若拿到沒 BOM 的純 UTF-8 文字檔,
+# 在繁中環境會被自動判定成 Big5 / CP950 → 顯示成 mojibake。
+# 桌面端、Web 端、Android 不受影響(都會猜 UTF-8)。為求一致、在送 .md / .txt /
+# .csv / .json / .yaml / .html / .log 時注入 BOM。
+# 寫到 system temp、原檔不污染。caller 負責 cleanup return 的 temp 路徑。
+#
+_TG_TEXT_EXTS_FOR_BOM = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".log"}
+
+
+def _prepare_tg_file_with_bom(file_path: str, log: logging.Logger | None = None,
+                               display: str | None = None) -> tuple[str, str | None]:
+    """檢查 file_path 副檔名是否為文字檔、是的話寫一個含 UTF-8 BOM 的 temp 給 TG send。
+
+    Args:
+        file_path: 來源檔絕對路徑
+        log: optional logger
+        display: 顯示給 log / caption 用的檔名(可選、預設 file_path 的 basename)
+
+    Returns:
+        (send_path, temp_to_cleanup)
+        - send_path:呼叫端 open() + send 用的路徑(可能是 file_path 本身、也可能是 temp)
+        - temp_to_cleanup:如果有產 temp 就回 path、caller send 完後 os.unlink();
+          沒產 temp 回 None
+    """
+    import tempfile as _tf
+    _ext = Path(file_path).suffix.lower()
+    if _ext not in _TG_TEXT_EXTS_FOR_BOM:
+        return file_path, None
+    _label = display or Path(file_path).name
+    try:
+        with open(file_path, "rb") as _f:
+            _bytes = _f.read()
+        # 已有 BOM 不重複加
+        if _bytes.startswith(b"\xef\xbb\xbf"):
+            return file_path, None
+        _fd, _tmp = _tf.mkstemp(suffix=_ext)
+        os.close(_fd)
+        with open(_tmp, "wb") as _wf:
+            _wf.write(b"\xef\xbb\xbf" + _bytes)
+        if log:
+            log.info(f"[Telegram] 文字檔加 UTF-8 BOM 避免 iOS 解碼成 Big5 亂碼:{_label}")
+        return _tmp, _tmp
+    except Exception as _e:
+        if log:
+            log.warning(f"[Telegram] 加 BOM 失敗、用原檔送:{_e}")
+        return file_path, None
+
+
 async def _send_step_output_to_tg(
     chat_id: int, step, step_label: str = "", *,
     workflow_name: str = "", logger=None, step_result=None,
@@ -779,29 +830,8 @@ async def _send_step_output_to_tg(
         return False, f"Telegram 設定不完整：chat_id={chat_id or '無'}, token={'有' if token else '無'}"
 
     try:
-        # 文字檔(.md / .txt / .csv / .json / .yaml / .html / .log)送 TG 前加 UTF-8 BOM ─
-        # 否則 iOS Telegram doc viewer 沒 BOM 時可能猜成 Big5/CP950、繁中變亂碼。
-        # 寫到 system temp、不污染原檔。
-        _text_exts = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".log"}
-        _ext = Path(file_path).suffix.lower()
-        _send_path = file_path
-        _temp_to_cleanup = None
-        if _ext in _text_exts:
-            try:
-                with open(file_path, "rb") as _f:
-                    _bytes = _f.read()
-                # 已經有 BOM 就不重複加
-                if not _bytes.startswith(b"\xef\xbb\xbf"):
-                    import tempfile
-                    _fd, _tmp = tempfile.mkstemp(suffix=_ext)
-                    os.close(_fd)
-                    with open(_tmp, "wb") as _wf:
-                        _wf.write(b"\xef\xbb\xbf" + _bytes)
-                    _send_path = _tmp
-                    _temp_to_cleanup = _tmp
-                    log.info(f"[Telegram] 文字檔加 UTF-8 BOM 避免 iOS 解碼成 Big5 亂碼:{display}")
-            except Exception as _e:
-                log.warning(f"[Telegram] 加 BOM 失敗、用原檔送:{_e}")
+        # 文字檔送 TG 前加 UTF-8 BOM 避免 iOS Telegram 解成 Big5 亂碼(共用 helper)
+        _send_path, _temp_to_cleanup = _prepare_tg_file_with_bom(file_path, log, display)
         # 用 async with:避免手動 bot.close()(那是 TG `close` API method、
         # 文件寫前 10 分鐘必回 429、嚴格 rate-limit、不該在 bot code 呼叫)。
         # 之前 user 報「每次手動點按鈕必出現速率限制警告」就是這個 bug。
