@@ -2366,11 +2366,13 @@ async def save_pending_recipes(run_id: str):
 @app.get("/pipeline/runs/{run_id}/log")
 async def get_pipeline_log(run_id: str):
     from pipeline.store import get_store
+    from pipeline.runner import _resolve_legacy_log_path
     run = get_store().load(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="找不到 pipeline run")
-    log_path = Path(run.log_path)
-    if not log_path.exists():
+    # 支援 #142 前舊 log_path(backend/ai_output → ai_output 自動 fallback)
+    log_path = _resolve_legacy_log_path(run.log_path)
+    if not log_path:
         return {"log": "（尚無 log 檔案）"}
     content = log_path.read_text(encoding="utf-8")
     return {"log": content}

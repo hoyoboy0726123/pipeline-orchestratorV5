@@ -1228,15 +1228,39 @@ def _deterministic_validate(step, exec_result, logger, workflow_name: str = "") 
     )
 
 
+def _resolve_legacy_log_path(stored_path: str):
+    """支援 #142 OUTPUT_BASE_PATH 統一前的舊 log_path。
+
+    舊版 .env 設 OUTPUT_BASE_PATH=./ai_output 的 user、DB 內 log_path 仍是
+    `D:\\...\\backend\\ai_output\\pipeline_logs\\xxx.log`。新版 ai_output 在 repo_root、
+    .log 檔已被 auto-migrate 搬到新位置、但 DB 內 path 沒改 → 找不到。
+
+    這層 fallback:原 path 不存在 → 嘗試把 backend/ai_output 換成 ai_output 再找一次。
+    """
+    from pathlib import Path as _P
+    if not stored_path:
+        return None
+    p = _P(stored_path)
+    if p.exists():
+        return p
+    s = str(p)
+    # 兩種斜線都試
+    for old, new in (("backend\\ai_output", "ai_output"), ("backend/ai_output", "ai_output")):
+        if old in s:
+            alt = _P(s.replace(old, new))
+            if alt.exists():
+                return alt
+    return None
+
+
 def get_run_log_tail(run_id: str, lines: int = 30) -> str:
     """取得 pipeline 執行 log 的最後 N 行（供 Telegram 查看）"""
     store = get_store()
     run = store.load(run_id)
     if not run or not run.log_path:
         return "（找不到 log）"
-    from pathlib import Path as _Path
-    log_file = _Path(run.log_path)
-    if not log_file.exists():
+    log_file = _resolve_legacy_log_path(run.log_path)
+    if not log_file:
         return "（log 檔案不存在）"
     try:
         all_lines = log_file.read_text(encoding="utf-8").splitlines()
