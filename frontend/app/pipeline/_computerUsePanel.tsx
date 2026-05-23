@@ -521,11 +521,22 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                             <span className="font-mono mr-0.5">{on ? '☑' : '☐'}</span>{label}
                           </button>
                         )
-                        // Preset chip:常見模式一鍵切到對應的 3-toggle 組合(舊「圖像比對」單鍵等價回歸)
+                        // Preset chip:常見模式一鍵切到對應的 3-toggle 組合
+                        // 純 CV preset 設 use_coord=T (action 層級開), 真正座標 fallback 開關走 step-level cvCoordFallback
+                        // 純 UIA / 純 座標 preset 嚴格、其他層 toggle 設 F → 沒中立即 fail
                         const isAll = useUia && useCv && useCoord
                         const isUiaOnly = useUia && !useCv && !useCoord
-                        const isCvOnly = !useUia && useCv && !useCoord
+                        const isCvOnly = !useUia && useCv && useCoord
                         const isCoordOnly = !useUia && !useCv && useCoord
+                        const currentMode: 'all' | 'uia-only' | 'cv-only' | 'coord-only' | 'custom' =
+                          isAll ? 'all'
+                            : isUiaOnly ? 'uia-only'
+                            : isCvOnly ? 'cv-only'
+                            : isCoordOnly ? 'coord-only'
+                            : 'custom'
+                        // step-level cvCoordFallback (預設 False) → 純 CV 模式下『座標 fallback 是否啟用』的真正 gate
+                        // 純 CV 模式下 座標 checkbox 顯示 = cvCoordFallback、點擊 → toggle cvCoordFallback (而不是 action use_coord)
+                        const cvCoordFallback = data.cvCoordFallback === true
                         const presetBtn = (label: string, active: boolean, onClick: () => void, hint: string) => (
                           <button
                             type="button"
@@ -543,25 +554,48 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                             }`}
                           >{label}</button>
                         )
+                        // 純 CV 模式下、座標 checkbox 的特製版:狀態 = cvCoordFallback、click = toggle cvCoordFallback
+                        const coordBoxCvOnly = (
+                          <button
+                            key="coord-cv-only"
+                            type="button"
+                            onClick={() => onUpdate({ cvCoordFallback: !cvCoordFallback })}
+                            disabled={explicitPrimary}
+                            title={`純 CV 模式下、CV 找不到時是否退到錄製座標。狀態跟『CV 詳細設定 → CV 失敗退回錄製座標』連動(目前 ${cvCoordFallback ? '啟用' : '關閉'})`}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                              explicitPrimary
+                                ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
+                                : cvCoordFallback
+                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400'
+                            }`}
+                          >
+                            <span className="font-mono mr-0.5">{cvCoordFallback ? '☑' : '☐'}</span>📍 座標 (fallback)
+                          </button>
+                        )
+                        // 顯示哪些 checkbox 依 currentMode(避免「純 UIA / 純 CV / 純 座標」preset 還顯示無關 layer 視覺重疊)
+                        const showUiaBox = currentMode === 'all' || currentMode === 'uia-only' || currentMode === 'custom'
+                        const showCvBox = (currentMode === 'all' || currentMode === 'cv-only' || currentMode === 'custom') && a.type === 'click_image'
+                        const showCoordBox = currentMode === 'all' || currentMode === 'cv-only' || currentMode === 'coord-only' || currentMode === 'custom'
                         return (
                           <>
                             {/* 模式快速 preset(一鍵切常見組合) */}
                             {presetBtn('全 (三層)', isAll, () => applyLayerPreset(i, true, true, true),
-                              '預設三層 fallback:UIA → CV → 強制座標,命中率最高(等同 3 個 checkbox 全勾)')}
+                              '預設三層 fallback:UIA → CV → 強制座標,命中率最高。下方 3 個 checkbox 顯示全勾、可手動取消任一變組合模式')}
                             {presetBtn('🪟 純 UIA', isUiaOnly, () => applyLayerPreset(i, true, false, false),
                               '純 UIA 嚴格模式:只用 UI 結構定位、找不到立即 fail(適合自家程式 + 有 AutomationId)')}
-                            {a.type === 'click_image' && presetBtn('🔍 純 CV', isCvOnly, () => applyLayerPreset(i, false, true, false),
-                              '純圖像比對嚴格模式:只用錨點圖、找不到立即 fail(適合視窗位置會變、不靠 UIA)')}
+                            {a.type === 'click_image' && presetBtn('🔍 純 CV', isCvOnly, () => applyLayerPreset(i, false, true, true),
+                              '純圖像比對:UIA 跳過, CV 找不到時要不要退座標看『CV 詳細設定 → CV 失敗退回錄製座標』(下方座標 checkbox 動態反映此設定)')}
                             {presetBtn('📍 純 座標', isCoordOnly, () => applyLayerPreset(i, false, false, true),
                               '純座標模式:直接點錄製的 x/y、不嘗試任何識別(最快、視窗位置固定才安全)')}
                             <span className="text-[10px] text-gray-300 select-none">|</span>
-                            {/* 3 細項 checkbox(進階組合微調) */}
-                            {layerBtn('🪟 UIA', 'use_uia', useUia,
+                            {/* 細項 checkbox(依當前 preset 動態決定顯示哪幾個、避免跟 preset 視覺重疊) */}
+                            {showUiaBox && layerBtn('🪟 UIA', 'use_uia', useUia,
                               '啟用 UIA element 結構定位(視窗位置變化最穩、自家程式有 AutomationId 命中率最高)。取消 = 跳過 UIA 直接走下一層')}
-                            {a.type === 'click_image' && layerBtn('🔍 CV', 'use_cv', useCv,
+                            {showCvBox && layerBtn('🔍 CV', 'use_cv', useCv,
                               '啟用 CV 圖像比對(用錄製的錨點圖找)。取消 = 跳過 CV、UIA 沒中直接退強制座標')}
-                            {layerBtn('📍 座標', 'use_coord', useCoord,
-                              '啟用強制座標(最終 fallback、直接點錄製的 x/y)。取消 = 前面層失敗就立即 fail、不退座標')}
+                            {showCoordBox && (currentMode === 'cv-only' ? coordBoxCvOnly : layerBtn('📍 座標', 'use_coord', useCoord,
+                              '啟用強制座標(最終 fallback、直接點錄製的 x/y)。取消 = 前面層失敗就立即 fail、不退座標'))}
                           </>
                         )
                       })()}
