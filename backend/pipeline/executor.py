@@ -2290,6 +2290,27 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
 - PATH 只有 Linux 工具(node/npm/python3/bash/ls/grep/curl);沒 where/dir/type/copy
 - 任務給 Windows 路徑 → 自動轉 `/mnt/<drive>/...` 再用
 
+【⛔ 兩個 mount 不要混淆 — 寫產物搞錯位置 = step 找不到產物 fail】
+容器有兩個獨立 mount 各管不同事:
+
+A. **專案目錄**(寫 workflow 產物的地方、絕大多數情境):
+   容器內:`{_v5_root_wsl}/`
+   host 對應:`{_v5_root_win}`
+   workflow 產物寫到 `{_v5_root_wsl}/ai_output/<workflow_name>/<檔名>`
+   ✅ 範例:`/mnt/d/Atlas/pipeline-orchestratorV5/ai_output/sales_q1_analysis/report.md`
+
+B. **Skill / Agent 目錄**(讀 only、skill 自身程式碼住的地方):
+   容器內:`/root/.agents/`
+   host 對應:`~\.agents\`
+   裡面是 SKILL.md / scripts / references — **不是 workflow 產物存放區**
+
+⛔ **絕對不要把 workflow 產物寫到 `/root/.agents/ai_output/<xxx>/`**!
+   那個路徑你可能看得到資料夾(因為 .agents/ai_output 巧合也存在)、
+   但**不對應到 host 的 ai_output**、Pipeline runner 看不到、step 標 fail。
+   這是踩過的真實坑、必須記牢。
+
+✅ **正確寫法**:`output_path` 提示給的是哪個容器內絕對路徑、就寫到那、不要自作主張改路徑。
+
 【📁 專案根目錄】`{_v5_root_wsl}`
 - 任務裡相對路徑(`external_projects/...` / `scripts/...` / `docs/...`)以**專案根**展開、不要拿 sandbox CWD
 - 例:`external_projects/interactive_demo/main.py` → `{_v5_root_wsl}/external_projects/interactive_demo/main.py`
@@ -2358,8 +2379,35 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         except Exception as e:
             logger.warning(f"[{step_name}] ⚠️ 載入 Skill {skill_name} 失敗：{e}")
 
-    output_hint = f"\n輸出路徑提示：請將結果存到 {output_path}" if output_path else ""
-    wd_hint = f"\n工作目錄：{working_dir}（所有相對路徑都相對於此目錄，請使用絕對路徑存取檔案）" if working_dir else ""
+    # output_path / working_dir hint:在 sandbox 模式下、自動翻 Windows path → 容器內 /mnt/<drive>/...
+    # 防 LLM 在沙盒內看到 D:\ 想破頭、或誤推「/root/.agents/ai_output/...」(那是 skill 目錄、不對應 host)
+    def _to_wsl_path_for_hint(p: str) -> str:
+        if not p:
+            return p
+        try:
+            from settings import get_settings
+            if (get_settings().get("skill_sandbox_mode") or "host").strip() != "wsl_docker":
+                return p  # host 模式直接用原 path
+            import re as _re
+            m = _re.match(r"^([A-Za-z]):[\\/](.+)$", p)
+            if m:
+                drive = m.group(1).lower()
+                rest = m.group(2).replace("\\", "/")
+                return f"/mnt/{drive}/{rest}"
+        except Exception:
+            pass
+        return p
+
+    _hint_output = _to_wsl_path_for_hint(output_path) if output_path else None
+    _hint_wd = _to_wsl_path_for_hint(working_dir) if working_dir else None
+    output_hint = (
+        f"\n輸出路徑提示:請將結果存到 `{_hint_output}`(這是**容器內絕對路徑**、寫到這 host 端會直接看到、不要改別處)"
+        if _hint_output else ""
+    )
+    wd_hint = (
+        f"\n工作目錄(容器內絕對路徑):`{_hint_wd}` (所有相對路徑相對於此、但建議直接用絕對路徑)"
+        if _hint_wd else ""
+    )
 
     # 組合前步驟的輸出資訊 —— 附上「實際內容樣本」,讓 LLM 一開始就看到真實的
     # 欄位名 / 值的格式(大小寫…),不用自己猜(猜錯又不當機就會靜默產出爛結果)。
