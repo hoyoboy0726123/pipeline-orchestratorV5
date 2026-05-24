@@ -232,6 +232,29 @@ def _build_tool_protocol_hint(allowed_tools: set[str]) -> str:
     return "\n".join(lines)
 
 
+def _to_wsl_path(p: str) -> str:
+    """sandbox 模式下、把 Windows path 轉成容器內 /mnt/<drive>/... 路徑、給 LLM hint 用。
+
+    防 LLM 在沙盒看到 D:\\... 自己亂猜成 /root/.agents/... 那種 mount 混淆 bug。
+    跟 executor.py 內同邏輯 (一個 helper 兩邊用)。
+    """
+    if not p:
+        return p
+    try:
+        from settings import get_settings
+        if (get_settings().get("skill_sandbox_mode") or "host").strip() != "wsl_docker":
+            return p
+        import re as _re
+        m = _re.match(r"^([A-Za-z]):[\\/](.+)$", p)
+        if m:
+            drv = m.group(1).lower()
+            rest = m.group(2).replace(chr(92), "/")
+            return f"/mnt/{drv}/{rest}"
+    except Exception:
+        pass
+    return p
+
+
 def _build_user_prompt(
     task: str,
     output_path: Optional[str],
@@ -240,13 +263,15 @@ def _build_user_prompt(
 ) -> str:
     parts = [f"請完成以下任務：\n\n{task}"]
     if output_path:
-        parts.append(f"\n預期輸出路徑：{output_path}")
+        _hint = _to_wsl_path(output_path)
+        parts.append(f"\n預期輸出路徑(容器內絕對路徑、寫到這 host 端會看到、不要改別處):`{_hint}`")
     if prev_outputs:
-        parts.append("\n前面步驟的輸出：")
+        parts.append("\n前面步驟的輸出:")
         for po in prev_outputs:
             p = po.get("path") or "(無路徑)"
             schema = po.get("schema") or ""
-            parts.append(f"  - {p}{(' — ' + schema) if schema else ''}")
+            _p_hint = _to_wsl_path(p) if p != "(無路徑)" else p
+            parts.append(f"  - {_p_hint}{(' — ' + schema) if schema else ''}")
     parts.append("\n" + _build_tool_protocol_hint(allowed_tools))
     return "\n".join(parts)
 
@@ -270,11 +295,27 @@ def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
 
     return system_prompt + f"""
 
-【🛡️ Sandbox 環境（重要）】
-本 step 的 run_python / run_shell **在 Linux Docker 容器內執行**：
-- OS = Linux：沒有 win32com / pywin32 / PowerShell；用純 Python / Linux 工具
-- Windows 路徑要轉：`C:\\X\\...` → `/mnt/c/X/...`
-- 專案根目錄：`{v5_root_wsl}`（任務裡的相對路徑以這個為基準）
+【🛡️ Sandbox 環境(重要)】
+本 step 的 run_python / run_shell **在 Linux Docker 容器內執行**:
+- OS = Linux:沒有 win32com / pywin32 / PowerShell;用純 Python / Linux 工具
+- Windows 路徑要轉:`C:\\X\\...` → `/mnt/c/X/...`、`D:\\X\\...` → `/mnt/d/X/...`
+- 專案根目錄:`{v5_root_wsl}`(任務裡的相對路徑以這個為基準)
+
+【⛔ 兩個 mount 不要混淆 — 寫產物搞錯位置 = step 找不到產物 fail】
+A. **專案目錄**(寫 workflow 產物的地方、絕大多數情境):
+   容器內:`{v5_root_wsl}/`
+   workflow 產物寫到 `{v5_root_wsl}/ai_output/<workflow_name>/<檔名>`
+   ✅ 範例:`{v5_root_wsl}/ai_output/sales_q1/report.md`
+
+B. **Skill / Agent 目錄**(讀 only、skill 自身住的地方):
+   容器內:`/root/.agents/`
+   裡面是 SKILL.md / scripts / references — **不是 workflow 產物存放區**
+
+⛔ 絕對不要把 workflow 產物寫到 `/root/.agents/ai_output/<xxx>/`!
+   那路徑可能存在(.agents/ai_output 巧合也有)、但**不對應到 host 的 ai_output**、
+   Pipeline runner 看不到、step 標 fail。這是踩過的真實坑、必須記牢。
+
+✅ output_path 提示給的是哪個容器內絕對路徑、就寫到那、不要自作主張改路徑。
 """
 
 
