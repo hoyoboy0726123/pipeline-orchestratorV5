@@ -365,13 +365,6 @@ async def run_subagent(
     """
     # 延後 import 避免循環依賴
     from langchain_core.messages import SystemMessage, HumanMessage
-    from pipeline.anti_hallucination import (
-        wrap_tool_result,
-        scan_llm_reply_for_fake_output,
-        check_done_preflight,
-        multi_tool_reminder,
-        SYSTEM_PROMPT_ANTI_HALLUCINATION,
-    )
     from llm_factory import build_llm, invoke_with_streaming
     from pipeline.executor import (
         _parse_skill_tool_calls,
@@ -394,8 +387,6 @@ async def run_subagent(
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
 
     system_prompt = _maybe_inject_sandbox_hint(role.get("system_prompt", ""))
-    # 反幻覺規則 — 4 條:強邊界、單一 tool、done preflight、重驗
-    system_prompt += SYSTEM_PROMPT_ANTI_HALLUCINATION
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
 
     tool_timeout = _compute_tool_timeout(timeout)
@@ -450,10 +441,6 @@ async def run_subagent(
     # Prose-before-tool 違規計數器(soft/enforce 共用):有 tool call 但第一個
     # <tool> 之前 prose > _PROSE_BEFORE_TOOL_THRESHOLD 時累加。Claude 寫 91K 字 plan 案例會擋。
     prose_before_tool_violations = 0
-
-    # 上一個成功執行的 tool name + 截短 result(給 done preflight 用)
-    last_tool_name: Optional[str] = None
-    last_tool_result: Optional[str] = None
 
     for i in range(max_iter):
         iteration = i + 1
@@ -525,20 +512,6 @@ async def run_subagent(
             accumulated_usage["cache_creation_tokens"] += um.get("cache_creation_tokens", 0) or 0
         if not accumulated_usage["model"]:
             accumulated_usage["model"] = llm_result.get("model") or ""
-
-        # 偵測 LLM 在 reply 內偽造強邊界(冒充 orchestrator 的真結果)→ 拒收 reply
-        _fakes = scan_llm_reply_for_fake_output(reply)
-        if _fakes:
-            log.warning(
-                f"[{step_name}] ⛔ Subagent 偽造 {len(_fakes)} 個 REAL OUTPUT 強邊界、拒收"
-            )
-            messages.append(HumanMessage(content=reply))
-            messages.append(HumanMessage(content=(
-                f"[系統] 你 reply 內偽造了 {len(_fakes)} 個 ====[REAL OUTPUT FROM TOOL ...]==== 強邊界、"
-                f"那是 orchestrator 才能生的、你不可以冒充。請重寫 reply、"
-                f"只用 <tool>...</tool><input>...</input> 跟正常文字、不要偽造 tool 結果。"
-            )))
-            continue
 
         tool_calls = _parse_skill_tool_calls(reply)
 
@@ -640,24 +613,24 @@ async def run_subagent(
                     or done_data.get("error")
                     or "(空 done)"
                 )
-                # 假 done 守門(升級版、用 check_done_preflight + surgical retry):
-                # 比原本「檢查 output 存在」更嚴格 — 大小門檻、上一個 tool 必須 run_python、結果需含 exists/size 痕跡。
-                # 失敗時發短指令(< 1KB)取代「重塞整個 system prompt」、節省 ~100× retry token。
-                if success and output_path and fake_done_count < _FAKE_DONE_LIMIT:
-                    _preflight = check_done_preflight(
-                        output_path=output_path,
-                        last_tool_name=last_tool_name,
-                        last_tool_result=last_tool_result,
+                # 假 done 守門:success=true 但 output_path 檔不存在 → reject、注入 reminder
+                # 強迫 LLM 補 run_python 真寫檔(SKILL 模式對應的 executor.py:2701)。
+                # 連 _FAKE_DONE_LIMIT 次都假 done → 讓 runner 走 step retry(走 #144 防線)
+                if (success and output_path and Path(output_path).expanduser().exists() is False
+                        and fake_done_count < _FAKE_DONE_LIMIT):
+                    fake_done_count += 1
+                    log.warning(
+                        f"[{step_name}] ⛔ Subagent 想 done(success=true) 但 output 檔 {output_path} 不存在"
+                        f"、reject + reminder({fake_done_count}/{_FAKE_DONE_LIMIT})"
                     )
-                    if not _preflight.accept:
-                        fake_done_count += 1
-                        log.warning(
-                            f"[{step_name}] ⛔ Subagent done 被 preflight 擋下:{_preflight.reason} "
-                            f"({fake_done_count}/{_FAKE_DONE_LIMIT})"
-                        )
-                        messages.append(HumanMessage(content=reply))
-                        messages.append(HumanMessage(content=_preflight.surgical_retry_prompt))
-                        continue
+                    messages.append(HumanMessage(content=reply))
+                    messages.append(HumanMessage(content=(
+                        f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在!"
+                        f"\n必須先用 <tool>run_python</tool> 實際跑 code 把產物寫到那個路徑(用 Path(...).write_text() / df.to_excel() / fig.savefig() 等)、"
+                        f"\n然後再 self-check Path('{output_path}').exists() == True 才能 done(success=true)。"
+                        f"\n不准只展示 code、必須真跑、跑完 print 確認檔存在。"
+                    )))
+                    continue
                 tool_calls_made.append({"name": "done", "input_preview": tool_input[:200], "result_preview": ""})
                 log.info(f"[{step_name}] ✅ Subagent 主動 done（success={success}）")
                 break
@@ -731,19 +704,17 @@ async def run_subagent(
         else:
             result_for_msg = result_str
 
-        # 把 LLM 回覆 + tool 結果接回對話 — 用強邊界(====[REAL OUTPUT FROM TOOL ...]====)
-        # LLM 比較難偽造、且 system prompt 明確說「邊界外的字串都是腦補」
+        # 把 LLM 回覆 + tool 結果接回對話（沿用 skill loop 慣例）
         messages.append(HumanMessage(content=reply))
-        messages.append(HumanMessage(content=wrap_tool_result(tool_name, result_for_msg)))
+        messages.append(HumanMessage(content=f"[工具結果 — {tool_name}]\n{result_for_msg}"))
 
-        # 多 tool 警告 reminder — 升級版(對齊 P0 SingleAcceptStripper):
-        # 明確告訴 LLM「後面那 N 個從未執行、reply 內描述已跑 XX 都是錯覺」
+        # 多 tool 警告 reminder(對齊 SKILL executor.py:3057-3066)
         if multi_tool_warn:
-            messages.append(HumanMessage(content=multi_tool_reminder(_tag_count, tool_name)))
-
-        # 更新 last_tool 給下一輪 done preflight 用
-        last_tool_name = tool_name
-        last_tool_result = result_str[:2000]  # 截短、preflight 只看關鍵字
+            messages.append(HumanMessage(
+                content=f"[系統警告] 你這個 reply 裡有 {_tag_count} 個 <tool> 標籤。系統只跑第一個({tool_name})、"
+                        f"其他 tag + done 都被忽略。規則:每個 reply 只能寫一個 <tool>...</tool><input>...</input>、"
+                        f"然後等系統回真實結果再決定下一步。不要 plan 多 tool。"
+            ))
 
         # 連續短 run_python 偵測(對齊 SKILL executor.py:3069-3080):
         # LLM 卡在「分步驟讀檔」、提示寫整段

@@ -22,13 +22,6 @@ from typing import Any, Optional
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
-from pipeline.anti_hallucination import (
-    wrap_tool_result,
-    scan_llm_reply_for_fake_output,
-    check_done_preflight,
-    multi_tool_reminder,
-    SYSTEM_PROMPT_ANTI_HALLUCINATION,
-)
 
 # 模組層 logger，給沒有 per-step logger 的輔助函式使用（例如沙盒路由）
 log = logging.getLogger(__name__)
@@ -183,17 +176,15 @@ def _compact_old_tool_results(messages: list) -> int:
     """壓縮舊 tool 結果防 context 膨脹。回傳壓縮的訊息數。
 
     規則:
-    - 找所有 `[工具結果 —`(舊格式)或 `====[REAL OUTPUT FROM TOOL —`(新強邊界格式)開頭的 HumanMessage
+    - 找所有 `[工具結果 —` 開頭的 HumanMessage
     - 保留最後 KEEP_RECENT_FULL 個完整、更早的截成 head + tail preview
     - 已經是 [摘要] 的不重複壓
     """
     from langchain_core.messages import HumanMessage as _HM
-    # 找出所有「工具結果」訊息的 index(支援新舊兩種格式)
+    # 找出所有「工具結果」訊息的 index
     tool_msg_indices = []
     for i, m in enumerate(messages):
-        if isinstance(m, _HM) and isinstance(m.content, str) and (
-            m.content.startswith("[工具結果 —") or m.content.startswith("====[REAL OUTPUT FROM TOOL")
-        ):
+        if isinstance(m, _HM) and isinstance(m.content, str) and m.content.startswith("[工具結果 —"):
             tool_msg_indices.append(i)
 
     if len(tool_msg_indices) <= SKILL_CONTEXT_KEEP_RECENT_FULL:
@@ -2470,9 +2461,6 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
     except Exception as _e:
         logger.debug(f"[{step_name}] sandbox env 注入失敗（略過）：{_e}")
 
-    # 反幻覺規則 — 4 條:強邊界、單一 tool、done preflight、重驗
-    system_prompt += SYSTEM_PROMPT_ANTI_HALLUCINATION
-
     # 掛載 skill：注入 SKILL.md 內容與子資源清單
     if skill_name:
         try:
@@ -2667,12 +2655,6 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         # 同理:防 LLM 在 run_shell rc=1(Cannot find module / no such file 等)後硬送 done。
         # 實測 Sonnet 會在 run_shell 失敗後直接 done(success=true)+ 寫假 summary 騙過 validator。
         last_run_shell_ok: Optional[bool] = None
-        # 給 check_done_preflight 用:上一次成功跑的 tool name + 截短 result
-        last_tool_name: Optional[str] = None
-        last_tool_result: Optional[str] = None
-        # 反幻覺 fake done 計數:超過 _FAKE_DONE_LIMIT_SKILL 次直接讓 step fail、別無限 retry
-        _FAKE_DONE_LIMIT_SKILL = 3
-        fake_done_count_skill = 0
         ask_user_count = 0               # ask_user 呼叫次數（上限 ASK_USER_MAX）
         web_search_count = 0             # web_search 呼叫次數（上限 WEB_SEARCH_MAX_PER_STEP）
         was_interactive = False          # 首次互動標記（給 recipe）
@@ -2758,18 +2740,6 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 idx = reply.lower().index('done')
                 snippet = reply[max(0, idx-80):idx+80]
                 logger.info(f"[{step_name}] reply 含 'done'，上下文：…{snippet}…")
-
-            # 偵測 LLM 在 reply 內偽造強邊界(冒充 orchestrator 的真結果)→ 拒收 reply
-            _fakes = scan_llm_reply_for_fake_output(reply)
-            if _fakes:
-                logger.warning(f"[{step_name}] ⛔ Skill 偽造 {len(_fakes)} 個 REAL OUTPUT 強邊界、拒收")
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=(
-                    f"[系統] 你 reply 內偽造了 {len(_fakes)} 個 ====[REAL OUTPUT FROM TOOL ...]==== 強邊界、"
-                    f"那是 orchestrator 才能生的、你不可以冒充。請重寫 reply、"
-                    f"只用 <tool>...</tool><input>...</input> 跟正常文字、不要偽造 tool 結果。"
-                )))
-                continue
 
             tool_calls = _parse_skill_tool_calls(reply)
 
@@ -2873,25 +2843,17 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                         ))
                         continue
 
-                    # 守門 2：done preflight(升級版、用 anti_hallucination.check_done_preflight)
-                    # 包含:檔存在、大小門檻、上一個 tool 是 run_python、結果含 exists/size 痕跡
-                    # 失敗時用 surgical_retry_prompt(<1KB 短指令、節省 ~100x retry token)取代「重塞整段」
-                    logger.debug(f"[{step_name}] done 檢查:success={success}, output_path={output_path}, exists={Path(output_path).exists() if output_path else 'N/A'}, last_run_python_ok={last_run_python_ok}")
-                    if success and output_path and fake_done_count_skill < _FAKE_DONE_LIMIT_SKILL:
-                        _preflight = check_done_preflight(
-                            output_path=output_path,
-                            last_tool_name=last_tool_name,
-                            last_tool_result=last_tool_result,
-                        )
-                        if not _preflight.accept:
-                            fake_done_count_skill += 1
-                            logger.warning(
-                                f"[{step_name}] ⛔ done preflight 擋下:{_preflight.reason} "
-                                f"({fake_done_count_skill}/{_FAKE_DONE_LIMIT_SKILL})"
-                            )
-                            messages.append(HumanMessage(content=reply))
-                            messages.append(HumanMessage(content=_preflight.surgical_retry_prompt))
-                            continue
+                    # 守門 2：宣稱成功但 output 檔案不存在
+                    logger.debug(f"[{step_name}] done 檢查：success={success}, output_path={output_path}, exists={Path(output_path).exists() if output_path else 'N/A'}, last_run_python_ok={last_run_python_ok}")
+                    if success and output_path and not Path(output_path).exists():
+                        logger.warning(f"[{step_name}] Agent 宣稱成功但輸出檔案 {output_path} 不存在，要求重新執行")
+                        messages.append(HumanMessage(content=reply))
+                        messages.append(HumanMessage(
+                            content=f"[系統] 你宣稱成功但輸出檔案 {output_path} 不存在。"
+                                    f"你必須使用 run_python 工具實際執行程式碼來產生檔案，"
+                                    f"不能只展示程式碼。請使用 <tool>run_python</tool> 執行。"
+                        ))
+                        continue
 
                     all_stdout.append(f"[Skill 完成] {summary}")
                     logger.info(f"[{step_name}] Skill 執行完成：{'成功' if success else '失敗'} — {summary}")
@@ -2995,7 +2957,7 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 if not ask_mode and ask_user_count > ASK_USER_MAX:
                     tool_result = f"[錯誤] ask_user 已達上限 {ASK_USER_MAX} 次（詢問模式未開啟）。請以預設值完成或呼叫 done(success=false)。"
                     messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=wrap_tool_result("ask_user", tool_result)))
+                    messages.append(HumanMessage(content=f"[工具結果 — ask_user]\n{tool_result}"))
                     continue
                 try:
                     q_data = json.loads(tool_input)
@@ -3020,9 +2982,7 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     was_interactive = True  # 標記 recipe「首次有人工回答」
                     tool_result = f"使用者回答：{answer}"
                 messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=wrap_tool_result("ask_user", tool_result)))
-                last_tool_name = "ask_user"
-                last_tool_result = (tool_result or "")[:2000]
+                messages.append(HumanMessage(content=f"[工具結果 — ask_user]\n{tool_result}"))
                 continue
 
             # web_search → 直接呼叫（不走 _execute_skill_tool 的沙盒 pre-flight；它是純 HTTPS API）
@@ -3042,9 +3002,7 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     )
                 all_stdout.append(f"[web_search] {tool_result}")
                 messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=wrap_tool_result("web_search", tool_result)))
-                last_tool_name = "web_search"
-                last_tool_result = (tool_result or "")[:2000]
+                messages.append(HumanMessage(content=f"[工具結果 — web_search]\n{tool_result}"))
                 continue
 
             # view_image → 走多模態：把圖檔讀成 base64 後以 image_url 形式塞進 HumanMessage，
@@ -3058,15 +3016,13 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 messages.append(HumanMessage(content=reply))
                 if img_data["image_b64"]:
                     messages.append(HumanMessage(content=[
-                        {"type": "text", "text": wrap_tool_result("view_image", img_data['text']) + "\n請仔細觀察圖片內容後再決定下一步。"},
+                        {"type": "text", "text": f"[工具結果 — view_image]\n{img_data['text']}\n請仔細觀察圖片內容後再決定下一步。"},
                         {"type": "image_url", "image_url": {
                             "url": f"data:{img_data['image_mime']};base64,{img_data['image_b64']}"
                         }},
                     ]))
                 else:
-                    messages.append(HumanMessage(content=wrap_tool_result("view_image", img_data['text'])))
-                last_tool_name = "view_image"
-                last_tool_result = (img_data['text'] or "")[:2000]
+                    messages.append(HumanMessage(content=f"[工具結果 — view_image]\n{img_data['text']}"))
                 continue
 
             # 執行工具
@@ -3244,15 +3200,17 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     prev_mtimes = cur_mtimes
 
             messages.append(HumanMessage(content=reply))
-            # 強邊界包 tool result(====[REAL OUTPUT FROM TOOL ...]====)— LLM 難偽造、配合 system prompt 「邊界外都是腦補」
-            messages.append(HumanMessage(content=wrap_tool_result(tool_name, tool_result)))
-            # 多工具警告 reminder — 升級版(明確說「後 N 個從未執行、reply 內描述已跑都是錯覺」)
+            messages.append(HumanMessage(content=f"[工具結果 — {tool_name}]\n{tool_result}"))
+            # 多工具警告：reply 含 ≥2 個 <tool>，告訴 LLM 我們只跑第一個（{tool_name}），其他 tag 被忽略
+            # 並提醒不要在 <input> 後面接「假的 stdout」當 prediction，那會自我欺騙
             if multi_tool_warn:
-                messages.append(HumanMessage(content=multi_tool_reminder(_tag_count, tool_name)))
-
-            # 更新 last_tool 給下一輪 done preflight 用
-            last_tool_name = tool_name
-            last_tool_result = (tool_result or "")[:2000]  # 截短、preflight 只看關鍵字
+                messages.append(HumanMessage(
+                    content=f"[系統警告] 你這個 reply 裡有 {_tag_count} 個 <tool> 標籤。系統一次只跑第一個（{tool_name}）"
+                            f"— 其他標籤跟它們的 <input> 都被忽略，包括你可能寫在後面的 done。"
+                            f"\n規則：每個 reply 只能寫一個 <tool>...</tool><input>...</input>，然後等系統回真實結果。"
+                            f"\n禁止在 <input> 之後寫『Successfully executed.』『Recalc Result: ...』這種假裝是執行結果的文字 —"
+                            f"那是你在自我欺騙，真實結果上面已經給你了。"
+                ))
 
             # 迴圈偵測：連續多次只執行短程式碼，注入提示打破迴圈
             if tool_name == "run_python" and len(tool_input) < 200:
@@ -3845,7 +3803,7 @@ async def execute_step_with_outlook(
                 all_stdout.append(f"[run_python] {tool_result}")
                 last_run_python_ok = "[exit code:" not in tool_result
                 messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=wrap_tool_result("run_python", tool_result)))
+                messages.append(HumanMessage(content=f"[工具結果 — run_python]\n{tool_result}"))
                 continue
 
             if tool_name == "ask_user":
