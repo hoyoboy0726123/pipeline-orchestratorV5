@@ -147,25 +147,26 @@ def build_subagent_tools(
         )
 
     # ─── ask_user ───────────────────────────────────────────────
+    # 注意:schema 故意全用 str — Optional[list[str]] 在 Gemini API 對 Gemma 4 等模型
+    # 會觸發 silent failure(整個 request 廢、LLM 回空 content + 空 tool_calls)。
+    # chat_tools.py 內所有 @tool 也都只用 str / int / bool、無 Optional / list — 對齊。
+    # 選項要呈現給使用者時、LLM 自己把選項列在 question 內(例:「A/B/C 哪個?」)。
     @tool
     async def ask_user(
         question: str,
-        options: Optional[list[str]] = None,
         context: str = "",
     ) -> str:
         """問使用者(pipeline 暫停、Telegram / 前端推問題、等回答)。
 
         用於高風險動作(覆寫 / 刪除 / 外部 API)、任務歧義(欄位 / 格式 / 路徑)、多選方案。
         Args:
-            question: 問題(中文、可一次多題)
-            options: 選項陣列(UI 顯示按鈕)、選填
+            question: 問題(中文、若有多選請直接寫在問題內,例「A/B/C 哪個?」)
             context: 額外脈絡(資料量、目前狀態等)、選填
         Returns:
             "使用者回答:<答案>" 或逾時錯誤
         """
-        opts = options or []
         answer = await _wait_for_ask_user(
-            run_id, question, opts, context, log, step_name,
+            run_id, question, [], context, log, step_name,
         )
         if answer is None:
             return "[錯誤] 等待使用者回答逾時或被取消、請以合理預設完成或呼叫 done(success=false)。"
