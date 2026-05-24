@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,21 @@ _ALWAYS_ALLOWED = {"done"}
 
 # 已知工具集（供防禦解析驗證 tool_name 是否乾淨）
 _KNOWN_TOOLS = {"run_python", "run_shell", "read_file", "web_search", "view_image", "done", "ask_user"}
+
+
+# ─── Prose-before-tool 智能 cap ──────────────────────────────────────────
+# 場景:有 tool call、但第一個 <tool> tag 之前 LLM 寫了一大段 prose(「想很多
+# 才動手」)、Claude 系列特別常見、單輪 30K-90K 字 prose、燒 output token。
+# 這個 cap 只在「有 tool」時觸發、最終回覆使用者(無 tool call)的長 reply 不擋。
+#
+# threshold 3000 字 ≈ 一個複雜決策思考夠用、寫不下 91K 字 plan。
+# soft mode 預設(觀察期 3-7 天):只 log warning、不擋。
+# enforce mode 開啟方式:.env SUBAGENT_PROSE_CAP_MODE=enforce
+_PROSE_BEFORE_TOOL_THRESHOLD = 3000   # 第一個 tool 前的 prose 字數上限
+_PROSE_BEFORE_TOOL_LIMIT = 2          # 連 N 次違規才中止(enforce 模式)
+_PROSE_BEFORE_TOOL_MODE = (os.environ.get("SUBAGENT_PROSE_CAP_MODE", "soft").strip().lower())
+if _PROSE_BEFORE_TOOL_MODE not in ("soft", "enforce", "off"):
+    _PROSE_BEFORE_TOOL_MODE = "soft"
 
 
 def _extract_input_for_tool(tool_name: str, after_text: str) -> str:
@@ -394,7 +410,14 @@ async def run_subagent(
     final_message = ""
     success = False
     # 累計每輪 LLM 的 token usage（subagent 整段執行的總成本）
-    accumulated_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "model": ""}
+    accumulated_usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "model": "",
+    }
 
     # 連續無 tool 計數器:LLM 連 N 輪沒呼工具就強制終止、避免 prose 死循環(常見:
     # LLM 把分析報告直接寫在 reply 而不寫進檔案、validator 看不到產物就把 step 打 fail)
@@ -414,6 +437,10 @@ async def run_subagent(
     last_error_sig = ""     # 連續 stderr 同錯偵測:避免 LLM 一直寫同 code 撞同 error
     same_error_count = 0
     # tool result smart truncation:read_file 長結果不全塞 history、降 input 累積
+
+    # Prose-before-tool 違規計數器(soft/enforce 共用):有 tool call 但第一個
+    # <tool> 之前 prose > _PROSE_BEFORE_TOOL_THRESHOLD 時累加。Claude 寫 91K 字 plan 案例會擋。
+    prose_before_tool_violations = 0
 
     for i in range(max_iter):
         iteration = i + 1
@@ -481,6 +508,8 @@ async def run_subagent(
             accumulated_usage["input_tokens"] += um.get("input_tokens", 0) or 0
             accumulated_usage["output_tokens"] += um.get("output_tokens", 0) or 0
             accumulated_usage["total_tokens"] += um.get("total_tokens", 0) or 0
+            accumulated_usage["cache_read_tokens"] += um.get("cache_read_tokens", 0) or 0
+            accumulated_usage["cache_creation_tokens"] += um.get("cache_creation_tokens", 0) or 0
         if not accumulated_usage["model"]:
             accumulated_usage["model"] = llm_result.get("model") or ""
 
@@ -526,6 +555,40 @@ async def run_subagent(
 
         # 有 tool 呼叫 → 重置 no-tool 計數
         consecutive_no_tool = 0
+
+        # Prose-before-tool 智能 cap:有 tool call、但第一個 <tool> tag 之前的
+        # prose > _PROSE_BEFORE_TOOL_THRESHOLD 字 → 「想很多才動手」、燒 output token。
+        # Claude 寫 91K 字 plan 案例會擋。最終回覆使用者(no tool)的長 reply 不擋。
+        if _PROSE_BEFORE_TOOL_MODE != "off":
+            _first_tool_match = re.search(r"<tool>", reply)
+            if _first_tool_match is not None:
+                _prose_chars = len(reply[: _first_tool_match.start()].strip())
+                if _prose_chars > _PROSE_BEFORE_TOOL_THRESHOLD:
+                    prose_before_tool_violations += 1
+                    log.warning(
+                        f"[{step_name}] ⚠ Subagent 第 {iteration} 輪 tool 前 prose {_prose_chars:,} 字"
+                        f"(上限 {_PROSE_BEFORE_TOOL_THRESHOLD})、累計違規 "
+                        f"{prose_before_tool_violations}/{_PROSE_BEFORE_TOOL_LIMIT} "
+                        f"[mode={_PROSE_BEFORE_TOOL_MODE}]"
+                    )
+                    if (_PROSE_BEFORE_TOOL_MODE == "enforce"
+                            and prose_before_tool_violations >= _PROSE_BEFORE_TOOL_LIMIT):
+                        err_msg = (
+                            f"連續 {_PROSE_BEFORE_TOOL_LIMIT} 輪 tool 前 prose 超過 "
+                            f"{_PROSE_BEFORE_TOOL_THRESHOLD} 字、強制中止避免燒 token。"
+                            f"思考分析請寫進 run_python 的 comment 或 print()、不要寫 reply 內。"
+                        )
+                        log.error(f"[{step_name}] ✗ {err_msg}")
+                        final_message = (
+                            f"(被系統終止 — prose-before-tool 違規)最後一輪 prose 前 200 字:\n"
+                            f"{reply[:_first_tool_match.start()].strip()[:200]}"
+                        )
+                        return SubagentResult(
+                            success=False, final_message=final_message,
+                            iterations=iteration, tool_calls_made=tool_calls_made,
+                            error="prose_before_tool_violation",
+                            token_usage=accumulated_usage,
+                        )
 
         # 一次只處理第一個 tool（避免 LLM 同時 run_python + done 製造假成功）
         first = _renormalize_tool_call(tool_calls[0], reply)
