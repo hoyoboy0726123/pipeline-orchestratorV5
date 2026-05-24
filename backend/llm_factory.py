@@ -58,7 +58,13 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
 
     if provider == "groq":
         from langchain_groq import ChatGroq
-        return ChatGroq(api_key=GROQ_API_KEY, model=model, temperature=temperature)
+        # max_tokens 不設 = LangChain default 1024-4096、大段 Python(含三引號 heredoc)
+        # 會被截斷成 unterminated string,LLM 寫 self-check py 一直 rc=1 syntax error 循環。
+        # 8192 對 Groq 系列(llama / kimi / qwen)夠用、只按實際 token 收費,設高不多花錢。
+        return ChatGroq(
+            api_key=GROQ_API_KEY, model=model, temperature=temperature,
+            max_tokens=8192,
+        )
 
     if provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -67,7 +73,9 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
             "model": model,
             "google_api_key": GEMINI_API_KEY,
             "temperature": temperature,
-            "max_output_tokens": 8192,  # 防止 gemma 等模型無限生成
+            # 16384:對齊其他 provider、寫大 Python code(三引號 heredoc 寫長 md/json 報告)
+            # 不被截斷。舊值 8192 對中文長報告會邊緣。Gemini 3 / Gemma 4 都支援這個上限。
+            "max_output_tokens": 16384,
         }
         # 只有 gemini-2.5 和 gemini-3.x 系列支援思考模式,其他模型(gemma, gemini-2.0)靜默忽略
         supports_thinking = model.startswith("gemini-2.5-") or _is_gemini_3x(model)
@@ -81,10 +89,14 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
 
     if provider == "openai":
         from langchain_openai import ChatOpenAI
+        # max_tokens 不設 = OpenAI default(gpt-4o-mini 可能僅 4096)、大段 Python heredoc
+        # 寫長 markdown/json 一定被截斷 → unterminated string → LLM 重寫 → 又截斷死循環。
+        # 16384 對主流 gpt-5 / gpt-4o / o1 系列都支援、按實際生成收費、設高不多花錢。
         return ChatOpenAI(
             model=model,
             api_key=OPENAI_API_KEY,
             temperature=temperature,
+            max_tokens=16384,
         )
 
     if provider == "anthropic":
