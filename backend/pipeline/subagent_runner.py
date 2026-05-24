@@ -67,6 +67,10 @@ _PROSE_BEFORE_TOOL_MODE = (os.environ.get("SUBAGENT_PROSE_CAP_MODE", "soft").str
 if _PROSE_BEFORE_TOOL_MODE not in ("soft", "enforce", "off"):
     _PROSE_BEFORE_TOOL_MODE = "soft"
 
+# 假 done 守門上限(text + native loop 共用):連 N 次假 done 就停止注入 reminder、
+# 讓 runner 走 step retry 機制(走 #144 防線、總成本可控)
+_FAKE_DONE_LIMIT = 2
+
 
 def _extract_input_for_tool(tool_name: str, after_text: str) -> str:
     """從 tool 標籤之後的文字抽出對應 input。
@@ -351,6 +355,13 @@ async def run_subagent(
 ) -> SubagentResult:
     """執行 subagent loop。
 
+    SUBAGENT_LOOP_MODE 環境變數控制協議:
+    - "text"(預設):文字 <tool>...</tool> 協議、自寫 parser(向後相容)
+    - "native":LangChain bind_tools() native function calling(Phase A.1)
+                output token -30%(無 <tool>tag),input prompt 砍冗餘(A.3 後)、
+                LLM 不能偽造 stdout / 不能寫多個 tool 混亂 parser
+    切換方式:.env 加 SUBAGENT_LOOP_MODE=native、重啟 backend。
+
     Args:
         role_name: 角色名（data_analyst / coder / researcher / critic / planner）
         task: 任務描述（節點 batch 內容）
@@ -363,6 +374,16 @@ async def run_subagent(
         timeout: 整體上限秒數（推導 tool_timeout）
         step_logger: per-step logger（傳給 _execute_skill_tool）
     """
+    # Phase A.1 feature flag — native function calling 開關
+    _mode = (os.environ.get("SUBAGENT_LOOP_MODE", "text") or "text").strip().lower()
+    if _mode == "native":
+        return await _run_subagent_native(
+            role_name=role_name, task=task, max_iter=max_iter,
+            workflow_dir=workflow_dir, run_id=run_id, step_name=step_name,
+            output_path=output_path, prev_outputs=prev_outputs,
+            timeout=timeout, step_logger=step_logger, llm_role=llm_role,
+        )
+
     # 延後 import 避免循環依賴
     from langchain_core.messages import SystemMessage, HumanMessage
     from llm_factory import build_llm, invoke_with_streaming
@@ -429,7 +450,7 @@ async def run_subagent(
     # reminder 強迫補 run_python(SKILL 模式從 V3 就有的守門、subagent 補上)。比 runner-level
     # 整步 retry 省 50-70% token,因為不必整個 step 從頭跑。
     fake_done_count = 0
-    _FAKE_DONE_LIMIT = 2  # 連 2 次假 done 就停止注入 reminder、讓 runner 走 step retry
+    # _FAKE_DONE_LIMIT 已提升到 module level、text + native loop 共用
 
     # ─── 從 SKILL loop (executor.py) 移植過來的 3 個守門 ──────────────────────
     # 之前 subagent 漏抄、導致 LLM 卡 self-check 循環、user 反映 step 5 max_iter 不 done
@@ -764,6 +785,344 @@ async def run_subagent(
             success=False, final_message=final_message, iterations=iterations_done,
             tool_calls_made=tool_calls_made, error="reached_max_iter_without_done",
             token_usage=accumulated_usage,
+        )
+
+    return SubagentResult(
+        success=success,
+        final_message=final_message,
+        iterations=iterations_done,
+        tool_calls_made=tool_calls_made,
+        token_usage=accumulated_usage,
+    )
+
+
+# ============================================================
+# Phase A.1 — Native function calling loop
+# ============================================================
+async def _run_subagent_native(
+    *,
+    role_name: str,
+    task: str,
+    max_iter: int = 5,
+    workflow_dir: Optional[str] = None,
+    run_id: str = "",
+    step_name: str = "",
+    output_path: Optional[str] = None,
+    prev_outputs: Optional[list[dict]] = None,
+    timeout: int = 600,
+    step_logger: Optional[logging.Logger] = None,
+    llm_role: str = "primary",
+) -> SubagentResult:
+    """Phase A.1 — SUBAGENT loop 用 LangChain bind_tools() native function calling 版本。
+
+    跟 text 版相同 signature 跟回傳、可以 1:1 替換。差別:
+    - tool_calls 從 AIMessage.tool_calls 拿(LLM API 結構保證、不必文字 parser)
+    - tool 結果用 ToolMessage 接(取代 HumanMessage + 「[工具結果 — X]」)
+    - 沒有「多 tool 標籤誤判」「LLM 偽 [工具結果]」「<tool> 文字格式錯誤」這類 parsing-level bug
+
+    保留的守門(從 text 版繼承):
+    - 角色白名單(透過 build_subagent_tools 的 allowed_tool_names)
+    - max_iter 上限
+    - consecutive_no_tool 計數(連 N 輪無 tool_call → 中止)
+    - prose-before-tool soft cap(AIMessage.content 太長 + 有 tool_calls 警告)
+    - fake_done 檔案存在驗證(LLM done 但 output_path 不存在 → reject + reminder)
+    - token usage 累計(含 cache_read / cache_creation)
+    """
+    from langchain_core.messages import (
+        SystemMessage, HumanMessage, AIMessage, ToolMessage,
+    )
+    from llm_factory import build_llm
+    from pipeline.executor import _compute_tool_timeout
+    from pipeline.sandbox_tools import build_subagent_tools
+
+    log = step_logger or logger
+    try:
+        role = get_role(role_name)
+    except UnknownRoleError as e:
+        log.error(f"[{step_name}] ✗ {e}")
+        return SubagentResult(
+            success=False, final_message="", iterations=0,
+            tool_calls_made=[], error=str(e),
+        )
+    allowed_tools = set(role.get("tools", [])) | _ALWAYS_ALLOWED
+
+    log.info(
+        f"[{step_name}] 🤖 Subagent 啟動 [NATIVE FC](role={role_name}, "
+        f"max_iter={max_iter}, tools={sorted(allowed_tools)})"
+    )
+
+    system_prompt = _maybe_inject_sandbox_hint(role.get("system_prompt", ""))
+    user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
+    tool_timeout = _compute_tool_timeout(timeout)
+
+    # Build LLM + bind tools
+    try:
+        llm = build_llm(role=llm_role)
+    except Exception as e:
+        return SubagentResult(
+            success=False, final_message="", iterations=0,
+            error=f"LLM 建立失敗: {e}",
+        )
+
+    web_search_counter = {"count": 0}
+    tools = build_subagent_tools(
+        cwd=workflow_dir, run_id=run_id, logger=log,
+        tool_timeout=tool_timeout, allowed_tool_names=allowed_tools,
+        step_name=step_name, web_search_counter=web_search_counter,
+    )
+    name_to_tool = {t.name: t for t in tools}
+    try:
+        llm_with_tools = llm.bind_tools(tools)
+    except Exception as e:
+        log.error(f"[{step_name}] bind_tools 失敗:{e}、fallback 不可用")
+        return SubagentResult(
+            success=False, final_message="", iterations=0,
+            error=f"bind_tools 失敗: {e}",
+        )
+
+    # Prompt caching — SystemMessage 加 cache_control(對 Anthropic 有效、其他 provider 略過)
+    _sys_msg_kwargs = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    messages: list = [
+        SystemMessage(content=system_prompt, additional_kwargs=_sys_msg_kwargs),
+        HumanMessage(content=user_prompt),
+    ]
+
+    tool_calls_made: list[dict] = []
+    final_message = ""
+    success = False
+    accumulated_usage = {
+        "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+        "cache_read_tokens": 0, "cache_creation_tokens": 0, "model": "",
+    }
+    consecutive_no_tool = 0
+    fake_done_count = 0
+    iterations_done = 0
+
+    _RETRIABLE_KEYWORDS = (
+        "503", "429", "unavailable", "rate limit", "rate_limit",
+        "service_unavailable", "overloaded", "internal error", "500",
+        "deadline exceeded", "resource_exhausted",
+    )
+
+    for i in range(max_iter):
+        iteration = i + 1
+        iterations_done = iteration
+        log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter} [NATIVE]")
+
+        # LLM call with retry
+        response: Optional[AIMessage] = None
+        last_llm_err: Optional[Exception] = None
+        for _attempt in range(3):
+            try:
+                log.info(f"[subagent[{role_name}]/{step_name}] 🤖 LLM 開始處理(input {sum(len(str(getattr(m, 'content', '') or '')) for m in messages):,} 字)…")
+                _t0 = asyncio.get_event_loop().time()
+                response = await asyncio.wait_for(
+                    llm_with_tools.ainvoke(messages), timeout=600.0,
+                )
+                _elapsed = asyncio.get_event_loop().time() - _t0
+                _content_str = (getattr(response, "content", "") or "") if isinstance(getattr(response, "content", ""), str) else ""
+                log.info(
+                    f"[subagent[{role_name}]/{step_name}] ✅ LLM 完成"
+                    f"({_elapsed:.0f}s, content {len(_content_str)} 字, "
+                    f"tool_calls={len(getattr(response, 'tool_calls', []) or [])})"
+                )
+                last_llm_err = None
+                break
+            except asyncio.TimeoutError as e:
+                last_llm_err = e
+                if _attempt < 2:
+                    _wait = 2 ** _attempt
+                    log.warning(f"[{step_name}] LLM 逾時、{_wait}s retry({_attempt + 1}/2)")
+                    await asyncio.sleep(_wait)
+                    continue
+                break
+            except Exception as e:
+                last_llm_err = e
+                _msg = str(e).lower()
+                _retriable = any(k in _msg for k in _RETRIABLE_KEYWORDS)
+                if _retriable and _attempt < 2:
+                    _wait = 2 ** _attempt
+                    log.warning(
+                        f"[{step_name}] LLM 暫時錯誤、{_wait}s retry({_attempt + 1}/2):"
+                        f"{type(e).__name__}: {str(e)[:200]}"
+                    )
+                    await asyncio.sleep(_wait)
+                    continue
+                break
+
+        if last_llm_err is not None or response is None:
+            err_msg = (
+                f"LLM 呼叫失敗: {type(last_llm_err).__name__}: {last_llm_err}"
+                if last_llm_err else "LLM 回傳 None"
+            )
+            return SubagentResult(
+                success=False, final_message="", iterations=iteration,
+                tool_calls_made=tool_calls_made, error=err_msg,
+                token_usage=accumulated_usage,
+            )
+
+        # 累計 token usage
+        um = getattr(response, "usage_metadata", None) or {}
+        if isinstance(um, dict) and um:
+            accumulated_usage["input_tokens"] += um.get("input_tokens", 0) or 0
+            accumulated_usage["output_tokens"] += um.get("output_tokens", 0) or 0
+            accumulated_usage["total_tokens"] += um.get("total_tokens", 0) or 0
+            itd = um.get("input_token_details") or {}
+            if isinstance(itd, dict):
+                accumulated_usage["cache_read_tokens"] += itd.get("cache_read", 0) or 0
+                accumulated_usage["cache_creation_tokens"] += itd.get("cache_creation", 0) or 0
+        if not accumulated_usage["model"]:
+            _rm = getattr(response, "response_metadata", None) or {}
+            accumulated_usage["model"] = _rm.get("model_name") or _rm.get("model") or ""
+
+        # 把 AIMessage 加進 messages(下一輪 LLM 看得到自己上輪 reply)
+        messages.append(response)
+
+        tool_calls = list(getattr(response, "tool_calls", []) or [])
+        content_str = response.content if isinstance(response.content, str) else ""
+
+        # ── 沒 tool_calls → 純 prose、累計 consecutive_no_tool ─────
+        if not tool_calls:
+            consecutive_no_tool += 1
+            log.warning(
+                f"[{step_name}] ⚠ 第 {iteration} 輪沒 tool_calls(reply {len(content_str)} 字)、"
+                f"累計 {consecutive_no_tool}/2"
+            )
+            if consecutive_no_tool >= 2:
+                err_msg = (
+                    f"連 2 輪沒呼叫任何 tool、強制中止。"
+                    f"LLM 可能把分析結論寫 content 而非 run_python 寫檔。"
+                )
+                log.error(f"[{step_name}] ✗ {err_msg}")
+                return SubagentResult(
+                    success=False,
+                    final_message=f"(被系統終止)最後 reply 前 200 字:\n{content_str[:200]}",
+                    iterations=iteration, tool_calls_made=tool_calls_made,
+                    error="consecutive_no_tool_calls", token_usage=accumulated_usage,
+                )
+            if i == max_iter - 1:
+                final_message = content_str
+                break
+            # 提示繼續
+            messages.append(HumanMessage(content=(
+                "請呼叫一個 tool(run_python / read_file / 等)繼續推進、"
+                "或呼叫 done 結束。分析請寫進 run_python 的程式碼、不要寫 content。"
+            )))
+            continue
+
+        consecutive_no_tool = 0
+
+        # ── 處理 tool_calls ─────────────────────────────────────
+        # 先掃過一次找 done(LLM 在同輪可能 [run_python, done]、要先跑非 done、再驗 done)
+        done_call: Optional[dict] = None
+        regular_calls = []
+        for tc in tool_calls:
+            if tc.get("name") == "done":
+                done_call = tc  # 留最後處理(若有多個 done 取最後)
+            else:
+                regular_calls.append(tc)
+
+        # 跑非 done 的 tool、每個 append ToolMessage
+        last_tool_name_this_iter: Optional[str] = None
+        last_tool_result_this_iter: Optional[str] = None
+        for tc in regular_calls:
+            tc_name = tc.get("name", "")
+            tc_id = tc.get("id") or ""
+            tc_args = tc.get("args", {}) or {}
+            tool_fn = name_to_tool.get(tc_name)
+            log.info(f"[{step_name}] 🛠 tool={tc_name} args_keys={list(tc_args.keys())}")
+            try:
+                if tool_fn is None:
+                    result = (
+                        f"[錯誤] tool '{tc_name}' 不在白名單。可用:{sorted(name_to_tool.keys())}"
+                    )
+                else:
+                    # async tool (ask_user) 用 ainvoke、sync 也接 ainvoke
+                    raw = await tool_fn.ainvoke(tc_args)
+                    result = str(raw) if raw is not None else ""
+            except Exception as e:
+                result = f"[執行失敗] {type(e).__name__}: {e}"
+
+            tool_calls_made.append({
+                "name": tc_name,
+                "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                "result_preview": result[:300],
+            })
+            last_tool_name_this_iter = tc_name
+            last_tool_result_this_iter = result
+
+            # 截斷大 result(防 context 雪崩)
+            _MAX = 3000 if tc_name == "read_file" else 5000
+            _HEAD = 2000 if tc_name == "read_file" else 4000
+            _TAIL = 1000
+            if len(result) > _MAX:
+                _head = result[:_HEAD]
+                _tail = result[-_TAIL:]
+                result = (
+                    f"{_head}\n…[中間省略 {len(result) - _HEAD - _TAIL} 字、"
+                    f"完整長度 {len(result)}]…\n{_tail}"
+                )
+
+            messages.append(ToolMessage(content=result, tool_call_id=tc_id))
+
+        # ── 處理 done(如有)── 驗證 output 存在、否則 reject + reminder
+        if done_call is not None:
+            tc_id = done_call.get("id") or ""
+            tc_args = done_call.get("args", {}) or {}
+            _success = bool(tc_args.get("success", True))
+            _summary = (
+                tc_args.get("summary")
+                or tc_args.get("error")
+                or "(空 summary)"
+            )
+
+            # 假 done 守門:success=true 但 output_path 檔不存在 → reject、注入 reminder
+            if (
+                _success and output_path
+                and Path(output_path).expanduser().exists() is False
+                and fake_done_count < _FAKE_DONE_LIMIT
+            ):
+                fake_done_count += 1
+                log.warning(
+                    f"[{step_name}] ⛔ done(success=true) 但 output 檔 {output_path} 不存在、"
+                    f"reject + reminder({fake_done_count}/{_FAKE_DONE_LIMIT})"
+                )
+                messages.append(ToolMessage(
+                    content=(
+                        f"[拒收] 你宣稱成功但輸出檔 {output_path} 不存在!"
+                        f"請先用 run_python 實際寫檔到那個路徑、跑完 print 確認 "
+                        f"Path('{output_path}').exists() == True 才能 done(success=true)。"
+                        f"不准只展示 code、必須真跑。"
+                    ),
+                    tool_call_id=tc_id,
+                ))
+                continue
+
+            # 通過 → 標 done 結束 loop
+            messages.append(ToolMessage(
+                content="__DONE_ACCEPTED__",
+                tool_call_id=tc_id,
+            ))
+            tool_calls_made.append({
+                "name": "done",
+                "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                "result_preview": "",
+            })
+            success = _success
+            final_message = _summary
+            log.info(
+                f"[{step_name}] ✅ Subagent 主動 done"
+                f"(success={_success}, summary 前 80 字={_summary[:80]})"
+            )
+            break
+
+    else:
+        # max_iter 用完沒 done
+        return SubagentResult(
+            success=False,
+            final_message=f"(超過 {max_iter} 輪未 done)最後 reply:{(content_str or '')[:200]}",
+            iterations=iterations_done, tool_calls_made=tool_calls_made,
+            error="reached_max_iter_without_done", token_usage=accumulated_usage,
         )
 
     return SubagentResult(
