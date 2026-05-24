@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 
 SKILL_TOOL_TIMEOUT = 60          # 預設值：給沒透過 execute_step_with_skill 流程的呼叫者用
-SKILL_TOOL_TIMEOUT_MAX = 180     # 動態 tool timeout 上限（避免 step.timeout 開超大時 run_python 永遠不被砍）
+SKILL_TOOL_TIMEOUT_MAX = 300     # 動態 tool timeout 上限(2026-05-24 從 180→300:node build_pptx 等任務常超 180s、放寬避免 SIGTERM)
 SKILL_MAX_ITERATIONS = 20  # 互動式 skill(python-cli-extractor:問 A-B/subcommand/參數 + 掃描大專案找函式簽名 + GUI 解耦 + retry 補套件 + 重跑)耗 iter 多;較不聰明的模型(Gemma 等)還會空回覆 / 多繞、15 仍會撞牆。20 留足容錯。純運算 skill 照樣 4-5 輪結束
 
 # 連續 N 輪 LLM 口頭說「完成」但沒下 <tool>done</tool> → 強制 done 收尾
@@ -219,15 +219,19 @@ def _compute_tool_timeout(step_timeout: int) -> int:
     """從 step.timeout 推導「單次 run_python / run_shell 上限秒數」。
     使用者已用 step.timeout 標註過該步驟大概要多久、tool 上限自然該跟著放寬。
 
-    公式：min(180, max(60, step.timeout // 5))
-    - step.timeout=300（短任務） → 60s
-    - step.timeout=600（skill 節點預設） → 120s
-    - step.timeout=1200（爬蟲類偏大 budget）→ 180s（封頂）
+    公式(2026-05-24 寬鬆化):min(300, max(90, step.timeout // 3))
+    - step.timeout=270(短任務)  → 90s
+    - step.timeout=300(預設)    → 100s
+    - step.timeout=600          → 200s
+    - step.timeout=900+         → 300s(封頂)
 
-    為什麼 step.timeout/5：skill agent 預期會跑 SKILL_MAX_ITERATIONS=15 次工具呼叫、
-    /5 留出 1/3 ratio 給 LLM 思考 + tool retry buffer，不會把整個 step.timeout 用光。
+    寬鬆化原因(取代 //5 60s 公式):
+    - node build_pptx.js 生 9 slide 含複雜 shape 超 60s → SIGTERM、step fail
+    - npm install 偶發 > 60s
+    - 60s 上限對「複雜但合理」的單次 tool 太緊、user 體感卡住
+    - 改 //3 仍留 2/3 budget 給 LLM 思考 + 多次 tool retry,不會吃光 step.timeout
     """
-    return min(SKILL_TOOL_TIMEOUT_MAX, max(60, int(step_timeout) // 5))
+    return min(SKILL_TOOL_TIMEOUT_MAX, max(90, int(step_timeout) // 3))
 ASK_USER_MAX = 6          # 一個 skill 節點最多 ask_user 次數（ask_mode ON 時取消）。互動式 skill（python-cli-extractor 要問 模式/A-B/subcommand/參數 ≥4 次）3 太緊跑不完、6 留容錯
 ASK_USER_TIMEOUT = 3600   # 單次等待使用者回答的逾時（秒）
 
@@ -1030,9 +1034,23 @@ def _skill_write_file(input_str: str) -> str:
         size = p.stat().st_size
         return f"✓ 已寫入 {p}({size:,} bytes、{len(content.splitlines()) if isinstance(content, str) else '?'} 行)"
     except _json.JSONDecodeError as e:
+        # 30K+ content 包 JSON 太容易踩 escape 雷(\u 跳脫、引號、換行)、引導 LLM 改 run_python
+        _len = len(input_str)
+        if _len > 5000:
+            return (
+                f"[錯誤] JSON 解析失敗(content {_len:,} 字、太長易踩 escape 雷):{e}\n\n"
+                f"⚠ 長內容(> 5KB)建議改用 run_python + heredoc、不要用 write_file:\n"
+                f"```python\n"
+                f"content = r'''...你的長內容...'''  # 用 r''' 避免 \\u / \\n escape 問題\n"
+                f"with open('/絕對路徑/檔名', 'w', encoding='utf-8') as f:\n"
+                f"    f.write(content)\n"
+                f"```\n"
+                f"write_file 適合 < 5KB 短內容、且不含複雜 escape。"
+            )
         return (f"[錯誤] JSON 格式錯誤:{e}\n"
                 f"正確格式:{{\"path\":\"x.js\",\"content\":\"檔案內容\"}}\n"
-                f"注意 content 內的 \" 要 escape 為 \\\"、換行用 \\n")
+                f"注意 content 內的 \" 要 escape 為 \\\"、換行用 \\n\n"
+                f"⚠ 內容超 5KB 建議改用 run_python + heredoc(避免 JSON escape 雷)")
     except Exception as e:
         return f"[錯誤] 寫檔失敗:{e.__class__.__name__}: {e}"
 
@@ -2325,8 +2343,12 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
 【🛡️ Sandbox 環境(Linux Docker 容器、python:3.13-slim、不是 Windows)】
 - OS = Linux:沒有 win32com / pywin32 / PowerShell / cmd.exe — 用純 Python 或 Linux 工具
 - 產 PPT 用 `python-pptx`(首選)或 Node.js + `pptxgenjs`(走 `.agents/skills/pptx`);**不要 import win32com.client**(永遠 ImportError)
-- Node.js 全域套件已預裝(`pptxgenjs`、`docx`、可能還有其他 npm 包),`NODE_PATH=/usr/local/lib/node_modules` 已設好
-  → **JS 檔內 require 一律用裸模組名**:`require('pptxgenjs')`、`require('docx')`
+- Node.js 全域套件已預裝(`pptxgenjs`、`docx`、可能還有其他 npm 包)
+  → **JS 檔內 require 用裸模組名**:`require('pptxgenjs')`、`require('docx')`
+  → **若 `require('pptxgenjs')` 報 Cannot find module**(image 可能用 nvm,NODE_PATH 跟實際路徑不一致):
+     - **正確做法**:在 JS 開頭加 `require('module').globalPaths.push(require('child_process').execSync('npm root -g').toString().trim());` 後再 require
+     - **或更穩**:先在 run_shell 跑 `npm root -g` 拿真路徑(< 1s)、然後 `require('絕對路徑/pptxgenjs')`
+     - **絕對禁止**:`find / -name "pptxgenjs"`(掃整碟 > 60s timeout、會 SIGTERM)
   → **絕對禁止** `require('C:/...')`、`require('/mnt/c/.../node_modules/pptxgenjs')`(那是 Windows / 主機路徑、container 內找不到、必定 Cannot find module)
 - 路徑轉換:Windows `C:\...` / `C:/...` 在容器無效、pathlib 會當相對路徑導致找不到檔
   - `C:\Users\X\...` → `/mnt/c/Users/X/...`
