@@ -1496,14 +1496,34 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
     force_host=True：跳過沙盒檢查直接走 host（使用者透過 ask_user 同意 fallback 時 caller 會傳）。
     logger: per-step 的 pipeline logger（有寫到 .log 檔）；None 的話沙盒標記只會印到 backend stdout。
     tool_timeout：單次 run_python / run_shell 上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。"""
+    # sandbox fallback 警告:設成 wsl_docker 但 sandbox 跑不起來時 LLM 不知情、
+    # 繼續用 /mnt/d/ Linux 路徑撞 Windows host、燒 token 瘋狂 retry(2026-05-24 root cause)。
+    # 在 host result 前綴明確告知 LLM 路徑與 shell 已切換。
+    _sandbox_warn_prefix = ""
     if tool_name in ("run_python", "run_shell") and not force_host:
-        sandbox_out = _try_sandbox_exec(tool_name, tool_input, cwd, run_id, logger, tool_timeout=tool_timeout)
+        _sandbox_meta: dict = {}
+        sandbox_out = _try_sandbox_exec(
+            tool_name, tool_input, cwd, run_id, logger,
+            tool_timeout=tool_timeout, out_meta=_sandbox_meta,
+        )
         if sandbox_out is not None:
             return sandbox_out
+        # 真的 fallback 到 host 才加 warning(不是 host 模式 normal 跑)
+        if _sandbox_meta.get("mode_was") == "wsl_docker":
+            _reason = _sandbox_meta.get("fallback_reason") or "未知"
+            _sandbox_warn_prefix = (
+                f"[⚠️ 沙盒不可用、本次 fallback 到 Windows host 執行 — 原因:{_reason}]\n"
+                f"⚠ 路徑請用 Windows 格式:D:\\... 或 C:\\...(不要用 /mnt/d/ 等 Linux 路徑)\n"
+                f"⚠ shell 是 cmd.exe、不認 ls / cat / grep / which:用 dir / type / findstr / where\n"
+                f"⚠ 設定請使用者去 Settings 切換沙盒開關恢復 — 之前已正常跑、現在突然不行通常是 Docker 或 WSL 暫斷\n"
+                f"---\n"
+            )
     if tool_name == "run_python":
-        return _skill_run_python(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        _r = _skill_run_python(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        return _sandbox_warn_prefix + _r if _sandbox_warn_prefix else _r
     elif tool_name == "run_shell":
-        return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        _r = _skill_run_shell(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        return _sandbox_warn_prefix + _r if _sandbox_warn_prefix else _r
     elif tool_name == "read_file":
         # 兩種輸入皆支援:
         #   1) 裸路徑字串(舊行為、向後相容)
@@ -1544,8 +1564,11 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
 
 
 # ── 沙盒路由（V3） ────────────────────────────────────────────────
-# 避免每次呼叫都 log「沙盒不可用」洗頻，用 set 去重（reason 作為 key）
-_SANDBOX_WARNED: set[str] = set()
+# 避免每次呼叫都 log「沙盒不可用」洗頻、但又要避免「第一次失敗後永久靜音」
+# 導致 LLM 一直用 sandbox 路徑撞 host(2026-05-24 ai_coding_market_research 燒
+# $1.5-2 token 的 root cause)。改用 dict[reason, last_warn_ts],過 5 分鐘可再 log。
+_SANDBOX_WARNED: dict[str, float] = {}
+_SANDBOX_WARN_COOLDOWN_SEC = 300.0  # 同 reason 每 5 分鐘最多 log 一次
 
 
 async def _preflight_sandbox(
@@ -1637,12 +1660,15 @@ async def _preflight_sandbox(
 
 def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_id: str,
                       logger: Optional[logging.Logger] = None,
-                      tool_timeout: int = SKILL_TOOL_TIMEOUT) -> Optional[str]:
+                      tool_timeout: int = SKILL_TOOL_TIMEOUT,
+                      out_meta: Optional[dict] = None) -> Optional[str]:
     """若 settings.skill_sandbox_mode='wsl_docker' 且沙盒可用，就把 run_python/run_shell
     送進 pipeline-sandbox-v4 容器執行。回傳組好的 output 字串（格式對齊 host 版本）；
     若 mode=host 或沙盒不可用則回傳 None 讓 caller fallback 到 host subprocess。
     logger: per-step pipeline logger；若提供則沙盒標記會出現在 .log 檔，否則只出現在 backend stdout。
-    tool_timeout：單次 tool 執行上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。"""
+    tool_timeout：單次 tool 執行上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。
+    out_meta: mutable dict, 失敗時填 {"fallback_reason": str, "mode_was": "wsl_docker"}
+              caller 用來判斷要不要在 host result 前綴警告給 LLM（防 LLM 還以為在 sandbox)。"""
     _lg = logger if logger is not None else log
     try:
         import sys as _sys
@@ -1653,6 +1679,9 @@ def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_i
         from pipeline import sandbox as _sandbox
     except Exception as e:
         _lg.warning(f"[sandbox] import 失敗（fallback 到 host）：{e}")
+        if out_meta is not None:
+            out_meta["fallback_reason"] = f"import failed: {e}"
+            out_meta["mode_was"] = "wsl_docker"  # 不知道、保守假設
         return None
 
     settings_dict = get_settings()
@@ -1663,12 +1692,28 @@ def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_i
     if mode != "wsl_docker":
         return None
 
+    # ensure_running 失敗時 retry 一次,可能只是 Docker 暫時 hiccup
     ok, reason = _sandbox.ensure_running()
     if not ok:
+        _lg.info(f"[sandbox] ensure_running 失敗({reason})、1s 後 retry...")
+        import time as _t
+        _t.sleep(1.0)
+        ok, reason = _sandbox.ensure_running()
+    if not ok:
+        # cooldown:同 reason 5 分鐘最多 log warning 一次,但不會永久靜音
         key = reason or "unknown"
-        if key not in _SANDBOX_WARNED:
-            _lg.warning(f"[sandbox] 沙盒不可用，此次 fallback 到 host：{reason}")
-            _SANDBOX_WARNED.add(key)
+        import time as _t
+        now = _t.time()
+        last = _SANDBOX_WARNED.get(key, 0)
+        if now - last >= _SANDBOX_WARN_COOLDOWN_SEC:
+            _lg.warning(
+                f"[sandbox] ⚠ 沙盒不可用、此次 fallback 到 Windows host:{reason}"
+                f"(同錯誤 {_SANDBOX_WARN_COOLDOWN_SEC:.0f}s 內不重複 log)"
+            )
+            _SANDBOX_WARNED[key] = now
+        if out_meta is not None:
+            out_meta["fallback_reason"] = reason or "sandbox not running"
+            out_meta["mode_was"] = "wsl_docker"
         return None
     # 沙盒恢復健康後，清掉之前的告警記錄下次若又壞可再提醒
     if _SANDBOX_WARNED:
