@@ -3495,10 +3495,22 @@ async def _execute_skill_native_loop(
                 )
                 _el = asyncio.get_event_loop().time() - _t0
                 _content_str = response.content if isinstance(response.content, str) else ""
+                _tc_count = len(getattr(response, 'tool_calls', []) or [])
                 logger.info(
                     f"[{step_name}] ✅ LLM 完成({_el:.0f}s, content {len(_content_str)} 字, "
-                    f"tool_calls={len(getattr(response, 'tool_calls', []) or [])})"
+                    f"tool_calls={_tc_count})"
                 )
+                # 診斷:LLM 回 content + tool_calls 都空 → dump 完整 response 看哪個 field 真有輸出
+                if len(_content_str) == 0 and _tc_count == 0:
+                    logger.warning(
+                        f"[{step_name}] ⚠ 空回應診斷:\n"
+                        f"  response.content = {response.content!r}\n"
+                        f"  response.additional_kwargs = {dict(getattr(response, 'additional_kwargs', None) or {})}\n"
+                        f"  response.response_metadata = {dict(getattr(response, 'response_metadata', None) or {})}\n"
+                        f"  response.usage_metadata = {dict(getattr(response, 'usage_metadata', None) or {})}\n"
+                        f"  response.tool_calls (raw) = {getattr(response, 'tool_calls', None)!r}\n"
+                        f"  response.invalid_tool_calls = {getattr(response, 'invalid_tool_calls', None)!r}"
+                    )
                 last_err = None
                 break
             except asyncio.TimeoutError as e:

@@ -921,11 +921,24 @@ async def _run_subagent_native(
                 )
                 _elapsed = asyncio.get_event_loop().time() - _t0
                 _content_str = (getattr(response, "content", "") or "") if isinstance(getattr(response, "content", ""), str) else ""
+                _tc_count = len(getattr(response, 'tool_calls', []) or [])
                 log.info(
                     f"[subagent[{role_name}]/{step_name}] ✅ LLM 完成"
                     f"({_elapsed:.0f}s, content {len(_content_str)} 字, "
-                    f"tool_calls={len(getattr(response, 'tool_calls', []) or [])})"
+                    f"tool_calls={_tc_count})"
                 )
+                # 診斷:LLM 回 content + tool_calls 都空 → dump 完整 response 看哪個 field 才有真實輸出
+                # (Gemma 4 thinking mode / langchain-google-genai 整合可能把輸出跑到 additional_kwargs / response_metadata)
+                if len(_content_str) == 0 and _tc_count == 0:
+                    log.warning(
+                        f"[{step_name}] ⚠ 空回應診斷:\n"
+                        f"  response.content = {response.content!r}\n"
+                        f"  response.additional_kwargs = {dict(getattr(response, 'additional_kwargs', None) or {})}\n"
+                        f"  response.response_metadata = {dict(getattr(response, 'response_metadata', None) or {})}\n"
+                        f"  response.usage_metadata = {dict(getattr(response, 'usage_metadata', None) or {})}\n"
+                        f"  response.tool_calls (raw) = {getattr(response, 'tool_calls', None)!r}\n"
+                        f"  response.invalid_tool_calls = {getattr(response, 'invalid_tool_calls', None)!r}"
+                    )
                 last_llm_err = None
                 break
             except asyncio.TimeoutError as e:
