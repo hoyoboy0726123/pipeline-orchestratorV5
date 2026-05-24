@@ -27,9 +27,6 @@ from pipeline.anti_hallucination import (
     scan_llm_reply_for_fake_output,
     check_done_preflight,
     multi_tool_reminder,
-    fake_output_reminder,
-    FAKE_OUTPUT_VIOLATION_LIMIT,
-    FAKE_OUTPUT_MIN_COUNT,
     SYSTEM_PROMPT_ANTI_HALLUCINATION,
 )
 
@@ -2676,8 +2673,6 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         # 反幻覺 fake done 計數:超過 _FAKE_DONE_LIMIT_SKILL 次直接讓 step fail、別無限 retry
         _FAKE_DONE_LIMIT_SKILL = 3
         fake_done_count_skill = 0
-        # 偽 fake 違規連續次數(LLM 在 reply 內生強邊界冒充 tool 結果、超 limit 直接 fail step)
-        fake_output_streak_skill = 0
         ask_user_count = 0               # ask_user 呼叫次數（上限 ASK_USER_MAX）
         web_search_count = 0             # web_search 呼叫次數（上限 WEB_SEARCH_MAX_PER_STEP）
         was_interactive = False          # 首次互動標記（給 recipe）
@@ -2764,31 +2759,17 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 snippet = reply[max(0, idx-80):idx+80]
                 logger.info(f"[{step_name}] reply 含 'done'，上下文：…{snippet}…")
 
-            # 偵測 LLM 在 reply 內偽造強邊界 — 寬鬆 threshold(< 2 個放行、引用 cite 容錯)
+            # 偵測 LLM 在 reply 內偽造強邊界(冒充 orchestrator 的真結果)→ 拒收 reply
             _fakes = scan_llm_reply_for_fake_output(reply)
-            if len(_fakes) >= FAKE_OUTPUT_MIN_COUNT:
-                fake_output_streak_skill += 1
-                logger.warning(
-                    f"[{step_name}] ⛔ Skill 偽造 {len(_fakes)} 個 REAL OUTPUT 強邊界、"
-                    f"拒收(連續 {fake_output_streak_skill}/{FAKE_OUTPUT_VIOLATION_LIMIT})"
-                )
-                if fake_output_streak_skill >= FAKE_OUTPUT_VIOLATION_LIMIT:
-                    err_msg = (
-                        f"連續 {FAKE_OUTPUT_VIOLATION_LIMIT} 輪偽造強邊界、LLM 不肯改變策略"
-                        f"(把資料 inline 寫 reply 而非 run_python 寫檔)、強制中止 step。"
-                    )
-                    logger.error(f"[{step_name}] ✗ {err_msg}")
-                    return ExecResult(
-                        exit_code=1,
-                        stdout="\n".join(all_stdout),
-                        stderr=err_msg,
-                        agent_concluded_fail=True,
-                    )
+            if _fakes:
+                logger.warning(f"[{step_name}] ⛔ Skill 偽造 {len(_fakes)} 個 REAL OUTPUT 強邊界、拒收")
                 messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=fake_output_reminder(len(_fakes))))
+                messages.append(HumanMessage(content=(
+                    f"[系統] 你 reply 內偽造了 {len(_fakes)} 個 ====[REAL OUTPUT FROM TOOL ...]==== 強邊界、"
+                    f"那是 orchestrator 才能生的、你不可以冒充。請重寫 reply、"
+                    f"只用 <tool>...</tool><input>...</input> 跟正常文字、不要偽造 tool 結果。"
+                )))
                 continue
-            else:
-                fake_output_streak_skill = 0
 
             tool_calls = _parse_skill_tool_calls(reply)
 

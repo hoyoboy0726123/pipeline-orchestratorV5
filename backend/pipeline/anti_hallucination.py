@@ -54,52 +54,10 @@ _FAKE_OUTPUT_PATTERN = re.compile(
 def scan_llm_reply_for_fake_output(reply: str) -> list[str]:
     """偵測 LLM reply 內有沒有偽造強邊界。
     回傳偽造片段(空 list = 乾淨)。有 → 拒收 reply + 要求 LLM 重寫。
-
-    注意:caller 應該套用「>= 2 個才算違規」的寬鬆閾值。LLM 引用之前 tool result
-    可能會 quote 1 個邊界當 cite source、不算惡意偽造。連續 N 次 >= 2 違規才升級成
-    abort step(避免無限 reject 燒 token)。
     """
     if not reply:
         return []
     return _FAKE_OUTPUT_PATTERN.findall(reply)
-
-
-def fake_output_reminder(fake_count: int) -> str:
-    """LLM 偽造強邊界時的 reminder — 明確告訴它「把資料寫進檔、不要 inline 在 reply」。
-
-    對應根因:LLM 心智模型錯誤、把報告 / 資料表直接寫 reply 內、自己畫邊界當分隔器。
-    純說「不要偽造」沒用、必須給出正確策略(寫到檔)。
-    """
-    return (
-        f"[系統] 你 reply 內生了 {fake_count} 個 ====[REAL OUTPUT FROM TOOL ...]==== 強邊界、"
-        f"那是 orchestrator 才能生的、你不可以冒充。\n"
-        f"\n"
-        f"⚠ **根本問題**:你想把資料表 / 報告 / 來源列表**直接寫在 reply 內**、用邊界區分區塊 — 這是錯的策略。\n"
-        f"\n"
-        f"✗ 不要再做的:把 markdown 報告 / data table / 來源 cite 寫在 reply 文字內。reply 越長越燒 token、且會被 reject。\n"
-        f"\n"
-        f"✓ **正確策略**:用 run_python 把資料寫進檔:\n"
-        f"```\n"
-        f"<tool>run_python</tool>\n"
-        f"<input>\n"
-        f"content = '''# 報告標題\n"
-        f"## 資料來源\n"
-        f"- ...你的完整內容...\n"
-        f"'''\n"
-        f"with open('/絕對路徑/output.md', 'w', encoding='utf-8') as f:\n"
-        f"    f.write(content)\n"
-        f"print('OK size=', len(content))\n"
-        f"</input>\n"
-        f"```\n"
-        f"\n"
-        f"下一輪 reply **不要含任何資料 / 報告 / 來源內容** — 只寫一個 <tool>run_python</tool> + 寫檔 code。"
-    )
-
-
-# 偽 fake 違規連續次數上限 — 超過直接 abort step、別無限 reject 燒 token
-FAKE_OUTPUT_VIOLATION_LIMIT = 3
-# 多少個偽邊界才算違規(LLM 引用 1 個當 cite 可寬鬆放行)
-FAKE_OUTPUT_MIN_COUNT = 2
 
 
 # ============================================================
