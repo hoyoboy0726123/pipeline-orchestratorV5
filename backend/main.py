@@ -3964,8 +3964,13 @@ async def _chat_agent_loop(
         llm_with_tools = llm
         tools_enabled = False
 
-    lc_messages: list = [SystemMessage(content=system_prompt)]
-    # 只取最近 _CHAT_HISTORY_CAP 則訊息送進 LLM，避免對話太長 token 爆炸
+    # Prompt caching (#153):AI 助手 system prompt 是 V5 最大的 input(50K+ 字、動態注入)。
+    # 加 ephemeral 1h TTL cache_control、跨輪對話命中 cache、Anthropic 第 2 輪起 input cost 0.1x。
+    # 注意:cache 命中需 prefix 穩定、main.py:3318 _build_pipeline_system_prompt 內動態注入區塊
+    # (今日日期、in-flight digest)應放在底稿後面、保最大化 cache prefix。
+    _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
+    # 只取最近 _CHAT_HISTORY_CAP 則訊息送進 LLM、避免對話太長 token 爆炸
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
         cls = HumanMessage if m["role"] == "user" else AIMessage
@@ -4159,7 +4164,9 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         llm_with_tools = llm
         tools_enabled = False
 
-    lc_messages: list = [SystemMessage(content=system_prompt)]
+    # Prompt caching (#153):chat/stream endpoint 同 _chat_agent_loop 處理
+    _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
         cls = HumanMessage if m["role"] == "user" else AIMessage

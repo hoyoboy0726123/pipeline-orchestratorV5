@@ -105,11 +105,20 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
         # 8192 對寫大段 Python(含三引號 heredoc)會在中途被斷流、收不到結尾的 """,
         # 解析時就會抛 unterminated triple-quoted string literal。設 32768 給足夠空間。
         # 只按實際生成 token 收費、不會因為設高了多花錢。
+        #
+        # Prompt caching (#153):啟用 prompt-caching 1h-TTL beta、跨輪 system prompt 命中 cache。
+        # 多輪 workflow (V5 標準場景) 第 2 輪起 cached input 只 0.1x 計價、實測省 70-85%。
+        # 用法:caller(subagent_runner / executor)對 SystemMessage 加 cache_control:
+        #   SystemMessage(content=..., additional_kwargs={"cache_control": {"type": "ephemeral"}})
+        # ephemeral 預設 5 分 TTL,需要 1 小時 TTL 用 {"type":"ephemeral","ttl":"1h"} 並要 1h-cache beta header。
         return ChatAnthropic(
             model=model,
             api_key=ANTHROPIC_API_KEY,
             temperature=temperature,
             max_tokens=32768,
+            default_headers={
+                "anthropic-beta": "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11",
+            },
         )
 
     if provider == "ollama":

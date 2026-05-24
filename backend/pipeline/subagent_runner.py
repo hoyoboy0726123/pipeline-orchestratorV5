@@ -380,8 +380,13 @@ async def run_subagent(
     except Exception as e:
         return SubagentResult(success=False, final_message="", iterations=0, error=f"LLM 建立失敗: {e}")
 
+    # Prompt caching (#153):對 SystemMessage 加 ephemeral 1h cache_control。
+    # 多輪 subagent loop 第 2 輪起 system_prompt 命中 cache、input cost 0.1x 計價。
+    # Anthropic 收費結構:cache write +25%、cache read -90%、整體多輪場景大省。
+    # 對其他 provider(Groq/OpenAI/Gemini/Ollama)cache_control 是 unknown kwarg、會被略過、不影響。
+    _sys_msg_kwargs = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
     messages: list = [
-        SystemMessage(content=system_prompt),
+        SystemMessage(content=system_prompt, additional_kwargs=_sys_msg_kwargs),
         HumanMessage(content=user_prompt),
     ]
 

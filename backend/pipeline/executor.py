@@ -2491,8 +2491,12 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 
     try:
         llm = _get_skill_llm(role=llm_role)
+        # Prompt caching (#153):對 SystemMessage 加 ephemeral 1h cache_control。
+        # SKILL loop 多輪、第 2 輪起 system_prompt 命中 cache、input cost 0.1x。
+        # 非 Anthropic provider 會略過 cache_control(不影響功能)。
+        _sys_cache_kwargs = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
         messages = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=system_prompt, additional_kwargs=_sys_cache_kwargs),
             HumanMessage(content=user_prompt),
         ]
 
