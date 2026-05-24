@@ -362,6 +362,13 @@ async def run_subagent(
     fake_done_count = 0
     _FAKE_DONE_LIMIT = 2  # 連 2 次假 done 就停止注入 reminder、讓 runner 走 step retry
 
+    # ─── 從 SKILL loop (executor.py) 移植過來的 3 個守門 ──────────────────────
+    # 之前 subagent 漏抄、導致 LLM 卡 self-check 循環、user 反映 step 5 max_iter 不 done
+    short_code_streak = 0   # 連續 < 200 字 run_python:LLM 卡分步驟讀檔、提示寫整段
+    last_error_sig = ""     # 連續 stderr 同錯偵測:避免 LLM 一直寫同 code 撞同 error
+    same_error_count = 0
+    # tool result smart truncation:read_file 長結果不全塞 history、降 input 累積
+
     for i in range(max_iter):
         iteration = i + 1
         log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter}")
@@ -479,6 +486,13 @@ async def run_subagent(
         tool_name = (first.get("tool") or "").strip()
         tool_input = first.get("input", "")
 
+        # 多 tool 偵測:LLM 一次塞多個 <tool>...</tool> tag 是惡習(後面的會被當 prose 忽略)
+        # 對齊 SKILL 的同類守門(executor.py:2652)、之前 subagent 漏抄
+        _tag_count = len(re.findall(r"<tool>\s*\w+\s*</tool>", reply))
+        multi_tool_warn = _tag_count > 1
+        if multi_tool_warn:
+            log.info(f"[{step_name}] 解析:tool={tool_name}, input_len={len(tool_input)} (⚠ 偵測到 {_tag_count} 個 <tool> 標籤、只跑第一個)")
+
         # done：解析 JSON、結束 loop
         if tool_name == "done":
             try:
@@ -550,23 +564,87 @@ async def run_subagent(
         # 真實案例:某 run_shell(find / pip list 之類)回 92K 字、被 append 後
         # 之後每輪 input 全帶這 92K、瞬間衝爆 context、max_iter 燒完
         # 留前 4K + 後 1K(中間 elide)、保訊息開頭 + 失敗尾巴(stderr 通常在尾)
-        _MAX_TOOL_OUT = 5000
+        #
+        # **D task**:read_file 結果改 head 2K + tail 1K(更激進、因為使用者用得多、累積快)、
+        # 提示 LLM 需要更多再 read_file(offset=N) 拉 page、不要每輪都讓全文塞 history。
+        if tool_name == "read_file":
+            _MAX_TOOL_OUT = 3000
+            _HEAD = 2000
+            _TAIL = 1000
+        else:
+            _MAX_TOOL_OUT = 5000
+            _HEAD = 4000
+            _TAIL = 1000
         if len(result_str) > _MAX_TOOL_OUT:
-            _head = result_str[:4000]
-            _tail = result_str[-1000:]
+            _head = result_str[:_HEAD]
+            _tail = result_str[-_TAIL:]
+            _elide_hint = ""
+            if tool_name == "read_file":
+                _elide_hint = (
+                    f"\n[系統提示] read_file 結果太長已截、想看中間請用 "
+                    f"<tool>read_file</tool><input>{{\"path\": \"...\", \"offset\": N}}</input> 從第 N 行讀。"
+                    f"不必每輪都讀全文。"
+                )
             result_for_msg = (
                 f"{_head}\n"
-                f"\n…[中間省略 {len(result_str) - 5000} 字、完整長度 {len(result_str)}、"
-                f"看尾段或 head/tail 字串]…\n"
-                f"{_tail}"
+                f"\n…[中間省略 {len(result_str) - _HEAD - _TAIL} 字、完整長度 {len(result_str)}、"
+                f"head {_HEAD}+ tail {_TAIL}]…\n"
+                f"{_tail}{_elide_hint}"
             )
-            log.info(f"[{step_name}] 🪚 tool 結果過長({len(result_str)} 字)、截到 ~5K 接回 messages")
+            log.info(f"[{step_name}] 🪚 tool={tool_name} 結果過長({len(result_str)} 字)、截到 ~{_HEAD + _TAIL} 接回 messages")
         else:
             result_for_msg = result_str
 
         # 把 LLM 回覆 + tool 結果接回對話（沿用 skill loop 慣例）
         messages.append(HumanMessage(content=reply))
         messages.append(HumanMessage(content=f"[工具結果 — {tool_name}]\n{result_for_msg}"))
+
+        # 多 tool 警告 reminder(對齊 SKILL executor.py:3057-3066)
+        if multi_tool_warn:
+            messages.append(HumanMessage(
+                content=f"[系統警告] 你這個 reply 裡有 {_tag_count} 個 <tool> 標籤。系統只跑第一個({tool_name})、"
+                        f"其他 tag + done 都被忽略。規則:每個 reply 只能寫一個 <tool>...</tool><input>...</input>、"
+                        f"然後等系統回真實結果再決定下一步。不要 plan 多 tool。"
+            ))
+
+        # 連續短 run_python 偵測(對齊 SKILL executor.py:3069-3080):
+        # LLM 卡在「分步驟讀檔」、提示寫整段
+        if tool_name == "run_python" and len(tool_input) < 200:
+            short_code_streak += 1
+            if short_code_streak >= 3:
+                log.warning(f"[{step_name}] 連續 {short_code_streak} 次短 run_python、注入打破循環提示")
+                messages.append(HumanMessage(
+                    content="[系統警告] 你已連續多次只跑很短的 run_python 讀資料、任務尚未完成。"
+                            "請在一個 <tool>run_python</tool> 內寫完整 code:讀取 + 處理 + 寫入 output_path、"
+                            "self-check 完畢後 done(success=true)。不要再 1 行 1 行讀。"
+                ))
+                short_code_streak = 0
+        else:
+            short_code_streak = 0
+
+        # 連續同錯偵測(對齊 SKILL executor.py:3082-3103):
+        # LLM 寫 self-check py / 主 code、反覆撞同 stderr → 提示換做法、不要硬刷同樣 code
+        if tool_name == "run_python" and "[stderr]" in result_str:
+            _err_lines = [l for l in result_str.split("\n") if l.strip() and not l.startswith("[")]
+            error_sig = _err_lines[-1].strip() if _err_lines else ""
+            if error_sig and error_sig == last_error_sig:
+                same_error_count += 1
+                if same_error_count >= 2:
+                    log.warning(f"[{step_name}] 相同錯誤連 {same_error_count + 1} 次、注入修正提示")
+                    messages.append(HumanMessage(
+                        content=f"[系統警告] 你已連續 {same_error_count + 1} 次撞到相同錯誤:{error_sig}\n"
+                                f"不能再寫一樣 / 類似的 code。請完全換做法:\n"
+                                f"  1. 用 <tool>read_file</tool> 先看當前 output_path 內容、確認檔到底在不在 / 內容對不對\n"
+                                f"  2. 如果檔已存在且內容 OK → 直接 <tool>done</tool> 回 success=true、不要再 self-check\n"
+                                f"  3. 如果檔有問題 → 寫一段全新 code(改變數名 / 改邏輯)、不要重複前面失敗的 pattern"
+                    ))
+                    same_error_count = 0
+            else:
+                last_error_sig = error_sig
+                same_error_count = 1
+        else:
+            last_error_sig = ""
+            same_error_count = 0
 
     iterations_done = min(max_iter, i + 1)
 
