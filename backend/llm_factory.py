@@ -77,9 +77,21 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
             # 不被截斷。舊值 8192 對中文長報告會邊緣。Gemini 3 / Gemma 4 都支援這個上限。
             "max_output_tokens": 16384,
         }
-        # 只有 gemini-2.5 和 gemini-3.x 系列支援思考模式,其他模型(gemma, gemini-2.0)靜默忽略
-        supports_thinking = model.startswith("gemini-2.5-") or _is_gemini_3x(model)
-        if gem_thinking != "off" and supports_thinking:
+        # 思考模式支援表(Gemini API):
+        # - gemini-2.5-* : thinking_budget(integer)
+        # - gemini-3.x   : thinking_level(low/medium/high)
+        # - gemma-4-*    : thinking_level only,且不支援 thinking_budget(API 會回錯)
+        #                  預設 thinking ON、要明確設 "minimal" 才會關(否則 reasoning 吃掉 tool_calls、native FC 失效)
+        # - 其他(gemini-2.0, gemma-3 等):不支援思考、靜默略過
+        is_gemma_4 = model.startswith("gemma-4-")
+        supports_thinking = model.startswith("gemini-2.5-") or _is_gemini_3x(model) or is_gemma_4
+        if is_gemma_4:
+            # Gemma 4 native FC 必須關 thinking(否則 LLM 回應全跑 reasoning field、tool_calls 永遠空)
+            # 即使 user 設 "off",對 Gemma 4 也要主動傳 "minimal" 才會真關(不傳 = 預設 thinking ON)
+            kwargs["thinking_level"] = (
+                gem_thinking if gem_thinking in ("low", "medium", "high") else "minimal"
+            )
+        elif gem_thinking != "off" and supports_thinking:
             if _is_gemini_3x(model):
                 kwargs["thinking_level"] = gem_thinking if gem_thinking != "auto" else "medium"
             else:
