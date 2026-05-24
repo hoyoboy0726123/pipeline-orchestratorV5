@@ -370,6 +370,9 @@ async def run_subagent(
         scan_llm_reply_for_fake_output,
         check_done_preflight,
         multi_tool_reminder,
+        fake_output_reminder,
+        FAKE_OUTPUT_VIOLATION_LIMIT,
+        FAKE_OUTPUT_MIN_COUNT,
         SYSTEM_PROMPT_ANTI_HALLUCINATION,
     )
     from llm_factory import build_llm, invoke_with_streaming
@@ -455,6 +458,9 @@ async def run_subagent(
     last_tool_name: Optional[str] = None
     last_tool_result: Optional[str] = None
 
+    # 偽 fake 違規連續次數(超過 limit 直接 abort step,避免無限 reject 燒 token)
+    fake_output_streak = 0
+
     for i in range(max_iter):
         iteration = i + 1
         log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter}")
@@ -526,19 +532,33 @@ async def run_subagent(
         if not accumulated_usage["model"]:
             accumulated_usage["model"] = llm_result.get("model") or ""
 
-        # 偵測 LLM 在 reply 內偽造強邊界(冒充 orchestrator 的真結果)→ 拒收 reply
+        # 偵測 LLM 在 reply 內偽造強邊界 — 寬鬆 threshold(< 2 個放行、引用 cite 容錯)
         _fakes = scan_llm_reply_for_fake_output(reply)
-        if _fakes:
+        if len(_fakes) >= FAKE_OUTPUT_MIN_COUNT:
+            fake_output_streak += 1
             log.warning(
-                f"[{step_name}] ⛔ Subagent 偽造 {len(_fakes)} 個 REAL OUTPUT 強邊界、拒收"
+                f"[{step_name}] ⛔ Subagent 偽造 {len(_fakes)} 個 REAL OUTPUT 強邊界、"
+                f"拒收(連續 {fake_output_streak}/{FAKE_OUTPUT_VIOLATION_LIMIT})"
             )
+            # 連 N 次偽造 = LLM 不收斂、abort step 別繼續燒 token
+            if fake_output_streak >= FAKE_OUTPUT_VIOLATION_LIMIT:
+                err_msg = (
+                    f"連續 {FAKE_OUTPUT_VIOLATION_LIMIT} 輪偽造強邊界、LLM 不肯改變策略"
+                    f"(把資料 inline 寫 reply 而非 run_python 寫檔)、強制中止 step。"
+                )
+                log.error(f"[{step_name}] ✗ {err_msg}")
+                return SubagentResult(
+                    success=False,
+                    final_message=f"(被系統終止 — fake output 違規)最後 reply 前 200 字:\n{reply[:200]}",
+                    iterations=iteration, tool_calls_made=tool_calls_made,
+                    error="fake_output_streak_limit", token_usage=accumulated_usage,
+                )
             messages.append(HumanMessage(content=reply))
-            messages.append(HumanMessage(content=(
-                f"[系統] 你 reply 內偽造了 {len(_fakes)} 個 ====[REAL OUTPUT FROM TOOL ...]==== 強邊界、"
-                f"那是 orchestrator 才能生的、你不可以冒充。請重寫 reply、"
-                f"只用 <tool>...</tool><input>...</input> 跟正常文字、不要偽造 tool 結果。"
-            )))
+            messages.append(HumanMessage(content=fake_output_reminder(len(_fakes))))
             continue
+        else:
+            # 沒偵測到強邊界 → 重置 streak(允許 LLM 補救一次)
+            fake_output_streak = 0
 
         tool_calls = _parse_skill_tool_calls(reply)
 
