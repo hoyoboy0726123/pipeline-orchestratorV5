@@ -1014,17 +1014,41 @@ def _skill_read_file(path: str, max_lines: int = 100, offset: int = 0) -> str:
 # 跟 run_python 互補:run_python 仍是邏輯處理主力,新 tool 接管「LLM 已知做什麼」場景
 
 def _skill_write_file(input_str: str) -> str:
-    """write_file(path, content) — JSON input: {"path": "...", "content": "..."}.
-    解 triple-quote 雷:LLM 直接傳 content,不用 Python 字串嵌入。"""
+    """write_file(path, content) — 兩種 input 格式:
+    1. JSON(短內容、< 5KB 推薦):{"path": "...", "content": "..."}
+    2. RAW MULTILINE(長內容、推薦):
+       path: /absolute/path/file.js
+       ---
+       <raw content here, no escaping needed, can contain \\u and " freely>
+
+    raw 格式 detection:input 第一行是 `path: ...` 且第二行(或之後)有 `---` 分隔線。
+    避免 30K+ JS code 包 JSON 踩 escape 雷(\\u / 引號 / 換行)。"""
     try:
-        import json as _json
-        data = _json.loads(input_str)
-        path = data.get("path") or data.get("file_path") or ""
-        content = data.get("content")
+        stripped = (input_str or "").lstrip()
+
+        # 偵測 raw multiline 格式:第一行 `path: ...` + `---` 分隔
+        if stripped.lower().startswith("path:") and "\n---" in stripped:
+            first_newline = stripped.find("\n")
+            path_line = stripped[:first_newline].strip()
+            path = path_line.split(":", 1)[1].strip()
+            rest = stripped[first_newline + 1:]
+            # 找第一個獨佔行的 `---`
+            sep_match = re.search(r"^---\s*$", rest, flags=re.MULTILINE)
+            if not sep_match:
+                return ("[錯誤] raw 格式需要獨佔行 '---' 分隔 path 跟 content\n"
+                        "範例:\n  path: /abs/path.js\n  ---\n  <content>")
+            content = rest[sep_match.end():].lstrip("\n")
+        else:
+            # JSON 格式
+            import json as _json
+            data = _json.loads(input_str)
+            path = data.get("path") or data.get("file_path") or ""
+            content = data.get("content")
+            if content is None:
+                return "[錯誤] write_file 需要 'content' 欄位"
+
         if not path:
             return "[錯誤] write_file 需要 'path' 欄位"
-        if content is None:
-            return "[錯誤] write_file 需要 'content' 欄位"
         # WSL→Windows 路徑轉換
         path = _wsl_to_windows_path(path)
         p = Path(path).expanduser()
@@ -1034,23 +1058,23 @@ def _skill_write_file(input_str: str) -> str:
         size = p.stat().st_size
         return f"✓ 已寫入 {p}({size:,} bytes、{len(content.splitlines()) if isinstance(content, str) else '?'} 行)"
     except _json.JSONDecodeError as e:
-        # 30K+ content 包 JSON 太容易踩 escape 雷(\u 跳脫、引號、換行)、引導 LLM 改 run_python
+        # 30K+ content 包 JSON 太容易踩 escape 雷、引導 LLM 改 raw multiline 或 run_python
         _len = len(input_str)
         if _len > 5000:
             return (
                 f"[錯誤] JSON 解析失敗(content {_len:,} 字、太長易踩 escape 雷):{e}\n\n"
-                f"⚠ 長內容(> 5KB)建議改用 run_python + heredoc、不要用 write_file:\n"
-                f"```python\n"
-                f"content = r'''...你的長內容...'''  # 用 r''' 避免 \\u / \\n escape 問題\n"
-                f"with open('/絕對路徑/檔名', 'w', encoding='utf-8') as f:\n"
-                f"    f.write(content)\n"
+                f"⚠ 長內容(> 5KB)請改用 RAW MULTILINE 格式(無需 escape):\n"
                 f"```\n"
-                f"write_file 適合 < 5KB 短內容、且不含複雜 escape。"
+                f"path: /絕對路徑/檔名.js\n"
+                f"---\n"
+                f"const x = `中文 \\u OK`;  // content 可自由用 \" \\ \\n \\u 任何字元、不必 escape\n"
+                f"const y = \"也可以\";\n"
+                f"```\n"
+                f"或用 run_python + r''' heredoc 寫檔。"
             )
         return (f"[錯誤] JSON 格式錯誤:{e}\n"
-                f"正確格式:{{\"path\":\"x.js\",\"content\":\"檔案內容\"}}\n"
-                f"注意 content 內的 \" 要 escape 為 \\\"、換行用 \\n\n"
-                f"⚠ 內容超 5KB 建議改用 run_python + heredoc(避免 JSON escape 雷)")
+                f"短內容 JSON:{{\"path\":\"x.js\",\"content\":\"...\"}}(content 內 \" 要 escape 為 \\\")\n"
+                f"長內容請改 RAW MULTILINE:\n  path: /abs/path.js\n  ---\n  <content>")
     except Exception as e:
         return f"[錯誤] 寫檔失敗:{e.__class__.__name__}: {e}"
 
@@ -2164,11 +2188,18 @@ async def execute_step_with_skill(
    ✗ 不要用於:「驗證自己剛 write 的檔存在」(Python exit 0 已證、用 Path.exists() 在 run_python 內就行)
    ✗ 不要用於:「再確認一次自己剛寫的內容對不對」(交給外部 validator、不要重複工作浪費 iter)
 4. write_file — **整檔寫入**(LLM 已知 content、直接寫,**避免用 Python 三引號包大段外語碼**)
+   **短內容(< 5KB)用 JSON**:
    <input>{"path":"output.js","content":"const x = ...整段內容..."}</input>
+   注意 JSON content 內 " 要 escape 為 \\"、換行用 \\n
+   **長內容(> 5KB、含特殊字元、不想 escape)用 RAW MULTILINE**(推薦):
+   <input>
+   path: /abs/path.js
+   ---
+   const x = `中文直接寫`;  // 完全免 escape、可自由用引號 / 反斜線 / 換行 / unicode
+   const y = "也可以放雙引號";
+   </input>
    ✓ 用於:寫 JS/HTML/CSS/SQL/markdown/設定檔等「LLM 知道全部內容、要原樣寫到檔」
-   ✓ 解 triple-quote 雷:不要再 run_python 然後用 Python 三引號(三個雙引號)包大段 JS
    ✗ 不要用於:寫 pandas DataFrame、計算結果(用 run_python + to_csv 才對)
-   注意:content 內 " 要 escape 為 \\"、換行用 \\n(JSON 標準)
 5. edit_file — **局部替換**(部分修改既有檔案、不整檔重寫)
    <input>{"path":"x.py","old_text":"return None","new_text":"return result"}</input>
    ✓ 用於:換一行、改一個函式、修一個 bug
@@ -2343,13 +2374,10 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
 【🛡️ Sandbox 環境(Linux Docker 容器、python:3.13-slim、不是 Windows)】
 - OS = Linux:沒有 win32com / pywin32 / PowerShell / cmd.exe — 用純 Python 或 Linux 工具
 - 產 PPT 用 `python-pptx`(首選)或 Node.js + `pptxgenjs`(走 `.agents/skills/pptx`);**不要 import win32com.client**(永遠 ImportError)
-- Node.js 全域套件已預裝(`pptxgenjs`、`docx`、可能還有其他 npm 包)
-  → **JS 檔內 require 用裸模組名**:`require('pptxgenjs')`、`require('docx')`
-  → **若 `require('pptxgenjs')` 報 Cannot find module**(image 可能用 nvm,NODE_PATH 跟實際路徑不一致):
-     - **正確做法**:在 JS 開頭加 `require('module').globalPaths.push(require('child_process').execSync('npm root -g').toString().trim());` 後再 require
-     - **或更穩**:先在 run_shell 跑 `npm root -g` 拿真路徑(< 1s)、然後 `require('絕對路徑/pptxgenjs')`
-     - **絕對禁止**:`find / -name "pptxgenjs"`(掃整碟 > 60s timeout、會 SIGTERM)
+- Node.js 全域套件已預裝(`pptxgenjs`、`docx`、可能還有其他 npm 包)、NODE_PATH 已自動對齊
+  → **JS 檔內 require 用裸模組名**:`require('pptxgenjs')`、`require('docx')`(NODE_PATH 自動解析、不必寫絕對路徑)
   → **絕對禁止** `require('C:/...')`、`require('/mnt/c/.../node_modules/pptxgenjs')`(那是 Windows / 主機路徑、container 內找不到、必定 Cannot find module)
+  → **絕對禁止** `find / -name "..."`(掃整碟 > 60s timeout、會 SIGTERM、且 NODE_PATH 已對齊不需要找)
 - 路徑轉換:Windows `C:\...` / `C:/...` 在容器無效、pathlib 會當相對路徑導致找不到檔
   - `C:\Users\X\...` → `/mnt/c/Users/X/...`
   - `D:\data\...` → `/mnt/d/data/...`
