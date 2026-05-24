@@ -2665,6 +2665,22 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         # 「完成」字樣連續輪數計數 — 連 2 輪 LLM 口頭說完成但沒下 done tag 就強制收尾
         done_keyword_streak = 0
 
+        # ── Phase A.2 — Native function calling 切換點 ──────────────────
+        # 共用 SUBAGENT_LOOP_MODE flag(SUBAGENT / SKILL 同個 .env 設定即可)。
+        # native: 跑下方獨立 inner function、用 LangChain bind_tools()、消滅 <tool> 文字協議
+        # text(預設): 繼續走原本 SKILL loop(向後相容)
+        _skill_loop_mode = (os.environ.get("SUBAGENT_LOOP_MODE", "text") or "text").strip().lower()
+        if _skill_loop_mode == "native":
+            logger.info(f"[{step_name}] 🚀 SKILL loop 用 [NATIVE] function calling 模式")
+            return _attach_trace(await _execute_skill_native_loop(
+                llm=llm, messages=messages,
+                output_path=output_path, working_dir=working_dir,
+                run_id=run_id, step_name=step_name, logger=logger,
+                tool_timeout=tool_timeout, ask_mode=ask_mode,
+                acc_usage=acc_usage, acc_tool_calls=acc_tool_calls,
+                all_stdout=all_stdout,
+            ))
+
         for iteration in range(SKILL_MAX_ITERATIONS):
             logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS}")
 
@@ -3380,6 +3396,335 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             stdout="\n".join(all_stdout),
             stderr=f"Skill 執行異常：{e}",
         ))
+
+
+# ============================================================
+# Phase A.2 — SKILL loop native function calling
+# ============================================================
+async def _execute_skill_native_loop(
+    *,
+    llm,
+    messages: list,
+    output_path: Optional[str],
+    working_dir: Optional[str],
+    run_id: str,
+    step_name: str,
+    logger: logging.Logger,
+    tool_timeout: int,
+    ask_mode: bool,
+    acc_usage: dict,
+    acc_tool_calls: list,
+    all_stdout: list,
+) -> ExecResult:
+    """Phase A.2 — SKILL loop 用 LangChain bind_tools() native function calling 版本。
+
+    跟 text 版同 ExecResult 回傳格式、execute_step_with_skill 看 SUBAGENT_LOOP_MODE=native 就 dispatch 過來。
+    保留守門:done preflight(output 存在 / run_python 成功 / run_shell 成功)、consecutive_no_tool。
+    省略(MVP):recipe save(下次同任務不快取、LLM 重跑)、visual_validation 由外層處理。
+    """
+    from langchain_core.messages import AIMessage, ToolMessage, HumanMessage as _HM
+    from pipeline.sandbox_tools import build_subagent_tools
+
+    # SKILL 預設工具集(白名單 = 完整集、跟既有 text loop dispatch 對齊)
+    # view_image 暫不含(multimodal 回傳 LangChain 處理較複雜、A.2 MVP 不做、LLM 改用 run_python 自己讀 base64)
+    allowed_tools = {"run_python", "run_shell", "read_file", "web_search", "ask_user", "done"}
+    web_counter = {"count": 0}
+
+    tools = build_subagent_tools(
+        cwd=working_dir, run_id=run_id, logger=logger,
+        tool_timeout=tool_timeout, allowed_tool_names=allowed_tools,
+        step_name=step_name, web_search_counter=web_counter,
+    )
+    name_to_tool = {t.name: t for t in tools}
+
+    try:
+        llm_with_tools = llm.bind_tools(tools)
+    except Exception as e:
+        logger.error(f"[{step_name}] bind_tools 失敗:{e}")
+        return ExecResult(
+            exit_code=-1, stdout="\n".join(all_stdout) or "",
+            stderr=f"SKILL bind_tools 失敗: {e}",
+        )
+
+    last_run_python_ok: Optional[bool] = None
+    last_run_shell_ok: Optional[bool] = None
+    last_successful_code: Optional[str] = None  # 預留 recipe save 用、MVP 暫不寫進
+    consecutive_no_tool = 0
+    fake_done_count = 0
+    _FAKE_DONE_LIMIT_SKILL = 3
+
+    _RETRIABLE = (
+        "503", "429", "unavailable", "rate limit", "rate_limit",
+        "overloaded", "internal error", "500", "deadline", "resource_exhausted",
+    )
+
+    for iteration in range(SKILL_MAX_ITERATIONS):
+        logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS} [NATIVE]")
+
+        # Context 雪崩防護(跟 text 版同邏輯)
+        if iteration >= SKILL_CONTEXT_KEEP_RECENT_FULL + 1:
+            _compacted = _compact_old_tool_results(messages)
+            if _compacted:
+                logger.debug(f"[{step_name}] 🪶 壓縮 {_compacted} 條舊 tool 結果(防 context 膨脹)")
+
+        # 第一輪後 strip FIRST_ITER 區塊(省 prompt token)
+        if iteration == 1 and isinstance(messages[0].content, str) and "<!--FIRST_ITER_BEGIN-->" in messages[0].content:
+            _stripped = re.sub(
+                r"<!--FIRST_ITER_BEGIN-->.*?<!--FIRST_ITER_END-->\s*",
+                "", messages[0].content, flags=re.DOTALL,
+            )
+            messages[0] = SystemMessage(
+                content=_stripped,
+                additional_kwargs=getattr(messages[0], "additional_kwargs", {}) or {},
+            )
+            logger.debug(f"[{step_name}] 🪶 第二輪起 system prompt 已 strip first-iter blocks")
+
+        if iteration > 0:
+            await asyncio.sleep(SKILL_REQUEST_INTERVAL)
+
+        # LLM call with retry
+        response: Optional[AIMessage] = None
+        last_err: Optional[Exception] = None
+        _input_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
+        for _attempt in range(3):
+            try:
+                logger.info(f"[{step_name}] 🤖 LLM 開始處理(input {_input_chars:,} 字)…")
+                _t0 = asyncio.get_event_loop().time()
+                response = await asyncio.wait_for(
+                    llm_with_tools.ainvoke(messages), timeout=600.0,
+                )
+                _el = asyncio.get_event_loop().time() - _t0
+                _content_str = response.content if isinstance(response.content, str) else ""
+                logger.info(
+                    f"[{step_name}] ✅ LLM 完成({_el:.0f}s, content {len(_content_str)} 字, "
+                    f"tool_calls={len(getattr(response, 'tool_calls', []) or [])})"
+                )
+                last_err = None
+                break
+            except asyncio.TimeoutError as e:
+                last_err = e
+                if _attempt < 2:
+                    _w = 2 ** _attempt
+                    logger.warning(f"[{step_name}] LLM 逾時、{_w}s retry({_attempt + 1}/2)")
+                    await asyncio.sleep(_w)
+                    continue
+                break
+            except Exception as e:
+                last_err = e
+                if any(k in str(e).lower() for k in _RETRIABLE):
+                    if _attempt < 2:
+                        _w = 2 ** _attempt
+                        logger.warning(
+                            f"[{step_name}] LLM 暫時錯誤、{_w}s retry({_attempt + 1}/2):"
+                            f"{type(e).__name__}: {str(e)[:200]}"
+                        )
+                        await asyncio.sleep(_w)
+                        continue
+                break
+
+        if last_err is not None or response is None:
+            err = f"LLM 失敗: {type(last_err).__name__ if last_err else 'None'}: {last_err}"
+            logger.error(f"[{step_name}] {err}")
+            return ExecResult(
+                exit_code=-2, stdout="\n".join(all_stdout), stderr=err,
+            )
+
+        # 累計 token usage
+        um = getattr(response, "usage_metadata", None) or {}
+        if isinstance(um, dict) and um:
+            for _k in ("input_tokens", "output_tokens", "total_tokens"):
+                _v = um.get(_k) or 0
+                if _v:
+                    acc_usage[_k] = acc_usage.get(_k, 0) + int(_v)
+            itd = um.get("input_token_details") or {}
+            if isinstance(itd, dict):
+                acc_usage["cache_read_tokens"] = (
+                    acc_usage.get("cache_read_tokens", 0) + (itd.get("cache_read", 0) or 0)
+                )
+                acc_usage["cache_creation_tokens"] = (
+                    acc_usage.get("cache_creation_tokens", 0) + (itd.get("cache_creation", 0) or 0)
+                )
+        if not acc_usage.get("model"):
+            _rm = getattr(response, "response_metadata", None) or {}
+            acc_usage["model"] = _rm.get("model_name") or _rm.get("model") or ""
+
+        # AIMessage 加進 messages(含 tool_calls)
+        messages.append(response)
+
+        tool_calls = list(getattr(response, "tool_calls", []) or [])
+        content_str = response.content if isinstance(response.content, str) else ""
+
+        # 沒 tool_calls → 視為 prose、累計 consecutive_no_tool
+        if not tool_calls:
+            consecutive_no_tool += 1
+            logger.warning(
+                f"[{step_name}] ⚠ 第 {iteration + 1} 輪沒 tool_calls"
+                f"(content {len(content_str)} 字)、累計 {consecutive_no_tool}/2"
+            )
+            if consecutive_no_tool >= 2:
+                err_msg = (
+                    f"連 2 輪沒呼叫任何 tool、強制中止。"
+                    f"LLM 把分析寫 content 而非 run_python 寫檔。"
+                )
+                logger.error(f"[{step_name}] ✗ {err_msg}")
+                return ExecResult(
+                    exit_code=1,
+                    stdout="\n".join(all_stdout) or content_str[:500],
+                    stderr=err_msg,
+                    agent_concluded_fail=True,
+                )
+            messages.append(_HM(content=(
+                "請呼叫一個 tool(run_python / read_file / 等)繼續、或 done 結束。"
+                "分析請寫進 run_python 程式碼、不要寫 content。"
+            )))
+            continue
+        consecutive_no_tool = 0
+
+        # 處理 tool_calls — 先掃出 done(若有)、其他先跑
+        done_call: Optional[dict] = None
+        regular_calls = []
+        for tc in tool_calls:
+            if tc.get("name") == "done":
+                done_call = tc  # 多個 done 取最後
+            else:
+                regular_calls.append(tc)
+
+        for tc in regular_calls:
+            tc_name = tc.get("name", "")
+            tc_id = tc.get("id") or ""
+            tc_args = tc.get("args", {}) or {}
+            logger.info(f"[{step_name}] 🛠 tool={tc_name}, args_keys={list(tc_args.keys())}")
+
+            tool_fn = name_to_tool.get(tc_name)
+            try:
+                if tool_fn is None:
+                    result = f"[錯誤] tool '{tc_name}' 不在白名單。可用:{sorted(name_to_tool.keys())}"
+                else:
+                    raw = await tool_fn.ainvoke(tc_args)
+                    result = str(raw) if raw is not None else ""
+            except Exception as e:
+                result = f"[執行失敗] {type(e).__name__}: {e}"
+
+            # 追蹤 last_run_python_ok / last_run_shell_ok(守門用)
+            if tc_name == "run_python":
+                last_run_python_ok = "[exit code:" not in result
+                if last_run_python_ok:
+                    last_successful_code = tc_args.get("code", "")
+            elif tc_name == "run_shell":
+                last_run_shell_ok = "[exit code:" not in result
+
+            all_stdout.append(f"[{tc_name}] {result[:500]}")
+            acc_tool_calls.append({
+                "name": tc_name,
+                "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                "result_preview": result[:300],
+            })
+
+            # 截斷大 result 防 context 雪崩
+            _MAX = 3000 if tc_name == "read_file" else 5000
+            _HEAD = 2000 if tc_name == "read_file" else 4000
+            _TAIL = 1000
+            if len(result) > _MAX:
+                _h = result[:_HEAD]
+                _t = result[-_TAIL:]
+                result = (
+                    f"{_h}\n…[中間省略 {len(result) - _HEAD - _TAIL} 字、"
+                    f"完整長度 {len(result)}]…\n{_t}"
+                )
+
+            messages.append(ToolMessage(content=result, tool_call_id=tc_id))
+
+        # 處理 done(在 regular_calls 全跑完後)
+        if done_call is not None:
+            tc_id = done_call.get("id") or ""
+            tc_args = done_call.get("args", {}) or {}
+            _success = bool(tc_args.get("success", True))
+            _summary = (
+                tc_args.get("summary")
+                or tc_args.get("error")
+                or "(空 summary)"
+            )
+
+            # 守門 1:run_python 失敗 → 拒 done(防 LLM 在程式炸掉後硬送 success=true)
+            if _success and last_run_python_ok is False:
+                logger.warning(f"[{step_name}] done 被拒:最近 run_python 失敗")
+                messages.append(ToolMessage(
+                    content=(
+                        "[拒收] 最近一次 run_python 執行失敗、看上面 stderr / traceback。"
+                        "請先用 run_python 修正、確認沒 [exit code: N] 才能 done。"
+                    ),
+                    tool_call_id=tc_id,
+                ))
+                continue
+
+            # 守門 1b:run_shell 失敗 → 拒 done
+            if _success and last_run_shell_ok is False:
+                logger.warning(f"[{step_name}] done 被拒:最近 run_shell 失敗")
+                messages.append(ToolMessage(
+                    content=(
+                        "[拒收] 最近一次 run_shell 失敗。請修正命令(常見:路徑、模組缺裝、quote)、"
+                        "確認 rc=0 沒 Error 後才能 done。"
+                    ),
+                    tool_call_id=tc_id,
+                ))
+                continue
+
+            # 守門 2:output_path 不存在 → 拒 done + surgical retry
+            if (
+                _success and output_path
+                and not Path(output_path).exists()
+                and fake_done_count < _FAKE_DONE_LIMIT_SKILL
+            ):
+                fake_done_count += 1
+                logger.warning(
+                    f"[{step_name}] done 被拒:output 檔 {output_path} 不存在"
+                    f"({fake_done_count}/{_FAKE_DONE_LIMIT_SKILL})"
+                )
+                messages.append(ToolMessage(
+                    content=(
+                        f"[拒收] 你宣稱成功但 output 檔 {output_path} 不存在!"
+                        f"請用 run_python 真實寫檔到那個路徑(Path(...).write_text() / "
+                        f"df.to_excel() / fig.savefig() 等)、跑完 print Path('{output_path}').exists() "
+                        f"確認 True 才能 done。不准只展示 code、必須真跑。"
+                    ),
+                    tool_call_id=tc_id,
+                ))
+                continue
+
+            # 通過 → 結束 loop
+            messages.append(ToolMessage(content="__DONE_ACCEPTED__", tool_call_id=tc_id))
+            acc_tool_calls.append({
+                "name": "done",
+                "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                "result_preview": "",
+            })
+            all_stdout.append(f"[Skill 完成] {_summary}")
+            logger.info(
+                f"[{step_name}] ✅ Skill 完成(success={_success}, "
+                f"summary 前 80 字={_summary[:80]})"
+            )
+
+            _final_stdout = (
+                _build_clean_success_stdout(all_stdout, "[Skill 完成]")
+                if _success else "\n".join(all_stdout)
+            )
+
+            return ExecResult(
+                exit_code=0 if _success else 1,
+                stdout=_final_stdout,
+                stderr="" if _success else _summary,
+                agent_concluded_fail=(not _success),
+            )
+
+    # max_iter 用完未 done
+    err_msg = f"max_iter ({SKILL_MAX_ITERATIONS}) 用完未 done"
+    logger.error(f"[{step_name}] {err_msg}")
+    return ExecResult(
+        exit_code=1,
+        stdout="\n".join(all_stdout),
+        stderr=err_msg,
+        agent_concluded_fail=True,
+    )
 
 
 # ── Outlook 自動化節點專屬 agent ──────────────────────────────────────────────
