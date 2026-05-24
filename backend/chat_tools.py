@@ -208,25 +208,12 @@ def _validate_subagent_roles_in_yaml(yaml_content: str) -> Optional[str]:
 
 @tool
 def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> str:
-    """把 YAML 套用到指定工作流（覆蓋原 YAML + 重建畫布節點）。
-
-    ⚠️ 這是 destructive 寫操作、**必須走兩步協議**：
-
-    **步驟 1 (confirm=False、預覽)**：
-    - 你先呼叫本工具但 confirm 不設 / 設 False → 本工具只回預覽資訊（目標、變動量、不寫入）
-    - 接著用純文字向使用者明確確認：「我準備把 YAML 套到 X、原 N 節點 → 新 M 節點，要套用嗎？」
-    - **不要假設使用者已同意** — 即使他之前說過「修一下」「改成這樣」、寫前還是要再確認一次
-
-    **步驟 2 (confirm=True、實寫)**：
-    - 使用者**明確**同意（回「yes」「OK」「套用」「好」等）後才呼叫本工具設 confirm=True
-    - 使用者語意若模糊（「再看看」「好像」）→ 不要設 True、繼續確認
+    """覆蓋既有 workflow YAML(重建畫布)、走兩步協議。
 
     Args:
-        query: 目標 workflow name（模糊比對）或 id（完整或前綴）。
-        yaml_content: 完整 YAML 字串（含 name/steps 等）。
-        confirm: False=預覽 / True=實寫。預設 False。
-
-    回傳：預覽資訊 或 寫入結果 / 錯誤訊息。
+        query: workflow name(模糊)或 id 前綴
+        yaml_content: 完整 YAML
+        confirm: False 預覽、True 真寫(等使用者明確同意才設 True)
     """
     wf, err = _resolve_workflow(query)
     if not wf:
@@ -291,29 +278,14 @@ def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> 
 
 @tool
 def create_workflow_yaml(name: str, yaml_content: str, confirm: bool = False) -> str:
-    """**建立**全新的工作流(已有名稱 = 拒絕)、把 YAML 寫進去 + 重建畫布。
+    """**建立**新工作流(撞名拒絕、防誤覆蓋)、走兩步協議。
 
-    跟 `save_workflow_yaml` 的差別:
-    - `save_workflow_yaml`:更新**已存在**工作流(query 找名/id)、會覆蓋原 YAML
-    - `create_workflow_yaml`:建**新的**工作流(若同名已存在會拒絕)、避免誤覆蓋
-
-    使用時機:
-    - 使用者明確說「建一個新工作流叫 X」「再開一個工作流叫 X」
-    - 對話脈絡中沒有現成工作流可套(例:剛規劃好新流程)
-
-    ⚠️ 也是 destructive 寫操作、**必須走兩步協議**:
-    步驟 1 (confirm=False、預覽):
-      - 檢查 name 是否已被佔用、yaml 是否合法
-      - 用純文字向使用者確認:「我要建一個新工作流叫 X、N 個節點、要建嗎?」
-    步驟 2 (confirm=True、實建):
-      - 使用者明確同意後才設 True
+    與 save_workflow_yaml 差別:save_=更新既有覆蓋、create_=新建撞名失敗。
 
     Args:
-        name: 新工作流名稱(同名已存在會拒絕、請改用 save_workflow_yaml 更新)
-        yaml_content: 完整 YAML 字串(含 name/steps 等)
-        confirm: False=預覽 / True=實建
-
-    回傳:預覽資訊 / 寫入結果 / 錯誤訊息
+        name: 新 workflow 名(撞名拒絕、要更新請用 save_workflow_yaml)
+        yaml_content: 完整 YAML
+        confirm: False 預覽、True 真建
     """
     name = (name or "").strip()
     if not name:
@@ -389,36 +361,15 @@ def create_subagent_role(
     system_prompt: str,
     confirm: bool = False,
 ) -> str:
-    """**建立**自訂 subagent role(寫到 ~/ai_output/custom_subagent_roles.yaml)。
-
-    ⚠️ 這是寫操作、**必須走兩步協議**:
-
-    **步驟 1 (confirm=False、預覽)**:
-      - 驗欄位、檢查 role_id 沒撞名、tools 都合法
-      - 用純文字向使用者確認:「我要新增角色 X、職能 Y、工具 [a, b, c],確認?」
-
-    **步驟 2 (confirm=True、實寫)**:
-      - 使用者明確同意後才設 True
-
-    使用時機:
-    - 使用者要的 subagent 能力沒對應的內建 / 已存自訂 role(boss / employee / legal_reviewer 等)
-    - 內建 5 個 role(data_analyst/coder/researcher/critic/planner)職能太通用、需要特化
-
-    不建議建 role 的場景(優先用內建 + 在 batch 描述特化):
-    - 一次性任務(role 是 reusable 長期物件、不是任務描述)
-    - 跟內建只差工具子集(直接用內建即可、subagent_runner 還是會白名單過濾)
+    """新增自訂 subagent role(寫到 custom_subagent_roles.yaml)、走兩步協議。
 
     Args:
-        role_id: 英文 snake_case (e.g. 'boss', 'legal_reviewer'),不可跟內建 ID 撞名
-        label: 中文顯示名 (e.g. '主管', '法務審稿員')
-        description: 一句話用途 (出現在 UI 下拉提示)
-        tools: 從 ['run_python', 'run_shell', 'read_file', 'web_search', 'view_image', 'ask_user']
-               挑、`done` 會自動加進去
-        system_prompt: role 看到的第一條 system message,必含「最高優先級違規規則」段落
-                      (reply 必須含 <tool>、reply 短 < 500 字、產物寫進指定 path)
-        confirm: False = 預覽 / True = 真寫入
-
-    回傳:預覽資訊 / 寫入結果 / 錯誤訊息
+        role_id: 英文 snake_case、不可撞內建(data_analyst/coder/researcher/critic/planner)
+        label: 中文顯示名(畫布顯示)
+        description: 一句話用途(UI 提示)
+        tools: 從 run_python/run_shell/read_file/web_search/view_image/ask_user 挑(done 自動加)
+        system_prompt: role 第一條 system message、需含「最高優先級違規」段落
+        confirm: False 預覽、True 真寫
     """
     from pipeline.subagent_runner import (
         BUILTIN_ROLE_IDS, SELECTABLE_TOOLS, load_custom_roles, save_custom_roles,
@@ -598,27 +549,12 @@ def list_schedules() -> str:
 
 @tool
 async def schedule_workflow(query: str, schedule_expr: str, confirm: bool = False) -> str:
-    """為指定工作流建立 cron 排程(每天/每週固定時間自動執行)。
-
-    使用時機:
-    - 使用者要求「每天早上 9 點跑 X」「每週一 18:00 跑 Y」「每小時跑一次 Z」
-    - 規劃完工作流後、user 提到「定時自動跑」
-
-    ⚠️ 寫操作、**必須走兩步協議**:
-    步驟 1 (confirm=False、預覽):確認 workflow 存在 + cron 表達式有效、用文字向使用者確認
-    步驟 2 (confirm=True、實建):明確同意後才設 True
+    """為 workflow 建 cron 排程、走兩步協議。
 
     Args:
-        query: 目標 workflow name(模糊)或 id(前綴)
-        schedule_expr: cron 表達式(分 時 日 月 週、5 個欄位)。常見:
-                       "0 9 * * *"   = 每天早上 9 點
-                       "0 9 * * 1-5" = 週一至週五早上 9 點
-                       "0 */2 * * *" = 每 2 小時整點
-                       "30 18 * * 1" = 每週一 18:30
-                       "0 0 1 * *"   = 每月 1 日午夜
-        confirm: False=預覽 / True=實建
-
-    回傳:預覽資訊 / 排程建立結果 / 錯誤訊息
+        query: workflow name(模糊)或 id 前綴
+        schedule_expr: cron 5 欄表達式(分 時 日 月 週、例 "0 9 * * 1-5" = 週一至五 9 點)
+        confirm: False 預覽、True 真建
     """
     wf, err = _resolve_workflow(query)
     if not wf:
@@ -754,30 +690,12 @@ def _resolve_workflow_output_dir(workflow_name: str):
 
 @tool
 def send_file_to_tg(workflow_query: str, filename: str = "", confirm: bool = False) -> str:
-    """從某 workflow 的輸出資料夾抓檔送到使用者 Telegram。
-
-    使用時機：
-    - 使用者要求「把報告傳給我」「把 report.md 傳到 TG」「傳 X 工作流的最新檔案」
-    - 你建議使用者下載某產出後、主動 offer 送過去
-
-    ⚠️ 這是會送資料到使用者 TG 的寫操作、**必須走兩步協議**：
-
-    **步驟 1 (confirm=False、預覽)**：
-    - filename 空 → 列出 workflow 輸出資料夾裡的所有檔案讓使用者選
-    - filename 給了 → 預覽要送哪個檔(大小、路徑)
-    - 接著用純文字向使用者確認:「要把 X 傳到 TG 嗎?」
-
-    **步驟 2 (confirm=True、實送)**：
-    - 使用者明確同意後才設 confirm=True
-
-    安全：檔案存取限定在 `<OUTPUT_BASE_PATH>/<workflow_name>/` 內、不能讀任意路徑。
+    """從 workflow 輸出資料夾抓檔傳 TG、走兩步協議。50MB cap、限定 OUTPUT_BASE_PATH 內。
 
     Args:
-        workflow_query: 目標 workflow name(模糊)或 id(前綴)。
-        filename: 檔名(完整、含副檔名;空字串 = 列出所有檔案讓使用者選)。
-        confirm: False=預覽 / True=實送。預設 False。
-
-    回傳:預覽 / 送檔結果 / 錯誤訊息。
+        workflow_query: workflow name(模糊)或 id 前綴
+        filename: 完整檔名;空 → 列所有檔讓使用者選
+        confirm: False 預覽、True 真送
     """
     # 1. 找 workflow
     wf, err = _resolve_workflow(workflow_query)
@@ -1187,38 +1105,16 @@ async def dispatch_subagent_async(
     max_iter: int = 8,
     follow_up: Optional[list[dict]] = None,
 ) -> str:
-    """派子代理進沙盒 (WSL Docker 內 pipeline-sandbox-v5) 非同步執行 ad-hoc 編碼 /
-    分析任務。立即 return task_id、不等子代理完成、對話可繼續。
+    """派子代理進沙盒非同步跑 ad-hoc 任務(寫 code / debug / 分析)、立即回 task_id。
 
     Args:
-        role: 子代理角色。data_analyst(處理 csv/xlsx 產 md/xlsx/png)、
-              coder(寫 / debug Python script)、researcher(收料產摘要)、
-              critic(純唯讀挑問題)、planner(拆任務)
-        task: 自然語言任務描述、給子代理當 prompt
-        working_dir: 工作 / 輸出資料夾、相對路徑會解到 ai_output/<dir>。
-                     留空 → 自動推 ai_output/chat-adhoc/<timestamp>_<id>/
-        max_iter: 子代理最多輪數(預設 8、簡單任務 6-8、複雜 10-15)。
-                  寫 .py + 跑 + done 至少 3 輪、但 LLM 會繞 read_file / 試錯、
-                  通常實際 5-7 輪、給 8 算 safe baseline。降到 5 以下高機率 max_iter 失敗
-        follow_up: (chain 模式)第一階段成功後 backend 自動派下一個、不必使用者手動 trigger。
-                  格式:list[dict] 例如:
-                      [
-                          {"role": "critic", "task": "審查上一階段產物、列 3 個問題"},
-                          {"role": "coder", "task": "根據意見修正", "max_iter": 10},
-                      ]
-                  特性:共用 working_dir、上一階段 summary 自動 prepend 進下個 task、
-                       任一階段失敗就停。每階段完都 push TG。
+        role: data_analyst / coder / researcher / critic / planner
+        task: 自然語言任務描述
+        working_dir: 工作目錄,留空 → 自動 ai_output/chat-adhoc/<ts>_<id>/
+        max_iter: 最大輪數,預設 8、複雜 10-15、勿低於 5
+        follow_up: chain 模式、list[{role, task, max_iter}]、共用 working_dir
 
-    Returns:
-        task_id 字串 + 預估時間 + 後續查詢提示。
-
-    使用情境（不限定簡單任務、複雜任務也可派）：
-        - 使用者 chat 中要寫程式 / 跑測試 / 做資料分析、且不指定要用畫布 / 工作流
-        - 不限任務大小：寫整個小應用、debug 多檔程式、跑研究式分析都 OK
-        - 派出 vs 建 workflow 的決策遵守 system prompt「派子代理 vs 建 workflow」段落:
-          使用者沒明說「自動化 / 排程 / 重複跑」時、應該先反問用戶要 A 還 B
-
-    後續：用 check_subagent_status(task_id) 查狀態 / 拿結果。
+    後續:check_subagent_status(task_id) 查;細則見 system prompt「派子代理 vs 建 workflow」。
     """
     import asyncio
     import time as _time
