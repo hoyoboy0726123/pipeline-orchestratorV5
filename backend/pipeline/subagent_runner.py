@@ -937,10 +937,21 @@ async def _run_subagent_native(
                 _elapsed = asyncio.get_event_loop().time() - _t0
                 _content_str = (getattr(response, "content", "") or "") if isinstance(getattr(response, "content", ""), str) else ""
                 _tc_count = len(getattr(response, 'tool_calls', []) or [])
+                # Cache stats(Anthropic / OpenAI 有,Gemini / Groq / Ollama 沒)
+                _um_this = getattr(response, "usage_metadata", None) or {}
+                _itd_this = _um_this.get("input_token_details") if isinstance(_um_this, dict) else None
+                _cache_read = (_itd_this or {}).get("cache_read", 0) or 0
+                _cache_create = (_itd_this or {}).get("cache_creation", 0) or 0
+                _in_tok_this = _um_this.get("input_tokens", 0) or 0
+                _cache_str = ""
+                if _cache_read or _cache_create:
+                    _total_prompt = _in_tok_this + _cache_read + _cache_create
+                    _hit_pct = (_cache_read / _total_prompt * 100) if _total_prompt > 0 else 0
+                    _cache_str = f", cache_read {_cache_read:,} ({_hit_pct:.0f}%), cache_write {_cache_create:,}"
                 log.info(
                     f"[subagent[{role_name}]/{step_name}] ✅ LLM 完成"
                     f"({_elapsed:.0f}s, content {len(_content_str)} 字, "
-                    f"tool_calls={_tc_count})"
+                    f"tool_calls={_tc_count}{_cache_str})"
                 )
                 # 診斷:LLM 回 content + tool_calls 都空 → dump 完整 response 看哪個 field 才有真實輸出
                 # (Gemma 4 thinking mode / langchain-google-genai 整合可能把輸出跑到 additional_kwargs / response_metadata)
