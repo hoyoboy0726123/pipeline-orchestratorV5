@@ -368,7 +368,7 @@ def create_subagent_role(
         label: 中文顯示名(畫布顯示)
         description: 一句話用途(UI 提示)
         tools: 從 run_python/run_shell/read_file/web_search/view_image/ask_user 挑(done 自動加)
-        system_prompt: role 第一條 system message、需含「最高優先級違規」段落
+        system_prompt: role 第一條 system message。寫**純語意**敘述職能+工作流、**不要寫 `<tool>` 文字格式範例**(native FC 自動處理、教 `<tool>` 反會讓 LLM 退回文字模式失敗)
         confirm: False 預覽、True 真寫
     """
     from pipeline.subagent_runner import (

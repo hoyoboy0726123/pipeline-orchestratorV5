@@ -3045,7 +3045,9 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 - `label`:中文顯示名(畫布上看到的、例「主管」「員工」)
 - `description`:一句話用途(下拉提示用)
 - `tools`:從 7 個內建工具挑(`run_python` / `run_shell` / `read_file` / `web_search` / `view_image` / `ask_user` / `done`),`done` 永遠加進去
-- `system_prompt`:必含「最高優先級違規規則」段落(reply 含 `<tool>`、reply 短、產物寫進指定 path),否則新 role 一定走進 prose 死循環
+- `system_prompt`:寫**純語意敘述**、說清楚角色職能 + 工作流(讀什麼 → 寫什麼 → 何時 done)。
+  **不要寫 `<tool>name</tool>` 文字協議範例**(V5 SUBAGENT loop 用 native function calling、會自動把 tool schema 注入給 LLM,你寫 `<tool>` 範例反而會讓 LLM 退回文字模式、tool_calls=[] 整 step 失敗)。
+  寫範本以 chat_tools.py 風格為準(只敘述 tool 用途、不寫格式)。
 - **不要為了 batch 描述方便就建 role**:role 是長期 reusable 的、不是一次性任務描述
 
 ### 🛑 寫 subagent workflow 常見錯誤(必看、不照做使用者一定踩坑)
