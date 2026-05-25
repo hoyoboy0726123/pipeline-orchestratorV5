@@ -3472,32 +3472,37 @@ async def _execute_skill_native_loop(
     _FAKE_DONE_LIMIT_SKILL = 3
 
     # Output-ready 自動 done 偵測:LLM 寫成 output 檔後常持續 verify / thumbnail / preview
-    # 不主動 done,9+ iter 燒 ~770K tokens(2026-05-26 PPT workflow 真實案例)。
-    # 連 N 輪 output 存在 + size 達標 + 沒 done → 注入「立刻 done」reminder;再 1 輪未從 → 強制 success 收尾。
+    # 不主動 done(2026-05-26 PPT workflow 真實案例:iter 11 寫成、iter 12-20 全空轉燒 ~770K tokens)。
+    #
+    # 誤殺防護(mtime-based):
+    # - 檔案 mtime 變動 = LLM 真的在改檔 / polish → reset counter(允許繼續優化)
+    # - 檔案 mtime 沒變 = LLM 在做別的(verify / thumbnail / ls)→ counter++
+    # 這樣只會擋「真正空轉」、不會誤殺「正在 polish」的合理場景。
     output_ready_no_done_count = 0
-    _OUTPUT_READY_REMINDER_AT = 1   # 第幾輪 ready 後注入 reminder
-    _OUTPUT_READY_FORCE_AT = 3       # 第幾輪 ready 後強制收尾
+    last_output_mtime: Optional[float] = None
+    _OUTPUT_READY_REMINDER_AT = 1   # 第幾輪 ready+mtime未變後注入 reminder
+    _OUTPUT_READY_FORCE_AT = 4       # 第幾輪 ready+mtime未變後強制收尾(從 3 調 4、更保守)
     _OFFICE_EXTS_SKILL = {".pptx", ".docx", ".xlsx"}
     _OFFICE_MIN_BYTES_SKILL = 5000
     _GENERIC_MIN_BYTES_SKILL = 100
 
-    def _output_is_ready() -> tuple[bool, int]:
-        """檢查 output_path 是否存在且 size 達門檻。回 (ready, size)。"""
+    def _output_is_ready() -> tuple[bool, int, Optional[float]]:
+        """檢查 output_path 是否存在且 size 達門檻。回 (ready, size, mtime)。"""
         if not output_path:
-            return False, 0
+            return False, 0, None
         p = Path(output_path)
         if not p.exists():
-            return False, 0
+            return False, 0, None
         try:
-            sz = p.stat().st_size
+            st = p.stat()
         except OSError:
-            return False, 0
+            return False, 0, None
         floor = (
             _OFFICE_MIN_BYTES_SKILL
             if p.suffix.lower() in _OFFICE_EXTS_SKILL
             else _GENERIC_MIN_BYTES_SKILL
         )
-        return sz >= floor, sz
+        return st.st_size >= floor, st.st_size, st.st_mtime
 
     _RETRIABLE = (
         "503", "429", "unavailable", "rate limit", "rate_limit",
@@ -3703,42 +3708,51 @@ async def _execute_skill_native_loop(
 
             messages.append(ToolMessage(content=result, tool_call_id=tc_id))
 
-        # Output-ready 自動 done 偵測 — 跑完所有 non-done tool 後檢查
-        # 場景:LLM 已寫成 output 檔、但持續 verify/preview 不肯 done、燒 token 撞 max_iter
+        # Output-ready 自動 done 偵測 — mtime-based、區分「真 polish」vs「純空轉」
         if done_call is None:
-            _ready, _size = _output_is_ready()
+            _ready, _size, _mtime = _output_is_ready()
             if _ready:
-                output_ready_no_done_count += 1
-                logger.info(
-                    f"[{step_name}] 📦 Output ready({_size:,} bytes)、LLM 未 done、"
-                    f"累計 {output_ready_no_done_count}/{_OUTPUT_READY_FORCE_AT}"
-                )
-                if output_ready_no_done_count >= _OUTPUT_READY_FORCE_AT:
-                    # 強制 success 收尾 — 檔案是真實證據、不必等 LLM 表態
-                    logger.warning(
-                        f"[{step_name}] ⚠ Output 已 ready {output_ready_no_done_count} 輪、"
-                        f"LLM 仍未 done — 強制 success 收尾(避免燒 token)。檔案:{output_path}({_size:,} bytes)"
+                # mtime 有變 = LLM 真的在改檔(可能是 polish)→ 重置 counter、允許繼續
+                if last_output_mtime is None or (_mtime is not None and _mtime > last_output_mtime):
+                    if last_output_mtime is not None:
+                        logger.info(
+                            f"[{step_name}] 📝 Output 檔有更新(mtime 變動、{_size:,} bytes)、"
+                            f"LLM 仍在 polish → counter 重置"
+                        )
+                    last_output_mtime = _mtime
+                    output_ready_no_done_count = 0
+                else:
+                    # mtime 沒變 = LLM 在做別的事(verify / thumbnail / ls)→ 累計
+                    output_ready_no_done_count += 1
+                    logger.info(
+                        f"[{step_name}] 📦 Output ready 但 mtime 未變({_size:,} bytes)、"
+                        f"LLM 未動檔也未 done、累計 {output_ready_no_done_count}/{_OUTPUT_READY_FORCE_AT}"
                     )
-                    all_stdout.append(
-                        f"[Skill 完成] 系統強制收尾:輸出檔案 {Path(output_path).name} "
-                        f"({_size:,} bytes)已 ready、LLM 未主動 done"
-                    )
-                    return ExecResult(
-                        exit_code=0,
-                        stdout=_build_clean_success_stdout(all_stdout, "[Skill 完成]"),
-                        stderr="",
-                    )
-                if output_ready_no_done_count >= _OUTPUT_READY_REMINDER_AT:
-                    # 注入強烈 reminder 給 LLM
-                    messages.append(HumanMessage(content=(
-                        f"[系統] ✅ 目標檔案 {output_path} 已存在({_size:,} bytes、超過門檻)。"
-                        f"**請立刻呼叫 done(success=true, summary=任務完成描述)** 結束 step。"
-                        f"不要再做 verify / thumbnail / preview / markitdown 等延伸操作 — 任務已達成、"
-                        f"done 是收尾、不是驗證輪。繼續輸出無關 tool call 會被系統強制中止燒你的 token。"
-                    )))
+                    if output_ready_no_done_count >= _OUTPUT_READY_FORCE_AT:
+                        logger.warning(
+                            f"[{step_name}] ⚠ Output 已 ready 且 mtime 未變 {output_ready_no_done_count} 輪、"
+                            f"LLM 仍未 done — 強制 success 收尾。檔案:{output_path}({_size:,} bytes)"
+                        )
+                        all_stdout.append(
+                            f"[Skill 完成] 系統強制收尾:輸出檔 {Path(output_path).name} "
+                            f"({_size:,} bytes)已 ready 且 {output_ready_no_done_count} 輪未動、LLM 未 done"
+                        )
+                        return ExecResult(
+                            exit_code=0,
+                            stdout=_build_clean_success_stdout(all_stdout, "[Skill 完成]"),
+                            stderr="",
+                        )
+                    if output_ready_no_done_count >= _OUTPUT_READY_REMINDER_AT:
+                        messages.append(HumanMessage(content=(
+                            f"[系統] ✅ 目標檔案 {output_path} 已存在({_size:,} bytes)且本輪未改檔。"
+                            f"如果你還在 polish — 直接寫檔(run_python 改檔)、系統會偵測 mtime 變動允許繼續。"
+                            f"如果你只是想 verify / 看 thumbnail / 確認大小 — 那是多餘的、**請立刻呼叫 done** 結束 step。"
+                            f"連續 {_OUTPUT_READY_FORCE_AT} 輪不動檔也不 done 會被強制收尾。"
+                        )))
             else:
-                # 沒 ready → 重置 counter(允許 LLM 繼續寫檔嘗試)
+                # 沒 ready → 重置 counter + mtime tracking(允許 LLM 繼續寫檔嘗試)
                 output_ready_no_done_count = 0
+                last_output_mtime = None
 
         # 處理 done(在 regular_calls 全跑完後)
         if done_call is not None:

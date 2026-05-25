@@ -1104,46 +1104,61 @@ async def _run_subagent_native(
 
             messages.append(ToolMessage(content=result, tool_call_id=tc_id))
 
-        # Output-ready 自動 done 偵測(同 SKILL native loop):跑完 non-done tool 後檢查
-        # 場景:LLM 已寫成 output、但持續 verify 不肯 done、燒 token 撞 max_iter
+        # Output-ready 自動 done 偵測(mtime-based、區分真 polish vs 純空轉)
         if done_call is None and output_path:
             _office_exts_sub = {".pptx", ".docx", ".xlsx"}
             try:
                 _p_sub = Path(output_path)
                 if _p_sub.exists():
-                    _sz_sub = _p_sub.stat().st_size
+                    _st_sub = _p_sub.stat()
+                    _sz_sub = _st_sub.st_size
+                    _mt_sub = _st_sub.st_mtime
                     _floor_sub = 5000 if _p_sub.suffix.lower() in _office_exts_sub else 100
                     if _sz_sub >= _floor_sub:
-                        output_ready_no_done_count_sub = locals().get(
-                            "output_ready_no_done_count_sub", 0
-                        ) + 1
-                        log.info(
-                            f"[{step_name}] 📦 Output ready({_sz_sub:,} bytes)、LLM 未 done、"
-                            f"累計 {output_ready_no_done_count_sub}/3"
-                        )
-                        if output_ready_no_done_count_sub >= 3:
-                            log.warning(
-                                f"[{step_name}] ⚠ Output {output_path} 已 ready 3 輪、強制 success 收尾"
+                        _last_mt_sub = locals().get("last_output_mtime_sub", None)
+                        if _last_mt_sub is None or _mt_sub > _last_mt_sub:
+                            # mtime 變動 = LLM 真的在 polish → 重置 counter
+                            if _last_mt_sub is not None:
+                                log.info(
+                                    f"[{step_name}] 📝 Output 有更新(mtime 變動、{_sz_sub:,} bytes)、polish 中 → counter 重置"
+                                )
+                            last_output_mtime_sub = _mt_sub
+                            output_ready_no_done_count_sub = 0
+                        else:
+                            # mtime 沒變 = LLM 純空轉 → 累計
+                            output_ready_no_done_count_sub = locals().get(
+                                "output_ready_no_done_count_sub", 0
+                            ) + 1
+                            log.info(
+                                f"[{step_name}] 📦 Output ready 但 mtime 未變({_sz_sub:,} bytes)、"
+                                f"LLM 未動檔也未 done、累計 {output_ready_no_done_count_sub}/4"
                             )
-                            return SubagentResult(
-                                success=True,
-                                final_message=(
-                                    f"系統強制收尾:輸出檔 {_p_sub.name}({_sz_sub:,} bytes)"
-                                    f"已 ready、LLM 未主動 done"
-                                ),
-                                iterations=iteration, tool_calls_made=tool_calls_made,
-                                token_usage=accumulated_usage,
-                            )
-                        if output_ready_no_done_count_sub >= 1:
-                            messages.append(HumanMessage(content=(
-                                f"[系統] ✅ 目標檔案 {output_path} 已存在({_sz_sub:,} bytes)。"
-                                f"**請立刻呼叫 done(success=true)** 結束 step。"
-                                f"不要再做 verify / preview 等延伸操作 — 任務已達成。"
-                            )))
+                            if output_ready_no_done_count_sub >= 4:
+                                log.warning(
+                                    f"[{step_name}] ⚠ Output {output_path} ready 且 mtime 未變 4 輪、強制 success 收尾"
+                                )
+                                return SubagentResult(
+                                    success=True,
+                                    final_message=(
+                                        f"系統強制收尾:輸出檔 {_p_sub.name}({_sz_sub:,} bytes)"
+                                        f"已 ready 且 {output_ready_no_done_count_sub} 輪未動、LLM 未 done"
+                                    ),
+                                    iterations=iteration, tool_calls_made=tool_calls_made,
+                                    token_usage=accumulated_usage,
+                                )
+                            if output_ready_no_done_count_sub >= 1:
+                                messages.append(HumanMessage(content=(
+                                    f"[系統] ✅ 目標檔案 {output_path} 已存在({_sz_sub:,} bytes)且本輪未改檔。"
+                                    f"如果在 polish 直接寫檔(run_python)、系統會偵測 mtime 變動允許繼續。"
+                                    f"如果只是 verify、**請立刻 done** 結束 step。"
+                                    f"連續 4 輪不動檔也不 done 會被強制收尾。"
+                                )))
                     else:
-                        # size 不夠 → 不算 ready、重置
+                        # size 不夠 → 重置 + 清 mtime 追蹤
                         if "output_ready_no_done_count_sub" in locals():
                             output_ready_no_done_count_sub = 0
+                        if "last_output_mtime_sub" in locals():
+                            last_output_mtime_sub = None
             except OSError:
                 pass
 
