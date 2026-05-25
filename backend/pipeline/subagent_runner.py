@@ -880,10 +880,25 @@ async def _run_subagent_native(
             error=f"bind_tools 失敗: {e}",
         )
 
+    # Native FC override — V5 既有 role system_prompt + user_prompt 內教了 <tool> 文字協議,
+    # 跟 bind_tools 的 native function_declarations 衝突。Gemma 4 等模型會選文字協議
+    # (LLM 認為範例更具體)、結果回 content 內含 <tool>run_python>...</tool> 純文字、
+    # native tool_calls=[]。在 system_prompt 結尾加 override 強制走 native。
+    # 不動 yaml / _build_user_prompt — 純加優先級指示、A.3 再徹底清理 prompt。
+    _native_override = (
+        "\n\n## ⛔ 最高優先級 — Tool 呼叫協議(本對話使用)\n"
+        "本對話**使用 native function calling API**、tool 已透過 function_declarations 註冊。\n"
+        "你**必須**透過 API 的 function_call 機制呼叫工具、**禁止**寫 `<tool>name</tool>` 文字格式。\n"
+        "✓ 正確:直接 emit tool_calls(API 結構化欄位)、不要在 reply 文字內寫 `<tool>` tag。\n"
+        "✗ 錯誤:寫 `<tool>run_python</tool>\\n```python\\n...` 純文字 — orchestrator 不會解析、會被視為沒呼叫 tool。\n"
+        "上面 role 內若有 `<tool>...</tool>` 範例、那是文字協議的舊範例、本次 native 模式請忽略格式、保留語意(該用哪個 tool / 何時 done)。\n"
+    )
+    system_prompt_native = system_prompt + _native_override
+
     # Prompt caching — SystemMessage 加 cache_control(對 Anthropic 有效、其他 provider 略過)
     _sys_msg_kwargs = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
     messages: list = [
-        SystemMessage(content=system_prompt, additional_kwargs=_sys_msg_kwargs),
+        SystemMessage(content=system_prompt_native, additional_kwargs=_sys_msg_kwargs),
         HumanMessage(content=user_prompt),
     ]
 

@@ -3446,6 +3446,24 @@ async def _execute_skill_native_loop(
             stderr=f"SKILL bind_tools 失敗: {e}",
         )
 
+    # Native FC override — SKILL system_prompt(execute_step_with_skill line 2181 起)教 LLM
+    # 用 <tool>name</tool> 文字協議,跟 bind_tools 的 native function_declarations 衝突。
+    # Gemma 4 等模型會選文字協議、回 content 含 <tool>...</tool> 純文字、tool_calls=[]。
+    # 在 system_prompt 結尾加 override 強制走 native。
+    if messages and isinstance(messages[0].content, str):
+        _native_override = (
+            "\n\n## ⛔ 最高優先級 — Tool 呼叫協議(本對話使用)\n"
+            "本對話**使用 native function calling API**、tool 已透過 function_declarations 註冊。\n"
+            "你**必須**透過 API 的 function_call 機制呼叫工具、**禁止**寫 `<tool>name</tool>` 文字格式。\n"
+            "✓ 正確:直接 emit tool_calls(API 結構化欄位)、不要在 reply 文字內寫 `<tool>` tag。\n"
+            "✗ 錯誤:寫 `<tool>run_python</tool>\\n```python\\n...` 純文字 — orchestrator 不會解析、會被視為沒呼叫 tool。\n"
+            "上面 system prompt 內若有 `<tool>...</tool>` 範例、那是文字協議的舊範例、本次 native 模式請忽略格式、保留語意(該用哪個 tool / 何時 done)。\n"
+        )
+        messages[0] = SystemMessage(
+            content=messages[0].content + _native_override,
+            additional_kwargs=getattr(messages[0], "additional_kwargs", {}) or {},
+        )
+
     last_run_python_ok: Optional[bool] = None
     last_run_shell_ok: Optional[bool] = None
     last_successful_code: Optional[str] = None  # 預留 recipe save 用、MVP 暫不寫進
