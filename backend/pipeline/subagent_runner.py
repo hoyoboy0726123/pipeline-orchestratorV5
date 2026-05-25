@@ -1104,6 +1104,49 @@ async def _run_subagent_native(
 
             messages.append(ToolMessage(content=result, tool_call_id=tc_id))
 
+        # Output-ready 自動 done 偵測(同 SKILL native loop):跑完 non-done tool 後檢查
+        # 場景:LLM 已寫成 output、但持續 verify 不肯 done、燒 token 撞 max_iter
+        if done_call is None and output_path:
+            _office_exts_sub = {".pptx", ".docx", ".xlsx"}
+            try:
+                _p_sub = Path(output_path)
+                if _p_sub.exists():
+                    _sz_sub = _p_sub.stat().st_size
+                    _floor_sub = 5000 if _p_sub.suffix.lower() in _office_exts_sub else 100
+                    if _sz_sub >= _floor_sub:
+                        output_ready_no_done_count_sub = locals().get(
+                            "output_ready_no_done_count_sub", 0
+                        ) + 1
+                        log.info(
+                            f"[{step_name}] 📦 Output ready({_sz_sub:,} bytes)、LLM 未 done、"
+                            f"累計 {output_ready_no_done_count_sub}/3"
+                        )
+                        if output_ready_no_done_count_sub >= 3:
+                            log.warning(
+                                f"[{step_name}] ⚠ Output {output_path} 已 ready 3 輪、強制 success 收尾"
+                            )
+                            return SubagentResult(
+                                success=True,
+                                final_message=(
+                                    f"系統強制收尾:輸出檔 {_p_sub.name}({_sz_sub:,} bytes)"
+                                    f"已 ready、LLM 未主動 done"
+                                ),
+                                iterations=iteration, tool_calls_made=tool_calls_made,
+                                token_usage=accumulated_usage,
+                            )
+                        if output_ready_no_done_count_sub >= 1:
+                            messages.append(HumanMessage(content=(
+                                f"[系統] ✅ 目標檔案 {output_path} 已存在({_sz_sub:,} bytes)。"
+                                f"**請立刻呼叫 done(success=true)** 結束 step。"
+                                f"不要再做 verify / preview 等延伸操作 — 任務已達成。"
+                            )))
+                    else:
+                        # size 不夠 → 不算 ready、重置
+                        if "output_ready_no_done_count_sub" in locals():
+                            output_ready_no_done_count_sub = 0
+            except OSError:
+                pass
+
         # ── 處理 done(如有)── 驗證 output 存在、否則 reject + reminder
         if done_call is not None:
             tc_id = done_call.get("id") or ""
