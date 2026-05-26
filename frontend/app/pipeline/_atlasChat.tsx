@@ -1,6 +1,6 @@
 'use client'
 import { useState, useRef, useEffect } from 'react'
-import { Bot, ChevronUp, ChevronDown, Send, Loader2, Sparkles, FolderOpen, Plus as PlusIcon } from 'lucide-react'
+import { Bot, ChevronUp, ChevronDown, Send, Loader2, Sparkles, FolderOpen, Plus as PlusIcon, X, Minus } from 'lucide-react'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
@@ -453,8 +453,10 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   }
 
   // ── Hero 畫面(Phase 3)──────────────────────────────────────────────────
-  // 首頁中央大畫面、glass 風格、4 個範例卡片、輸入框、底部 2 個 CTA。
-  // 點範例 → 文字塞進輸入框(不立即送出);送出 / ESC / CTA → 切 sidebar mode。
+  // 首頁中央大畫面、玻璃感(可透出 canvas)、4 個範例卡片(送第一則後收起)、
+  // 內嵌 chat history、輸入框、底部 2 個 CTA。
+  // 點範例 → 文字塞進輸入框(不立即送出);送出 → 訊息在 hero 內展開、不切 sidebar;
+  // 只有 ESC / 右上 X / CTA / YAML 套用才會切到 sidebar。
   if (mode === 'hero') {
     return <HeroMode
       input={input}
@@ -462,6 +464,8 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
       loading={loading}
       handleSend={handleSend}
       envPaths={envPaths}
+      messages={messages}
+      onYamlApply={onYamlApply}
     />
   }
   if (mode === 'mini') {
@@ -662,6 +666,8 @@ interface HeroModeProps {
   loading: boolean
   handleSend: () => Promise<void>
   envPaths: EnvPaths | null
+  messages: ChatMsg[]
+  onYamlApply: (yaml: string, mode: 'new' | 'overwrite') => void
 }
 
 // 4 個範例卡片的 metadata(短描述 = 卡片顯示;long = hover tooltip + 點擊塞進輸入框)
@@ -730,19 +736,31 @@ const HERO_EXAMPLES: ExampleCard[] = [
   },
 ]
 
-function HeroMode({ input, setInput, loading, handleSend, envPaths }: HeroModeProps) {
+function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, onYamlApply }: HeroModeProps) {
   const setChatUIState = useWorkflowStore(s => s.setChatUIState)
   const setHasInteracted = useWorkflowStore(s => s.setHasInteracted)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const chatEndRef = useRef<HTMLDivElement>(null)
   // 出場淡入(opacity 0 → 1,300ms)— 用 mounted flag + CSS transition
   const [mounted, setMounted] = useState(false)
-  // 退場淡出(opacity → 0 + scale 0.95,200ms)— 觸發後等動畫結束才切 state
+  // 退場淡出(opacity → 0 + scale 0.98,200ms)— 觸發後等動畫結束才切 state
   const [closing, setClosing] = useState(false)
   useEffect(() => {
     // 進場:下一個 frame 設 mounted = true、讓 opacity 0 → 1 過渡
     const t = requestAnimationFrame(() => setMounted(true))
     return () => cancelAnimationFrame(t)
   }, [])
+
+  // hasStarted:對話是否已展開(有任何 user 訊息或非單一 welcome 的 assistant 訊息)
+  // - 初始(只有 welcome)→ false:顯示歡迎大標 + 4 卡片 + CTA
+  // - 送出第一則訊息後 → true:卡片 / CTA 收起、改顯示 chat history scroll area
+  // welcome 訊息是 messages[0] 且 role==='assistant' 且 !hasYaml,所以 length>1 表示有真實對話
+  const hasStarted = messages.some(m => m.role === 'user') || messages.length > 1
+
+  // hasStarted 切換時、自動滾到最新訊息
+  useEffect(() => {
+    if (hasStarted) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, hasStarted])
 
   // 切到 sidebar mode 的統一 helper:含退場動畫
   const exitToSidebar = (markInteracted: boolean = false) => {
@@ -772,16 +790,13 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths }: HeroModePr
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
-  // 送出 → 走既有 handleSend、然後切 sidebar(Phase 3 暫時、Phase 4 改 'mini')
-  // 注意:hero 跟 sidebar 是不同 instance、messages state 各自獨立。
-  // Phase 3 簡化:送出後 hero 訊息不會繼承到 sidebar(Phase 5 再修)
+  // 送出 → 走既有 handleSend、訊息會 setMessages 到父狀態、hero 內 chat history 自動 re-render
+  // 不再呼 exitToSidebar — hero 是「主要對話介面」、使用者要主動關才關
+  // 標記 hasInteracted,讓下次進站直接走 sidebar mode(不要再彈 hero)
   const onSubmit = async () => {
     if (!input.trim() || loading) return
-    try {
-      await handleSend()
-    } finally {
-      exitToSidebar(true)
-    }
+    setHasInteracted(true)
+    await handleSend()
   }
 
   // Enter 送出 / Shift+Enter 換行
@@ -809,74 +824,239 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths }: HeroModePr
     exitToSidebar(true)
   }
 
+  // 右上「最小化」按鈕:把 hero 收到 sidebar、保留對話內容
+  const onMinimize = () => {
+    exitToSidebar(true)
+  }
+
+  // YAML 套用包裝:套用後 hero 不關、繼續在 hero 內對話
+  // (若想立刻去畫布看結果、使用者可按最小化按鈕)
+  const handleYamlApplyInHero = (yaml: string, mode: 'new' | 'overwrite') => {
+    onYamlApply(yaml, mode)
+    // 套 YAML 是「進畫布」的訊號、自動切回 sidebar 讓使用者看到畫布
+    exitToSidebar(true)
+  }
+
   // 整體 fade in/out 樣式:mounted false 或 closing true → opacity 0
   const containerOpacity = (!mounted || closing) ? 'opacity-0' : 'opacity-100'
-  const cardScale = closing ? 'scale-95' : 'scale-100'
+  const cardScale = closing ? 'scale-[0.98]' : 'scale-100'
 
   return (
     <div
       onClick={onOverlayClick}
-      className={`fixed inset-0 z-50 backdrop-blur-2xl bg-gradient-to-br from-slate-900/85 via-indigo-950/80 to-purple-950/85 transition-opacity duration-300 ${containerOpacity}`}
+      // 透明度大幅降低(20-25%)+ 強 blur — 真正的毛玻璃,canvas 節點透出來
+      // 拿掉紫藍漸層、改近乎中性深色,讓底下 canvas 決定整體色調
+      className={`fixed inset-0 z-50 backdrop-blur-2xl bg-slate-950/25 transition-opacity duration-300 ${containerOpacity}`}
     >
-      {/* 中央 glass card — absolute 置中、最大寬 720px */}
+      {/* 中央 glass card — hasStarted 後變寬變高、容納 chat history
+          透明化:bg-white/[0.06] + border-white/[0.08] + bg-clip-padding,
+          配 shadow-2xl shadow-black/40 給深度感(macOS Control Center 風)*/}
       <div
-        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[90vw] max-w-[720px] backdrop-blur-xl bg-white/8 border border-white/15 rounded-3xl shadow-2xl px-6 py-8 sm:px-10 sm:py-12 transition-all duration-300 ${cardScale}`}
-        style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}
+        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-clip-padding backdrop-blur-2xl bg-white/[0.06] border border-white/[0.08] rounded-3xl shadow-2xl shadow-black/40 transition-all duration-300 ${cardScale} ${
+          hasStarted
+            ? 'w-[92vw] max-w-[820px] h-[82vh] max-h-[820px] flex flex-col px-5 py-4 sm:px-7 sm:py-5'
+            : 'w-[90vw] max-w-[720px] px-6 py-8 sm:px-10 sm:py-12'
+        }`}
         onClick={e => e.stopPropagation()}
       >
-        {/* Atlas logo / 標題 — 漸層 white → iceBlue */}
-        <div className="text-center mb-4">
-          <h1
-            className="text-[38px] font-light tracking-wide bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent"
-            style={{ fontFamily: "'Inter', 'Noto Sans TC', sans-serif" }}
+        {/* 右上控制列(始終存在):最小化 + 關閉 */}
+        <div className={`absolute right-3 top-3 flex items-center gap-1 ${hasStarted ? 'z-10' : ''}`}>
+          <button
+            onClick={onMinimize}
+            title="最小化到 sidebar(對話保留)"
+            className="w-8 h-8 flex items-center justify-center rounded-full text-white/40 hover:text-white/90 hover:bg-white/10 transition-colors"
           >
-            <Sparkles className="inline w-7 h-7 mr-2 -mt-1 text-sky-200/80" />
-            Atlas
-          </h1>
+            <Minus className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => exitToSidebar(false)}
+            title="關閉(ESC)"
+            className="w-8 h-8 flex items-center justify-center rounded-full text-white/40 hover:text-white/90 hover:bg-white/10 transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
-        {/* 歡迎大字 */}
-        <div className="text-center mb-7">
-          <h2 className="text-[22px] sm:text-[24px] font-medium text-white/95 leading-snug">
-            歡迎回來、想要我替您執行什麼任務?
-          </h2>
-        </div>
+        {/* === 初始畫面(hasStarted=false):大歡迎 + 4 卡片 + CTA ============= */}
+        {!hasStarted && (
+          <>
+            {/* Atlas logo / 標題 — 漸層 white → sky 而非紫色 */}
+            <div className="text-center mb-4">
+              <h1
+                className="text-[38px] font-light tracking-wide bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent"
+                style={{ fontFamily: "'Inter', 'Noto Sans TC', sans-serif" }}
+              >
+                <Sparkles className="inline w-7 h-7 mr-2 -mt-1 text-sky-200/80" />
+                Atlas
+              </h1>
+            </div>
 
-        {/* 4 個範例卡片 — grid 2×2 */}
-        <div className="grid grid-cols-2 gap-3 mb-6">
-          {HERO_EXAMPLES.map(card => (
-            <button
-              key={card.key}
-              onClick={() => onCardClick(card)}
-              title={card.prompt(envPaths)}
-              className="text-left bg-white/5 hover:bg-white/15 border border-white/10 rounded-2xl p-4 cursor-pointer transition-all hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-white/30"
-            >
-              <div className="text-[28px] mb-1.5 leading-none">{card.emoji}</div>
-              <div className="text-[14px] font-semibold text-white mb-0.5">{card.title}</div>
-              <div className="text-[12px] text-white/50 leading-snug">{card.subtitle}</div>
-            </button>
-          ))}
-        </div>
+            {/* 歡迎大字 */}
+            <div className="text-center mb-7">
+              <h2 className="text-[22px] sm:text-[24px] font-medium text-white/90 leading-snug">
+                歡迎回來、想要我替您執行什麼任務?
+              </h2>
+            </div>
 
-        {/* 輸入框 + 送出 */}
-        <div className="relative mb-4">
+            {/* 4 個範例卡片 — grid 2×2,hover 用 sky 而非紫 */}
+            <div className="grid grid-cols-2 gap-3 mb-6">
+              {HERO_EXAMPLES.map(card => (
+                <button
+                  key={card.key}
+                  onClick={() => onCardClick(card)}
+                  title={card.prompt(envPaths)}
+                  className="text-left bg-white/[0.04] hover:bg-white/[0.10] border border-white/[0.08] hover:border-sky-300/30 rounded-2xl p-4 cursor-pointer transition-all hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-sky-300/30"
+                >
+                  <div className="text-[28px] mb-1.5 leading-none">{card.emoji}</div>
+                  <div className="text-[14px] font-semibold text-white/95 mb-0.5">{card.title}</div>
+                  <div className="text-[12px] text-white/50 leading-snug">{card.subtitle}</div>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* === 對話模式(hasStarted=true):縮小 logo + chat history ========== */}
+        {hasStarted && (
+          <>
+            {/* 縮小的 logo 列(取代大歡迎標題)*/}
+            <div className="flex items-center gap-2 mb-3 pl-1 pr-20">
+              <Sparkles className="w-4 h-4 text-sky-200/80 shrink-0" />
+              <span className="text-[15px] font-medium bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent">
+                Atlas
+              </span>
+              <span className="text-[11px] text-white/40 ml-1">主要對話介面</span>
+            </div>
+
+            {/* Chat history scroll area — 佔卡片大部分高度 */}
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-thumb]:rounded-full">
+              {messages.map((msg, i) => (
+                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  {msg.role === 'assistant' && (
+                    <div className="w-6 h-6 rounded-full bg-sky-400/15 border border-sky-300/20 flex items-center justify-center shrink-0 mt-1 mr-2">
+                      <Bot className="w-3 h-3 text-sky-200" />
+                    </div>
+                  )}
+                  <div
+                    className={`max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-[13px] leading-relaxed break-words overflow-hidden ${
+                      msg.role === 'user'
+                        ? 'bg-sky-500/80 text-white rounded-br-sm shadow-md shadow-sky-900/30'
+                        : 'bg-white/[0.07] border border-white/[0.08] text-white/90 rounded-bl-sm'
+                    }`}
+                    style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                  >
+                    {/* Tool blocks(串流時顯示工具呼叫進度)*/}
+                    {msg.role === 'assistant' && msg.toolBlocks && msg.toolBlocks.length > 0 && (
+                      <div className="mb-1.5 space-y-1">
+                        {msg.toolBlocks.map((tb, ti) => (
+                          <div
+                            key={ti}
+                            className={`text-[11px] px-2 py-1 rounded border ${
+                              tb.status === 'running'
+                                ? 'bg-sky-400/10 border-sky-300/20 text-sky-100'
+                                : 'bg-white/[0.04] border-white/[0.06] text-white/60'
+                            }`}
+                          >
+                            {tb.status === 'running' ? (
+                              <span className="flex items-center gap-1.5">
+                                <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                <span className="font-mono">{tb.name}</span>
+                                <span className="text-[10px] text-sky-200/70 truncate">
+                                  {Object.entries(tb.args).slice(0, 2).map(([k, v]) =>
+                                    `${k}=${typeof v === 'string' ? `"${v.slice(0, 30)}"` : JSON.stringify(v).slice(0, 30)}`
+                                  ).join(', ')}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1.5">
+                                <span className="text-emerald-300 shrink-0">✓</span>
+                                <span className="font-mono">{tb.name}</span>
+                                {tb.preview && (
+                                  <span className="text-[10px] text-white/40 truncate" title={tb.preview}>
+                                    {tb.preview.slice(0, 60)}
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {msg.role === 'assistant' ? (
+                      <div className="prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-pre:bg-black/30 prose-code:break-all prose-code:bg-white/10 prose-code:px-1 prose-code:rounded prose-headings:text-white prose-strong:text-white prose-a:text-sky-300">
+                        <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n```yaml[\s\S]*?```/g, '(已偵測到 YAML ↓)'))}</ReactMarkdown>
+                        {msg.streaming && (
+                          <span className="inline-block w-1.5 h-3 ml-0.5 bg-sky-300 animate-pulse align-middle" />
+                        )}
+                      </div>
+                    ) : (
+                      <span className="whitespace-pre-wrap">{msg.content}</span>
+                    )}
+                    {msg.hasYaml && msg.yamlError && (
+                      <div className="mt-1.5 p-2 rounded-lg bg-red-500/15 border border-red-300/30 text-[11px] text-red-100 leading-relaxed">
+                        ⚠️ YAML 有問題,建議請 AI 修正後再套用:<br/>
+                        <code className="break-all">{msg.yamlError}</code>
+                      </div>
+                    )}
+                    {msg.hasYaml && msg.yaml && (
+                      <div className="mt-2 grid grid-cols-2 gap-1.5">
+                        <button
+                          onClick={() => handleYamlApplyInHero(msg.yaml!, 'new')}
+                          title="建立一個新的工作流來放這份 YAML"
+                          className={`flex items-center justify-center gap-1 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                            msg.yamlError
+                              ? 'bg-amber-500/80 hover:bg-amber-400 text-white'
+                              : 'bg-emerald-500/80 hover:bg-emerald-400 text-white'
+                          }`}
+                        >
+                          ＋ 建立新工作流
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (!confirm('這會覆蓋目前工作流的內容(無法還原)。確定要繼續嗎?')) return
+                            handleYamlApplyInHero(msg.yaml!, 'overwrite')
+                          }}
+                          title="用這份 YAML 覆蓋目前工作流"
+                          className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-xs font-medium border border-white/20 bg-white/[0.04] hover:bg-white/[0.08] text-white/80 transition-colors"
+                        >
+                          ⚠ 覆蓋目前
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {loading && (
+                <div className="flex items-center gap-2 text-xs text-white/40 pl-8">
+                  <Loader2 className="w-3 h-3 animate-spin" /> 思考中…
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+          </>
+        )}
+
+        {/* 輸入框 + 送出(兩種狀態都有,但 hasStarted 後緊貼底部)*/}
+        <div className={`relative ${hasStarted ? 'mt-3' : 'mb-4'}`}>
           <textarea
             ref={inputRef}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             disabled={loading}
-            rows={3}
-            placeholder="想做什麼?跟我說...(例:每天早上 9 點抓 Reddit r/ASUS 的熱門貼文、AI 摘要、Telegram 通知我)"
-            className="w-full bg-white/10 border border-white/20 rounded-2xl px-5 py-4 pr-14 text-white placeholder-white/40 focus:bg-white/15 focus:border-white/40 outline-none transition resize-none text-[14px] leading-relaxed disabled:opacity-50"
+            rows={hasStarted ? 2 : 3}
+            placeholder={hasStarted
+              ? '繼續對話…(Enter 送出 / Shift+Enter 換行)'
+              : '想做什麼?跟我說...(例:每天早上 9 點抓 Reddit r/ASUS 的熱門貼文、AI 摘要、Telegram 通知我)'}
+            className="w-full bg-white/[0.06] border border-white/[0.10] rounded-2xl px-5 py-3.5 pr-14 text-white placeholder-white/35 focus:bg-white/[0.10] focus:border-sky-300/40 outline-none transition resize-none text-[14px] leading-relaxed disabled:opacity-50"
           />
           <button
             onClick={onSubmit}
             disabled={!input.trim() || loading}
             className={`absolute right-3 bottom-3 w-10 h-10 flex items-center justify-center rounded-xl transition-all ${
               input.trim() && !loading
-                ? 'bg-sky-500 hover:bg-sky-400 text-white shadow-lg cursor-pointer'
-                : 'bg-white/10 text-white/30 cursor-not-allowed'
+                ? 'bg-sky-400 hover:bg-sky-300 text-white shadow-lg shadow-sky-900/30 cursor-pointer'
+                : 'bg-white/[0.08] text-white/30 cursor-not-allowed'
             }`}
             title="送出(Enter)"
           >
@@ -884,28 +1064,32 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths }: HeroModePr
           </button>
         </div>
 
-        {/* 底部次要 CTA(扁平樣式)*/}
-        <div className="flex gap-3 justify-center">
-          <button
-            onClick={onRunExisting}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/70 hover:text-white hover:bg-white/10 transition-colors"
-          >
-            <FolderOpen className="w-3.5 h-3.5" />
-            跑現有工作流
-          </button>
-          <button
-            onClick={onBlankCanvas}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/70 hover:text-white hover:bg-white/10 transition-colors"
-          >
-            <PlusIcon className="w-3.5 h-3.5" />
-            開啟空白畫布
-          </button>
-        </div>
+        {/* 底部次要 CTA(僅初始畫面顯示)*/}
+        {!hasStarted && (
+          <>
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={onRunExisting}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/60 hover:text-white hover:bg-white/[0.08] transition-colors"
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                跑現有工作流
+              </button>
+              <button
+                onClick={onBlankCanvas}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/60 hover:text-white hover:bg-white/[0.08] transition-colors"
+              >
+                <PlusIcon className="w-3.5 h-3.5" />
+                開啟空白畫布
+              </button>
+            </div>
 
-        {/* 底部小提示 — ESC 逃生 */}
-        <div className="mt-4 text-center text-[11px] text-white/30">
-          按 ESC 跳過、或選擇上方任一選項繼續
-        </div>
+            {/* 底部小提示 — ESC 逃生 */}
+            <div className="mt-4 text-center text-[11px] text-white/30">
+              按 ESC 跳過、或選擇上方任一選項繼續
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
