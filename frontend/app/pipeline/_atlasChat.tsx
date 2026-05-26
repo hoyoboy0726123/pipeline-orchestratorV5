@@ -1,6 +1,6 @@
 'use client'
 import { useState, useRef, useEffect } from 'react'
-import { Bot, ChevronUp, ChevronDown, Send, Loader2 } from 'lucide-react'
+import { Bot, ChevronUp, ChevronDown, Send, Loader2, Sparkles, FolderOpen, Plus as PlusIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
@@ -452,10 +452,17 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
     }
   }
 
-  // ── 其他 mode 預留 placeholder(Phase 3/4 實作) ─────────────────────────
+  // ── Hero 畫面(Phase 3)──────────────────────────────────────────────────
+  // 首頁中央大畫面、glass 風格、4 個範例卡片、輸入框、底部 2 個 CTA。
+  // 點範例 → 文字塞進輸入框(不立即送出);送出 / ESC / CTA → 切 sidebar mode。
   if (mode === 'hero') {
-    // TODO Phase 3 實作:首頁中央大畫面、glass 風格、範例卡片、CTA 按鈕
-    return null
+    return <HeroMode
+      input={input}
+      setInput={setInput}
+      loading={loading}
+      handleSend={handleSend}
+      envPaths={envPaths}
+    />
   }
   if (mode === 'mini') {
     // TODO Phase 4 實作:縮小 floating button(右下角 / 右上角)、點開展 drawer
@@ -635,6 +642,271 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── HeroMode 子元件(Phase 3)─────────────────────────────────────────────
+// Atlas 首頁中央大畫面。獨立子元件、由父 AtlasChat 在 mode==='hero' 時 render。
+// 為什麼拆出來:Hero 用獨立 input state(進 sidebar mode 不繼承)、避免 sidebar
+// instance 的訊息流被 hero 干擾。共享 envPaths / handleSend 由 props 傳入。
+//
+// 4 個範例卡片(對應 buildWelcomeMessage 內的 ex1/ex4/ex6/ex7):
+//   A 📋 Python 腳本串接   → 把幾個 .py 串成一條工作流
+//   B 🌐 爬蟲 + AI + Outlook → 抓 → 摘要 → 確認 → 寄信完整鏈
+//   C 🐍 啟動既有 Python 專案 → 把自家專案接進來自動跑
+//   D 🧠 多代理探索分析     → 不確定怎麼做、讓 AI 邊想邊改
+interface HeroModeProps {
+  input: string
+  setInput: (s: string) => void
+  loading: boolean
+  handleSend: () => Promise<void>
+  envPaths: EnvPaths | null
+}
+
+// 4 個範例卡片的 metadata(短描述 = 卡片顯示;long = hover tooltip + 點擊塞進輸入框)
+interface ExampleCard {
+  key: 'A' | 'B' | 'C' | 'D'
+  emoji: string
+  title: string
+  subtitle: string
+  // 點擊後塞進輸入框的詳細範例描述(讓使用者直接送或微調)
+  prompt: (env: EnvPaths | null) => string
+}
+
+const HERO_EXAMPLES: ExampleCard[] = [
+  {
+    key: 'A',
+    emoji: '📋',
+    title: 'Python 腳本串接',
+    subtitle: '把幾個 .py 串成一條工作流',
+    prompt: (env) => {
+      const dir = env?.finance_example_dir
+      if (env?.has_finance_example && dir) {
+        return `把以下 Python 腳本串成一條工作流:
+第一步:執行 \`python ${dir}\\stage1_generate_transactions.py\`,輸出到 \`ai_output/q1_finance/raw_transactions.xlsx\`
+第二步:執行 \`python ${dir}\\stage2_clean_data.py\`,讀取上一步的 Excel,輸出到 \`ai_output/q1_finance/cleaned_transactions.xlsx\`
+第三步:執行 \`python ${dir}\\stage3_analyze_finance.py\`,做財務彙總,輸出到 \`ai_output/q1_finance/financial_summary.xlsx\`
+第四步:執行 \`python ${dir}\\stage4_generate_report.py\`,產出 \`ai_output/q1_finance/Q1_financial_report.xlsx\``
+      }
+      return `把以下 Python 腳本串成一條工作流:
+第一步:執行 \`python 你的腳本.py\`,輸出到 \`ai_output/daily_report/raw.csv\`
+第二步:執行 \`python 分析腳本.py\`,讀取上一步的 csv,輸出到 \`ai_output/daily_report/result.xlsx\``
+    },
+  },
+  {
+    key: 'B',
+    emoji: '🌐',
+    title: '爬蟲 + AI + Outlook',
+    subtitle: '抓 → 摘要 → 確認 → 寄信完整鏈',
+    prompt: () =>
+      `我想做一條每天跑的工作流:
+第一步(網頁爬蟲):抓 \`https://www.reddit.com/r/ASUS/\` 列表頁
+第二步(AI 技能):抽前 10 篇連結各自展開抓內文,每篇 80 字內摘要,輸出 \`ai_output/reddit_asus/daily.md\`
+第三步(人工確認):把摘要傳到 Telegram,我看過 OK 才繼續
+第四步(Outlook):把 daily.md 當附件用 send_with_attachment 模板寄給 boss@x.com`,
+  },
+  {
+    key: 'C',
+    emoji: '🐍',
+    title: '啟動既有 Python 專案',
+    subtitle: '把自家專案接進來自動跑',
+    prompt: () =>
+      `我有一個 Python 專案,想接到工作流自動化跑:
+1. 跑專案的 main.py、產出檔案到工作流目錄
+2. AI 驗證一下產出檔內容對不對
+3. 確認沒問題後 Telegram 通知我做最終放行
+
+(專案放在 external_projects/<名稱>/ 底下,請問我要哪個專案)`,
+  },
+  {
+    key: 'D',
+    emoji: '🧠',
+    title: '多代理探索分析',
+    subtitle: '不確定怎麼做、讓 AI 邊想邊改',
+    prompt: () =>
+      `任務:「我有 \`sales.xlsx\`,想看看 Q1 哪幾個品類賣最差、找出共通原因」這種「不確定要看什麼指標、邊看邊找」的場景。
+單一步驟:用多代理節點、角色挑「資料分析師(data_analyst)」、最多輪數設 6-8、任務描述寫清楚目標即可(不用拆步驟)。多代理會自己 read → run_python → 看結果 → 再 read… 直到產出 \`analysis.md\`。`,
+  },
+]
+
+function HeroMode({ input, setInput, loading, handleSend, envPaths }: HeroModeProps) {
+  const setChatUIState = useWorkflowStore(s => s.setChatUIState)
+  const setHasInteracted = useWorkflowStore(s => s.setHasInteracted)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  // 出場淡入(opacity 0 → 1,300ms)— 用 mounted flag + CSS transition
+  const [mounted, setMounted] = useState(false)
+  // 退場淡出(opacity → 0 + scale 0.95,200ms)— 觸發後等動畫結束才切 state
+  const [closing, setClosing] = useState(false)
+  useEffect(() => {
+    // 進場:下一個 frame 設 mounted = true、讓 opacity 0 → 1 過渡
+    const t = requestAnimationFrame(() => setMounted(true))
+    return () => cancelAnimationFrame(t)
+  }, [])
+
+  // 切到 sidebar mode 的統一 helper:含退場動畫
+  const exitToSidebar = (markInteracted: boolean = false) => {
+    if (closing) return
+    setClosing(true)
+    if (markInteracted) setHasInteracted(true)
+    // 等 fade out 動畫結束才真正切 state
+    setTimeout(() => setChatUIState('sidebar'), 200)
+  }
+
+  // ESC 鍵 → 切 sidebar(逃生口)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        exitToSidebar(false)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [closing]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 點範例卡片 → 把對應 prompt 塞進輸入框(不立即送出、focus 給使用者改)
+  const onCardClick = (card: ExampleCard) => {
+    setInput(card.prompt(envPaths))
+    // 等下一個 tick 再 focus、textarea 才已經有值
+    setTimeout(() => inputRef.current?.focus(), 0)
+  }
+
+  // 送出 → 走既有 handleSend、然後切 sidebar(Phase 3 暫時、Phase 4 改 'mini')
+  // 注意:hero 跟 sidebar 是不同 instance、messages state 各自獨立。
+  // Phase 3 簡化:送出後 hero 訊息不會繼承到 sidebar(Phase 5 再修)
+  const onSubmit = async () => {
+    if (!input.trim() || loading) return
+    try {
+      await handleSend()
+    } finally {
+      exitToSidebar(true)
+    }
+  }
+
+  // Enter 送出 / Shift+Enter 換行
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      onSubmit()
+    }
+  }
+
+  // 點 overlay 灰色邊緣不關閉(避免誤點、必須主動操作 CTA 才關)
+  const onOverlayClick = (e: React.MouseEvent) => {
+    // 不做任何事 — 留著當 click sink
+    e.stopPropagation()
+  }
+
+  // 點「跑現有工作流」CTA — Phase 5 才接 modal、現在先 toast + 切 sidebar
+  const onRunExisting = () => {
+    toast.info('Phase 5 將開啟「選擇現有工作流」對話框')
+    exitToSidebar(true)
+  }
+
+  // 點「開啟空白畫布」CTA — 純切 sidebar、不發訊息
+  const onBlankCanvas = () => {
+    exitToSidebar(true)
+  }
+
+  // 整體 fade in/out 樣式:mounted false 或 closing true → opacity 0
+  const containerOpacity = (!mounted || closing) ? 'opacity-0' : 'opacity-100'
+  const cardScale = closing ? 'scale-95' : 'scale-100'
+
+  return (
+    <div
+      onClick={onOverlayClick}
+      className={`fixed inset-0 z-50 backdrop-blur-2xl bg-gradient-to-br from-slate-900/85 via-indigo-950/80 to-purple-950/85 transition-opacity duration-300 ${containerOpacity}`}
+    >
+      {/* 中央 glass card — absolute 置中、最大寬 720px */}
+      <div
+        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[90vw] max-w-[720px] backdrop-blur-xl bg-white/8 border border-white/15 rounded-3xl shadow-2xl px-6 py-8 sm:px-10 sm:py-12 transition-all duration-300 ${cardScale}`}
+        style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Atlas logo / 標題 — 漸層 white → iceBlue */}
+        <div className="text-center mb-4">
+          <h1
+            className="text-[38px] font-light tracking-wide bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent"
+            style={{ fontFamily: "'Inter', 'Noto Sans TC', sans-serif" }}
+          >
+            <Sparkles className="inline w-7 h-7 mr-2 -mt-1 text-sky-200/80" />
+            Atlas
+          </h1>
+        </div>
+
+        {/* 歡迎大字 */}
+        <div className="text-center mb-7">
+          <h2 className="text-[22px] sm:text-[24px] font-medium text-white/95 leading-snug">
+            歡迎回來、想要我替您執行什麼任務?
+          </h2>
+        </div>
+
+        {/* 4 個範例卡片 — grid 2×2 */}
+        <div className="grid grid-cols-2 gap-3 mb-6">
+          {HERO_EXAMPLES.map(card => (
+            <button
+              key={card.key}
+              onClick={() => onCardClick(card)}
+              title={card.prompt(envPaths)}
+              className="text-left bg-white/5 hover:bg-white/15 border border-white/10 rounded-2xl p-4 cursor-pointer transition-all hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-white/30"
+            >
+              <div className="text-[28px] mb-1.5 leading-none">{card.emoji}</div>
+              <div className="text-[14px] font-semibold text-white mb-0.5">{card.title}</div>
+              <div className="text-[12px] text-white/50 leading-snug">{card.subtitle}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* 輸入框 + 送出 */}
+        <div className="relative mb-4">
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            disabled={loading}
+            rows={3}
+            placeholder="想做什麼?跟我說...(例:每天早上 9 點抓 Reddit r/ASUS 的熱門貼文、AI 摘要、Telegram 通知我)"
+            className="w-full bg-white/10 border border-white/20 rounded-2xl px-5 py-4 pr-14 text-white placeholder-white/40 focus:bg-white/15 focus:border-white/40 outline-none transition resize-none text-[14px] leading-relaxed disabled:opacity-50"
+          />
+          <button
+            onClick={onSubmit}
+            disabled={!input.trim() || loading}
+            className={`absolute right-3 bottom-3 w-10 h-10 flex items-center justify-center rounded-xl transition-all ${
+              input.trim() && !loading
+                ? 'bg-sky-500 hover:bg-sky-400 text-white shadow-lg cursor-pointer'
+                : 'bg-white/10 text-white/30 cursor-not-allowed'
+            }`}
+            title="送出(Enter)"
+          >
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+          </button>
+        </div>
+
+        {/* 底部次要 CTA(扁平樣式)*/}
+        <div className="flex gap-3 justify-center">
+          <button
+            onClick={onRunExisting}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/70 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            跑現有工作流
+          </button>
+          <button
+            onClick={onBlankCanvas}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/70 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <PlusIcon className="w-3.5 h-3.5" />
+            開啟空白畫布
+          </button>
+        </div>
+
+        {/* 底部小提示 — ESC 逃生 */}
+        <div className="mt-4 text-center text-[11px] text-white/30">
+          按 ESC 跳過、或選擇上方任一選項繼續
+        </div>
+      </div>
     </div>
   )
 }

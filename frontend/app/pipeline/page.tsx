@@ -41,6 +41,7 @@ import SubagentConfigPanel          from './_subagentPanel'
 import ConditionPanel               from './_conditionPanel'
 import HoverScrollRow               from './_hoverScrollRow'
 import Sidebar                from './_sidebar'
+import AtlasChat              from './_atlasChat'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
   type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData, type SubagentData,
@@ -490,6 +491,8 @@ export default function PipelinePage() {
 
   // ── Workflow Store ────────────────────────────────────────────────────────
   const { activeId, workflows, updateWorkflow, saveCanvas, createWorkflow } = useWorkflowStore()
+  // Hero UX 重塑(Phase 2/3):chatUIState='hero' 時在最上層 render 全螢幕 Hero 浮層
+  const chatUIState = useWorkflowStore(s => s.chatUIState)
 
   // 當 activeId 改變時，載入對應工作流（defer 避免 render-time setState）
   useEffect(() => {
@@ -1701,6 +1704,12 @@ export default function PipelinePage() {
   return (
     <div className="h-screen flex overflow-hidden bg-gray-50" style={{ fontFamily: "'Inter', 'Noto Sans TC', sans-serif" }}>
       <Toaster richColors position="top-right" />
+
+      {/* ── Hero overlay(Phase 3、chatUIState='hero' 時最上層全螢幕)──
+          z-50;Atlas 首頁中央大畫面。送出 / ESC / CTA → 切 'sidebar' 由元件內處理 */}
+      {chatUIState === 'hero' && (
+        <AtlasChat mode="hero" onYamlApply={importYaml} />
+      )}
 
       {/* ── Left Sidebar ── */}
       <Sidebar onYamlApply={importYaml} />
