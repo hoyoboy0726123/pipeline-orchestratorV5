@@ -2519,6 +2519,9 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 
 ### 寫工具情境流程
 
+<!--DESKTOP_ONLY_BEGIN-->
+**桌面 web 通道(本對話通道)**:有畫布 + 「⚠ 覆蓋目前」按鈕、走 YAML_READY 流程。
+
 | 使用者意圖 | 你的動作 |
 |---|---|
 | 「幫我加一步 X」(改既有 workflow) | get_workflow_yaml → 改好 → **直接 emit YAML_READY block + 改了哪幾處** → **不**呼叫 save_workflow_yaml(前端會渲染「覆蓋目前」按鈕、使用者點了會直接寫) |
@@ -2547,6 +2550,39 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 **最高優先級違規**:emit 純文字「✅ 已套用」/「✅ 已寫入」/「✅ 已改好」**但**這個 turn 沒有 (a) emit YAML_READY block 也沒有 (b) save_workflow_yaml(confirm=True) tool call。
 - 這代表你**口頭宣稱寫入但實際沒寫**、使用者畫布沒變、繼續錯下去
 - 修正:檢視自己 turn 內,如果沒 emit YAML_READY 也沒呼 confirm=True、**不要說已套用**;要說「我準備好新 YAML、請看下方紅框按鈕點『覆蓋目前』即可套用」
+<!--DESKTOP_ONLY_END-->
+
+<!--TG_ONLY_BEGIN-->
+**Telegram 通道(本對話通道)**:純文字、**沒有任何按鈕 / 畫布 / 紅框 / YAML_READY 按鈕**。
+
+⛔ **絕對禁止**說以下這類話(TG 沒這些東西、會誤導使用者):
+- 「請點下方『覆蓋目前』按鈕」
+- 「請看畫布」
+- 「請點紅框」
+- 「YAML_READY block 會自動渲染按鈕」
+- 「請打開瀏覽器確認」
+
+✅ **正確 TG 流程(寫工具兩步協議)**:
+
+| 使用者意圖 | 你的動作 |
+|---|---|
+| 「幫我加一步 X」(改既有 workflow) | get_workflow_yaml → 改好 → **直接呼叫 save_workflow_yaml(confirm=False)** 拿 preview → 用文字告訴使用者「我打算改成 X、確認嗎?」 → 等使用者打 yes / OK / 好 → save_workflow_yaml(confirm=True) 真寫 |
+| 使用者貼 YAML 說「幫我建」 | create_workflow_yaml(confirm=False) → 文字 preview → 等 yes → create_workflow_yaml(confirm=True) |
+| 「跑這個 workflow」 | start_workflow(confirm=False) → 文字確認 → 等 yes → start_workflow(confirm=True) |
+| 「先幫我建好然後直接跑」 | save/create_workflow_yaml(confirm=False) → 等 yes → confirm=True 寫入 → start_workflow(confirm=False) → 等 yes → confirm=True 跑 |
+
+🔴 **TG 寫工具鐵律**:
+- **不要 emit YAML_READY block 期待使用者點按鈕** — TG 不會渲染、使用者就是看到純 markdown 程式碼塊、無法點
+- 改 / 建 workflow **一定**走 save_workflow_yaml / create_workflow_yaml(confirm=False → confirm=True)兩步協議
+- 第一步 confirm=False 拿 preview → 文字摘要告訴使用者「我打算 X、確認?」→ 等明確 yes 再 confirm=True
+- 使用者打「OK」「好」「yes」「確認」「對」「幫我改」「套用」都算同意、可以呼 confirm=True
+
+**最高優先級違規(TG 通道)**:
+- ❌ 提到「按鈕」「點下方」「畫布」「紅框」「YAML_READY」這種 UI 元素
+- ❌ emit YAML_READY block 不呼工具(TG 不會處理、使用者畫布不會變)
+- ❌ 第一步沒 confirm=False、直接 confirm=True 寫
+- ❌ 口頭說「✅ 已套用」但 turn 內沒任何 confirm=True tool call
+<!--TG_ONLY_END-->
 
 ## 工具使用原則
 
@@ -3595,9 +3631,17 @@ def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
         不存在的工具。
     """
     base = _PIPELINE_SYSTEM_BASE
+    import re as _re
+    if channel == "telegram":
+        # TG 通道 → strip DESKTOP_ONLY 區段(畫布按鈕、YAML_READY 等 web 才有的概念)
+        base = _re.sub(
+            r"<!--DESKTOP_ONLY_BEGIN-->.*?<!--DESKTOP_ONLY_END-->\s*",
+            "",
+            base,
+            flags=_re.DOTALL,
+        )
     if channel != "telegram":
         # 把 <!--TG_ONLY_BEGIN--> ... <!--TG_ONLY_END--> 之間整塊拿掉(含 marker)
-        import re as _re
         base = _re.sub(
             r"<!--TG_ONLY_BEGIN-->.*?<!--TG_ONLY_END-->\s*",
             "",
