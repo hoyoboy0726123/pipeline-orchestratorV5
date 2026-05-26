@@ -963,17 +963,19 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
   return (
     <div
       onClick={onOverlayClick}
-      // Overlay 純做 click sink、不上色不模糊 — canvas 節點 100% 清楚可見、
-      // 毛玻璃感全部交給 glass card 自己的 backdrop-blur(只在卡片範圍內 blur 背景)。
-      // 過去用 bg-slate-950/25 + backdrop-blur-2xl 整片覆蓋,看起來像不透明擋板。
-      className={`fixed inset-0 z-50 bg-transparent transition-opacity duration-300 ${containerOpacity}`}
+      // Overlay 用「柔和 focal blur」:backdrop-blur-md 讓 canvas 節點輪廓清楚、
+      // 細節略糊、視線自動聚焦到前景 hero card。bg-slate-950/10 一層極淡黑紗、
+      // 微微壓暗背景但不擋住 canvas。過去 25% + blur-2xl 太重像不透明擋板、
+      // 改為 transparent 又完全沒模糊讓 canvas razor sharp 搶眼 — 這次取中間值。
+      className={`fixed inset-0 z-50 bg-slate-950/10 backdrop-blur-md transition-opacity duration-300 ${containerOpacity}`}
     >
       {/* 中央 glass card — hasStarted 後變寬變高、容納 chat history
-          毛玻璃感:backdrop-blur-2xl(只 blur 卡片底下的區域)+ bg-white/[0.08]
-          淡白填色 + border-white/20(略強的描邊,做毛玻璃邊界,不靠加深填色)+
-          shadow-2xl shadow-black/40 給深度感(macOS Control Center 風)*/}
+          毛玻璃兩層 blur:overlay 的 backdrop-blur-md(背景柔焦)+ card 自己的
+          backdrop-blur-2xl(卡片底下再加強毛玻璃感)。卡片基底用 bg-slate-900/60
+          (深底色 60% 不透明)讓內部文字、cards、輸入框內容對比足夠、清楚可讀;
+          border-white/25 略強描邊做毛玻璃邊界;shadow-2xl shadow-black/50 給深度感。*/}
       <div
-        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-clip-padding backdrop-blur-2xl bg-white/[0.08] border border-white/20 rounded-3xl shadow-2xl shadow-black/40 transition-all duration-300 ${cardScale} ${
+        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-clip-padding backdrop-blur-2xl bg-slate-900/60 border border-white/25 rounded-3xl shadow-2xl shadow-black/50 transition-all duration-300 ${cardScale} ${
           hasStarted
             ? 'w-[92vw] max-w-[820px] h-[82vh] max-h-[820px] flex flex-col px-5 py-4 sm:px-7 sm:py-5'
             : 'w-[90vw] max-w-[720px] px-6 py-8 sm:px-10 sm:py-12'
@@ -1016,7 +1018,7 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
 
             {/* 歡迎大字 */}
             <div className="text-center mb-7">
-              <h2 className="text-[22px] sm:text-[24px] font-medium text-white/90 leading-snug">
+              <h2 className="text-[22px] sm:text-[24px] font-medium text-white leading-snug">
                 歡迎回來、想要我替您執行什麼任務?
               </h2>
             </div>
@@ -1028,11 +1030,11 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
                   key={card.key}
                   onClick={() => onCardClick(card)}
                   title={card.prompt(envPaths)}
-                  className="text-left bg-white/[0.04] hover:bg-white/[0.10] border border-white/[0.08] hover:border-sky-300/30 rounded-2xl p-4 cursor-pointer transition-all hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-sky-300/30"
+                  className="text-left bg-slate-800/40 hover:bg-slate-700/60 border border-white/15 hover:border-sky-300/40 rounded-2xl p-4 cursor-pointer transition-all hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-sky-300/40"
                 >
                   <div className="text-[28px] mb-1.5 leading-none">{card.emoji}</div>
-                  <div className="text-[14px] font-semibold text-white/95 mb-0.5">{card.title}</div>
-                  <div className="text-[12px] text-white/50 leading-snug">{card.subtitle}</div>
+                  <div className="text-[14px] font-semibold text-white mb-0.5">{card.title}</div>
+                  <div className="text-[12px] text-white/70 leading-snug">{card.subtitle}</div>
                 </button>
               ))}
             </div>
@@ -1174,7 +1176,7 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
             placeholder={hasStarted
               ? '繼續對話…(Enter 送出 / Shift+Enter 換行)'
               : '想做什麼?跟我說...(例:每天早上 9 點抓 Reddit r/ASUS 的熱門貼文、AI 摘要、Telegram 通知我)'}
-            className="w-full bg-white/[0.06] border border-white/[0.10] rounded-2xl px-5 py-3.5 pr-14 text-white placeholder-white/35 focus:bg-white/[0.10] focus:border-sky-300/40 outline-none transition resize-none text-[14px] leading-relaxed disabled:opacity-50"
+            className="w-full bg-slate-800/40 border border-white/20 rounded-2xl px-5 py-3.5 pr-14 text-white placeholder-white/55 focus:bg-slate-800/60 focus:border-sky-300/50 outline-none transition resize-none text-[14px] leading-relaxed disabled:opacity-50"
           />
           <button
             onClick={onSubmit}
@@ -1196,14 +1198,14 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
             <div className="flex gap-3 justify-center">
               <button
                 onClick={onRunExisting}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/60 hover:text-white hover:bg-white/[0.08] transition-colors"
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/75 hover:text-white hover:bg-white/[0.12] transition-colors"
               >
                 <FolderOpen className="w-3.5 h-3.5" />
                 跑現有工作流
               </button>
               <button
                 onClick={onBlankCanvas}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/60 hover:text-white hover:bg-white/[0.08] transition-colors"
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/75 hover:text-white hover:bg-white/[0.12] transition-colors"
               >
                 <PlusIcon className="w-3.5 h-3.5" />
                 開啟空白畫布
@@ -1211,7 +1213,7 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
             </div>
 
             {/* 底部小提示 — ESC 逃生 */}
-            <div className="mt-4 text-center text-[11px] text-white/30">
+            <div className="mt-4 text-center text-[11px] text-white/50">
               按 ESC 跳過、或選擇上方任一選項繼續
             </div>
           </>
