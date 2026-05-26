@@ -206,6 +206,8 @@ export interface AtlasChatProps {
 export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatProps) {
   // 從 zustand store 拿目前綁定工作流的資訊(顯示「對話綁定:xxx」用)
   const { workflows, activeId } = useWorkflowStore()
+  // 用於「新對話」按鈕觸發 Hero overlay 重新出現(跟 Hero 連動、是同一入口)
+  const setChatUIState = useWorkflowStore(s => s.setChatUIState)
 
   const [showChat, setShowChat] = useState(false)
   const [messages, setMessages] = useState<ChatMsg[]>([
@@ -429,14 +431,19 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
 
   // 清空對話 → 退回到只有 welcome 的狀態
   // 同時把對話「暫時解綁」當前工作流：下次發訊息 AI 不帶 yaml/canvas 上下文，
-  // 等於從零開始；想討論其他工作流可直接從左邊清單切過去（切了就重新綁定）。
+  // 等於從零開始;想討論其他工作流可直接從左邊清單切過去(切了就重新綁定)。
+  //
+  // 額外行為(User 反饋):新對話 = 跟 Hero 連動、開啟 Hero overlay。
+  // 因為「新對話」跟 Hero 本質是同一個入口(全新空白對話的開始)、
+  // 點下去應該回到那個視覺最強的 Hero 介面、提供範例卡片 / CTA 給使用者選下一步。
   const handleClearChat = async () => {
     if (loading) return
     if (!confirm(
-      '清空目前對話、開始新話題？\n\n' +
+      '開啟新對話?\n\n' +
       '• 畫布與 YAML 不變\n' +
-      '• 對話會暫時與當前工作流解綁（下次訊息 AI 看不到目前 YAML、是真的新話題）\n' +
-      '• 想回到原工作流的討論：從左邊清單切換工作流即可重新綁定'
+      '• Sidebar 的對話會清空、且暫時與當前工作流解綁\n' +
+      '• 會彈出 Hero 對話視窗(類似首頁、有範例卡片)\n' +
+      '• 想回到原工作流的討論:從左邊清單切換工作流即可重新綁定'
     )) return
     const welcome: ChatMsg = {
       role: 'assistant',
@@ -450,6 +457,8 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
     } else {
       try { localStorage.removeItem(SCRATCH_LS_KEY) } catch {/* ignore */}
     }
+    // 跟 Hero 連動 — 切到 hero state、Hero overlay 自動出現
+    setChatUIState('hero')
   }
 
   // ── Hero 畫面(Phase 3)──────────────────────────────────────────────────
