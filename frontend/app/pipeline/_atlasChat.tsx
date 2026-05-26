@@ -457,14 +457,13 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   // 內嵌 chat history、輸入框、底部 2 個 CTA。
   // 點範例 → 文字塞進輸入框(不立即送出);送出 → 訊息在 hero 內展開、不切 sidebar;
   // 只有 ESC / 右上 X / CTA / YAML 套用才會切到 sidebar。
+  //
+  // Hero 是「全新對話」介面:不繼承 parent 的 messages、不讀 localStorage 歷史、
+  // 不把訊息 persist 進 localStorage / backend。reload 後就消失,sidebar 模式
+  // 的歷史照常持久化(workflow-bound)。
   if (mode === 'hero') {
     return <HeroMode
-      input={input}
-      setInput={setInput}
-      loading={loading}
-      handleSend={handleSend}
       envPaths={envPaths}
-      messages={messages}
       onYamlApply={onYamlApply}
     />
   }
@@ -661,12 +660,7 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
 //   C 🐍 啟動既有 Python 專案 → 把自家專案接進來自動跑
 //   D 🧠 多代理探索分析     → 不確定怎麼做、讓 AI 邊想邊改
 interface HeroModeProps {
-  input: string
-  setInput: (s: string) => void
-  loading: boolean
-  handleSend: () => Promise<void>
   envPaths: EnvPaths | null
-  messages: ChatMsg[]
   onYamlApply: (yaml: string, mode: 'new' | 'overwrite') => void
 }
 
@@ -736,31 +730,40 @@ const HERO_EXAMPLES: ExampleCard[] = [
   },
 ]
 
-function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, onYamlApply }: HeroModeProps) {
+function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
   const setChatUIState = useWorkflowStore(s => s.setChatUIState)
   const setHasInteracted = useWorkflowStore(s => s.setHasInteracted)
+  const activeId = useWorkflowStore(s => s.activeId)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
   // 出場淡入(opacity 0 → 1,300ms)— 用 mounted flag + CSS transition
   const [mounted, setMounted] = useState(false)
   // 退場淡出(opacity → 0 + scale 0.98,200ms)— 觸發後等動畫結束才切 state
   const [closing, setClosing] = useState(false)
+
+  // ── Hero 專屬 ephemeral state ───────────────────────────────────────────
+  // Hero 是「全新對話」介面 — 不繼承 parent messages、不讀 localStorage 歷史、
+  // 不 persist 出去。reload 後就消失,讓進站體驗永遠像第一次見面。
+  // (sidebar 模式仍會走 parent AtlasChat 的 workflow-bound 歷史)
+  const [heroMessages, setHeroMessages] = useState<ChatMsg[]>([])
+  const [heroInput, setHeroInput] = useState('')
+  const [heroLoading, setHeroLoading] = useState(false)
+
   useEffect(() => {
     // 進場:下一個 frame 設 mounted = true、讓 opacity 0 → 1 過渡
     const t = requestAnimationFrame(() => setMounted(true))
     return () => cancelAnimationFrame(t)
   }, [])
 
-  // hasStarted:對話是否已展開(有任何 user 訊息或非單一 welcome 的 assistant 訊息)
-  // - 初始(只有 welcome)→ false:顯示歡迎大標 + 4 卡片 + CTA
+  // hasStarted:對話是否已展開(本次 session 有任何 user 訊息)
+  // - 初始(heroMessages 空)→ false:顯示歡迎大標 + 4 卡片 + CTA
   // - 送出第一則訊息後 → true:卡片 / CTA 收起、改顯示 chat history scroll area
-  // welcome 訊息是 messages[0] 且 role==='assistant' 且 !hasYaml,所以 length>1 表示有真實對話
-  const hasStarted = messages.some(m => m.role === 'user') || messages.length > 1
+  const hasStarted = heroMessages.some(m => m.role === 'user')
 
   // hasStarted 切換時、自動滾到最新訊息
   useEffect(() => {
     if (hasStarted) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, hasStarted])
+  }, [heroMessages, hasStarted])
 
   // 切到 sidebar mode 的統一 helper:含退場動畫
   const exitToSidebar = (markInteracted: boolean = false) => {
@@ -785,18 +788,134 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, on
 
   // 點範例卡片 → 把對應 prompt 塞進輸入框(不立即送出、focus 給使用者改)
   const onCardClick = (card: ExampleCard) => {
-    setInput(card.prompt(envPaths))
+    setHeroInput(card.prompt(envPaths))
     // 等下一個 tick 再 focus、textarea 才已經有值
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
-  // 送出 → 走既有 handleSend、訊息會 setMessages 到父狀態、hero 內 chat history 自動 re-render
-  // 不再呼 exitToSidebar — hero 是「主要對話介面」、使用者要主動關才關
+  // Hero-local handleSend:走 pipelineChatStream、但完全不 persist(不寫 localStorage、
+  // 不呼 appendWorkflowChat)。訊息只活在這個 HeroMode component 的 state 裡、
+  // reload 就消失。workflow_id 仍綁 activeId(讓 AI 看得到當前 yaml/canvas 上下文)。
+  const heroHandleSend = async () => {
+    const text = heroInput.trim()
+    if (!text || heroLoading) return
+    const userMsg: ChatMsg = { role: 'user', content: text }
+    const baseMsgs = heroMessages
+    const newMsgs = [...baseMsgs, userMsg]
+    const assistantBubble: ChatMsg = {
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      toolBlocks: [],
+    }
+    setHeroMessages([...newMsgs, assistantBubble])
+    setHeroInput('')
+    setHeroLoading(true)
+
+    let accumulated = ''
+    let finalHasYaml = false
+    let finalYaml: string | null = null
+    let finalYamlError: string | null = null
+    try {
+      await pipelineChatStream(
+        newMsgs.map(m => ({ role: m.role, content: m.content })),
+        activeId ?? null,
+        (ev) => {
+          if (ev.type === 'token') {
+            accumulated += ev.text
+            setHeroMessages(prev => {
+              const copy = [...prev]
+              const last = copy[copy.length - 1]
+              if (last && last.role === 'assistant' && last.streaming) {
+                copy[copy.length - 1] = { ...last, content: accumulated }
+              }
+              return copy
+            })
+          } else if (ev.type === 'tool_start') {
+            setHeroMessages(prev => {
+              const copy = [...prev]
+              const last = copy[copy.length - 1]
+              if (last && last.role === 'assistant' && last.streaming) {
+                const blocks = [...(last.toolBlocks || [])]
+                blocks.push({ name: ev.name, args: ev.args || {}, status: 'running' })
+                copy[copy.length - 1] = { ...last, toolBlocks: blocks }
+              }
+              return copy
+            })
+          } else if (ev.type === 'tool_end') {
+            setHeroMessages(prev => {
+              const copy = [...prev]
+              const last = copy[copy.length - 1]
+              if (last && last.role === 'assistant' && last.streaming && last.toolBlocks?.length) {
+                const blocks = [...last.toolBlocks]
+                for (let i = blocks.length - 1; i >= 0; i--) {
+                  if (blocks[i].name === ev.name && blocks[i].status === 'running') {
+                    blocks[i] = { ...blocks[i], status: 'done', preview: ev.result_preview }
+                    break
+                  }
+                }
+                copy[copy.length - 1] = { ...last, toolBlocks: blocks }
+              }
+              return copy
+            })
+          } else if (ev.type === 'done') {
+            finalHasYaml = ev.has_yaml
+            finalYaml = ev.yaml_content
+            finalYamlError = ev.yaml_error
+            accumulated = ev.reply || accumulated
+          } else if (ev.type === 'error') {
+            throw new Error(ev.detail || '串流錯誤')
+          }
+        },
+      )
+      setHeroMessages(prev => {
+        const copy = [...prev]
+        const last = copy[copy.length - 1]
+        if (last && last.role === 'assistant' && last.streaming) {
+          copy[copy.length - 1] = {
+            role: 'assistant',
+            content: accumulated,
+            hasYaml: finalHasYaml,
+            yaml: finalYaml,
+            yamlError: finalYamlError,
+            toolBlocks: last.toolBlocks,
+            streaming: false,
+          }
+        }
+        return copy
+      })
+      if (finalYamlError) {
+        const errStr: string = finalYamlError
+        toast.error(`產生的 YAML 有語法問題:${errStr.slice(0, 120)}`)
+      }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : '未知錯誤'
+      toast.error(`AI 回應失敗:${errMsg.slice(0, 220)}`)
+      setHeroMessages(prev => {
+        const copy = [...prev]
+        const last = copy[copy.length - 1]
+        if (last && last.role === 'assistant' && last.streaming) {
+          copy[copy.length - 1] = {
+            role: 'assistant',
+            content: `❌ ${errMsg}`,
+            streaming: false,
+          }
+        } else {
+          copy.push({ role: 'assistant', content: `❌ ${errMsg}` })
+        }
+        return copy
+      })
+    } finally {
+      setHeroLoading(false)
+    }
+  }
+
+  // 送出 → 走 hero-local handleSend、訊息只更新 heroMessages、不 persist
   // 標記 hasInteracted,讓下次進站直接走 sidebar mode(不要再彈 hero)
   const onSubmit = async () => {
-    if (!input.trim() || loading) return
+    if (!heroInput.trim() || heroLoading) return
     setHasInteracted(true)
-    await handleSend()
+    await heroHandleSend()
   }
 
   // Enter 送出 / Shift+Enter 換行
@@ -844,15 +963,17 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, on
   return (
     <div
       onClick={onOverlayClick}
-      // 透明度大幅降低(20-25%)+ 強 blur — 真正的毛玻璃,canvas 節點透出來
-      // 拿掉紫藍漸層、改近乎中性深色,讓底下 canvas 決定整體色調
-      className={`fixed inset-0 z-50 backdrop-blur-2xl bg-slate-950/25 transition-opacity duration-300 ${containerOpacity}`}
+      // Overlay 純做 click sink、不上色不模糊 — canvas 節點 100% 清楚可見、
+      // 毛玻璃感全部交給 glass card 自己的 backdrop-blur(只在卡片範圍內 blur 背景)。
+      // 過去用 bg-slate-950/25 + backdrop-blur-2xl 整片覆蓋,看起來像不透明擋板。
+      className={`fixed inset-0 z-50 bg-transparent transition-opacity duration-300 ${containerOpacity}`}
     >
       {/* 中央 glass card — hasStarted 後變寬變高、容納 chat history
-          透明化:bg-white/[0.06] + border-white/[0.08] + bg-clip-padding,
-          配 shadow-2xl shadow-black/40 給深度感(macOS Control Center 風)*/}
+          毛玻璃感:backdrop-blur-2xl(只 blur 卡片底下的區域)+ bg-white/[0.08]
+          淡白填色 + border-white/20(略強的描邊,做毛玻璃邊界,不靠加深填色)+
+          shadow-2xl shadow-black/40 給深度感(macOS Control Center 風)*/}
       <div
-        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-clip-padding backdrop-blur-2xl bg-white/[0.06] border border-white/[0.08] rounded-3xl shadow-2xl shadow-black/40 transition-all duration-300 ${cardScale} ${
+        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-clip-padding backdrop-blur-2xl bg-white/[0.08] border border-white/20 rounded-3xl shadow-2xl shadow-black/40 transition-all duration-300 ${cardScale} ${
           hasStarted
             ? 'w-[92vw] max-w-[820px] h-[82vh] max-h-[820px] flex flex-col px-5 py-4 sm:px-7 sm:py-5'
             : 'w-[90vw] max-w-[720px] px-6 py-8 sm:px-10 sm:py-12'
@@ -881,12 +1002,14 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, on
         {!hasStarted && (
           <>
             {/* Atlas logo / 標題 — 漸層 white → sky 而非紫色 */}
-            <div className="text-center mb-4">
+            {/* 從 38px 放大到 72px(text-7xl ≈ 72px),font-light 配大字級看起來
+                像 macOS Big Sur logo lockup。Sparkles 圖示同比例放大、與字 baseline 對齊。*/}
+            <div className="text-center mb-6">
               <h1
-                className="text-[38px] font-light tracking-wide bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent"
+                className="text-7xl sm:text-[80px] font-light tracking-wide bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent leading-none"
                 style={{ fontFamily: "'Inter', 'Noto Sans TC', sans-serif" }}
               >
-                <Sparkles className="inline w-7 h-7 mr-2 -mt-1 text-sky-200/80" />
+                <Sparkles className="inline w-14 h-14 sm:w-16 sm:h-16 mr-3 -mt-3 text-sky-200/80" />
                 Atlas
               </h1>
             </div>
@@ -930,18 +1053,21 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, on
 
             {/* Chat history scroll area — 佔卡片大部分高度 */}
             <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-thumb]:rounded-full">
-              {messages.map((msg, i) => (
+              {heroMessages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'assistant' && (
                     <div className="w-6 h-6 rounded-full bg-sky-400/15 border border-sky-300/20 flex items-center justify-center shrink-0 mt-1 mr-2">
                       <Bot className="w-3 h-3 text-sky-200" />
                     </div>
                   )}
+                  {/* AI bubble:從 bg-white/[0.07] 加深到 bg-slate-800/50,border 從
+                      white/[0.08] 強化到 white/20,文字 white/95 — 提高對比、可清楚閱讀。
+                      User bubble(sky-500/80)維持不動。*/}
                   <div
                     className={`max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-[13px] leading-relaxed break-words overflow-hidden ${
                       msg.role === 'user'
                         ? 'bg-sky-500/80 text-white rounded-br-sm shadow-md shadow-sky-900/30'
-                        : 'bg-white/[0.07] border border-white/[0.08] text-white/90 rounded-bl-sm'
+                        : 'bg-slate-800/50 border border-white/20 text-white/95 rounded-bl-sm'
                     }`}
                     style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
                   >
@@ -1026,7 +1152,7 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, on
                   </div>
                 </div>
               ))}
-              {loading && (
+              {heroLoading && (
                 <div className="flex items-center gap-2 text-xs text-white/40 pl-8">
                   <Loader2 className="w-3 h-3 animate-spin" /> 思考中…
                 </div>
@@ -1040,10 +1166,10 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, on
         <div className={`relative ${hasStarted ? 'mt-3' : 'mb-4'}`}>
           <textarea
             ref={inputRef}
-            value={input}
-            onChange={e => setInput(e.target.value)}
+            value={heroInput}
+            onChange={e => setHeroInput(e.target.value)}
             onKeyDown={onKeyDown}
-            disabled={loading}
+            disabled={heroLoading}
             rows={hasStarted ? 2 : 3}
             placeholder={hasStarted
               ? '繼續對話…(Enter 送出 / Shift+Enter 換行)'
@@ -1052,15 +1178,15 @@ function HeroMode({ input, setInput, loading, handleSend, envPaths, messages, on
           />
           <button
             onClick={onSubmit}
-            disabled={!input.trim() || loading}
+            disabled={!heroInput.trim() || heroLoading}
             className={`absolute right-3 bottom-3 w-10 h-10 flex items-center justify-center rounded-xl transition-all ${
-              input.trim() && !loading
+              heroInput.trim() && !heroLoading
                 ? 'bg-sky-400 hover:bg-sky-300 text-white shadow-lg shadow-sky-900/30 cursor-pointer'
                 : 'bg-white/[0.08] text-white/30 cursor-not-allowed'
             }`}
             title="送出(Enter)"
           >
-            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+            {heroLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           </button>
         </div>
 
