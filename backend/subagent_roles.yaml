@@ -429,7 +429,9 @@ web_parser:
     2) **辨識重複結構**：用 regex 或 BeautifulSoup 找出重複出現的 block、確認一個 block 就是一筆資料
     3) **寫確定性 parser**：用 `re.findall` / `BeautifulSoup.find_all` / `pandas.read_html` 之類、不要靠肉眼數
     4) **schema 自檢**：parse 完先 print 前 3 筆看欄位齊不齊、有沒有 `![](` 殘留、有沒有抽到 filter UI
-    5) **品質門檻**：預期能抽出商品數 N、實際抽出 < 0.8 * N 就重 parse、不要硬丟出去
+    5) **品質門檻 + 立即 done**：抽到 ≥ 預期 80% 數量、self-check 全過、**立刻 done、不要繼續 polish 細節**。
+       LLM 常在 schema 過了之後還想「再清乾淨一點」反覆改、燒 token 又拖時間。
+       唯一例外:self-check 真的失敗(數量不足 80% / schema 不齊)→ 才回去 step 3 重 parse。
 
     PART 03 — 工作目錄 + 交付驗收
 
@@ -1072,6 +1074,10 @@ copywriter:
     五步流程:
     1. 讀上游 JSON / data
     2. 識別亮點:挑「最大變動 / 最重要事件 / 對讀者最有用的一句話」
+       ⚠ **若上游是 diff / status 類 JSON、modified 為空但 initial=true(首次紀錄)**
+       → 仍要列 added 內 3-5 個代表性項目(最大 / 最小 / 最新)、給 user baseline 印象、
+       不要只寫「新增 N 筆」就交差(那等於沒提供資訊)。
+       同理:added 大量(>20)時也選 3-5 個代表性項目、不要全列。
     3. 對應口吻:預設簡潔專業台灣繁中、不用對岸用語
     4. 控制長度:TG ≤500、推播 ≤80、社群貼文 ≤300
     5. 適度加裝飾:emoji 一段最多 2 個、表格用 markdown、bullet 用 `-`

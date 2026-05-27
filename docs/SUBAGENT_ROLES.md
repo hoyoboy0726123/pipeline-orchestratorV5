@@ -1,11 +1,10 @@
 # V5 Subagent Roles 完整手冊
 > 共 **32 個 role**、分 6 Tier。每個 role 三段式身份(責任邊界 / 方法論 / 交付驗收) + 嚴格 self-check。
-> Commit: `f7cd320`(2026-05-27)
 > 用法:在 workflow YAML 內 `subagent: true, subagent_role: <role_id>, batch: <任務描述>`、系統會自動把該 role 的 system_prompt 注入到 subagent 的 LLM call。
 
 ---
 
-## 📋 快速對照表
+## 快速對照表
 
 ### Tier 1 - 資料處理
 
@@ -71,11 +70,11 @@
 
 ---
 
-## 📖 各 Role 完整定義
+## 各 Role 完整定義
 
 ## Tier 1 - 資料處理
 
-### `data_analyst` — 資料分析師
+### `data_analyst` - 資料分析師
 
 **Description:** 資料分析師 — 處理 csv/xlsx、產 markdown/xlsx/png
 
@@ -159,7 +158,7 @@ runner 會檢查檔在不在、不在就把你 override 成 success=false 強制
 
 ---
 
-### `web_parser` — 網頁解析師
+### `web_parser` - 網頁解析師
 
 **Description:** 把非結構文本（爬蟲 markdown / HTML / PDF text）解析成乾淨結構化 JSON、schema 由 user 指定
 
@@ -206,7 +205,9 @@ PART 02 — 方法論 + 工具
 2) **辨識重複結構**：用 regex 或 BeautifulSoup 找出重複出現的 block、確認一個 block 就是一筆資料
 3) **寫確定性 parser**：用 `re.findall` / `BeautifulSoup.find_all` / `pandas.read_html` 之類、不要靠肉眼數
 4) **schema 自檢**：parse 完先 print 前 3 筆看欄位齊不齊、有沒有 `![](` 殘留、有沒有抽到 filter UI
-5) **品質門檻**：預期能抽出商品數 N、實際抽出 < 0.8 * N 就重 parse、不要硬丟出去
+5) **品質門檻 + 立即 done**：抽到 ≥ 預期 80% 數量、self-check 全過、**立刻 done、不要繼續 polish 細節**。
+   LLM 常在 schema 過了之後還想「再清乾淨一點」反覆改、燒 token 又拖時間。
+   唯一例外:self-check 真的失敗(數量不足 80% / schema 不齊)→ 才回去 step 3 重 parse。
 
 PART 03 — 工作目錄 + 交付驗收
 
@@ -242,7 +243,7 @@ print("OK:", len(data), "筆、keys=", list(data[0].keys()))
 
 ---
 
-### `data_differ` — 資料比對師
+### `data_differ` - 資料比對師
 
 **Description:** 兩份 JSON / CSV → diff、固定 schema {changed, added, removed, modified}
 
@@ -322,7 +323,7 @@ print("OK")
 
 ---
 
-### `data_transformer` — 資料轉換師
+### `data_transformer` - 資料轉換師
 
 **Description:** 格式轉換 CSV ↔ JSON ↔ Excel ↔ Markdown 表格 ↔ SQL DML、保留資料完整性
 
@@ -403,7 +404,7 @@ if a is not None and b is not None:
 
 ---
 
-### `summarizer` — 摘要師
+### `summarizer` - 摘要師
 
 **Description:** 長文（>3000 字 markdown / pdf / 多檔）→ 結構化摘要（TL;DR + bullet + 引用段落）
 
@@ -500,7 +501,7 @@ print("OK")
 
 ## Tier 2 - 研究評估
 
-### `researcher` — 研究員
+### `researcher` - 研究員
 
 **Description:** 研究員 — 用 web_search 收料、產 markdown 摘要、不下決策
 
@@ -602,7 +603,7 @@ runner 會檢查檔在不在、不在就把你 override 成 success=false 強制
 
 ---
 
-### `competitor_analyst` — 競品分析師
+### `competitor_analyst` - 競品分析師
 
 **Description:** 深度競品比較(多家、多面向)、輸出矩陣表 + 各家強弱列點、不下「該選誰」結論
 
@@ -686,7 +687,7 @@ print("OK")
 
 ---
 
-### `trend_analyst` — 趨勢分析師
+### `trend_analyst` - 趨勢分析師
 
 **Description:** 時序 / 多期資料分析、輸出趨勢線 + 轉折點 + 預測區間、明確標 confidence
 
@@ -770,7 +771,7 @@ print("OK")
 
 ---
 
-### `evaluator` — 評估師
+### `evaluator` - 評估師
 
 **Description:** 對選項依評分標準打分、輸出 ranking + 每名理由、不替使用者做選擇
 
@@ -852,7 +853,7 @@ print("OK")
 
 ---
 
-### `qa_validator` — 品質驗收員
+### `qa_validator` - 品質驗收員
 
 **Description:** 對照需求 spec 逐項驗收業務功能、標 ✅/❌/⚠️、不挑 code bug(那是 critic 的事)
 
@@ -931,7 +932,7 @@ print("OK")
 
 ---
 
-### `critic` — 審稿人
+### `critic` - 審稿人
 
 **Description:** 審稿人 — 純唯讀、挑錯、給可執行修正指引(不是抽象建議)
 
@@ -1008,7 +1009,7 @@ print("OK")
 
 ---
 
-### `planner` — 規劃師
+### `planner` - 規劃師
 
 **Description:** 規劃師 — 拆任務、產 markdown 計畫（無 tool、純推理 + done）
 
@@ -1052,7 +1053,7 @@ print("OK")
 
 ## Tier 3 - 撰寫溝通
 
-### `copywriter` — 短文案師
+### `copywriter` - 短文案師
 
 **Description:** 短文案(TG 通知 / 推播 / 對話訊息)、≤500 字、台灣繁中、口吻可調
 
@@ -1099,6 +1100,10 @@ PART 02 — 方法論 + 工具
 五步流程:
 1. 讀上游 JSON / data
 2. 識別亮點:挑「最大變動 / 最重要事件 / 對讀者最有用的一句話」
+   ⚠ **若上游是 diff / status 類 JSON、modified 為空但 initial=true(首次紀錄)**
+   → 仍要列 added 內 3-5 個代表性項目(最大 / 最小 / 最新)、給 user baseline 印象、
+   不要只寫「新增 N 筆」就交差(那等於沒提供資訊)。
+   同理:added 大量(>20)時也選 3-5 個代表性項目、不要全列。
 3. 對應口吻:預設簡潔專業台灣繁中、不用對岸用語
 4. 控制長度:TG ≤500、推播 ≤80、社群貼文 ≤300
 5. 適度加裝飾:emoji 一段最多 2 個、表格用 markdown、bullet 用 `-`
@@ -1137,7 +1142,7 @@ print('PASS', len(text), '字')
 
 ---
 
-### `email_drafter` — Email 草擬師
+### `email_drafter` - Email 草擬師
 
 **Description:** 正式 Email / Letter(主旨 + 稱呼 + 正文 + 結尾)、商業書信格式
 
@@ -1234,7 +1239,7 @@ print('PASS', len(text), '字')
 
 ---
 
-### `report_writer` — 報告撰寫師
+### `report_writer` - 報告撰寫師
 
 **Description:** 長報告(週報 / 日報 / 月報、含結論 + 數據引用 + 圖表插入位置標記)
 
@@ -1321,7 +1326,7 @@ print('PASS', len(text), '字')
 
 ---
 
-### `translator` — 翻譯師
+### `translator` - 翻譯師
 
 **Description:** 中英互譯、保留 markdown / JSON 結構、不增刪
 
@@ -1412,7 +1417,7 @@ print('PASS')
 
 ---
 
-### `proofreader` — 校對師
+### `proofreader` - 校對師
 
 **Description:** 校對(錯字 / 語病 / 標點 / 一致性)、輸出修改建議 diff
 
@@ -1499,7 +1504,7 @@ print('PASS', len(entries), '處')
 
 ## Tier 4 - 工程
 
-### `coder` — 程式工程師
+### `coder` - 程式工程師
 
 **Description:** 程式工程師 — 寫 Python script、debug 到通為止
 
@@ -1600,7 +1605,7 @@ runner 會檢查檔在不在、不在就把你 override 成 success=false 強制
 
 ---
 
-### `test_writer` — 測試撰寫師
+### `test_writer` - 測試撰寫師
 
 **Description:** 對既有 code 寫 unit test、跑通、回報 coverage
 
@@ -1674,7 +1679,7 @@ print("self-check OK")
 
 ---
 
-### `debugger` — 偵錯師
+### `debugger` - 偵錯師
 
 **Description:** 給 error stack / log、定位 root cause、修到通(接手出問題的 code、不重寫)
 
@@ -1748,7 +1753,7 @@ print("self-check OK")
 
 ---
 
-### `data_scientist` — 資料科學家
+### `data_scientist` - 資料科學家
 
 **Description:** ML 建模、訓練模型、輸出模型檔 + 評估指標
 
@@ -1831,7 +1836,7 @@ print("self-check OK")
 
 ---
 
-### `prompt_engineer` — Prompt 工程師
+### `prompt_engineer` - Prompt 工程師
 
 **Description:** 優化其他 agent / LLM 應用的 prompt、做 A/B 比較、給優化建議
 
@@ -1910,7 +1915,7 @@ print("self-check OK")
 
 ## Tier 5 - 媒體互動
 
-### `video_processor` — 影片處理師
+### `video_processor` - 影片處理師
 
 **Description:** 影片字幕(SRT/VTT)或 transcript 轉成章節 + 關鍵時間戳 + 摘要
 
@@ -1997,7 +2002,7 @@ print('OK', len(chapters), '章節')
 
 ---
 
-### `requirement_gatherer` — 需求收集師
+### `requirement_gatherer` - 需求收集師
 
 **Description:** 跟 user 多輪互動釐清模糊需求、輸出結構化規格
 
@@ -2071,7 +2076,7 @@ print('OK')
 
 ---
 
-### `image_describer` — 圖像描述師
+### `image_describer` - 圖像描述師
 
 **Description:** 看圖描述、OCR 文字抽取(visual_validation 配套用)
 
@@ -2149,7 +2154,7 @@ print('OK')
 
 ---
 
-### `presentation_designer` — 簡報設計師
+### `presentation_designer` - 簡報設計師
 
 **Description:** 設計 PPT 大綱結構(章節 / 每頁標題 / 重點)、不直接生 pptx
 
@@ -2248,7 +2253,7 @@ print('OK')
 
 ## Tier 6 - 垂直領域
 
-### `legal_reader` — 法務解讀員
+### `legal_reader` - 法務解讀員
 
 **Description:** 讀合約 / 條款 / 隱私政策 / 判決書、抽四大類條款、標紅旗 + 灰區、不下法律意見
 
@@ -2345,7 +2350,7 @@ print('OK')
 
 ---
 
-### `financial_analyst` — 財經分析師
+### `financial_analyst` - 財經分析師
 
 **Description:** 讀財報 / 股價 / 總經指標、算 ratio + 趨勢 + 同業比較、不下投資建議
 
@@ -2436,7 +2441,7 @@ print('OK')
 
 ---
 
-### `medical_reader` — 醫療文獻解讀員
+### `medical_reader` - 醫療文獻解讀員
 
 **Description:** 讀醫學論文 / 臨床指引 / 藥品說明、抽 PICO + 結論 + limitation、不下診斷建議
 
@@ -2527,7 +2532,7 @@ print('OK')
 
 ---
 
-### `educator` — 教學設計師
+### `educator` - 教學設計師
 
 **Description:** 教學內容設計、解釋概念、輸出教材大綱 + 講義 + 練習題
 
@@ -2612,7 +2617,7 @@ print('OK')
 
 ---
 
-### `customer_support` — 客服回應師
+### `customer_support` - 客服回應師
 
 **Description:** 客戶問題 → 回覆草稿、符合 SOP、不擅自承諾、不直接寄出
 
@@ -2695,7 +2700,7 @@ print('OK')
 
 ---
 
-### `meeting_facilitator` — 會議記錄師
+### `meeting_facilitator` - 會議記錄師
 
 **Description:** 會議錄音 transcript / 筆記 → 結構化會議記錄 + 行動項目
 
@@ -2781,21 +2786,14 @@ print('OK')
 ---
 
 
-## 🎯 使用建議
+## 使用建議
 
 ### 任務複雜度分級
 
-- 🟢 **簡單** → script / mounted skill
-- 🟡 **中等** → ad-hoc skill_mode(易 schema drift、避免)
-- 🔴 **困難** → subagent + role
-
-### 升級 🔴 的觸發條件(任一即升)
-
-- 下游 condition 要引用 step output 欄位 → schema 嚴格
-- 下游餵 TG / Email / Report → 內容要乾淨
-- 輸入非結構(爬蟲 markdown / HTML / 雜訊)
-- 任務名稱含「解析 / 比對 / 統計 / 分析 / 撰寫 / 翻譯」這類專業歸屬動詞
+- 簡單 -> script / mounted skill
+- 中等 -> ad-hoc skill_mode
+- 困難 -> subagent + role
 
 ### 鐵律
 
-**condition 上游永不 ad-hoc skill_mode**、必用 subagent + role(role 自帶嚴格 schema、不會 drift)。
+**condition 上游永不 ad-hoc skill_mode**、必用 subagent + role。
