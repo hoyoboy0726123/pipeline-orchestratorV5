@@ -1,6 +1,6 @@
 'use client'
 import { useState, useRef, useEffect } from 'react'
-import { Bot, ChevronUp, ChevronDown, Send, Loader2, Sparkles, FolderOpen, Plus as PlusIcon, X, Minus } from 'lucide-react'
+import { Bot, ChevronUp, ChevronDown, Send, Loader2, X, Minus } from 'lucide-react'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
@@ -658,92 +658,219 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   )
 }
 
-// ── HeroMode 子元件(Phase 3)─────────────────────────────────────────────
+// ── HeroMode 子元件(Phase 3 — Soft Architectural Grid 風格重做)─────────
 // Atlas 首頁中央大畫面。獨立子元件、由父 AtlasChat 在 mode==='hero' 時 render。
-// 為什麼拆出來:Hero 用獨立 input state(進 sidebar mode 不繼承)、避免 sidebar
-// instance 的訊息流被 hero 干擾。共享 envPaths / handleSend 由 props 傳入。
+// 視覺定位:Soft Architectural Grid — 米色 + 32px 規則網格 + 純白卡片 + 4px hard
+// shadow + brutalist 邊框、字型混 Bricolage Grotesque / JetBrains Mono / Plus
+// Jakarta Sans。無圓角、無漸層、無 emoji(取代舊 dark glass overlay + sky 配色)。
 //
-// 4 個範例卡片(對應 buildWelcomeMessage 內的 ex1/ex4/ex6/ex7):
-//   A 📋 Python 腳本串接   → 把幾個 .py 串成一條工作流
-//   B 🌐 爬蟲 + AI + Outlook → 抓 → 摘要 → 確認 → 寄信完整鏈
-//   C 🐍 啟動既有 Python 專案 → 把自家專案接進來自動跑
-//   D 🧠 多代理探索分析     → 不確定怎麼做、讓 AI 邊想邊改
+// 8 個 ACTIONS 卡片對齊 V5 真實功能(對應 buildWelcomeMessage 內的 ex1-ex8):
+//   chain        Python 腳本串接
+//   scrape-ai    爬蟲 + AI + Outlook
+//   existing     啟動既有 Python 專案
+//   multiagent   多代理探索分析
+//   schedule     排程定時任務
+//   notify       人工確認與通知串
+//   db-report    資料分析 → AI 報表
+//   monitor      網頁變化偵測
 interface HeroModeProps {
   envPaths: EnvPaths | null
   onYamlApply: (yaml: string, mode: 'new' | 'overwrite') => void
 }
 
-// 4 個範例卡片的 metadata(短描述 = 卡片顯示;long = hover tooltip + 點擊塞進輸入框)
-interface ExampleCard {
-  key: 'A' | 'B' | 'C' | 'D'
-  emoji: string
-  title: string
-  subtitle: string
-  // 點擊後塞進輸入框的詳細範例描述(讓使用者直接送或微調)
-  prompt: (env: EnvPaths | null) => string
+// ── Atlas Soft Architectural Grid — design tokens ───────────────────────
+// 直接使用 design handoff README 的色票 / 字級 / 間距、不抽 CSS variable
+// (避免污染 globals.css、HeroMode 是相對隔離的 overlay,單檔內聚就好)
+const ATLAS_PAL = {
+  bg:       '#F6F4EE',                    // 主背景(米色)
+  bgCard:   '#FFFFFF',                    // 卡片底色
+  ink:      '#16170F',                    // 主文字(近黑)
+  inkSoft:  '#67685E',                    // 次要文字(60% 暖灰)
+  rule:     'rgba(22,23,15,0.10)',        // 邊框與網格線
+  forest:   '#3E5C4B',                    // 主色 — 強調連結、hover 邊框、accent
+  brick:    '#B85A2E',
+  sand:     '#D6B16D',
+  dusk:     '#5470A1',
+} as const
+
+const FONT_DISPLAY = "'Bricolage Grotesque', sans-serif"
+const FONT_BODY    = "'Plus Jakarta Sans', system-ui, sans-serif"
+const FONT_MONO    = "'JetBrains Mono', monospace"
+
+// ── ActionGlyph — 8 個幾何 SVG icon(逐字抄 reference HTML) ─────────────
+type GlyphPalette = { fg: string; a1: string; a2: string; a3: string; a4: string }
+
+function ActionGlyph({ id, size = 28, palette: c }: { id: ActionId; size?: number; palette: GlyphPalette }) {
+  const props = { width: size, height: size, viewBox: '0 0 32 32', fill: 'none' as const, 'aria-hidden': true }
+  switch (id) {
+    case 'chain':
+      return (
+        <svg {...props}>
+          <rect x="3" y="13" width="9" height="6" rx="2" fill={c.a1} />
+          <rect x="11.5" y="13" width="9" height="6" rx="2" fill={c.a2} />
+          <rect x="20" y="13" width="9" height="6" rx="2" fill={c.a3} />
+        </svg>
+      )
+    case 'scrape-ai':
+      return (
+        <svg {...props}>
+          <circle cx="10" cy="10" r="6" fill={c.a2} />
+          <circle cx="22" cy="16" r="6" fill={c.a1} />
+          <circle cx="14" cy="22" r="6" fill={c.a3} />
+        </svg>
+      )
+    case 'existing':
+      return (
+        <svg {...props}>
+          <rect x="5" y="5" width="22" height="22" rx="3" fill="none" stroke={c.fg} strokeWidth="1.5" />
+          <rect x="9" y="9" width="14" height="3" rx="1" fill={c.a2} />
+          <rect x="9" y="14" width="9" height="3" rx="1" fill={c.a3} />
+          <rect x="9" y="19" width="11" height="3" rx="1" fill={c.a1} />
+        </svg>
+      )
+    case 'multiagent':
+      return (
+        <svg {...props}>
+          <circle cx="9" cy="9" r="4.5" fill={c.a1} />
+          <circle cx="23" cy="9" r="4.5" fill={c.a3} />
+          <circle cx="16" cy="22" r="4.5" fill={c.a2} />
+          <path d="M9 9 L23 9 M9 9 L16 22 M23 9 L16 22" stroke={c.fg} strokeWidth="1" opacity="0.4" />
+        </svg>
+      )
+    case 'schedule':
+      return (
+        <svg {...props}>
+          <circle cx="16" cy="16" r="11" fill="none" stroke={c.fg} strokeWidth="1.5" />
+          <path d="M16 8 L16 16 L22 19" stroke={c.a1} strokeWidth="2.4" strokeLinecap="round" fill="none" />
+          <circle cx="16" cy="16" r="1.8" fill={c.a1} />
+        </svg>
+      )
+    case 'notify':
+      return (
+        <svg {...props}>
+          <path d="M16 4 C11 4 8 7 8 12 V18 L5 22 H27 L24 18 V12 C24 7 21 4 16 4 Z" fill={c.a3} />
+          <circle cx="16" cy="26" r="2.2" fill={c.a1} />
+        </svg>
+      )
+    case 'db-report':
+      return (
+        <svg {...props}>
+          <ellipse cx="16" cy="8" rx="9" ry="3" fill={c.a2} />
+          <path d="M7 8 V15 C7 17 11 18 16 18 C21 18 25 17 25 15 V8" fill={c.a3} />
+          <path d="M7 15 V22 C7 24 11 25 16 25 C21 25 25 24 25 22 V15" fill={c.a1} />
+        </svg>
+      )
+    case 'monitor':
+      return (
+        <svg {...props}>
+          <circle cx="14" cy="14" r="8" fill="none" stroke={c.fg} strokeWidth="1.5" />
+          <circle cx="14" cy="14" r="3" fill={c.a1} />
+          <path d="M20 20 L26 26" stroke={c.fg} strokeWidth="2.4" strokeLinecap="round" />
+        </svg>
+      )
+  }
 }
 
-const HERO_EXAMPLES: ExampleCard[] = [
-  {
-    key: 'A',
-    emoji: '📋',
-    title: 'Python 腳本串接',
-    subtitle: '把幾個 .py 串成一條工作流',
-    prompt: (env) => {
-      const dir = env?.finance_example_dir
-      if (env?.has_finance_example && dir) {
-        return `把以下 Python 腳本串成一條工作流:
-第一步:執行 \`python ${dir}\\stage1_generate_transactions.py\`,輸出到 \`ai_output/q1_finance/raw_transactions.xlsx\`
-第二步:執行 \`python ${dir}\\stage2_clean_data.py\`,讀取上一步的 Excel,輸出到 \`ai_output/q1_finance/cleaned_transactions.xlsx\`
-第三步:執行 \`python ${dir}\\stage3_analyze_finance.py\`,做財務彙總,輸出到 \`ai_output/q1_finance/financial_summary.xlsx\`
-第四步:執行 \`python ${dir}\\stage4_generate_report.py\`,產出 \`ai_output/q1_finance/Q1_financial_report.xlsx\``
-      }
-      return `把以下 Python 腳本串成一條工作流:
-第一步:執行 \`python 你的腳本.py\`,輸出到 \`ai_output/daily_report/raw.csv\`
-第二步:執行 \`python 分析腳本.py\`,讀取上一步的 csv,輸出到 \`ai_output/daily_report/result.xlsx\``
-    },
-  },
-  {
-    key: 'B',
-    emoji: '🌐',
-    title: '爬蟲 + AI + Outlook',
-    subtitle: '抓 → 摘要 → 確認 → 寄信完整鏈',
-    prompt: () =>
-      `我想做一條每天跑的工作流:
-第一步(網頁爬蟲):抓 \`https://www.reddit.com/r/ASUS/\` 列表頁
-第二步(AI 技能):抽前 10 篇連結各自展開抓內文,每篇 80 字內摘要,輸出 \`ai_output/reddit_asus/daily.md\`
-第三步(人工確認):把摘要傳到 Telegram,我看過 OK 才繼續
-第四步(Outlook):把 daily.md 當附件用 send_with_attachment 模板寄給 boss@x.com`,
-  },
-  {
-    key: 'C',
-    emoji: '🐍',
-    title: '啟動既有 Python 專案',
-    subtitle: '把自家專案接進來自動跑',
-    prompt: () =>
-      `我有一個 Python 專案,想接到工作流自動化跑:
-1. 跑專案的 main.py、產出檔案到工作流目錄
-2. AI 驗證一下產出檔內容對不對
-3. 確認沒問題後 Telegram 通知我做最終放行
+// ── AtlasMark — 26x26 logo SVG(逐字抄 reference HTML) ─────────────────
+function AtlasMark({ size = 26 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <path d="M5 26 L16 6 L27 26 Z" fill={ATLAS_PAL.ink} />
+      <path d="M16 6 L27 26 L20 26 L16 14 Z" fill={ATLAS_PAL.forest} />
+      <circle cx="16" cy="10" r="3" fill={ATLAS_PAL.sand} />
+      <rect x="5" y="24.5" width="22" height="1.6" rx="0.8" fill={ATLAS_PAL.brick} />
+    </svg>
+  )
+}
 
-(專案放在 external_projects/<名稱>/ 底下,請問我要哪個專案)`,
+// ── 8 個 ACTIONS(對齊 V5 真實功能)─────────────────────────────────────
+type ActionId =
+  | 'chain' | 'scrape-ai' | 'existing' | 'multiagent'
+  | 'schedule' | 'notify' | 'db-report' | 'monitor'
+
+interface AtlasAction {
+  id: ActionId
+  title: string
+  desc: string
+  tag: string
+  examples: [string, string, string]
+}
+
+// 卡片內容對齊 V5 真實節點集合(網頁爬蟲 / AI 技能 / 多代理 / 人工確認 / Outlook
+// / 視覺驗證 / 啟動既有 Python 專案 等)、與 buildWelcomeMessage 的範例呼應。
+const ATLAS_ACTIONS: AtlasAction[] = [
+  {
+    id: 'chain', title: 'Python 腳本串接', desc: '把幾個 .py 串成一條工作流', tag: 'Workflow',
+    examples: [
+      '把 stage1.py / stage2.py / stage3.py 串成財務報表',
+      '加錯誤重試與失敗 Telegram 通知',
+      '搭配排程、每天早上 9 點自動跑',
+    ],
   },
   {
-    key: 'D',
-    emoji: '🧠',
-    title: '多代理探索分析',
-    subtitle: '不確定怎麼做、讓 AI 邊想邊改',
-    prompt: () =>
-      `任務:「我有 \`sales.xlsx\`,想看看 Q1 哪幾個品類賣最差、找出共通原因」這種「不確定要看什麼指標、邊看邊找」的場景。
-單一步驟:用多代理節點、角色挑「資料分析師(data_analyst)」、最多輪數設 6-8、任務描述寫清楚目標即可(不用拆步驟)。多代理會自己 read → run_python → 看結果 → 再 read… 直到產出 \`analysis.md\`。`,
+    id: 'scrape-ai', title: '爬蟲 + AI + Outlook', desc: '抓 → 摘要 → 確認 → 寄信', tag: 'Pipeline',
+    examples: [
+      '每天抓 Reddit r/ASUS 熱門 → AI 摘要 → Telegram 確認 → Outlook 寄信',
+      '監控 5 個競品官網 → 變化偵測 → Telegram 通知',
+      '讀 PDF 報告 → AI 重點 → Outlook 草稿',
+    ],
+  },
+  {
+    id: 'existing', title: '啟動既有 Python 專案', desc: '把自家專案接進來自動跑', tag: 'Import',
+    examples: [
+      '把 external_projects/ 內的專案接進來、跑 main.py 排程',
+      '跑既有 Jupyter Notebook 當定時任務',
+      '已有 CLI 工具透過 Atlas 觸發、自動寫入 ai_output',
+    ],
+  },
+  {
+    id: 'multiagent', title: '多代理探索分析', desc: '不確定怎麼做、讓 AI 邊想邊改', tag: 'Agent',
+    examples: [
+      '丟一份 sales.xlsx、AI 自己決定分析方向',
+      '客服回饋自動分類、產 5 大主題摘要',
+      '研究員 + 評論員雙角色、產出深度報告',
+    ],
+  },
+  {
+    id: 'schedule', title: '排程定時任務', desc: '每天 / 每週自動執行', tag: 'Cron',
+    examples: [
+      '週一早上彙整上週銷售數字',
+      '每小時檢查股價、超過閾值 Telegram 通知',
+      '月底自動寄出客戶月報',
+    ],
+  },
+  {
+    id: 'notify', title: '人工確認與通知串', desc: '重要步驟暫停、TG 推按鈕等真人核可', tag: 'Trigger',
+    examples: [
+      '寄信前先 TG 推草稿、按鈕確認才送出',
+      '錯誤發生 → 自動 TG 推訊息給我',
+      '長 workflow 跑完自動推完成通知',
+    ],
+  },
+  {
+    id: 'db-report', title: '資料分析 → AI 報表', desc: 'pandas + AI 寫洞察', tag: 'Insight',
+    examples: [
+      '讀 Excel/CSV、AI 寫一頁中文分析',
+      '透視表 + 長條圖、產出 dashboard.xlsx',
+      '多檔合併、AI 找趨勢、輸出 docx 報告',
+    ],
+  },
+  {
+    id: 'monitor', title: '網頁變化偵測', desc: '定時抓網頁、變動就通知', tag: 'Watch',
+    examples: [
+      '競品定價頁面變動就 Telegram 通知',
+      '官方公告頁有新文章自動寄信',
+      '指定關鍵字出現在頁面就推播',
+    ],
   },
 ]
 
-function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
+function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
   const setChatUIState = useWorkflowStore(s => s.setChatUIState)
   const setHasInteracted = useWorkflowStore(s => s.setHasInteracted)
   const activeId = useWorkflowStore(s => s.activeId)
-  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
   // 出場淡入(opacity 0 → 1,300ms)— 用 mounted flag + CSS transition
   const [mounted, setMounted] = useState(false)
@@ -757,6 +884,8 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
   const [heroMessages, setHeroMessages] = useState<ChatMsg[]>([])
   const [heroInput, setHeroInput] = useState('')
   const [heroLoading, setHeroLoading] = useState(false)
+  // Soft Architectural Grid 卡片 hover 狀態 — 單一 hoveredId、同時只能有一張卡 active
+  const [hoveredCard, setHoveredCard] = useState<ActionId | null>(null)
 
   useEffect(() => {
     // 進場:下一個 frame 設 mounted = true、讓 opacity 0 → 1 過渡
@@ -795,10 +924,10 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
     return () => window.removeEventListener('keydown', onKey)
   }, [closing]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 點範例卡片 → 把對應 prompt 塞進輸入框(不立即送出、focus 給使用者改)
-  const onCardClick = (card: ExampleCard) => {
-    setHeroInput(card.prompt(envPaths))
-    // 等下一個 tick 再 focus、textarea 才已經有值
+  // 點範例卡片 → 把該卡的第一個 example 塞進輸入框(不立即送出、focus 給使用者改)
+  // 對齊現有 HeroMode 行為:卡片點擊 = 提供起點、使用者可微調再送
+  const onCardClick = (action: AtlasAction) => {
+    setHeroInput(action.examples[0])
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
@@ -942,14 +1071,29 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
   }
 
   // 點「跑現有工作流」CTA — Phase 5 才接 modal、現在先 toast + 切 sidebar
-  const onRunExisting = () => {
+  // (Soft Architectural Grid 設計不顯示此 CTA、保留 handler 給未來用)
+  const _onRunExisting = () => {
     toast.info('Phase 5 將開啟「選擇現有工作流」對話框')
     exitToSidebar(true)
   }
 
-  // 點「開啟空白畫布」CTA — 純切 sidebar、不發訊息
-  const onBlankCanvas = () => {
+  // Footer:[+] new canvas — 純切 sidebar、不發訊息(切到空白畫布)
+  const onNewCanvas = () => {
     exitToSidebar(true)
+  }
+
+  // Footer:[⌥] import .py — Phase 5 才接、現在 placeholder
+  const onImportPy = () => {
+    // eslint-disable-next-line no-console
+    console.log('[Hero] import .py — TODO: open file picker (Phase 5)')
+    toast.info('import .py 功能即將上線(Phase 5)')
+  }
+
+  // Footer:[⌘K] command — Phase 5 才接 command palette
+  const onCmdK = () => {
+    // eslint-disable-next-line no-console
+    console.log('[Hero] command palette — TODO (Phase 5)')
+    toast.info('Command palette 即將上線(Phase 5)')
   }
 
   // 右上「最小化」按鈕:把 hero 收到 sidebar、保留對話內容
@@ -969,136 +1113,354 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
   const containerOpacity = (!mounted || closing) ? 'opacity-0' : 'opacity-100'
   const cardScale = closing ? 'scale-[0.98]' : 'scale-100'
 
+  // ── Soft Architectural Grid 配色 / 字型 ────────────────────────────────
+  // 這些 inline style 直接打在 element 上、不走 Tailwind。原因:
+  // 1. brutalist 設計用很多自訂顏色與精確字級、用 Tailwind 反而要寫一堆 arbitrary value
+  // 2. inline style 與 reference HTML 一比就能對齊、改 design tokens 直觀
+  // 3. HeroMode 是相對隔離的 overlay、不影響 globals.css
+  const glyphPal: GlyphPalette = {
+    fg: ATLAS_PAL.ink, a1: ATLAS_PAL.forest, a2: ATLAS_PAL.brick, a3: ATLAS_PAL.sand, a4: ATLAS_PAL.dusk,
+  }
+
   return (
     <div
       onClick={onOverlayClick}
-      // Overlay 用「柔和 focal blur」:backdrop-blur-md 讓 canvas 節點輪廓清楚、
-      // 細節略糊、視線自動聚焦到前景 hero card。bg-slate-950/10 一層極淡黑紗、
-      // 微微壓暗背景但不擋住 canvas。過去 25% + blur-2xl 太重像不透明擋板、
-      // 改為 transparent 又完全沒模糊讓 canvas razor sharp 搶眼 — 這次取中間值。
-      className={`fixed inset-0 z-50 bg-slate-950/10 backdrop-blur-md transition-opacity duration-300 ${containerOpacity}`}
+      // 覆蓋全螢幕米色 + 32px 規則網格背景(取代舊 dark glass overlay)
+      // backgroundImage 用雙線性漸層畫格線、Soft Architectural Grid 核心視覺
+      style={{
+        backgroundColor: ATLAS_PAL.bg,
+        backgroundImage:
+          `linear-gradient(${ATLAS_PAL.rule} 1px, transparent 1px),` +
+          `linear-gradient(90deg, ${ATLAS_PAL.rule} 1px, transparent 1px)`,
+        backgroundSize: '32px 32px',
+        backgroundPosition: '-1px -1px',
+        color: ATLAS_PAL.ink,
+        fontFamily: FONT_BODY,
+      }}
+      className={`fixed inset-0 z-50 transition-opacity duration-300 ${containerOpacity}`}
     >
-      {/* 中央 glass card — hasStarted 後變寬變高、容納 chat history
-          毛玻璃兩層 blur:overlay 的 backdrop-blur-md(背景柔焦)+ card 自己的
-          backdrop-blur-2xl(卡片底下再加強毛玻璃感)。卡片基底用 bg-slate-900/60
-          (深底色 60% 不透明)讓內部文字、cards、輸入框內容對比足夠、清楚可讀;
-          border-white/25 略強描邊做毛玻璃邊界;shadow-2xl shadow-black/50 給深度感。*/}
+      {/* 全螢幕 artboard:1280×880 ref,左右 56px、上 44px、下 36px。
+          hasStarted 後不切寬度、只把 hero / cards 區塊收起讓 chat history 接管。
+          這裡用 absolute inset-0、把整片 overlay 當畫布、不再有 glass card 概念。*/}
       <div
-        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-clip-padding backdrop-blur-2xl bg-slate-900/60 border border-white/25 rounded-3xl shadow-2xl shadow-black/50 transition-all duration-300 ${cardScale} ${
-          hasStarted
-            ? 'w-[92vw] max-w-[820px] h-[82vh] max-h-[820px] flex flex-col px-5 py-4 sm:px-7 sm:py-5'
-            : 'w-[90vw] max-w-[720px] px-6 py-8 sm:px-10 sm:py-12'
-        }`}
+        className={`absolute inset-0 flex flex-col transition-all duration-300 ${cardScale}`}
+        style={{ padding: '44px 56px 36px' }}
         onClick={e => e.stopPropagation()}
       >
-        {/* 右上控制列(始終存在):最小化 + 關閉 */}
-        <div className={`absolute right-3 top-3 flex items-center gap-1 ${hasStarted ? 'z-10' : ''}`}>
-          <button
-            onClick={onMinimize}
-            title="最小化到 sidebar(對話保留)"
-            className="w-8 h-8 flex items-center justify-center rounded-full text-white/40 hover:text-white/90 hover:bg-white/10 transition-colors"
-          >
-            <Minus className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => exitToSidebar(false)}
-            title="關閉(ESC)"
-            className="w-8 h-8 flex items-center justify-center rounded-full text-white/40 hover:text-white/90 hover:bg-white/10 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+        {/* ================= Top bar ================= */}
+        {/* 左:Atlas mark + wordmark;右:三個 stage chip (1·觸發 / 2·處理 / 3·輸出)
+            外加最小化 / 關閉(取代舊 absolute 右上 icon)*/}
+        <div className="flex items-center justify-between" style={{ marginBottom: 36, position: 'relative', zIndex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <AtlasMark size={26} />
+            <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, letterSpacing: '-0.01em', color: ATLAS_PAL.ink }}>Atlas</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {['1·觸發', '2·處理', '3·輸出'].map((s, i) => (
+              <div
+                key={i}
+                style={{
+                  fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em',
+                  padding: '5px 10px', border: `1px solid ${ATLAS_PAL.rule}`,
+                  background: ATLAS_PAL.bgCard, color: ATLAS_PAL.inkSoft,
+                }}
+              >{s}</div>
+            ))}
+            {/* 最小化 + 關閉:用 mono 文字而非 lucide icon、貼合 brutalist 風格 */}
+            <button
+              onClick={onMinimize}
+              title="最小化到 sidebar(對話保留)"
+              style={{
+                fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em',
+                padding: '5px 10px', border: `1px solid ${ATLAS_PAL.rule}`,
+                background: ATLAS_PAL.bgCard, color: ATLAS_PAL.inkSoft, cursor: 'pointer',
+                marginLeft: 4,
+              }}
+            >
+              <Minus className="w-3.5 h-3.5 inline-block" style={{ verticalAlign: 'middle' }} />
+            </button>
+            <button
+              onClick={() => exitToSidebar(false)}
+              title="關閉(ESC)"
+              style={{
+                fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em',
+                padding: '5px 10px', border: `1px solid ${ATLAS_PAL.rule}`,
+                background: ATLAS_PAL.bgCard, color: ATLAS_PAL.inkSoft, cursor: 'pointer',
+              }}
+            >
+              <X className="w-3.5 h-3.5 inline-block" style={{ verticalAlign: 'middle' }} />
+            </button>
+          </div>
         </div>
 
-        {/* === 初始畫面(hasStarted=false):大歡迎 + 4 卡片 + CTA ============= */}
+        {/* ================= Initial state(!hasStarted):Hero + Cards grid + Input + Footer ================= */}
         {!hasStarted && (
           <>
-            {/* Atlas logo / 標題 — 漸層 white → sky 而非紫色 */}
-            {/* 從 38px 放大到 72px(text-7xl ≈ 72px),font-light 配大字級看起來
-                像 macOS Big Sur logo lockup。Sparkles 圖示同比例放大、與字 baseline 對齊。*/}
-            <div className="text-center mb-6">
-              <h1
-                className="text-7xl sm:text-[80px] font-light tracking-wide bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent leading-none"
-                style={{ fontFamily: "'Inter', 'Noto Sans TC', sans-serif" }}
-              >
-                <Sparkles className="inline w-14 h-14 sm:w-16 sm:h-16 mr-3 -mt-3 text-sky-200/80" />
-                Atlas
+            {/* Hero header:breadcrumb + h1 */}
+            <div style={{ marginBottom: 28, position: 'relative', zIndex: 1, maxWidth: 760 }}>
+              <div style={{
+                display: 'flex', gap: 10, alignItems: 'center', marginBottom: 14,
+                fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em', color: ATLAS_PAL.inkSoft,
+              }}>
+                <span style={{ display: 'inline-block', width: 8, height: 8, background: ATLAS_PAL.forest }} />
+                home / start a workflow
+              </div>
+              <h1 style={{
+                fontFamily: FONT_DISPLAY, fontWeight: 500, fontSize: 56,
+                lineHeight: 1.0, letterSpacing: '-0.03em', margin: 0, color: ATLAS_PAL.ink,
+              }}>
+                選一個方向開始,<br />
+                或<span style={{
+                  color: ATLAS_PAL.forest,
+                  textDecoration: 'underline',
+                  textUnderlineOffset: 8,
+                  textDecorationThickness: 2,
+                }}>用一句話</span>描述你要的工作流。
               </h1>
             </div>
 
-            {/* 歡迎大字 */}
-            <div className="text-center mb-7">
-              <h2 className="text-[22px] sm:text-[24px] font-medium text-white leading-snug">
-                歡迎回來、想要我替您執行什麼任務?
-              </h2>
+            {/* 4×2 cards grid */}
+            <div
+              role="list"
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                gap: 10,
+                position: 'relative',
+                zIndex: 1,
+                marginBottom: 18,
+              }}
+            >
+              {ATLAS_ACTIONS.map(a => {
+                const isHover = hoveredCard === a.id
+                return (
+                  <button
+                    key={a.id}
+                    role="listitem"
+                    aria-expanded={isHover}
+                    onMouseEnter={() => setHoveredCard(a.id)}
+                    onMouseLeave={() => setHoveredCard(null)}
+                    onFocus={() => setHoveredCard(a.id)}
+                    onBlur={() => setHoveredCard(null)}
+                    onClick={() => onCardClick(a)}
+                    style={{
+                      background: ATLAS_PAL.bgCard,
+                      border: `1px solid ${isHover ? ATLAS_PAL.ink : ATLAS_PAL.rule}`,
+                      padding: 16, cursor: 'pointer',
+                      transition: 'border-color 180ms, box-shadow 200ms, transform 200ms',
+                      position: 'relative', minHeight: 170,
+                      display: 'flex', flexDirection: 'column', gap: 12,
+                      boxShadow: isHover ? `4px 4px 0 0 ${ATLAS_PAL.ink}` : 'none',
+                      transform: isHover ? 'translate(-3px,-3px)' : 'translate(0,0)',
+                      textAlign: 'left',
+                      borderRadius: 0,
+                      color: ATLAS_PAL.ink,
+                      fontFamily: FONT_BODY,
+                    }}
+                  >
+                    {/* Top row:glyph 左、tag 右 */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <ActionGlyph id={a.id} size={28} palette={glyphPal} />
+                      <div style={{
+                        fontFamily: FONT_MONO, fontSize: 9.5, letterSpacing: '0.06em',
+                        color: ATLAS_PAL.inkSoft, padding: '2px 6px',
+                        border: `1px solid ${ATLAS_PAL.rule}`,
+                      }}>{a.tag}</div>
+                    </div>
+
+                    {/* Body — 兩層 absolute,cross-fade 切換 */}
+                    <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+                      {/* Default layer:title + desc */}
+                      <div style={{
+                        opacity: isHover ? 0 : 1,
+                        transition: 'opacity 180ms',
+                        position: 'absolute', inset: 0,
+                      }}>
+                        <div style={{
+                          fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17,
+                          lineHeight: 1.2, letterSpacing: '-0.01em', marginBottom: 6,
+                        }}>{a.title}</div>
+                        <div style={{
+                          fontSize: 12.5, color: ATLAS_PAL.inkSoft, lineHeight: 1.45,
+                        }}>{a.desc}</div>
+                      </div>
+                      {/* Hover layer:title↗ + 3 examples */}
+                      <div style={{
+                        opacity: isHover ? 1 : 0,
+                        transition: 'opacity 220ms 60ms',
+                        position: 'absolute', inset: 0,
+                        display: 'flex', flexDirection: 'column', gap: 6,
+                      }}>
+                        <div style={{
+                          fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 13.5,
+                          lineHeight: 1.1, marginBottom: 4,
+                        }}>{a.title} ↗</div>
+                        {a.examples.map((ex, k) => (
+                          <div key={k} style={{
+                            fontSize: 11.5, lineHeight: 1.35, color: ATLAS_PAL.ink,
+                            display: 'flex', gap: 6,
+                            paddingBottom: 5,
+                            borderBottom: k === a.examples.length - 1 ? 'none' : `1px solid ${ATLAS_PAL.rule}`,
+                          }}>
+                            <span style={{
+                              color: ATLAS_PAL.forest, fontFamily: FONT_MONO,
+                              fontSize: 10, flexShrink: 0,
+                            }}>+</span>
+                            <span>{ex}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
 
-            {/* 4 個範例卡片 — grid 2×2,hover 用 sky 而非紫 */}
-            <div className="grid grid-cols-2 gap-3 mb-6">
-              {HERO_EXAMPLES.map(card => (
+            {/* OR / 描述一句 divider */}
+            <div style={{ position: 'relative', zIndex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
+                <div style={{ height: 1, background: ATLAS_PAL.ink, flex: 1 }} />
+                <div style={{
+                  fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.14em',
+                  color: ATLAS_PAL.inkSoft, padding: '0 12px', textTransform: 'uppercase',
+                }}>OR / 描述一句</div>
+                <div style={{ height: 1, background: ATLAS_PAL.ink, flex: 1 }} />
+              </div>
+
+              {/* Input row(brutalist:純黑邊框、無圓角)*/}
+              <div style={{
+                background: ATLAS_PAL.bgCard, border: `1px solid ${ATLAS_PAL.ink}`,
+                display: 'flex', alignItems: 'center', padding: '14px 16px', gap: 14,
+              }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: ATLAS_PAL.forest }}>{'>'}</span>
+                <input
+                  ref={inputRef}
+                  value={heroInput}
+                  onChange={e => setHeroInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      onSubmit()
+                    }
+                  }}
+                  disabled={heroLoading}
+                  placeholder="每天早上 9 點抓 Reddit 熱門 → AI 摘要 → Telegram 通知"
+                  style={{
+                    flex: 1, border: 'none', outline: 'none', background: 'transparent',
+                    fontFamily: FONT_MONO, fontSize: 13.5, color: ATLAS_PAL.ink,
+                  }}
+                />
                 <button
-                  key={card.key}
-                  onClick={() => onCardClick(card)}
-                  title={card.prompt(envPaths)}
-                  className="text-left bg-slate-800/40 hover:bg-slate-700/60 border border-white/15 hover:border-sky-300/40 rounded-2xl p-4 cursor-pointer transition-all hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                  onClick={onSubmit}
+                  disabled={!heroInput.trim() || heroLoading}
+                  style={{
+                    background: heroInput.trim() && !heroLoading ? ATLAS_PAL.ink : ATLAS_PAL.inkSoft,
+                    color: ATLAS_PAL.bg, padding: '8px 16px',
+                    fontFamily: FONT_MONO, fontSize: 11.5, letterSpacing: '0.04em',
+                    cursor: heroInput.trim() && !heroLoading ? 'pointer' : 'not-allowed',
+                    border: 'none', borderRadius: 0,
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                  }}
                 >
-                  <div className="text-[28px] mb-1.5 leading-none">{card.emoji}</div>
-                  <div className="text-[14px] font-semibold text-white mb-0.5">{card.title}</div>
-                  <div className="text-[12px] text-white/70 leading-snug">{card.subtitle}</div>
+                  {heroLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  run ↵
                 </button>
-              ))}
+              </div>
+            </div>
+
+            {/* Footer hints */}
+            <div style={{
+              marginTop: 'auto', paddingTop: 24,
+              display: 'flex', justifyContent: 'space-between',
+              fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em',
+              color: ATLAS_PAL.inkSoft, position: 'relative', zIndex: 1,
+            }}>
+              <div style={{ display: 'flex', gap: 20 }}>
+                <button
+                  onClick={onNewCanvas}
+                  style={{ fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em', color: ATLAS_PAL.inkSoft, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                >[+] new canvas</button>
+                <button
+                  onClick={onImportPy}
+                  style={{ fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em', color: ATLAS_PAL.inkSoft, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                >[⌥] import .py</button>
+                <button
+                  onClick={onCmdK}
+                  style={{ fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em', color: ATLAS_PAL.inkSoft, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                >[⌘K] command</button>
+              </div>
+              <span>esc · skip</span>
             </div>
           </>
         )}
 
-        {/* === 對話模式(hasStarted=true):縮小 logo + chat history ========== */}
+        {/* ================= Chat mode(hasStarted=true):chat history + input + footer ================= */}
+        {/* 進入對話後、卡片區收起、改顯示 chat scroll;視覺保持 brutalist 風格(白卡 + 黑邊)*/}
         {hasStarted && (
           <>
-            {/* 縮小的 logo 列(取代大歡迎標題)*/}
-            <div className="flex items-center gap-2 mb-3 pl-1 pr-20">
-              <Sparkles className="w-4 h-4 text-sky-200/80 shrink-0" />
-              <span className="text-[15px] font-medium bg-gradient-to-r from-white to-sky-200 bg-clip-text text-transparent">
-                Atlas
-              </span>
-              <span className="text-[11px] text-white/40 ml-1">主要對話介面</span>
+            {/* Breadcrumb-style header(對話模式縮小)*/}
+            <div style={{
+              display: 'flex', gap: 10, alignItems: 'center', marginBottom: 14,
+              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em', color: ATLAS_PAL.inkSoft,
+              position: 'relative', zIndex: 1,
+            }}>
+              <span style={{ display: 'inline-block', width: 8, height: 8, background: ATLAS_PAL.forest }} />
+              home / talking to atlas
             </div>
 
-            {/* Chat history scroll area — 佔卡片大部分高度 */}
-            <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-thumb]:rounded-full">
+            {/* Chat history scroll area */}
+            <div
+              className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-black/10 [&::-webkit-scrollbar-thumb]:rounded-full"
+              style={{ position: 'relative', zIndex: 1 }}
+            >
               {heroMessages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'assistant' && (
-                    <div className="w-6 h-6 rounded-full bg-sky-400/15 border border-sky-300/20 flex items-center justify-center shrink-0 mt-1 mr-2">
-                      <Bot className="w-3 h-3 text-sky-200" />
+                    <div
+                      className="shrink-0 mt-1 mr-2 flex items-center justify-center"
+                      style={{
+                        width: 22, height: 22,
+                        background: ATLAS_PAL.bgCard,
+                        border: `1px solid ${ATLAS_PAL.rule}`,
+                      }}
+                    >
+                      <span style={{
+                        display: 'inline-block', width: 8, height: 8, background: ATLAS_PAL.forest,
+                      }} />
                     </div>
                   )}
-                  {/* AI bubble:從 bg-white/[0.07] 加深到 bg-slate-800/50,border 從
-                      white/[0.08] 強化到 white/20,文字 white/95 — 提高對比、可清楚閱讀。
-                      User bubble(sky-500/80)維持不動。*/}
                   <div
-                    className={`max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-[13px] leading-relaxed break-words overflow-hidden ${
-                      msg.role === 'user'
-                        ? 'bg-sky-500/80 text-white rounded-br-sm shadow-md shadow-sky-900/30'
-                        : 'bg-slate-800/50 border border-white/20 text-white/95 rounded-bl-sm'
-                    }`}
-                    style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                    className="max-w-[85%] min-w-0 break-words overflow-hidden"
+                    style={{
+                      background: msg.role === 'user' ? ATLAS_PAL.ink : ATLAS_PAL.bgCard,
+                      color: msg.role === 'user' ? ATLAS_PAL.bg : ATLAS_PAL.ink,
+                      border: msg.role === 'user' ? 'none' : `1px solid ${ATLAS_PAL.rule}`,
+                      padding: '10px 14px',
+                      fontFamily: FONT_BODY,
+                      fontSize: 13,
+                      lineHeight: 1.5,
+                      borderRadius: 0,
+                      overflowWrap: 'anywhere', wordBreak: 'break-word',
+                    }}
                   >
-                    {/* Tool blocks(串流時顯示工具呼叫進度)*/}
                     {msg.role === 'assistant' && msg.toolBlocks && msg.toolBlocks.length > 0 && (
-                      <div className="mb-1.5 space-y-1">
+                      <div className="mb-2 space-y-1">
                         {msg.toolBlocks.map((tb, ti) => (
                           <div
                             key={ti}
-                            className={`text-[11px] px-2 py-1 rounded border ${
-                              tb.status === 'running'
-                                ? 'bg-sky-400/10 border-sky-300/20 text-sky-100'
-                                : 'bg-white/[0.04] border-white/[0.06] text-white/60'
-                            }`}
+                            style={{
+                              fontFamily: FONT_MONO, fontSize: 11,
+                              padding: '4px 8px',
+                              border: `1px solid ${tb.status === 'running' ? ATLAS_PAL.forest : ATLAS_PAL.rule}`,
+                              background: tb.status === 'running' ? '#EEF2EC' : '#F7F6F2',
+                              color: ATLAS_PAL.ink,
+                            }}
                           >
                             {tb.status === 'running' ? (
                               <span className="flex items-center gap-1.5">
                                 <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                                <span className="font-mono">{tb.name}</span>
-                                <span className="text-[10px] text-sky-200/70 truncate">
+                                <span>{tb.name}</span>
+                                <span style={{ fontSize: 10, color: ATLAS_PAL.inkSoft }} className="truncate">
                                   {Object.entries(tb.args).slice(0, 2).map(([k, v]) =>
                                     `${k}=${typeof v === 'string' ? `"${v.slice(0, 30)}"` : JSON.stringify(v).slice(0, 30)}`
                                   ).join(', ')}
@@ -1106,10 +1468,10 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
                               </span>
                             ) : (
                               <span className="flex items-center gap-1.5">
-                                <span className="text-emerald-300 shrink-0">✓</span>
-                                <span className="font-mono">{tb.name}</span>
+                                <span style={{ color: ATLAS_PAL.forest, flexShrink: 0 }}>+</span>
+                                <span>{tb.name}</span>
                                 {tb.preview && (
-                                  <span className="text-[10px] text-white/40 truncate" title={tb.preview}>
+                                  <span style={{ fontSize: 10, color: ATLAS_PAL.inkSoft }} className="truncate" title={tb.preview}>
                                     {tb.preview.slice(0, 60)}
                                   </span>
                                 )}
@@ -1120,18 +1482,31 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
                       </div>
                     )}
                     {msg.role === 'assistant' ? (
-                      <div className="prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-pre:bg-black/30 prose-code:break-all prose-code:bg-white/10 prose-code:px-1 prose-code:rounded prose-headings:text-white prose-strong:text-white prose-a:text-sky-300">
+                      <div className="prose prose-sm max-w-none prose-p:my-1 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-code:break-all">
                         <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n```yaml[\s\S]*?```/g, '(已偵測到 YAML ↓)'))}</ReactMarkdown>
                         {msg.streaming && (
-                          <span className="inline-block w-1.5 h-3 ml-0.5 bg-sky-300 animate-pulse align-middle" />
+                          <span
+                            className="inline-block align-middle ml-0.5 animate-pulse"
+                            style={{ width: 6, height: 12, background: ATLAS_PAL.forest }}
+                          />
                         )}
                       </div>
                     ) : (
                       <span className="whitespace-pre-wrap">{msg.content}</span>
                     )}
                     {msg.hasYaml && msg.yamlError && (
-                      <div className="mt-1.5 p-2 rounded-lg bg-red-500/15 border border-red-300/30 text-[11px] text-red-100 leading-relaxed">
-                        ⚠️ YAML 有問題,建議請 AI 修正後再套用:<br/>
+                      <div
+                        className="mt-2"
+                        style={{
+                          padding: 8,
+                          border: `1px solid ${ATLAS_PAL.brick}`,
+                          background: '#FBEFE7',
+                          color: ATLAS_PAL.brick,
+                          fontSize: 11,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        YAML 有問題,建議請 AI 修正後再套用:<br />
                         <code className="break-all">{msg.yamlError}</code>
                       </div>
                     )}
@@ -1140,90 +1515,79 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
                         <button
                           onClick={() => handleYamlApplyInHero(msg.yaml!, 'new')}
                           title="建立一個新的工作流來放這份 YAML"
-                          className={`flex items-center justify-center gap-1 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                            msg.yamlError
-                              ? 'bg-amber-500/80 hover:bg-amber-400 text-white'
-                              : 'bg-emerald-500/80 hover:bg-emerald-400 text-white'
-                          }`}
-                        >
-                          ＋ 建立新工作流
-                        </button>
+                          style={{
+                            background: msg.yamlError ? ATLAS_PAL.brick : ATLAS_PAL.forest,
+                            color: ATLAS_PAL.bg,
+                            fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+                            padding: '8px 10px', cursor: 'pointer', borderRadius: 0, border: 'none',
+                          }}
+                        >+ new workflow</button>
                         <button
                           onClick={() => {
                             if (!confirm('這會覆蓋目前工作流的內容(無法還原)。確定要繼續嗎?')) return
                             handleYamlApplyInHero(msg.yaml!, 'overwrite')
                           }}
                           title="用這份 YAML 覆蓋目前工作流"
-                          className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-xs font-medium border border-white/20 bg-white/[0.04] hover:bg-white/[0.08] text-white/80 transition-colors"
-                        >
-                          ⚠ 覆蓋目前
-                        </button>
+                          style={{
+                            background: ATLAS_PAL.bgCard,
+                            color: ATLAS_PAL.ink,
+                            border: `1px solid ${ATLAS_PAL.ink}`,
+                            fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+                            padding: '8px 10px', cursor: 'pointer', borderRadius: 0,
+                          }}
+                        >! overwrite</button>
                       </div>
                     )}
                   </div>
                 </div>
               ))}
               {heroLoading && (
-                <div className="flex items-center gap-2 text-xs text-white/40 pl-8">
-                  <Loader2 className="w-3 h-3 animate-spin" /> 思考中…
+                <div
+                  className="flex items-center gap-2 pl-8"
+                  style={{ fontFamily: FONT_MONO, fontSize: 11, color: ATLAS_PAL.inkSoft }}
+                >
+                  <Loader2 className="w-3 h-3 animate-spin" /> thinking…
                 </div>
               )}
               <div ref={chatEndRef} />
             </div>
-          </>
-        )}
 
-        {/* 輸入框 + 送出(兩種狀態都有,但 hasStarted 後緊貼底部)*/}
-        <div className={`relative ${hasStarted ? 'mt-3' : 'mb-4'}`}>
-          <textarea
-            ref={inputRef}
-            value={heroInput}
-            onChange={e => setHeroInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            disabled={heroLoading}
-            rows={hasStarted ? 2 : 3}
-            placeholder={hasStarted
-              ? '繼續對話…(Enter 送出 / Shift+Enter 換行)'
-              : '想做什麼?跟我說...(例:每天早上 9 點抓 Reddit r/ASUS 的熱門貼文、AI 摘要、Telegram 通知我)'}
-            className="w-full bg-slate-800/40 border border-white/20 rounded-2xl px-5 py-3.5 pr-14 text-white placeholder-white/55 focus:bg-slate-800/60 focus:border-sky-300/50 outline-none transition resize-none text-[14px] leading-relaxed disabled:opacity-50"
-          />
-          <button
-            onClick={onSubmit}
-            disabled={!heroInput.trim() || heroLoading}
-            className={`absolute right-3 bottom-3 w-10 h-10 flex items-center justify-center rounded-xl transition-all ${
-              heroInput.trim() && !heroLoading
-                ? 'bg-sky-400 hover:bg-sky-300 text-white shadow-lg shadow-sky-900/30 cursor-pointer'
-                : 'bg-white/[0.08] text-white/30 cursor-not-allowed'
-            }`}
-            title="送出(Enter)"
-          >
-            {heroLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          </button>
-        </div>
-
-        {/* 底部次要 CTA(僅初始畫面顯示)*/}
-        {!hasStarted && (
-          <>
-            <div className="flex gap-3 justify-center">
+            {/* Chat-mode input(同 brutalist 樣式)*/}
+            <div style={{
+              background: ATLAS_PAL.bgCard, border: `1px solid ${ATLAS_PAL.ink}`,
+              display: 'flex', alignItems: 'flex-start', padding: '12px 14px', gap: 12,
+              marginTop: 12, position: 'relative', zIndex: 1,
+            }}>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: ATLAS_PAL.forest, paddingTop: 2 }}>{'>'}</span>
+              <textarea
+                ref={textareaRef}
+                value={heroInput}
+                onChange={e => setHeroInput(e.target.value)}
+                onKeyDown={onKeyDown}
+                disabled={heroLoading}
+                rows={2}
+                placeholder="繼續對話…(Enter 送出 / Shift+Enter 換行)"
+                style={{
+                  flex: 1, border: 'none', outline: 'none', background: 'transparent',
+                  fontFamily: FONT_MONO, fontSize: 13, color: ATLAS_PAL.ink, resize: 'none',
+                  lineHeight: 1.45,
+                }}
+              />
               <button
-                onClick={onRunExisting}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/75 hover:text-white hover:bg-white/[0.12] transition-colors"
+                onClick={onSubmit}
+                disabled={!heroInput.trim() || heroLoading}
+                style={{
+                  background: heroInput.trim() && !heroLoading ? ATLAS_PAL.ink : ATLAS_PAL.inkSoft,
+                  color: ATLAS_PAL.bg, padding: '8px 16px',
+                  fontFamily: FONT_MONO, fontSize: 11.5, letterSpacing: '0.04em',
+                  cursor: heroInput.trim() && !heroLoading ? 'pointer' : 'not-allowed',
+                  border: 'none', borderRadius: 0,
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
               >
-                <FolderOpen className="w-3.5 h-3.5" />
-                跑現有工作流
+                {heroLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                run ↵
               </button>
-              <button
-                onClick={onBlankCanvas}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-[13px] text-white/75 hover:text-white hover:bg-white/[0.12] transition-colors"
-              >
-                <PlusIcon className="w-3.5 h-3.5" />
-                開啟空白畫布
-              </button>
-            </div>
-
-            {/* 底部小提示 — ESC 逃生 */}
-            <div className="mt-4 text-center text-[11px] text-white/50">
-              按 ESC 跳過、或選擇上方任一選項繼續
             </div>
           </>
         )}
