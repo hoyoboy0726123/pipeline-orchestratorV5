@@ -4230,9 +4230,11 @@ async def _chat_agent_loop(
                 )
 
     if has_yaml:
-        match = re.search(r"```yaml\n([\s\S]+?)```", content)
-        if match:
-            yaml_content = match.group(1).strip()
+        # LLM 可能 emit 多份 yaml block(diff snippet 在前、完整版在後)。
+        # 之前 re.search 只抓第一個、撞到 snippet 會 validation fail。改 findall 取最後一個。
+        _yaml_blocks = re.findall(r"```yaml\n([\s\S]+?)```", content)
+        if _yaml_blocks:
+            yaml_content = _yaml_blocks[-1].strip()
             # ── 語法驗證：試跑 PipelineConfig.from_dict 檢查 schema ──
             try:
                 import yaml as _yaml
@@ -4446,9 +4448,10 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 )
 
     if has_yaml:
-        match = re.search(r"```yaml\n([\s\S]+?)```", content)
-        if match:
-            yaml_content = match.group(1).strip()
+        # 同 pipeline_chat:LLM 可能 emit 多份 yaml block、取最後一個
+        _yaml_blocks = re.findall(r"```yaml\n([\s\S]+?)```", content)
+        if _yaml_blocks:
+            yaml_content = _yaml_blocks[-1].strip()
             try:
                 import yaml as _yaml
                 from pipeline.models import PipelineConfig

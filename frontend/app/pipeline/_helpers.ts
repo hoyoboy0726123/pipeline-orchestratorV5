@@ -1869,6 +1869,9 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     default: partial.default ?? '',
     next: partial.next ?? '',
     llmRole: partial.llmRole ?? 'primary',
+    // 同類漏寫補齊:human_confirm 超時行為(wait/pass/reject/abort)、skill 主動問用戶模式
+    hcOnTimeout: partial.hcOnTimeout ?? 'wait',
+    askMode: partial.askMode ?? false,
     timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : (partial.subagent ? 600 : 300))))),
     // YAML 沒寫 retry 時的 fallback — 跟 newSkillData / newStepData 跟 backend
     // PipelineStep.retry default 一致（都是 1）。讓「貼 YAML 進來」跟「拉新節點」
