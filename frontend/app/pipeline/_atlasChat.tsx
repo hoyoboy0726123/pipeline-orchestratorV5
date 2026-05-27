@@ -948,10 +948,11 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
     return () => window.removeEventListener('keydown', onKey)
   }, [closing]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 點範例卡片 → 把該卡的第一個 example 塞進輸入框(不立即送出、focus 給使用者改)
-  // 對齊現有 HeroMode 行為:卡片點擊 = 提供起點、使用者可微調再送
-  const onCardClick = (action: AtlasAction) => {
-    setHeroInput(action.examples[0])
+  // 點範例卡片 → 把指定 example 塞進輸入框(不立即送出、focus 給使用者改)
+  // exampleIdx 可指定要用哪個 example(預設 0、給「點 card 整體」用)
+  // 點「具體某行 example」時、handler 會傳對應 idx、不再永遠用第一個
+  const onCardClick = (action: AtlasAction, exampleIdx: number = 0) => {
+    setHeroInput(action.examples[exampleIdx] ?? action.examples[0])
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
@@ -1346,12 +1347,25 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                           lineHeight: 1.1, marginBottom: 4,
                         }}>{a.title} ↗</div>
                         {a.examples.map((ex, k) => (
-                          <div key={k} style={{
-                            fontSize: 11.5, lineHeight: 1.35, color: ATLAS_PAL.ink,
-                            display: 'flex', gap: 6,
-                            paddingBottom: 5,
-                            borderBottom: k === a.examples.length - 1 ? 'none' : `1px solid ${ATLAS_PAL.rule}`,
-                          }}>
+                          <div
+                            key={k}
+                            onClick={(e) => {
+                              // 阻止 bubble 到外層卡片 button、不會永遠抓 examples[0]
+                              e.stopPropagation()
+                              onCardClick(a, k)
+                            }}
+                            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = ATLAS_PAL.bg }}
+                            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+                            style={{
+                              fontSize: 11.5, lineHeight: 1.35, color: ATLAS_PAL.ink,
+                              display: 'flex', gap: 6,
+                              padding: '4px 6px',
+                              marginLeft: -6, marginRight: -6,
+                              borderBottom: k === a.examples.length - 1 ? 'none' : `1px solid ${ATLAS_PAL.rule}`,
+                              cursor: 'pointer',
+                              transition: 'background 120ms',
+                            }}
+                          >
                             <span style={{
                               color: ATLAS_PAL.forest, fontFamily: FONT_MONO,
                               fontSize: 10, flexShrink: 0,

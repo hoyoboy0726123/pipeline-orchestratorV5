@@ -3097,6 +3097,38 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 - ❌ 「寫 TG 通知文」→ 第一直覺用 batch 寫死 message
   ✅ 正確:**copywriter**(動態根據資料寫、台灣繁中)
 
+### 🚨 多筆 vs 單篇辨識(超重要、最常選錯 role)
+
+看到任務含這些訊號 → **多筆同構結構**、**default 拆兩步**:
+- 「爬列表頁 / 熱門 / 排行 / 多篇 / N 篇 / 清單」
+- 「Reddit / 論壇 / 社群 / 商品 / 新聞 / RSS」
+- 「列出 X 個 / 整理 N 筆 / 抓最新 K 篇」
+
+**拆兩步公式**(看到上述訊號就反射用):
+```
+step 1: web_crawler         抓回原始 markdown / HTML
+step 2: subagent web_parser 每筆抽結構化欄位 → JSON list
+                              (例:[{title, url, score, top_comment, sentiment}])
+step 3: subagent report_writer / summarizer
+                              讀 JSON list → 寫成對外格式
+                              (日報 markdown / 推播 / 摘要報告)
+```
+
+**為什麼不能直接用 summarizer 一步走?**
+- `summarizer` 的設計是「**單一**長文 → TL;DR + bullet + 引用」(像讀一篇研究報告抓 abstract)
+- Reddit / 論壇 / 商品列表是「**多筆**同構結構」、每筆要逐項抽欄位
+- 兩者格式 / 任務性質完全不同。塞 summarizer 會吐成 TL;DR 格式、不會是「逐篇條列」
+
+**判斷小竅門**:
+- 上游是「**一篇** 長文 / 一份 PDF / 一份 report」→ summarizer 對(壓縮)
+- 上游是「**多筆** 貼文 / 商品 / 列表 row」→ web_parser + report_writer 對(抽 + 寫)
+
+❌ 錯誤(實測案例):
+- 「每天抓 Reddit r/ASUS 熱門 → AI 摘要 → 寄信」用 summarizer 一步
+✅ 正確:
+- web_crawler(抓列表+子頁)→ web_parser(每篇抽 title/score/url/top_comment)
+  → report_writer(寫逐篇條列日報)→ outlook_automation(寄信)
+
 ### 反射式對照(看到關鍵字直接選 role、不要再想)
 
 ```
