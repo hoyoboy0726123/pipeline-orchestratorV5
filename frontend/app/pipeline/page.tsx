@@ -515,13 +515,20 @@ export default function PipelinePage() {
       setTimeout(() => {
         savingRef.current = false
         rfInstanceRef.current?.fitView({ padding: 0.3, duration: 300 })
-        // 一次性 yaml backfill — 對舊工作流（DB yaml 欄位空）很關鍵，
-        // 因為單純點開不修改不會觸發 auto-save。idempotent，重複載入也只會覆寫成相同值。
+        // 一次性 yaml backfill — 對舊工作流(DB yaml 欄位空)很關鍵、
+        // 因為單純點開不修改不會觸發 auto-save。idempotent、重複載入也只會覆寫成相同值。
         // 這也是 TG 遠端遙控能讀到 yaml 的最後一道保險。
+        //
+        // ⚠ 跳過 nodes 為空的 workflow:capture 的 `wf` 是 1 秒前的 snapshot。
+        // 若這 1 秒內有 importYaml('new') 寫入 reddit canvas、backfill 用舊 capture
+        // 會用「空 nodes」蓋掉 backend 已存的好資料。導致 user 從 hero 套用 YAML 後、
+        // 切回工作流發現 canvas 變空。empty workflow 也沒 yaml 可 backfill、skip 安全。
         try {
-          const yaml = stepsToYaml(wf.name, flowToSteps(wf.nodes as AppNode[], wf.edges))
-          saveCanvas(activeId, wf.nodes as AppNode[], wf.edges, yaml)
-        } catch { /* 解析失敗就放過，下次編輯時 auto-save 會補 */ }
+          if (wf.nodes && wf.nodes.length > 0) {
+            const yaml = stepsToYaml(wf.name, flowToSteps(wf.nodes as AppNode[], wf.edges))
+            saveCanvas(activeId, wf.nodes as AppNode[], wf.edges, yaml)
+          }
+        } catch { /* 解析失敗就放過、下次編輯時 auto-save 會補 */ }
       }, 1000)
     }, 30)
     return () => clearTimeout(timer)
