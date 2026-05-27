@@ -1,6 +1,6 @@
 'use client'
 import { useState, useRef, useEffect } from 'react'
-import { Bot, ChevronUp, ChevronDown, Send, Loader2, X, Minus } from 'lucide-react'
+import { Bot, ChevronUp, ChevronDown, Send, Loader2, X, Minus, RotateCcw } from 'lucide-react'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
@@ -781,15 +781,29 @@ function ActionGlyph({ id, size = 28, palette: c }: { id: ActionId; size?: numbe
   }
 }
 
-// ── AtlasMark — 26x26 logo SVG(逐字抄 reference HTML) ─────────────────
-function AtlasMark({ size = 26 }: { size?: number }) {
+// ── AtlasMark — 跟 sidebar 一致的 indigo gradient + 山峰 SVG ──────────
+// (之前用 brutalist 幾何版本、跟畫布 sidebar 樣式不一致、改成跟 sidebar 同款)
+function AtlasMark({ size = 32 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
-      <path d="M5 26 L16 6 L27 26 Z" fill={ATLAS_PAL.ink} />
-      <path d="M16 6 L27 26 L20 26 L16 14 Z" fill={ATLAS_PAL.forest} />
-      <circle cx="16" cy="10" r="3" fill={ATLAS_PAL.sand} />
-      <rect x="5" y="24.5" width="22" height="1.6" rx="0.8" fill={ATLAS_PAL.brick} />
-    </svg>
+    <div
+      className="rounded-lg bg-gradient-to-br from-indigo-500 via-indigo-600 to-purple-600 flex items-center justify-center shrink-0 shadow-md"
+      style={{ width: size, height: size }}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        width={size * 0.75}
+        height={size * 0.75}
+        fill="none"
+        stroke="white"
+        strokeWidth="2.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-label="Atlas"
+      >
+        <path d="M4 21 L12 3 L20 21" />
+        <path d="M7.8 14 L16.2 14" />
+      </svg>
+    </div>
   )
 }
 
@@ -1166,8 +1180,8 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
             marginBottom 從 36 縮到 20、塞進 panel 上方 */}
         <div className="flex items-center justify-between shrink-0" style={{ marginBottom: 20, position: 'relative', zIndex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <AtlasMark size={26} />
-            <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, letterSpacing: '-0.01em', color: ATLAS_PAL.ink }}>Atlas</span>
+            <AtlasMark size={32} />
+            <span className="font-bold text-gray-900 text-base tracking-tight">Atlas</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {['1·觸發', '2·處理', '3·輸出'].map((s, i) => (
@@ -1180,6 +1194,26 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                 }}
               >{s}</div>
             ))}
+            {/* 重新開始(清空對話):user 想開新對話時用、不關閉視窗 */}
+            <button
+              onClick={() => {
+                if (heroMessages.length === 0) return
+                if (!confirm('清空目前對話、重新開始?')) return
+                setHeroMessages([])
+              }}
+              title="清空對話、重新開始"
+              disabled={heroMessages.length === 0}
+              style={{
+                fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em',
+                padding: '5px 10px', border: `1px solid ${ATLAS_PAL.rule}`,
+                background: ATLAS_PAL.bgCard, color: ATLAS_PAL.inkSoft,
+                cursor: heroMessages.length === 0 ? 'not-allowed' : 'pointer',
+                opacity: heroMessages.length === 0 ? 0.5 : 1,
+                marginLeft: 4,
+              }}
+            >
+              <RotateCcw className="w-3.5 h-3.5 inline-block" style={{ verticalAlign: 'middle' }} />
+            </button>
             {/* 最小化 + 關閉:用 mono 文字而非 lucide icon、貼合 brutalist 風格 */}
             <button
               onClick={onMinimize}
@@ -1188,7 +1222,6 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                 fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em',
                 padding: '5px 10px', border: `1px solid ${ATLAS_PAL.rule}`,
                 background: ATLAS_PAL.bgCard, color: ATLAS_PAL.inkSoft, cursor: 'pointer',
-                marginLeft: 4,
               }}
             >
               <Minus className="w-3.5 h-3.5 inline-block" style={{ verticalAlign: 'middle' }} />
@@ -1529,41 +1562,25 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                       </div>
                     )}
                     {msg.hasYaml && msg.yaml && (
-                      <div className="mt-2 grid grid-cols-2 gap-1.5">
+                      // Hero 是新對話入口、永遠建新工作流、不該有「覆蓋」(沒目前 workflow 可覆蓋)
+                      // overwrite 按鈕只放 sidebar mode 內、Hero 移除
+                      <div className="mt-2">
                         <button
                           onClick={() => handleYamlApplyInHero(msg.yaml!, 'new')}
                           disabled={!!msg.yamlError}
                           title={msg.yamlError
                             ? 'YAML 有解析錯誤、無法套用、請請 AI 重新產出完整 YAML'
                             : '建立一個新的工作流來放這份 YAML'}
+                          className="w-full"
                           style={{
                             background: msg.yamlError ? '#D5D2CC' : ATLAS_PAL.forest,
                             color: msg.yamlError ? '#8B8680' : ATLAS_PAL.bg,
                             fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
-                            padding: '8px 10px',
+                            padding: '10px 12px',
                             cursor: msg.yamlError ? 'not-allowed' : 'pointer',
                             borderRadius: 0, border: 'none',
                           }}
                         >+ new workflow</button>
-                        <button
-                          onClick={() => {
-                            if (!confirm('這會覆蓋目前工作流的內容(無法還原)。確定要繼續嗎?')) return
-                            handleYamlApplyInHero(msg.yaml!, 'overwrite')
-                          }}
-                          disabled={!!msg.yamlError}
-                          title={msg.yamlError
-                            ? 'YAML 有解析錯誤、無法套用、請請 AI 重新產出完整 YAML'
-                            : '用這份 YAML 覆蓋目前工作流'}
-                          style={{
-                            background: msg.yamlError ? '#D5D2CC' : ATLAS_PAL.bgCard,
-                            color: msg.yamlError ? '#8B8680' : ATLAS_PAL.ink,
-                            border: msg.yamlError ? '1px solid #B5B2AC' : `1px solid ${ATLAS_PAL.ink}`,
-                            fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
-                            padding: '8px 10px',
-                            cursor: msg.yamlError ? 'not-allowed' : 'pointer',
-                            borderRadius: 0,
-                          }}
-                        >! overwrite</button>
                       </div>
                     )}
                   </div>
