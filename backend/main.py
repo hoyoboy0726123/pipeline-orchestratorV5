@@ -1135,7 +1135,7 @@ async def get_available_skills():
 
 
 # ── Subagent role CRUD ────────────────────────────────────────────────
-# 內建 5 個 role 永遠在、不可改不可刪。自訂 role 寫到 ~/ai_output/custom_subagent_roles.yaml,
+# 內建 32 個 role 永遠在、不可改不可刪。自訂 role 寫到 ~/ai_output/custom_subagent_roles.yaml,
 # 跟內建 merge 出最終可用 role 清單。前端設定頁 / AI 助手 create_subagent_role 工具都走這幾個 endpoint。
 
 class SubagentRolePayload(BaseModel):
@@ -3073,25 +3073,116 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
   timeout: 600
 ```
 
-### ⚠️ 何時用 subagent vs AI 技能（**重要決策、不要選錯**）
+### ⚠️ 何時用 subagent vs AI 技能(**重要決策、不要選錯**)
 
-**預設用 AI 技能 + Recipe**。出現以下訊號才升級用 subagent：
+### 任務複雜度分級(先判斷複雜度、再選工具)
 
-| 訊號 | 用什麼 |
+```
+🟢 簡單(用 script / 掛預製 skill):
+  - 下載檔案、轉檔、複製、移動
+  - 跑現成 CLI 工具
+  - 解析論壇 / PTT(掛 scraped-content-parser)
+  - 用現成模板寄信(outlook_automation)
+
+🟡 中等(用 ad-hoc skill_mode、不掛 role):
+  - 一次性的小型計算
+  - 簡單檔案格式轉換
+  - 預期 schema 寬鬆、user 不會把輸出餵下游
+  - 純 deterministic 處理
+
+🔴 困難(必用 subagent + role):
+  ⚠ 任一條件滿足就升級 🔴:
+  - 下游有 condition 節點要引用該 step 的 output 某欄位 → schema 嚴格
+  - 下游要把該 step 的 output 餵 TG / Email / Report → 內容要乾淨
+  - 輸入是非結構(爬蟲 markdown / HTML / 雜訊資料)→ 結構不穩
+  - 任務名稱含「解析 / 比對 / 統計 / 分析 / 撰寫 / 翻譯」這類有專業歸屬的動詞
+  - 任務需要 LLM 多輪推理、不是一個 Python 函式能搞定
+```
+
+### 任務 → role 對照表(全 27 個專業 role、照表選不要猜)
+
+**Tier 1 資料處理:**
+| 任務 | role |
 |---|---|
-| 每天 / 每週重複跑、邏輯固定 | **AI 技能 + Recipe**（第 1 次 LLM 寫 code、之後零 token 直接 replay）|
-| 結構不固定、邊想邊改、可能要試錯 | **subagent**（每次重新推理、能根據中間結果調整）|
-| 純拿意見 / 審稿 / 挑問題 | **subagent + critic**（只讀檔挑錯、不會改）|
-| 純拆任務、規劃步驟 | **subagent + planner**（純推理、不執行任何工具）|
-| 收料 + 整理摘要、要列來源 | **subagent + researcher**（研究式收料、不下決策）|
-| 寫 / debug Python 到通 | **subagent + coder**（多輪試錯改 code）|
+| 爬蟲後解析非結構文本 → 乾淨 JSON | `web_parser` |
+| 兩份資料 → diff(固定 schema {changed, added, removed, modified}) | `data_differ` |
+| 格式轉換 CSV ↔ JSON ↔ Excel ↔ Markdown | `data_transformer` |
+| 長文(>3000 字)→ TL;DR + bullet + 引用 | `summarizer` |
+| 統計分析、csv/xlsx → 指標 + chart | `data_analyst` |
 
-**不要用 subagent 的徵兆**（勸使用者改用 AI 技能）：
-- 每天 / 每週重複跑（→ Recipe 更省錢、第二次起零 token）
-- 流程明確固定（→ 寫死成 skill 邏輯更穩、不會每次結果不一樣）
-- 對成本敏感（→ subagent token 用量是 skill 的 2-5 倍）
+**Tier 2 研究評估:**
+| 任務 | role |
+|---|---|
+| 深度競品比較(多家、多面向)、輸出矩陣 | `competitor_analyst` |
+| 時序資料 → 趨勢線 + 預測區間 + confidence | `trend_analyst` |
+| 對選項打分 + ranking | `evaluator` |
+| 驗收業務需求(對照 spec 標 ✅/❌/⚠️) | `qa_validator` |
+| 收料 + 整理摘要、列來源 | `researcher` |
+| 純唯讀挑 3 個最重要問題(code/config 審查) | `critic` |
+| 純拆任務、規劃步驟 | `planner` |
 
-**判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
+**Tier 3 撰寫溝通:**
+| 任務 | role |
+|---|---|
+| 短文案(TG 通知 / 推播、≤500 字) | `copywriter` |
+| 正式 Email(主旨+稱呼+正文+結尾、商業書信) | `email_drafter` |
+| 長報告(日 / 週 / 月報、含結論 + 數據) | `report_writer` |
+| 中英互譯(保留 markdown / JSON 結構) | `translator` |
+| 校對(錯字 / 語病 / 標點 / 一致性、不改寫) | `proofreader` |
+
+**Tier 4 工程:**
+| 任務 | role |
+|---|---|
+| 寫 / debug Python 到通 | `coder` |
+| 對既有 code 寫 unit test、跑通、回報 coverage | `test_writer` |
+| 接 error stack、定位 root cause、修 bug | `debugger` |
+| ML 建模、訓練模型、輸出 .pkl + metrics | `data_scientist` |
+| 優化 prompt、做 A/B 比較 | `prompt_engineer` |
+
+**Tier 5 媒體互動:**
+| 任務 | role |
+|---|---|
+| 影片字幕(SRT/VTT)→ 章節 + 時間戳 + 摘要 | `video_processor` |
+| 多輪互動釐清需求、輸出規格 | `requirement_gatherer` |
+| 看圖描述、OCR 配合 | `image_describer` |
+| 設計 PPT 大綱結構(不生 pptx) | `presentation_designer` |
+
+**Tier 6 垂直領域(附專業免責聲明):**
+| 任務 | role |
+|---|---|
+| 讀合約 / 條款 / 隱私政策(標紅旗 + 灰區) | `legal_reader` |
+| 讀財報 / 股價(算 ratio + 趨勢、不下投資建議) | `financial_analyst` |
+| 讀醫學論文(抽 PICO + 結論 + limitation) | `medical_reader` |
+| 教學內容設計(大綱 + 講義 + 練習題) | `educator` |
+| 客戶問題 → 回覆草稿(對照 SOP) | `customer_support` |
+| 會議 transcript → 結構化會議記錄 + 行動項目 | `meeting_facilitator` |
+
+### Fallback 邏輯
+
+```
+找不到對應 role 嗎?
+  ↓
+🟡 中等任務 → ad-hoc skill_mode(不掛 skill 也不掛 role、LLM 自由發揮)
+🟢 簡單任務 → script 節點(deterministic、寫 shell / 固定 Python)
+🟢 一次性 deterministic 處理 → 掛 skill(若有對應預製 skill)
+```
+
+### 預設選擇優先序
+
+```
+1. 任務有專業歸屬(解析 / 比對 / 撰寫 / 翻譯 / 法律 / 財經 / ...)→ subagent + 對應 role
+2. 任務是 deterministic + 重複跑 → 掛預製 skill(scraped-content-parser / pdf-tool 等)
+3. 任務是 deterministic + 一次性 → script 節點
+4. 任務需要 LLM 但無對應 role → ad-hoc skill_mode(最易 schema drift、避免用)
+```
+
+**重要原則**:**下游有 condition / TG / Email 要引用該 step output 的、上游必用 subagent + role**、永遠不用 ad-hoc skill_mode。role 自帶嚴格 schema 邊界、不會自由發揮。
+
+**何時用內建工具不用 subagent**:
+- 每天 / 每週重複跑、邏輯固定 → AI 技能 + Recipe
+- 流程明確固定 → skill 寫死
+
+**判斷小竅門**:使用者描述含「研究 / 探索 / 試試看 / debug / 不確定」→ subagent;含「每天 / 自動化 / 定時 / 日報 / 跑一次」→ AI 技能。
 
 ### ⛔ 順序鐵律(踩線會被擋、整個 turn 浪費)
 
@@ -3122,7 +3213,14 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 ### 🚫 role 名只能用「實際存在的」、不可自編
 
-**內建 5 個 role**:`data_analyst` / `coder` / `researcher` / `critic` / `planner`
+**內建 32 個 role**(完整名稱請看上方分 Tier 對照表、或動態注入的「可用 Subagent role 清單」段):
+- Tier 1 資料處理:`data_analyst` / `web_parser` / `data_differ` / `data_transformer` / `summarizer`
+- Tier 2 研究評估:`competitor_analyst` / `trend_analyst` / `evaluator` / `qa_validator` / `researcher` / `critic` / `planner`
+- Tier 3 撰寫溝通:`copywriter` / `email_drafter` / `report_writer` / `translator` / `proofreader`
+- Tier 4 工程:`coder` / `test_writer` / `debugger` / `data_scientist` / `prompt_engineer`
+- Tier 5 媒體互動:`video_processor` / `requirement_gatherer` / `image_describer` / `presentation_designer`
+- Tier 6 垂直領域:`legal_reader` / `financial_analyst` / `medical_reader` / `educator` / `customer_support` / `meeting_facilitator`
+
 **自訂 role**(若使用者透過設定頁 / 你呼叫 `create_subagent_role` 加過)會出現在動態注入的「可用 role 清單」段。
 
 **規則**:
@@ -3133,7 +3231,7 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 ### 🆕 新增自訂角色(`create_subagent_role` 工具、兩步確認)
 
-當使用者明確說「我要一個新角色」、或內建 5 個 role 都不適合時:
+當使用者明確說「我要一個新角色」、或內建 32 個 role 都不適合時:
 
 1. **confirm=False** 呼叫 → 拿到 preview(role_id、label、tools、system_prompt 摘要)
 2. 用文字告訴使用者「我要新增角色 X、職能是 Y、會有這些工具:[...]、確認?」
