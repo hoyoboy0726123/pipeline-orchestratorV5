@@ -602,10 +602,13 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
                     <div className="mt-1.5 grid grid-cols-2 gap-1">
                       <button
                         onClick={() => onYamlApply(msg.yaml!, 'new')}
-                        title="建立一個新的工作流來放這份 YAML，不碰目前的"
+                        disabled={!!msg.yamlError}
+                        title={msg.yamlError
+                          ? 'YAML 有解析錯誤、無法套用、請請 AI 重新產出完整 YAML'
+                          : '建立一個新的工作流來放這份 YAML，不碰目前的'}
                         className={`flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium transition-colors ${
                           msg.yamlError
-                            ? 'bg-amber-500 hover:bg-amber-400 text-white'
+                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                             : 'bg-emerald-500 hover:bg-emerald-400 text-white'
                         }`}
                       >
@@ -616,8 +619,15 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
                           if (!confirm('這會覆蓋目前工作流的內容（無法還原）。確定要繼續嗎？')) return
                           onYamlApply(msg.yaml!, 'overwrite')
                         }}
-                        title="用這份 YAML 覆蓋目前工作流（會彈確認）"
-                        className="flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium border border-gray-300 bg-white hover:bg-gray-50 text-gray-600 transition-colors"
+                        disabled={!!msg.yamlError}
+                        title={msg.yamlError
+                          ? 'YAML 有解析錯誤、無法套用、請請 AI 重新產出完整 YAML'
+                          : '用這份 YAML 覆蓋目前工作流（會彈確認）'}
+                        className={`flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium transition-colors ${
+                          msg.yamlError
+                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed border border-gray-300'
+                            : 'border border-gray-300 bg-white hover:bg-gray-50 text-gray-600'
+                        }`}
                       >
                         ⚠ 覆蓋目前
                       </button>
@@ -1522,12 +1532,17 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                       <div className="mt-2 grid grid-cols-2 gap-1.5">
                         <button
                           onClick={() => handleYamlApplyInHero(msg.yaml!, 'new')}
-                          title="建立一個新的工作流來放這份 YAML"
+                          disabled={!!msg.yamlError}
+                          title={msg.yamlError
+                            ? 'YAML 有解析錯誤、無法套用、請請 AI 重新產出完整 YAML'
+                            : '建立一個新的工作流來放這份 YAML'}
                           style={{
-                            background: msg.yamlError ? ATLAS_PAL.brick : ATLAS_PAL.forest,
-                            color: ATLAS_PAL.bg,
+                            background: msg.yamlError ? '#D5D2CC' : ATLAS_PAL.forest,
+                            color: msg.yamlError ? '#8B8680' : ATLAS_PAL.bg,
                             fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
-                            padding: '8px 10px', cursor: 'pointer', borderRadius: 0, border: 'none',
+                            padding: '8px 10px',
+                            cursor: msg.yamlError ? 'not-allowed' : 'pointer',
+                            borderRadius: 0, border: 'none',
                           }}
                         >+ new workflow</button>
                         <button
@@ -1535,13 +1550,18 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                             if (!confirm('這會覆蓋目前工作流的內容(無法還原)。確定要繼續嗎?')) return
                             handleYamlApplyInHero(msg.yaml!, 'overwrite')
                           }}
-                          title="用這份 YAML 覆蓋目前工作流"
+                          disabled={!!msg.yamlError}
+                          title={msg.yamlError
+                            ? 'YAML 有解析錯誤、無法套用、請請 AI 重新產出完整 YAML'
+                            : '用這份 YAML 覆蓋目前工作流'}
                           style={{
-                            background: ATLAS_PAL.bgCard,
-                            color: ATLAS_PAL.ink,
-                            border: `1px solid ${ATLAS_PAL.ink}`,
+                            background: msg.yamlError ? '#D5D2CC' : ATLAS_PAL.bgCard,
+                            color: msg.yamlError ? '#8B8680' : ATLAS_PAL.ink,
+                            border: msg.yamlError ? '1px solid #B5B2AC' : `1px solid ${ATLAS_PAL.ink}`,
                             fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
-                            padding: '8px 10px', cursor: 'pointer', borderRadius: 0,
+                            padding: '8px 10px',
+                            cursor: msg.yamlError ? 'not-allowed' : 'pointer',
+                            borderRadius: 0,
                           }}
                         >! overwrite</button>
                       </div>
