@@ -1299,7 +1299,7 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                       border: `1px solid ${isHover ? ATLAS_PAL.ink : ATLAS_PAL.rule}`,
                       padding: 12, cursor: 'pointer',
                       transition: 'border-color 180ms, box-shadow 200ms, transform 200ms',
-                      position: 'relative', minHeight: 130,
+                      position: 'relative', minHeight: 160,
                       display: 'flex', flexDirection: 'column', gap: 10,
                       boxShadow: isHover ? `4px 4px 0 0 ${ATLAS_PAL.ink}` : 'none',
                       transform: isHover ? 'translate(-3px,-3px)' : 'translate(0,0)',
