@@ -2915,6 +2915,44 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
   timeout: 3600
 ```
 
+### ⚠ human_confirm 後的「附件 / 上一步輸出」鐵律(主動意識、別等 user 提醒)
+
+**human_confirm 節點自己不產任何檔**。下游若要寄信附件、產報表、餵 condition 引用、用「上一步輸出」這類**隱式參照**會抓不到任何東西。
+
+**反 pattern**(會壞、user 跑了才發現):
+```yaml
+- name: 撰寫日報
+  subagent: true
+  subagent_role: report_writer
+  output: { path: report.md }
+- name: 審核日報
+  human_confirm: true
+  send_prev_output: true       # ✓ OK、抓得到 report.md
+- name: 寄信
+  outlook_automation: true
+  outlook_template: send_with_attachment
+  outlook_params: {"to":"x@y.com", ...}
+                               # ❌ 預設抓「上一步」= human_confirm 沒檔可寄、附件空
+```
+
+**正 pattern**(主動加變數):
+```yaml
+- name: 寄信
+  outlook_automation: true
+  outlook_template: send_with_attachment
+  outlook_params:
+    {"to":"x@y.com", ...,
+     "attachment_path":"{{ steps.撰寫日報.output.path }}"}
+                               # ✅ 跳過 human_confirm、明確指到原始檔
+```
+
+**判斷規則**(emit YAML 前主動跑一遍):
+1. 找出所有 human_confirm 節點
+2. 看 human_confirm 之後有沒有節點需要「上一步輸出」(outlook 寄信 / 另一個 subagent 餵資料 / condition 引用)
+3. **有 → 必用 `{{ steps.<產檔 step>.output.path }}` 明確跨節點引用、不要依賴 send_prev_output / 隱式上一步**
+
+同理:**condition 節點本身也不產檔**、它之後的步驟若要引用、也要跨節點指回上上一步。這是「**只有 human_confirm 或 condition 在中間時、絕對不用隱式上一步、必用變數**」。
+
 ## 4. 網頁爬蟲節點（web_crawler，wc_mode: web）
 **使用者說**：貼 URL「抓這頁」「爬」「擷取」
 ```yaml
