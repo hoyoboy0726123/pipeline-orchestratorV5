@@ -584,7 +584,7 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
                   )}
                   {msg.role === 'assistant' ? (
                     <div className="prose prose-xs max-w-none prose-p:my-0.5 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-code:break-all">
-                      <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n```yaml[\s\S]*?```/g, '（已偵測到 YAML ↓）'))}</ReactMarkdown>
+                      <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n/g, ''))}</ReactMarkdown>
                       {msg.streaming && (
                         <span className="inline-block w-1.5 h-3 ml-0.5 bg-indigo-500 animate-pulse align-middle" />
                       )}
@@ -1501,7 +1501,7 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                     )}
                     {msg.role === 'assistant' ? (
                       <div className="prose prose-sm max-w-none prose-p:my-1 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-code:break-all">
-                        <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n```yaml[\s\S]*?```/g, '(已偵測到 YAML ↓)'))}</ReactMarkdown>
+                        <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n/g, ''))}</ReactMarkdown>
                         {msg.streaming && (
                           <span
                             className="inline-block align-middle ml-0.5 animate-pulse"
