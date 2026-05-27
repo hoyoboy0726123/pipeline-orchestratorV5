@@ -3075,6 +3075,72 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 ### ⚠️ 何時用 subagent vs AI 技能(**重要決策、不要選錯**)
 
+### 🚨 預設規則(default-on、不是 opt-in)
+
+任務描述含這些**專業歸屬動詞**、**預設用 subagent + 對應 role**:
+
+```
+分析、摘要、整理、解析、撰寫、翻譯、比對、評估、校對、
+研究、調查、審查、診斷、規劃、設計、教學
+```
+
+**default = subagent + role**、不要先想「skill_mode 行不行」、不要「中等任務用 ad-hoc」。
+**例外**(才不用 subagent):
+1. 任務是純 deterministic 操作(轉檔 / 移動 / 計算固定公式 / 跑 CLI)→ script
+2. 剛好有 mounted skill 完全 fit(scraped-content-parser 處理 PTT) → skill_mode + skill
+
+⚠ **常見錯誤路由**(別犯):
+- ❌ 「爬 Reddit 後寫摘要」→ 第一直覺用 skill_mode、想說「不就是 LLM 寫個摘要嘛」
+  ✅ 正確:**web_parser**(抽結構化資料)+ **report_writer / summarizer**(寫報告)兩步
+- ❌ 「比對價格」→ 第一直覺用 skill_mode
+  ✅ 正確:**data_differ**(固定 schema 不 drift)
+- ❌ 「寫 TG 通知文」→ 第一直覺用 batch 寫死 message
+  ✅ 正確:**copywriter**(動態根據資料寫、台灣繁中)
+
+### 反射式對照(看到關鍵字直接選 role、不要再想)
+
+```
+爬蟲後解析 / 抽結構化資料  → web_parser
+比對 / diff / 找差異       → data_differ
+轉檔 / 格式轉換             → data_transformer
+長文壓縮摘要                → summarizer
+統計 / 算指標 / 出 chart    → data_analyst
+競品比較 / 多家對比         → competitor_analyst
+趨勢預測                    → trend_analyst
+選項打分 / ranking          → evaluator
+驗收業務需求                → qa_validator
+收料寫研究報告              → researcher
+找問題 / 審稿(code/config) → critic
+拆任務 / 規劃               → planner
+TG / 推播 / 短文案          → copywriter
+正式 Email                  → email_drafter
+日報 / 週報 / 月報           → report_writer
+中英互譯                    → translator
+校對錯字 / 語病             → proofreader
+寫程式 / debug              → coder
+寫測試 + coverage           → test_writer
+接 bug 修最小範圍           → debugger
+ML 建模 + metrics           → data_scientist
+prompt A/B 比較             → prompt_engineer
+字幕 → 章節 + 時間戳        → video_processor
+多輪互動釐清需求            → requirement_gatherer
+看圖描述 + OCR              → image_describer
+PPT 大綱結構                → presentation_designer
+合約 / 條款 / 隱私政策      → legal_reader
+財報 / 股價 / 同業比較      → financial_analyst
+醫學論文 / 臨床指引         → medical_reader
+教材 / 練習題               → educator
+客服回覆草稿                → customer_support
+會議記錄 + 行動項目         → meeting_facilitator
+```
+
+「爬蟲 → 整理 → 寄信」這種**多步 pipeline**、每一步分別套對應 role:
+- 爬蟲 = `web_crawler` 節點
+- 整理 = `web_parser` subagent(抽結構)+ `report_writer` subagent(寫報告)
+- 寄信 = `outlook_automation` 節點
+
+**不要**一個「整理」步用 ad-hoc skill_mode、那是把問題全推給 LLM 自由發揮、容易 schema drift 或輸出品質爛。
+
 ### 任務複雜度分級(先判斷複雜度、再選工具)
 
 ```
