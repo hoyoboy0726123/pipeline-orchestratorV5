@@ -1328,7 +1328,14 @@ def _skill_web_search(tool_input: str, call_count: int = 0,
     if not query:
         return "[web_search 錯誤] query 不可為空"
     max_results = max(1, min(int(params.get("max_results", 5)), 5))
-    search_depth = "advanced" if str(params.get("search_depth", "basic")).lower() == "advanced" else "basic"
+    # search_depth 預設讀 settings.web_search_deep_default(預設 True、advanced)、
+    # LLM 可以在 input 內傳 search_depth 個別 override(基本上不必、預設就好)。
+    _deep_default = bool(s.get("web_search_deep_default", True))
+    _depth_input = params.get("search_depth")
+    if _depth_input is None:
+        search_depth = "advanced" if _deep_default else "basic"
+    else:
+        search_depth = "advanced" if str(_depth_input).lower() == "advanced" else "basic"
     # 完整內容模式：預設從 settings 取、agent 可 per-call 覆寫
     full_content = bool(params.get("include_full_content",
                                    s.get("web_search_full_content_default", False)))
@@ -2277,9 +2284,9 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
 - ✅ 即時資訊(股價 / 新聞 / 匯率)、使用者提「查」「最新」、缺背景知識、確認套件 / API 最新做法
 - ❌ 純資料處理、任務已給完整資料、為「驗證想法」亂搜(先動手)
 
-<input>{"query":"今天美國科技新聞","max_results":5,"search_depth":"basic","include_full_content":true}</input>
+<input>{"query":"今天美國科技新聞","max_results":5,"include_full_content":true}</input>
 - max_results: 1-5(預設 5)
-- search_depth: "basic"(預設便宜) / "advanced"(貴 2x、較精)
+- search_depth: 不必傳、系統會用設定頁的預設(預設 advanced、深度好、適合研究類任務)
 - include_full_content=true → 拿每則完整原文(~3000 字/篇)
 
 ⭐ 任務要「擷取內文 / 分析全文」時直接 `include_full_content=true`、別寫 requests/newspaper 自己爬

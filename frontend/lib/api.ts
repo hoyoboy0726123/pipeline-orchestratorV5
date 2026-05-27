@@ -999,6 +999,7 @@ export interface WebSearchSettingsStatus {
   has_key: boolean
   web_search_enabled: boolean
   web_search_full_content_default: boolean
+  web_search_deep_default: boolean
 }
 
 export interface WebSearchSettingsInput {
@@ -1006,6 +1007,7 @@ export interface WebSearchSettingsInput {
   tavily_api_key?: string
   web_search_enabled?: boolean
   web_search_full_content_default?: boolean
+  web_search_deep_default?: boolean
 }
 
 export async function getWebSearchSettings(): Promise<WebSearchSettingsStatus> {

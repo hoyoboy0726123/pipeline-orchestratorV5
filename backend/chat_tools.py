@@ -1020,6 +1020,11 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
         return "[web_search 錯誤] query 不可為空"
     n = max(1, min(int(max_results or 5), 5))
 
+    # 搜尋深度:讀 settings.web_search_deep_default(預設 True、advanced 模式)
+    # Atlas 定位深度研究、預設 ON;帳單失控時設定頁關掉。
+    _deep = bool(s.get("web_search_deep_default", True))
+    _depth = "advanced" if _deep else "basic"
+
     import requests as _requests
     try:
         resp = _requests.post(
@@ -1028,11 +1033,11 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
                 "api_key": key,
                 "query": q,
                 "max_results": n,
-                "search_depth": "basic",
+                "search_depth": _depth,
                 "include_answer": True,
                 "include_raw_content": bool(full_content),
             },
-            timeout=45 if full_content else 20,
+            timeout=60 if (full_content or _deep) else 20,
         )
         if resp.status_code == 401:
             return "[web_search 錯誤] Tavily API key 無效(401)、請更新"

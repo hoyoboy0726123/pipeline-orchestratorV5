@@ -1313,6 +1313,9 @@ function WebSearchSection() {
   const [origHasKey, setOrigHasKey] = useState(false)
   const [origEnabled, setOrigEnabled] = useState(false)
   const [origVerbose, setOrigVerbose] = useState(false)
+  // 搜尋深度預設(advanced vs basic);Atlas 預設 true(深度模式)。
+  const [deepMode, setDeepMode] = useState(true)
+  const [origDeepMode, setOrigDeepMode] = useState(true)
 
   useEffect(() => {
     (async () => {
@@ -1322,6 +1325,7 @@ function WebSearchSection() {
         setHasKey(s.has_key); setOrigHasKey(s.has_key)
         setEnabled(s.web_search_enabled); setOrigEnabled(s.web_search_enabled)
         setVerbose(s.web_search_full_content_default); setOrigVerbose(s.web_search_full_content_default)
+        setDeepMode(s.web_search_deep_default); setOrigDeepMode(s.web_search_deep_default)
       } catch (e) { toast.error((e as Error).message) }
       finally { setLoading(false) }
     })()
@@ -1330,7 +1334,8 @@ function WebSearchSection() {
   const dirty =
     apiKey.length > 0 ||            // 使用者輸入了新 key
     enabled !== origEnabled ||
-    verbose !== origVerbose
+    verbose !== origVerbose ||
+    deepMode !== origDeepMode
 
   const handleSave = async () => {
     setSaving(true)
@@ -1338,12 +1343,14 @@ function WebSearchSection() {
       const patch: WebSearchSettingsInput = {
         web_search_enabled: enabled,
         web_search_full_content_default: verbose,
+        web_search_deep_default: deepMode,
       }
       if (apiKey.trim()) patch.tavily_api_key = apiKey.trim()
       const saved = await saveWebSearchSettings(patch)
       setHasKey(saved.has_key); setOrigHasKey(saved.has_key)
       setOrigEnabled(saved.web_search_enabled)
       setOrigVerbose(saved.web_search_full_content_default)
+      setOrigDeepMode(saved.web_search_deep_default)
       setApiKey('')  // 儲存完清空輸入，避免使用者以為要重填
       toast.success('網路搜尋設定已儲存')
     } catch (e) { toast.error((e as Error).message) }
@@ -1457,6 +1464,35 @@ function WebSearchSection() {
               >
                 <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
                   verbose ? 'translate-x-5' : 'translate-x-0'
+                }`} />
+              </button>
+            </div>
+
+            {/* 深度搜尋模式 toggle */}
+            <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+              <div>
+                <div className="text-sm font-medium text-gray-800">深度搜尋模式</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {deepMode
+                    ? '已啟用 — Tavily advanced mode、品質好 5-10x、AI 助手 / Skill / Subagent 全部受惠'
+                    : '未啟用 — Tavily basic mode、簡單查詢用、研究類任務不建議'}
+                </div>
+                <div className="text-[11px] text-amber-600 mt-1 font-medium">
+                  ⚠️ Tavily credit 用量 2x、但深度研究品質提升大;
+                  Atlas 定位深度研究、預設 ON。
+                </div>
+                <div className="text-[11px] text-gray-500 mt-0.5">
+                  💡 影響範圍:全域 — AI 助手 chat、TG bot、Skill 節點、Subagent 節點都會用此預設
+                </div>
+              </div>
+              <button
+                onClick={() => setDeepMode(!deepMode)}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+                  deepMode ? 'bg-cyan-500' : 'bg-gray-300'
+                }`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                  deepMode ? 'translate-x-5' : 'translate-x-0'
                 }`} />
               </button>
             </div>

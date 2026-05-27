@@ -1377,6 +1377,7 @@ class WebSearchSettingsRequest(BaseModel):
     tavily_api_key: Optional[str] = None
     web_search_enabled: Optional[bool] = None
     web_search_full_content_default: Optional[bool] = None
+    web_search_deep_default: Optional[bool] = None
 
 
 def _web_search_response_dict(s: dict) -> dict:
@@ -1386,6 +1387,7 @@ def _web_search_response_dict(s: dict) -> dict:
         "has_key": bool((s.get("tavily_api_key") or "").strip()),
         "web_search_enabled": bool(s.get("web_search_enabled")),
         "web_search_full_content_default": bool(s.get("web_search_full_content_default")),
+        "web_search_deep_default": bool(s.get("web_search_deep_default", True)),
     }
 
 
@@ -1408,6 +1410,8 @@ async def put_web_search_settings(req: WebSearchSettingsRequest):
         s["web_search_enabled"] = bool(req.web_search_enabled)
     if req.web_search_full_content_default is not None:
         s["web_search_full_content_default"] = bool(req.web_search_full_content_default)
+    if req.web_search_deep_default is not None:
+        s["web_search_deep_default"] = bool(req.web_search_deep_default)
     with _lock:
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:

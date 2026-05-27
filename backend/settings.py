@@ -49,6 +49,10 @@ _DEFAULT = {
     # 完整內容模式：ON 時 Tavily 直接回文章原文（Agent 不用寫爬蟲）
     # 代價：一次回傳 ~15000 字，需要雲端大 context 模型；本地 Ollama 8B 小 context 會爆
     "web_search_full_content_default": False,
+    # 搜尋深度預設:advanced 模式比 basic 貴 2x、但研究品質好 5-10x。
+    # Atlas 定位深度研究 → 預設 ON。chat 助手 / skill / subagent 全部受影響。
+    # 帳單失控時可從設定頁關掉、改成 LLM 個別 input 才走 advanced。
+    "web_search_deep_default": True,
     # 含 computer_use 節點的工作流啟動時自動縮小前景視窗(通常是 V5 瀏覽器)、
     # 結束後自動還原。避免 V5 視窗擋住要自動化的目標 app。
     # 預設 OFF — 使用者自己決定要不要打擾桌面。並發 workflow 用 ref-count 處理。
