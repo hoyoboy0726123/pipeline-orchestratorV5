@@ -1125,32 +1125,36 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
   return (
     <div
       onClick={onOverlayClick}
-      // 覆蓋全螢幕米色 + 32px 規則網格背景(取代舊 dark glass overlay)
-      // backgroundImage 用雙線性漸層畫格線、Soft Architectural Grid 核心視覺
-      style={{
-        backgroundColor: ATLAS_PAL.bg,
-        backgroundImage:
-          `linear-gradient(${ATLAS_PAL.rule} 1px, transparent 1px),` +
-          `linear-gradient(90deg, ${ATLAS_PAL.rule} 1px, transparent 1px)`,
-        backgroundSize: '32px 32px',
-        backgroundPosition: '-1px -1px',
-        color: ATLAS_PAL.ink,
-        fontFamily: FONT_BODY,
-      }}
-      className={`fixed inset-0 z-50 transition-opacity duration-300 ${containerOpacity}`}
+      // Layer 1 — Backdrop:全螢幕半透明黑 + backdrop-blur,讓底下 canvas 模糊可見
+      // (取代舊「整片米色蓋滿 viewport」設計、改回真正的 overlay 觀感)
+      // 點 backdrop 不關 hero(避免誤關)— onOverlayClick 是 click sink
+      className={`fixed inset-0 z-50 bg-slate-950/20 backdrop-blur-md flex items-center justify-center transition-opacity duration-300 ${containerOpacity}`}
+      style={{ color: ATLAS_PAL.ink, fontFamily: FONT_BODY }}
     >
-      {/* 全螢幕 artboard:1280×880 ref,左右 56px、上 44px、下 36px。
-          hasStarted 後不切寬度、只把 hero / cards 區塊收起讓 chat history 接管。
-          這裡用 absolute inset-0、把整片 overlay 當畫布、不再有 glass card 概念。*/}
+      {/* Layer 2 — Centered Hero Panel:
+          - max-w-[1100px] w-[92vw] / max-h-[88vh]:不撐破 viewport、自然置中
+          - 米色背景 + 32px 規則網格(設計風保留)
+          - 圓角 0(brutalist)+ 1px 邊框 + shadow-2xl(深度感、像紙片浮著)
+          - overflow-hidden + flex flex-col:內容超過 panel 不溢出、垂直排列 */}
       <div
-        className={`absolute inset-0 flex flex-col transition-all duration-300 ${cardScale}`}
-        style={{ padding: '44px 56px 36px' }}
+        className={`relative w-[92vw] max-w-[1100px] max-h-[88vh] overflow-hidden flex flex-col rounded-none shadow-2xl shadow-black/30 transition-all duration-300 ${cardScale}`}
+        style={{
+          backgroundColor: ATLAS_PAL.bg,
+          backgroundImage:
+            `linear-gradient(${ATLAS_PAL.rule} 1px, transparent 1px),` +
+            `linear-gradient(90deg, ${ATLAS_PAL.rule} 1px, transparent 1px)`,
+          backgroundSize: '32px 32px',
+          backgroundPosition: '-1px -1px',
+          border: `1px solid ${ATLAS_PAL.rule}`,
+          padding: '24px 36px',
+        }}
         onClick={e => e.stopPropagation()}
       >
         {/* ================= Top bar ================= */}
         {/* 左:Atlas mark + wordmark;右:三個 stage chip (1·觸發 / 2·處理 / 3·輸出)
-            外加最小化 / 關閉(取代舊 absolute 右上 icon)*/}
-        <div className="flex items-center justify-between" style={{ marginBottom: 36, position: 'relative', zIndex: 1 }}>
+            外加最小化 / 關閉(取代舊 absolute 右上 icon)
+            marginBottom 從 36 縮到 20、塞進 panel 上方 */}
+        <div className="flex items-center justify-between shrink-0" style={{ marginBottom: 20, position: 'relative', zIndex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <AtlasMark size={26} />
             <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, letterSpacing: '-0.01em', color: ATLAS_PAL.ink }}>Atlas</span>
@@ -1193,42 +1197,45 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
           </div>
         </div>
 
-        {/* ================= Initial state(!hasStarted):Hero + Cards grid + Input + Footer ================= */}
+        {/* ================= Initial state(!hasStarted):Hero + Cards grid + Input + Footer =================
+            整個 !hasStarted 區塊用 flex flex-col flex-1 min-h-0、讓內容垂直排列、
+            cards grid 可在 panel 內 scroll、input + footer 永遠停在 panel 底部 */}
         {!hasStarted && (
-          <>
-            {/* Hero header:breadcrumb + h1 */}
-            <div style={{ marginBottom: 28, position: 'relative', zIndex: 1, maxWidth: 760 }}>
+          <div className="flex flex-col flex-1 min-h-0">
+            {/* Hero header:breadcrumb + h1(h1 從 56 縮到 42、給 input/cards 留空間)*/}
+            <div className="shrink-0" style={{ marginBottom: 16, position: 'relative', zIndex: 1, maxWidth: 760 }}>
               <div style={{
-                display: 'flex', gap: 10, alignItems: 'center', marginBottom: 14,
+                display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10,
                 fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em', color: ATLAS_PAL.inkSoft,
               }}>
                 <span style={{ display: 'inline-block', width: 8, height: 8, background: ATLAS_PAL.forest }} />
                 home / start a workflow
               </div>
               <h1 style={{
-                fontFamily: FONT_DISPLAY, fontWeight: 500, fontSize: 56,
-                lineHeight: 1.0, letterSpacing: '-0.03em', margin: 0, color: ATLAS_PAL.ink,
+                fontFamily: FONT_DISPLAY, fontWeight: 500, fontSize: 42,
+                lineHeight: 1.05, letterSpacing: '-0.03em', margin: 0, color: ATLAS_PAL.ink,
               }}>
-                選一個方向開始,<br />
+                選一個方向開始,
                 或<span style={{
                   color: ATLAS_PAL.forest,
                   textDecoration: 'underline',
-                  textUnderlineOffset: 8,
+                  textUnderlineOffset: 6,
                   textDecorationThickness: 2,
                 }}>用一句話</span>描述你要的工作流。
               </h1>
             </div>
 
-            {/* 4×2 cards grid */}
+            {/* 4×2 cards grid(<1000px 小螢幕時自動降成 2 欄 4 列)
+                用 min-h-0 + overflow-y-auto:cards 區若超過剩餘空間就 scroll、不擠到 input */}
             <div
               role="list"
+              className="grid grid-cols-2 lg:grid-cols-4 flex-1 min-h-0 overflow-y-auto"
               style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
                 gap: 10,
                 position: 'relative',
                 zIndex: 1,
-                marginBottom: 18,
+                marginBottom: 14,
+                gridAutoRows: 'min-content',
               }}
             >
               {ATLAS_ACTIONS.map(a => {
@@ -1246,10 +1253,10 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                     style={{
                       background: ATLAS_PAL.bgCard,
                       border: `1px solid ${isHover ? ATLAS_PAL.ink : ATLAS_PAL.rule}`,
-                      padding: 16, cursor: 'pointer',
+                      padding: 12, cursor: 'pointer',
                       transition: 'border-color 180ms, box-shadow 200ms, transform 200ms',
-                      position: 'relative', minHeight: 170,
-                      display: 'flex', flexDirection: 'column', gap: 12,
+                      position: 'relative', minHeight: 130,
+                      display: 'flex', flexDirection: 'column', gap: 10,
                       boxShadow: isHover ? `4px 4px 0 0 ${ATLAS_PAL.ink}` : 'none',
                       transform: isHover ? 'translate(-3px,-3px)' : 'translate(0,0)',
                       textAlign: 'left',
@@ -1368,9 +1375,9 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
               </div>
             </div>
 
-            {/* Footer hints */}
-            <div style={{
-              marginTop: 'auto', paddingTop: 24,
+            {/* Footer hints(panel 內底部、shrink-0 不被擠掉)*/}
+            <div className="shrink-0" style={{
+              paddingTop: 14,
               display: 'flex', justifyContent: 'space-between',
               fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.06em',
               color: ATLAS_PAL.inkSoft, position: 'relative', zIndex: 1,
@@ -1391,16 +1398,17 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
               </div>
               <span>esc · skip</span>
             </div>
-          </>
+          </div>
         )}
 
         {/* ================= Chat mode(hasStarted=true):chat history + input + footer ================= */}
-        {/* 進入對話後、卡片區收起、改顯示 chat scroll;視覺保持 brutalist 風格(白卡 + 黑邊)*/}
+        {/* 進入對話後、卡片區收起、改顯示 chat scroll;視覺保持 brutalist 風格(白卡 + 黑邊)
+            外層 flex flex-col flex-1 min-h-0:讓 chat scroll area 真正能 flex-1、input 永遠在底 */}
         {hasStarted && (
-          <>
+          <div className="flex flex-col flex-1 min-h-0">
             {/* Breadcrumb-style header(對話模式縮小)*/}
-            <div style={{
-              display: 'flex', gap: 10, alignItems: 'center', marginBottom: 14,
+            <div className="shrink-0" style={{
+              display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12,
               fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em', color: ATLAS_PAL.inkSoft,
               position: 'relative', zIndex: 1,
             }}>
@@ -1552,8 +1560,8 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
               <div ref={chatEndRef} />
             </div>
 
-            {/* Chat-mode input(同 brutalist 樣式)*/}
-            <div style={{
+            {/* Chat-mode input(同 brutalist 樣式、shrink-0 永遠停在 panel 底部)*/}
+            <div className="shrink-0" style={{
               background: ATLAS_PAL.bgCard, border: `1px solid ${ATLAS_PAL.ink}`,
               display: 'flex', alignItems: 'flex-start', padding: '12px 14px', gap: 12,
               marginTop: 12, position: 'relative', zIndex: 1,
@@ -1589,7 +1597,7 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                 run ↵
               </button>
             </div>
-          </>
+          </div>
         )}
       </div>
     </div>
