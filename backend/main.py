@@ -2695,9 +2695,47 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 ## 4. Emit — 才產 YAML
 **必須**含 `YAML_READY` 標記。
 
-### Emit 前完整性檢查清單（強制做、不要跳過）
+### 🚨 最高優先級規則 — 「口頭 vs YAML 一致性」(違反 = 直接 bug)
 
-產 YAML 前先逐項檢查、缺東西不要 emit、退回 Discovery 再問：
+**典型錯誤 pattern**(在「修改既有 YAML」場景特別常見):
+- 上一輪 emit 過 YAML、使用者請你「把 X 改成 condition 節點」
+- 你在 narrative(回應正文)寫:「**好的、我把『判斷是否通知』改為 condition 節點、加上 expression / on_true**」
+- 但在 YAML block 內、那個 step 你**只 copy-paste 舊版**、或只寫了 `- name: 判斷是否通知` **後面什麼都沒**
+
+```yaml
+# ❌ 致命錯誤(口頭說改、實際空白)
+- name: 判斷是否通知
+- name: 發送 TG 通知
+  human_confirm: true
+
+# ✅ 正確(口頭說改、YAML 真寫滿)
+- name: 判斷是否通知
+  condition: true
+  expression: "{{ steps.比對價格變動.output.changed }} == True"
+  on_true: 發送 TG 通知
+- name: 發送 TG 通知
+  human_confirm: true
+```
+
+**為什麼這是致命錯誤**:server 端會偵測「step 只有 name、沒有 batch 也沒有任何節點 type flag」、直接 reject + 吐紅色警告給使用者。**使用者套不下去、整輪 emit 浪費**。
+
+**強制自檢(emit YAML 前最後一道):**
+逐 step 看、每一個 step 至少要有以下其中一個欄位、否則就是空殼:
+- `batch`(非空字串)
+- `condition: true`
+- `skill_mode: true`
+- `subagent: true`
+- `human_confirm: true`
+- `computer_use: true`
+- `visual_validation: true`
+- `outlook_automation: true`
+- `web_crawler: true`
+
+「修改既有 YAML」的場景特別容易犯這錯 — 你以為 narrative 描述就夠了、但**前端只渲染 YAML、不渲染你的 narrative**。narrative 只是給使用者看的說明、**真正生效的是 YAML block 內每個欄位**。
+
+### Emit 前完整性檢查清單(強制做、不要跳過)
+
+產 YAML 前先逐項檢查、缺東西不要 emit、退回 Discovery 再問:
 
 1. **使用者明確給的資訊（email、人名、檔案路徑、URL、數字、日期）必須字面寫進 YAML**，不可用 placeholder（不要 `boss@x.com`、要用使用者真的給的 `wilson_bai@asus.com`）
 2. **每個節點的必要欄位都要齊全**（看下方表）：
@@ -4194,8 +4232,32 @@ async def _chat_agent_loop(
                 parsed = _yaml.safe_load(yaml_content) or {}
                 raw_cfg = parsed.get("pipeline", parsed)
                 PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
+
+                # ── 空 step 偵測:AI 經典 bug — 嘴上說「改為 condition / 加 X 節點」
+                #    但實際 emit 的 YAML 內 step 只寫了 name、節點 type flag / batch 全漏掉。
+                #    這種 step 解析後 fallback 到空 script、UI 看起來像沒改。
+                _empty_steps: list[str] = []
+                for _s in (raw_cfg.get("steps") or []):
+                    if not isinstance(_s, dict):
+                        continue
+                    _name = str(_s.get("name", "")).strip()
+                    _has_batch = bool(str(_s.get("batch", "")).strip())
+                    _has_type_flag = any(_s.get(k) for k in (
+                        "condition", "skill_mode", "subagent", "human_confirm",
+                        "computer_use", "visual_validation", "outlook_automation",
+                        "web_crawler",
+                    ))
+                    if _name and not _has_batch and not _has_type_flag:
+                        _empty_steps.append(_name)
+                if _empty_steps:
+                    _names = "、".join(f"「{n}」" for n in _empty_steps)
+                    yaml_error = (
+                        f"⚠ step {_names} 沒有任何節點類型(batch / condition / skill_mode / ... 全空)。\n"
+                        f"AI 可能口頭說『改為 condition 節點』但實際只寫了 name、漏掉 condition: true + expression + on_true。\n"
+                        f"請跟 AI 說『{_empty_steps[0]} 還是空的、請補完整 condition 欄位(condition: true + expression + on_true)』。"
+                    )
             except Exception as e:
-                yaml_error = f"YAML 語法/結構錯誤：{type(e).__name__}：{str(e)[:300]}"
+                yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
 
     return {"reply": content, "has_yaml": has_yaml, "yaml_content": yaml_content, "yaml_error": yaml_error}
 
@@ -4385,6 +4447,27 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 parsed = _yaml.safe_load(yaml_content) or {}
                 raw_cfg = parsed.get("pipeline", parsed)
                 PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
+
+                _empty_steps: list[str] = []
+                for _s in (raw_cfg.get("steps") or []):
+                    if not isinstance(_s, dict):
+                        continue
+                    _name = str(_s.get("name", "")).strip()
+                    _has_batch = bool(str(_s.get("batch", "")).strip())
+                    _has_type_flag = any(_s.get(k) for k in (
+                        "condition", "skill_mode", "subagent", "human_confirm",
+                        "computer_use", "visual_validation", "outlook_automation",
+                        "web_crawler",
+                    ))
+                    if _name and not _has_batch and not _has_type_flag:
+                        _empty_steps.append(_name)
+                if _empty_steps:
+                    _names = "、".join(f"「{n}」" for n in _empty_steps)
+                    yaml_error = (
+                        f"⚠ step {_names} 沒有任何節點類型(batch / condition / skill_mode / ... 全空)。\n"
+                        f"AI 可能口頭說『改為 condition 節點』但實際只寫了 name、漏掉 condition: true + expression + on_true。\n"
+                        f"請跟 AI 說『{_empty_steps[0]} 還是空的、請補完整 condition 欄位(condition: true + expression + on_true)』。"
+                    )
             except Exception as e:
                 yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
 
