@@ -4245,7 +4245,6 @@ async def _chat_agent_loop(
                 #    但實際 emit 的 YAML 內 step 只寫了 name、節點 type flag / batch 全漏掉。
                 #    這種 step 解析後 fallback 到空 script、UI 看起來像沒改。
                 _empty_steps: list[str] = []
-                _spaced_steps: list[str] = []
                 for _s in (raw_cfg.get("steps") or []):
                     if not isinstance(_s, dict):
                         continue
@@ -4258,22 +4257,12 @@ async def _chat_agent_loop(
                     ))
                     if _name and not _has_batch and not _has_type_flag:
                         _empty_steps.append(_name)
-                    # step name 不能含任何空格(全形 / 半形)、否則 Jinja 變數會炸
-                    if _name and (" " in _name or "　" in _name):
-                        _spaced_steps.append(_name)
                 if _empty_steps:
                     _names = "、".join(f"「{n}」" for n in _empty_steps)
                     yaml_error = (
                         f"⚠ step {_names} 沒有任何節點類型(batch / condition / skill_mode / ... 全空)。\n"
                         f"AI 可能口頭說『改為 condition 節點』但實際只寫了 name、漏掉 condition: true + expression + on_true。\n"
                         f"請跟 AI 說『{_empty_steps[0]} 還是空的、請補完整 condition 欄位(condition: true + expression + on_true)』。"
-                    )
-                elif _spaced_steps:
-                    _names = "、".join(f"「{n}」" for n in _spaced_steps)
-                    _fixed_hint = "、".join(f"「{n}」→「{n.replace(' ', '').replace(chr(0x3000), '')}」" for n in _spaced_steps)
-                    yaml_error = (
-                        f"⚠ step name {_names} 含空格、會讓 Jinja 變數 {{{{ steps.<name>.output.path }}}} 炸(中英混合空格也算)。\n"
-                        f"請跟 AI 說『把步驟名空格全部去掉:{_fixed_hint},變數引用同步更新』。"
                     )
             except Exception as e:
                 yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
@@ -4468,7 +4457,6 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
 
                 _empty_steps: list[str] = []
-                _spaced_steps: list[str] = []
                 for _s in (raw_cfg.get("steps") or []):
                     if not isinstance(_s, dict):
                         continue
@@ -4481,21 +4469,12 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                     ))
                     if _name and not _has_batch and not _has_type_flag:
                         _empty_steps.append(_name)
-                    if _name and (" " in _name or "　" in _name):
-                        _spaced_steps.append(_name)
                 if _empty_steps:
                     _names = "、".join(f"「{n}」" for n in _empty_steps)
                     yaml_error = (
                         f"⚠ step {_names} 沒有任何節點類型(batch / condition / skill_mode / ... 全空)。\n"
                         f"AI 可能口頭說『改為 condition 節點』但實際只寫了 name、漏掉 condition: true + expression + on_true。\n"
                         f"請跟 AI 說『{_empty_steps[0]} 還是空的、請補完整 condition 欄位(condition: true + expression + on_true)』。"
-                    )
-                elif _spaced_steps:
-                    _names = "、".join(f"「{n}」" for n in _spaced_steps)
-                    _fixed_hint = "、".join(f"「{n}」→「{n.replace(' ', '').replace(chr(0x3000), '')}」" for n in _spaced_steps)
-                    yaml_error = (
-                        f"⚠ step name {_names} 含空格、會讓 Jinja 變數 {{{{ steps.<name>.output.path }}}} 炸(中英混合空格也算)。\n"
-                        f"請跟 AI 說『把步驟名空格全部去掉:{_fixed_hint},變數引用同步更新』。"
                     )
             except Exception as e:
                 yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"

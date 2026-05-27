@@ -1857,6 +1857,18 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     subagent: partial.subagent ?? false,
     subagentRole: partial.subagentRole ?? 'data_analyst',
     subagentMaxIter: partial.subagentMaxIter ?? 5,
+    // condition / 分支控制(YAML 來源:condition: true + expression+on_true/on_false 或 switch+cases)
+    // 之前 buildStep 漏寫這 8 個欄位 → parseYaml 設好 cur.condition=true 等、進 buildStep 後全被丟掉、
+    // stepsToYaml 一看 s.condition===undefined 就完全不寫 condition 區塊 → YAML round-trip 丟失條件節點
+    condition: partial.condition ?? false,
+    expression: partial.expression ?? '',
+    onTrue: partial.onTrue ?? '',
+    onFalse: partial.onFalse ?? '',
+    switch: partial.switch ?? '',
+    cases: partial.cases ?? {},
+    default: partial.default ?? '',
+    next: partial.next ?? '',
+    llmRole: partial.llmRole ?? 'primary',
     timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : (partial.subagent ? 600 : 300))))),
     // YAML 沒寫 retry 時的 fallback — 跟 newSkillData / newStepData 跟 backend
     // PipelineStep.retry default 一致（都是 1）。讓「貼 YAML 進來」跟「拉新節點」
