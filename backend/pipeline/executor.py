@@ -2685,9 +2685,9 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 
         # ── Phase A.2 — Native function calling 切換點 ──────────────────
         # 共用 SUBAGENT_LOOP_MODE flag(SUBAGENT / SKILL 同個 .env 設定即可)。
-        # native: 跑下方獨立 inner function、用 LangChain bind_tools()、消滅 <tool> 文字協議
-        # text(預設): 繼續走原本 SKILL loop(向後相容)
-        _skill_loop_mode = (os.environ.get("SUBAGENT_LOOP_MODE", "text") or "text").strip().lower()
+        # native(**預設**,#157): 跑下方獨立 inner function、用 LangChain bind_tools()、消滅 <tool> 文字協議
+        # text(opt-out): 繼續走原本 SKILL loop(向後相容、.env 設 SUBAGENT_LOOP_MODE=text 可退回)
+        _skill_loop_mode = (os.environ.get("SUBAGENT_LOOP_MODE", "native") or "native").strip().lower()
         if _skill_loop_mode == "native":
             logger.info(f"[{step_name}] 🚀 SKILL loop 用 [NATIVE] function calling 模式")
             return _attach_trace(await _execute_skill_native_loop(

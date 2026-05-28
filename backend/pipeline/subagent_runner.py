@@ -388,11 +388,11 @@ async def run_subagent(
     """執行 subagent loop。
 
     SUBAGENT_LOOP_MODE 環境變數控制協議:
-    - "text"(預設):文字 <tool>...</tool> 協議、自寫 parser(向後相容)
-    - "native":LangChain bind_tools() native function calling(Phase A.1)
-                output token -30%(無 <tool>tag),input prompt 砍冗餘(A.3 後)、
-                LLM 不能偽造 stdout / 不能寫多個 tool 混亂 parser
-    切換方式:.env 加 SUBAGENT_LOOP_MODE=native、重啟 backend。
+    - "native"(**預設**,#157):LangChain bind_tools() native function calling(Phase A.1)
+                output token -30%(無 <tool>tag)、LLM 不能偽造 stdout / 不能寫多個 tool 混亂 parser、
+                強模型(Sonnet 4.6)在 skill/subagent loop 改成小步呼叫工具、不再單次狂寫(實測 2026-05-28)
+    - "text"(opt-out):舊文字 <tool>...</tool> 協議、自寫 parser(向後相容)
+    切換回 text:.env 加 SUBAGENT_LOOP_MODE=text、重啟 backend。
 
     Args:
         role_name: 角色名（data_analyst / coder / researcher / critic / planner）
@@ -406,8 +406,8 @@ async def run_subagent(
         timeout: 整體上限秒數（推導 tool_timeout）
         step_logger: per-step logger（傳給 _execute_skill_tool）
     """
-    # Phase A.1 feature flag — native function calling 開關
-    _mode = (os.environ.get("SUBAGENT_LOOP_MODE", "text") or "text").strip().lower()
+    # Phase A.1 feature flag — native function calling 開關(#157:預設改 native、text 可 opt-out)
+    _mode = (os.environ.get("SUBAGENT_LOOP_MODE", "native") or "native").strip().lower()
     if _mode == "native":
         return await _run_subagent_native(
             role_name=role_name, task=task, max_iter=max_iter,
