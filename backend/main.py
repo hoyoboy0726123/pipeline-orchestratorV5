@@ -3021,11 +3021,19 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
   直接餵下游、再掛 parser 是多餘的 LLM 步驟
 
 **多站比較場景**（如「比較 3 個購物站的 X 價格」）：
-- 3 個**不同站**結構不同 → 要 **3 組「爬蟲 + scraped-content-parser」**、各站各一支 parser
-- **不要**把 3 個不同站塞進一個爬蟲節點的多 URL（會合併成一檔、一支 parser 解不了 3 種結構）
-- 各 parser 輸出**不同檔名**（pchome.json / amazon.json / ...）
-- 最後一個 skill 節點當「比較 / 分析節點」、用多個 `{{ steps.X.output.path }}` 讀進 3 個 JSON 彙整
-- runner 是線性執行 → 節點排成一直線即可（3 站依序爬、非真平行、但結果一樣）
+- N 個**不同站**結構不同 → 要 **N 組「爬蟲 + 解析」**、各站各一支(解析用 web_parser subagent 或 scraped-content-parser skill 皆可)
+- **不要**把 N 個不同站塞進一個爬蟲節點的多 URL（會合併成一檔、一支 parser 解不了 N 種結構）
+- 各解析輸出**不同檔名**（pchome.json / momo.json / ...）
+- 最後一個節點當「比較 / 分析節點」(data_differ / competitor_analyst)、用多個 `{{ steps.X.output.path }}` 讀進 N 個 JSON 彙整
+- runner 是線性執行 → 節點排成一直線即可（N 站依序爬、非真平行、但結果一樣）
+
+**🚨 多站比較兩條鐵律(實測 compete 案踩過、不照做會產假比對):**
+1. **每站必須有具體 URL**。使用者只給「另一電商 / 別家 / 競品」這種**模糊指稱、沒給網址** →
+   **先 `ask_user` 問「第 N 站是哪個站的哪個頁面 URL?」**,拿到再排節點。**絕不可**自己拿同一個站
+   充當第二站、或瞎掰一個 URL。
+2. **禁止把同一來源的資料複製進多個檔**。實測壞案:AI 只真的爬了 1 站、卻把同一筆資料同時寫進
+   `pchome.json` 跟 `ecommerce_b.json` → data_differ 比兩個一樣的檔 → 假「無變動」報告(看起來有跑、其實沒比)。
+   每個輸出檔**必須來自它自己那站的獨立爬蟲節點**、N 站就是 N 個 web_crawler 節點各抓各的 URL。
 
 ## 5. 影片爬蟲節點（web_crawler，wc_mode: video）
 **使用者說**：貼 YouTube / Vimeo / Bilibili 連結「下載」「抓影片」
