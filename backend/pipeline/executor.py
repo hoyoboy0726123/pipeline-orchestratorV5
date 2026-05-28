@@ -250,10 +250,10 @@ ASK_USER_TIMEOUT = 3600   # 單次等待使用者回答的逾時（秒）
 #   OFF：輕量 — answer + URL 清單（~500 字）
 #   ON： 完整 — answer + URL + 每則文章完整原文（~15000 字）
 #        由 Tavily 端直接回完整內容（include_raw_content=True），Agent 不用自己寫爬蟲
-WEB_SEARCH_MAX_PER_STEP = 5             # 單一 skill step 最多呼叫次數
+WEB_SEARCH_MAX_PER_STEP = 8             # 單一 skill step 最多呼叫次數(深度研究要拆多子題各搜、5→8)
 WEB_SEARCH_OUTPUT_CHAR_CAP_LIGHT = 2000 # OFF 模式：輕量硬上限
-WEB_SEARCH_OUTPUT_CHAR_CAP_FULL = 20000 # ON 模式：完整內容硬上限（雲端 context 足夠）
-WEB_SEARCH_PER_RESULT_FULL_CHARS = 3000 # ON 模式：每則原文截斷長度
+WEB_SEARCH_OUTPUT_CHAR_CAP_FULL = 30000 # ON 模式：完整內容硬上限(放寬 20K→30K 容納更多來源)
+WEB_SEARCH_PER_RESULT_FULL_CHARS = 4000 # ON 模式：每則原文截斷長度(3000→4000)
 WEB_SEARCH_TITLE_CHARS = 100            # Title 顯示最大長度
 
 
@@ -1337,7 +1337,7 @@ def _skill_web_search(tool_input: str, call_count: int = 0,
     query = (params.get("query") or "").strip()
     if not query:
         return "[web_search 錯誤] query 不可為空"
-    max_results = max(1, min(int(params.get("max_results", 5)), 5))
+    max_results = max(1, min(int(params.get("max_results", 5)), 8))
     # search_depth 預設讀 settings.web_search_deep_default(預設 True、advanced)、
     # LLM 可以在 input 內傳 search_depth 個別 override(基本上不必、預設就好)。
     _deep_default = bool(s.get("web_search_deep_default", True))

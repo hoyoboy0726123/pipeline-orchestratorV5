@@ -1018,7 +1018,11 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
     q = (query or "").strip()
     if not q:
         return "[web_search 錯誤] query 不可為空"
-    n = max(1, min(int(max_results or 5), 5))
+    # 完整內容模式:caller 沒明確要 full、就看設定頁的「完整內容模式」開關
+    # (修:原本只讀 caller 參數、UI 開了也沒用 — 對齊 _skill_web_search 的設定讀取)
+    if not full_content:
+        full_content = bool(s.get("web_search_full_content_default", False))
+    n = max(1, min(int(max_results or 5), 8))
 
     # 搜尋深度:讀 settings.web_search_deep_default(預設 True、advanced 模式)
     # Atlas 定位深度研究、預設 ON;帳單失控時設定頁關掉。
@@ -1067,7 +1071,7 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
         if full_content:
             raw = (r.get("raw_content") or r.get("content") or "").strip()
             if raw:
-                lines.append(f"    {raw[:2500]}{'...' if len(raw) > 2500 else ''}")
+                lines.append(f"    {raw[:6000]}{'...' if len(raw) > 6000 else ''}")
     return "\n".join(lines)
 
 
