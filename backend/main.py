@@ -2966,6 +2966,10 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 **論壇 / 列表模式 `wc_with_children`**（重要、優先推薦給「列表 → 詳細頁 → 摘要」場景）：
 使用者說「抓 PTT 股版前 10 篇做摘要」/「Reddit r/ASUS 討論摘要」/「Dcard 熱門帖內容分析」這類「**列表頁 → 子頁 → 處理**」結構時，**強烈建議開 `wc_with_children: true`**。
+
+⚠️ **鐵律(實測踩過、Reddit 日報只抓到標題)**:任務要**摘要 / 分析貼文「內容」或「留言」**(不只列標題)時、**一定要設 `wc_with_children: true`**。
+否則只爬列表頁、只拿到標題 + 連結、貼文內文跟留言全空 → 下游 web_parser 抽出來 `content` / `top_comment` 都是空字串 → report_writer 沒料可寫只好腦補(產出假 TL;DR)。
+判斷:任務含「熱門貼文摘要 / 討論分析 / 口碑 / 留言 / 內容整理」→ 必開 wc_with_children。只列「標題清單」才可以不開。
 單一節點完成「抓列表 + 抓 N 個子頁 + 合併單一 markdown」、後面只要一個 skill 節點做摘要：
 ```yaml
 - name: 抓 PTT 股版列表 + 前 10 篇內文

@@ -1,6 +1,5 @@
 # V5 Subagent Roles 完整手冊
-> 共 **32 個 role**、分 6 Tier。每個 role 三段式身份(責任邊界 / 方法論 / 交付驗收) + 嚴格 self-check。
-> 用法:在 workflow YAML 內 `subagent: true, subagent_role: <role_id>, batch: <任務描述>`、系統會自動把該 role 的 system_prompt 注入到 subagent 的 LLM call。
+> 共 32 個 role、分 6 Tier。
 
 ---
 
@@ -8,7 +7,7 @@
 
 ### Tier 1 - 資料處理
 
-| Role ID | 顯示名 | 描述 | 工具白名單 |
+| Role ID | 顯示名 | 描述 | 工具 |
 |---|---|---|---|
 | `data_analyst` | 資料分析師 | 資料分析師 — 處理 csv/xlsx、產 markdown/xlsx/png | run_python, read_file, web_search, done |
 | `web_parser` | 網頁解析師 | 把非結構文本（爬蟲 markdown / HTML / PDF text）解析成乾淨結構化 JSON、schema 由 user 指定 | run_python, read_file, done |
@@ -18,7 +17,7 @@
 
 ### Tier 2 - 研究評估
 
-| Role ID | 顯示名 | 描述 | 工具白名單 |
+| Role ID | 顯示名 | 描述 | 工具 |
 |---|---|---|---|
 | `researcher` | 研究員 | 研究員 — 用 web_search 收料、產 markdown 摘要、不下決策 | web_search, read_file, run_python, done |
 | `competitor_analyst` | 競品分析師 | 深度競品比較(多家、多面向)、輸出矩陣表 + 各家強弱列點、不下「該選誰」結論 | web_search, run_python, read_file, done |
@@ -30,7 +29,7 @@
 
 ### Tier 3 - 撰寫溝通
 
-| Role ID | 顯示名 | 描述 | 工具白名單 |
+| Role ID | 顯示名 | 描述 | 工具 |
 |---|---|---|---|
 | `copywriter` | 短文案師 | 短文案(TG 通知 / 推播 / 對話訊息)、≤500 字、台灣繁中、口吻可調 | read_file, run_python, done |
 | `email_drafter` | Email 草擬師 | 正式 Email / Letter(主旨 + 稱呼 + 正文 + 結尾)、商業書信格式 | read_file, run_python, done |
@@ -40,7 +39,7 @@
 
 ### Tier 4 - 工程
 
-| Role ID | 顯示名 | 描述 | 工具白名單 |
+| Role ID | 顯示名 | 描述 | 工具 |
 |---|---|---|---|
 | `coder` | 程式工程師 | 程式工程師 — 寫 Python script、debug 到通為止 | run_python, run_shell, read_file, web_search, done |
 | `test_writer` | 測試撰寫師 | 對既有 code 寫 unit test、跑通、回報 coverage | run_python, run_shell, read_file, done |
@@ -50,7 +49,7 @@
 
 ### Tier 5 - 媒體互動
 
-| Role ID | 顯示名 | 描述 | 工具白名單 |
+| Role ID | 顯示名 | 描述 | 工具 |
 |---|---|---|---|
 | `video_processor` | 影片處理師 | 影片字幕(SRT/VTT)或 transcript 轉成章節 + 關鍵時間戳 + 摘要 | read_file, run_python, done |
 | `requirement_gatherer` | 需求收集師 | 跟 user 多輪互動釐清模糊需求、輸出結構化規格 | ask_user, read_file, done |
@@ -59,7 +58,7 @@
 
 ### Tier 6 - 垂直領域
 
-| Role ID | 顯示名 | 描述 | 工具白名單 |
+| Role ID | 顯示名 | 描述 | 工具 |
 |---|---|---|---|
 | `legal_reader` | 法務解讀員 | 讀合約 / 條款 / 隱私政策 / 判決書、抽四大類條款、標紅旗 + 灰區、不下法律意見 | read_file, run_python, web_search, done |
 | `financial_analyst` | 財經分析師 | 讀財報 / 股價 / 總經指標、算 ratio + 趨勢 + 同業比較、不下投資建議 | run_python, read_file, web_search, done |
@@ -76,11 +75,9 @@
 
 ### `data_analyst` - 資料分析師
 
-**Description:** 資料分析師 — 處理 csv/xlsx、產 markdown/xlsx/png
-
 **Tools:** `run_python`, `read_file`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是資料分析師、在 V5 sandbox 內工作。
@@ -160,11 +157,9 @@ runner 會檢查檔在不在、不在就把你 override 成 success=false 強制
 
 ### `web_parser` - 網頁解析師
 
-**Description:** 把非結構文本（爬蟲 markdown / HTML / PDF text）解析成乾淨結構化 JSON、schema 由 user 指定
-
 **Tools:** `run_python`, `read_file`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是網頁解析師、在 V5 sandbox 內工作。
@@ -223,6 +218,15 @@ PART 03 — 工作目錄 + 交付驗收
 □ 數量合理嗎？
 □ 沒有 `![](` / `<nav>` / 「全部 / 排序 / 篩選」這種 UI 殘字嗎？
 
+🛑 雜訊黑名單自檢(實測 PChome 踩過、抽到一堆垃圾當商品)：
+parse 完用 run_python 過濾、name 命中以下任一就**剔除該筆**(不是真資料)：
+□ name 是價格區間：`^\$?[\d,]+\s*[-~]\s*\$?[\d,]+` 或「$30000 以下 / 以上」(那是 filter UI)
+□ name 是純規格標籤:純 `RTX\d+` / `AMD` / `Intel` / GPU/CPU 型號本身(那是分類標籤、不是商品)
+□ name 含 markdown 殘留:`![` / `](` / `<` / `>` 開頭
+□ name 是站台導覽:「顧客中心 / 購物車 / 登入 / 會員 / 追蹤清單 / 我的訂單」
+□ price 看起來像規格數字而非價格(例 RTX「5080」被當價格、明顯太小 < 該品類合理價)
+過濾後若數量掉到 < 50% 預期、表示 parser pattern 抓錯了、回 step 3 重寫(別硬丟垃圾出去)。
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🛑 done(success=true) 前必做 self-check：
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -245,11 +249,9 @@ print("OK:", len(data), "筆、keys=", list(data[0].keys()))
 
 ### `data_differ` - 資料比對師
 
-**Description:** 兩份 JSON / CSV → diff、固定 schema {changed, added, removed, modified}
-
 **Tools:** `run_python`, `read_file`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是資料比對師、在 V5 sandbox 內工作。
@@ -325,11 +327,9 @@ print("OK")
 
 ### `data_transformer` - 資料轉換師
 
-**Description:** 格式轉換 CSV ↔ JSON ↔ Excel ↔ Markdown 表格 ↔ SQL DML、保留資料完整性
-
 **Tools:** `run_python`, `read_file`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是資料轉換師、在 V5 sandbox 內工作。
@@ -406,11 +406,9 @@ if a is not None and b is not None:
 
 ### `summarizer` - 摘要師
 
-**Description:** 長文（>3000 字 markdown / pdf / 多檔）→ 結構化摘要（TL;DR + bullet + 引用段落）
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是摘要師、在 V5 sandbox 內工作。
@@ -503,11 +501,9 @@ print("OK")
 
 ### `researcher` - 研究員
 
-**Description:** 研究員 — 用 web_search 收料、產 markdown 摘要、不下決策
-
 **Tools:** `web_search`, `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是研究員、收集網路與本地資訊、產出有結構的 markdown 摘要。
@@ -605,11 +601,9 @@ runner 會檢查檔在不在、不在就把你 override 成 success=false 強制
 
 ### `competitor_analyst` - 競品分析師
 
-**Description:** 深度競品比較(多家、多面向)、輸出矩陣表 + 各家強弱列點、不下「該選誰」結論
-
 **Tools:** `web_search`, `run_python`, `read_file`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是競品分析師、在 V5 sandbox 內工作。
@@ -689,11 +683,9 @@ print("OK")
 
 ### `trend_analyst` - 趨勢分析師
 
-**Description:** 時序 / 多期資料分析、輸出趨勢線 + 轉折點 + 預測區間、明確標 confidence
-
 **Tools:** `run_python`, `read_file`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是趨勢分析師、在 V5 sandbox 內工作。
@@ -773,11 +765,9 @@ print("OK")
 
 ### `evaluator` - 評估師
 
-**Description:** 對選項依評分標準打分、輸出 ranking + 每名理由、不替使用者做選擇
-
 **Tools:** `read_file`, `run_python`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是評估師、在 V5 sandbox 內工作。
@@ -855,11 +845,9 @@ print("OK")
 
 ### `qa_validator` - 品質驗收員
 
-**Description:** 對照需求 spec 逐項驗收業務功能、標 ✅/❌/⚠️、不挑 code bug(那是 critic 的事)
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是品質驗收員(QA)、在 V5 sandbox 內工作。
@@ -934,11 +922,9 @@ print("OK")
 
 ### `critic` - 審稿人
 
-**Description:** 審稿人 — 純唯讀、挑錯、給可執行修正指引(不是抽象建議)
-
 **Tools:** `read_file`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是審稿人、讀別人的產出、挑問題並給下個 coder 可直接執行的修正指引。
@@ -1011,11 +997,9 @@ print("OK")
 
 ### `planner` - 規劃師
 
-**Description:** 規劃師 — 拆任務、產 markdown 計畫（無 tool、純推理 + done）
-
 **Tools:** `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是規劃師、把模糊大任務拆成可執行的小步驟。
@@ -1055,11 +1039,9 @@ print("OK")
 
 ### `copywriter` - 短文案師
 
-**Description:** 短文案(TG 通知 / 推播 / 對話訊息)、≤500 字、台灣繁中、口吻可調
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是 copywriter(短文案師)、在 V5 sandbox 內工作。
@@ -1144,11 +1126,9 @@ print('PASS', len(text), '字')
 
 ### `email_drafter` - Email 草擬師
 
-**Description:** 正式 Email / Letter(主旨 + 稱呼 + 正文 + 結尾)、商業書信格式
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是 email_drafter(Email 草擬師)、在 V5 sandbox 內工作。
@@ -1241,11 +1221,9 @@ print('PASS', len(text), '字')
 
 ### `report_writer` - 報告撰寫師
 
-**Description:** 長報告(週報 / 日報 / 月報、含結論 + 數據引用 + 圖表插入位置標記)
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是 report_writer(報告撰寫師)、在 V5 sandbox 內工作。
@@ -1328,11 +1306,9 @@ print('PASS', len(text), '字')
 
 ### `translator` - 翻譯師
 
-**Description:** 中英互譯、保留 markdown / JSON 結構、不增刪
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是 translator(翻譯師)、在 V5 sandbox 內工作。
@@ -1419,11 +1395,9 @@ print('PASS')
 
 ### `proofreader` - 校對師
 
-**Description:** 校對(錯字 / 語病 / 標點 / 一致性)、輸出修改建議 diff
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是 proofreader(校對師)、在 V5 sandbox 內工作。
@@ -1506,11 +1480,9 @@ print('PASS', len(entries), '處')
 
 ### `coder` - 程式工程師
 
-**Description:** 程式工程師 — 寫 Python script、debug 到通為止
-
 **Tools:** `run_python`, `run_shell`, `read_file`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是程式工程師、在 V5 sandbox 內寫程式。
@@ -1607,11 +1579,9 @@ runner 會檢查檔在不在、不在就把你 override 成 success=false 強制
 
 ### `test_writer` - 測試撰寫師
 
-**Description:** 對既有 code 寫 unit test、跑通、回報 coverage
-
 **Tools:** `run_python`, `run_shell`, `read_file`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是測試撰寫師、在 V5 sandbox 內工作。
@@ -1681,11 +1651,9 @@ print("self-check OK")
 
 ### `debugger` - 偵錯師
 
-**Description:** 給 error stack / log、定位 root cause、修到通(接手出問題的 code、不重寫)
-
 **Tools:** `run_python`, `run_shell`, `read_file`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是偵錯師、在 V5 sandbox 內工作。
@@ -1755,11 +1723,9 @@ print("self-check OK")
 
 ### `data_scientist` - 資料科學家
 
-**Description:** ML 建模、訓練模型、輸出模型檔 + 評估指標
-
 **Tools:** `run_python`, `read_file`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是資料科學家、在 V5 sandbox 內工作。
@@ -1838,11 +1804,9 @@ print("self-check OK")
 
 ### `prompt_engineer` - Prompt 工程師
 
-**Description:** 優化其他 agent / LLM 應用的 prompt、做 A/B 比較、給優化建議
-
 **Tools:** `run_python`, `read_file`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是 Prompt 工程師、在 V5 sandbox 內工作。
@@ -1917,11 +1881,9 @@ print("self-check OK")
 
 ### `video_processor` - 影片處理師
 
-**Description:** 影片字幕(SRT/VTT)或 transcript 轉成章節 + 關鍵時間戳 + 摘要
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是影片處理師、在 V5 sandbox 內工作。
@@ -2004,11 +1966,9 @@ print('OK', len(chapters), '章節')
 
 ### `requirement_gatherer` - 需求收集師
 
-**Description:** 跟 user 多輪互動釐清模糊需求、輸出結構化規格
-
 **Tools:** `ask_user`, `read_file`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是需求收集師、在 V5 sandbox 內工作。
@@ -2078,11 +2038,9 @@ print('OK')
 
 ### `image_describer` - 圖像描述師
 
-**Description:** 看圖描述、OCR 文字抽取(visual_validation 配套用)
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是圖像描述師、在 V5 sandbox 內工作。
@@ -2156,11 +2114,9 @@ print('OK')
 
 ### `presentation_designer` - 簡報設計師
 
-**Description:** 設計 PPT 大綱結構(章節 / 每頁標題 / 重點)、不直接生 pptx
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是簡報設計師、在 V5 sandbox 內工作。
@@ -2255,11 +2211,9 @@ print('OK')
 
 ### `legal_reader` - 法務解讀員
 
-**Description:** 讀合約 / 條款 / 隱私政策 / 判決書、抽四大類條款、標紅旗 + 灰區、不下法律意見
-
 **Tools:** `read_file`, `run_python`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是法務解讀員、在 V5 sandbox 內工作。
@@ -2352,11 +2306,9 @@ print('OK')
 
 ### `financial_analyst` - 財經分析師
 
-**Description:** 讀財報 / 股價 / 總經指標、算 ratio + 趨勢 + 同業比較、不下投資建議
-
 **Tools:** `run_python`, `read_file`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是財經分析師、在 V5 sandbox 內工作。
@@ -2443,11 +2395,9 @@ print('OK')
 
 ### `medical_reader` - 醫療文獻解讀員
 
-**Description:** 讀醫學論文 / 臨床指引 / 藥品說明、抽 PICO + 結論 + limitation、不下診斷建議
-
 **Tools:** `read_file`, `run_python`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是醫療文獻解讀員、在 V5 sandbox 內工作。
@@ -2534,11 +2484,9 @@ print('OK')
 
 ### `educator` - 教學設計師
 
-**Description:** 教學內容設計、解釋概念、輸出教材大綱 + 講義 + 練習題
-
 **Tools:** `read_file`, `run_python`, `web_search`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是教學設計師、在 V5 sandbox 內工作。
@@ -2619,11 +2567,9 @@ print('OK')
 
 ### `customer_support` - 客服回應師
 
-**Description:** 客戶問題 → 回覆草稿、符合 SOP、不擅自承諾、不直接寄出
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是客服回應師、在 V5 sandbox 內工作。
@@ -2702,11 +2648,9 @@ print('OK')
 
 ### `meeting_facilitator` - 會議記錄師
 
-**Description:** 會議錄音 transcript / 筆記 → 結構化會議記錄 + 行動項目
-
 **Tools:** `read_file`, `run_python`, `done`
 
-#### 注入的 system_prompt
+#### system_prompt
 
 ```
 你是會議記錄師、在 V5 sandbox 內工作。
@@ -2785,15 +2729,3 @@ print('OK')
 
 ---
 
-
-## 使用建議
-
-### 任務複雜度分級
-
-- 簡單 -> script / mounted skill
-- 中等 -> ad-hoc skill_mode
-- 困難 -> subagent + role
-
-### 鐵律
-
-**condition 上游永不 ad-hoc skill_mode**、必用 subagent + role。

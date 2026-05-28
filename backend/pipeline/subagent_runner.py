@@ -296,6 +296,21 @@ def _build_user_prompt(
     return "\n".join(parts)
 
 
+def _inject_today_date(system_prompt: str) -> str:
+    """注入當前日期 — subagent(report_writer / data_analyst 等)寫報告日期時
+    別用訓練記憶的舊日期(實測踩過:報告寫成 2024-05-22)。放 prompt 最前面。"""
+    from datetime import datetime as _dt
+    _now = _dt.now()
+    _block = (
+        f"【當前日期時間(host 時鐘)】{_now.strftime('%Y-%m-%d %H:%M:%S')}"
+        f"(週{'一二三四五六日'[_now.weekday()]})\n"
+        "  寫報告 / 日報 / 任何需要日期的產物時、**一律以上面這個日期為準**、"
+        "絕不要用你訓練資料記憶的日期(例:不要寫 2024-xx-xx)。需要程式取日期就用 "
+        "datetime.now()、不要憑記憶。\n\n"
+    )
+    return _block + system_prompt
+
+
 def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
     """若 settings.skill_sandbox_mode='wsl_docker'、追加沙盒環境提示（共用 skill 的格式）。"""
     try:
@@ -407,7 +422,7 @@ async def run_subagent(
 
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
 
-    system_prompt = _maybe_inject_sandbox_hint(role.get("system_prompt", ""))
+    system_prompt = _inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
 
     tool_timeout = _compute_tool_timeout(timeout)
@@ -851,7 +866,7 @@ async def _run_subagent_native(
         f"max_iter={max_iter}, tools={sorted(allowed_tools)})"
     )
 
-    system_prompt = _maybe_inject_sandbox_hint(role.get("system_prompt", ""))
+    system_prompt = _inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
     tool_timeout = _compute_tool_timeout(timeout)
 
