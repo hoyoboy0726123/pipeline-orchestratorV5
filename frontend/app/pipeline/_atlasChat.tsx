@@ -834,9 +834,9 @@ const ATLAS_ACTIONS: AtlasAction[] = [
   {
     id: 'chain', title: 'Python 腳本串接', desc: '把幾個 .py 串成一條工作流', tag: 'Workflow',
     examples: [
-      '跑 V5 內建 Q1 財務四階段(stage1→2→3→4)展示純腳本串接',
-      'finance pipeline 第 3 步後插 AI 健康判讀 + 條件分流',
-      '腳本串接 + 失敗 Telegram 通知 + 每天 9 點排程',
+      'AI 生 3 個示範腳本(產資料 → 清洗 → 報表)串成一條 script 工作流',
+      '示範腳本串接 + 第 2 步後插 AI 健康判讀 + 條件分流',
+      '示範腳本串接 + 失敗 Telegram 通知',
     ],
   },
   {

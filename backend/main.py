@@ -3525,6 +3525,44 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
   next: end             # 跑完直接結束、不會再掉進「簡易處理」
 ```
 
+### 🚨 condition 拓樸自檢(emit 前強制跑、最常產出孤兒節點)
+
+condition 節點後面的每個 step、**必須**能被以下其中一種方式「連到」、否則就是**孤兒節點**(永遠跑不到 or 語意矛盾):
+1. 被某個 condition 的 `on_true` / `on_false` / `cases` / `default` 指到
+2. 被某個非 condition step 的 `next: <step名>` 指到
+3. 是某個分支步驟的「線性下一步」(分支 step 沒寫 `next: end` 時會自然掉進來)
+
+**反 pattern**(實測 AI 產出過、會壞):
+```yaml
+- name: 判斷                      # condition
+  condition: true
+  expression: "..."
+  on_true: 發通知
+  on_false: 更新快照
+- name: 發通知                    # ✓ 被 on_true 指到
+  human_confirm: true
+- name: 更新快照                  # ✓ 被 on_false 指到
+  batch: ...
+  next: end
+- name: 寄信                      # ❌ 孤兒!沒被任何 on_true/on_false/next 指到、
+  outlook_automation: true        #    又接在 next:end 的「更新快照」後面、永遠跑不到
+```
+
+**正 pattern**:孤兒 step 該明確掛在某分支末端、或被 next 串起來:
+```yaml
+- name: 判斷
+  condition: true
+  expression: "..."
+  on_true: 發通知
+- name: 發通知                    # on_true 目標
+  human_confirm: true
+  # 沒 next:end → 跑完線性掉進「寄信」
+- name: 寄信                      # ✓ 線性接在「發通知」後、true 分支的延續
+  outlook_automation: true
+```
+
+**emit 前逐 step 檢查**:每個在 condition 之後的 step、問自己「它怎麼被執行到?」答不出來 = 孤兒 = 改拓樸。
+
 **何時用 condition**：使用者明說「如果 / 否則 / 依情況 / 超過就 / 分支」這類條件邏輯時才用。
 單純線性流程不要硬加。
 
