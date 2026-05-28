@@ -54,6 +54,16 @@ def _looks_like_done(reply: str) -> bool:
 SKILL_CONTEXT_KEEP_RECENT_FULL = 3
 SKILL_CONTEXT_PREVIEW_CHARS = 200
 
+# Prose-before-tool 守門(backport 自 subagent_runner、task #160)。
+# native FC 下「prose before tool」= AIMessage.content（伴隨 tool_calls 的長篇文字）。
+# 共用 subagent 的環境變數 SUBAGENT_PROSE_CAP_MODE(soft/enforce/off、預設 soft),
+# 不另開旗標。實測 Sonnet 4.6 在 skill loop 單輪寫 5 萬字 parser → 拖斷連線 → 燒額度。
+_SKILL_PROSE_BEFORE_TOOL_THRESHOLD = 3000   # 跟 subagent 同閾值
+_SKILL_PROSE_BEFORE_TOOL_LIMIT = 2          # 連 N 輪違規才中止(enforce)
+_SKILL_PROSE_CAP_MODE = (os.environ.get("SUBAGENT_PROSE_CAP_MODE", "soft").strip().lower())
+if _SKILL_PROSE_CAP_MODE not in ("soft", "enforce", "off"):
+    _SKILL_PROSE_CAP_MODE = "soft"
+
 
 # ── 錯誤分類 + 對症提示 ───────────────────────────────────────────────────────
 # 連續 2 次同類錯誤時、注入具體的恢復策略給 LLM(取代「換策略」這種空話)
@@ -2671,6 +2681,7 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 
         # 「完成」字樣連續輪數計數 — 連 2 輪 LLM 口頭說完成但沒下 done tag 就強制收尾
         done_keyword_streak = 0
+        prose_before_tool_violations = 0   # task #160:第一個 <tool> 前 prose 過長累計
 
         # ── Phase A.2 — Native function calling 切換點 ──────────────────
         # 共用 SUBAGENT_LOOP_MODE flag(SUBAGENT / SKILL 同個 .env 設定即可)。
@@ -2815,6 +2826,37 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             else:
                 # 有 tool call、清掉 done streak
                 done_keyword_streak = 0
+
+            # ── Prose-before-tool 守門(task #160、backport 自 subagent text 版)──
+            # 第一個 <tool> 前 prose 過長 = LLM「想很多/寫長篇才動手」(Sonnet 4.6 寫 5 萬字
+            # parser 案例)、燒 output token + 拖斷長連線。soft 只 log、enforce 連 _LIMIT 輪中止。
+            if _SKILL_PROSE_CAP_MODE != "off":
+                _tool_pos = reply.find("<tool>")
+                _prose_chars = len(reply[:_tool_pos].strip()) if _tool_pos > 0 else 0
+                if _prose_chars > _SKILL_PROSE_BEFORE_TOOL_THRESHOLD:
+                    prose_before_tool_violations += 1
+                    logger.warning(
+                        f"[{step_name}] ⚠ 第 {iteration + 1} 輪 tool 前 prose {_prose_chars:,} 字"
+                        f"(上限 {_SKILL_PROSE_BEFORE_TOOL_THRESHOLD})、累計違規 "
+                        f"{prose_before_tool_violations}/{_SKILL_PROSE_BEFORE_TOOL_LIMIT} "
+                        f"[mode={_SKILL_PROSE_CAP_MODE}]"
+                    )
+                    if (_SKILL_PROSE_CAP_MODE == "enforce"
+                            and prose_before_tool_violations >= _SKILL_PROSE_BEFORE_TOOL_LIMIT):
+                        err_msg = (
+                            f"連續 {_SKILL_PROSE_BEFORE_TOOL_LIMIT} 輪 tool 前 prose 超過 "
+                            f"{_SKILL_PROSE_BEFORE_TOOL_THRESHOLD} 字、強制中止避免燒 token / 拖斷連線。"
+                            f"解析請直接寫進 run_python 程式碼、不要在 reply 寫長篇 parser / 解釋。"
+                        )
+                        logger.error(f"[{step_name}] ✗ {err_msg}")
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout) if all_stdout else reply[:500],
+                            stderr=err_msg,
+                            agent_concluded_fail=True,
+                        )
+                else:
+                    prose_before_tool_violations = 0
 
             # 多工具偵測：LLM 一次塞 run_python + done 是惡習（會把假成功訊息混進 done），
             # 預設只跑第一個 tool（既有行為）、明確告訴 LLM「這次只跑 X、忽略 Y」
@@ -3475,6 +3517,7 @@ async def _execute_skill_native_loop(
     last_run_shell_ok: Optional[bool] = None
     last_successful_code: Optional[str] = None  # 預留 recipe save 用、MVP 暫不寫進
     consecutive_no_tool = 0
+    prose_before_tool_violations = 0   # task #160:有 tool_calls 但 content 過長累計
     fake_done_count = 0
     _FAKE_DONE_LIMIT_SKILL = 3
 
@@ -3660,6 +3703,37 @@ async def _execute_skill_native_loop(
             )))
             continue
         consecutive_no_tool = 0
+
+        # ── Prose-before-tool 守門(task #160、backport 自 subagent)──
+        # 有 tool_calls 但伴隨超長 content(Sonnet 4.6 寫 5 萬字 parser 案例)→ 燒 output token、
+        # 拖斷長連線。soft 只 log、enforce 連 _LIMIT 輪違規才中止。
+        if _SKILL_PROSE_CAP_MODE != "off":
+            _prose_chars = len((content_str or "").strip())
+            if _prose_chars > _SKILL_PROSE_BEFORE_TOOL_THRESHOLD:
+                prose_before_tool_violations += 1
+                logger.warning(
+                    f"[{step_name}] ⚠ 第 {iteration + 1} 輪 tool 前 content {_prose_chars:,} 字"
+                    f"(上限 {_SKILL_PROSE_BEFORE_TOOL_THRESHOLD})、累計違規 "
+                    f"{prose_before_tool_violations}/{_SKILL_PROSE_BEFORE_TOOL_LIMIT} "
+                    f"[mode={_SKILL_PROSE_CAP_MODE}]"
+                )
+                if (_SKILL_PROSE_CAP_MODE == "enforce"
+                        and prose_before_tool_violations >= _SKILL_PROSE_BEFORE_TOOL_LIMIT):
+                    err_msg = (
+                        f"連續 {_SKILL_PROSE_BEFORE_TOOL_LIMIT} 輪 tool 前 content 超過 "
+                        f"{_SKILL_PROSE_BEFORE_TOOL_THRESHOLD} 字、強制中止避免燒 token / 拖斷連線。"
+                        f"解析請直接寫進 run_python 程式碼、不要在 content 寫長篇 parser / 解釋。"
+                    )
+                    logger.error(f"[{step_name}] ✗ {err_msg}")
+                    return ExecResult(
+                        exit_code=1,
+                        stdout="\n".join(all_stdout) or content_str[:500],
+                        stderr=err_msg,
+                        agent_concluded_fail=True,
+                    )
+            else:
+                # 沒違規這輪 → 重置(只擋「連續」冗長、跟 subagent 一致)
+                prose_before_tool_violations = 0
 
         # 處理 tool_calls — 先掃出 done(若有)、其他先跑
         done_call: Optional[dict] = None
