@@ -311,6 +311,23 @@ def _inject_today_date(system_prompt: str) -> str:
     return _block + system_prompt
 
 
+def _inject_upstream_schema_hint(system_prompt: str) -> str:
+    """讀上游節點 JSON 時、先看實際欄位名、禁止假設英文 key。
+    實測踩過:skill 產的 products.json 用中文 key(名稱/價格)、
+    report_writer 生成的 code 假設英文 key(item.get('name'))→ 整份報告寫成「未知商品/未知價格」。
+    放 prompt 最前面、對所有讀上游資料的 role 都生效(不讀上游的 role 自然忽略)。"""
+    _block = (
+        "【🔑 讀上游節點產出的資料時 — 先看實際欄位名、禁止假設】\n"
+        "  若你的任務要讀上一步(skill / 其他節點)寫的 JSON / 表格(如 products.json / parsed.json):\n"
+        "  1. **先 read_file 看實際內容**、看清楚每筆物件的**實際欄位名(key)**再動手。\n"
+        "  2. 上游 key 可能是**中文**(名稱 / 價格 / 標題 / 內文)或任意命名 — **一律用檔案裡實際出現的 key**。\n"
+        "  3. ❌ 嚴禁沒看就假設英文欄位(`item['name']` / `item.get('price')`)硬寫 code — "
+        "上游若用中文 key、你會抽到 None、整份報告變成「未知 / N/A」(實測踩過)。\n"
+        "  4. 寫 code 前先 `print(list(data[0].keys()))` 印出真實 key、確認後再用真實 key 抽值。\n\n"
+    )
+    return _block + system_prompt
+
+
 def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
     """若 settings.skill_sandbox_mode='wsl_docker'、追加沙盒環境提示（共用 skill 的格式）。"""
     try:
@@ -422,7 +439,7 @@ async def run_subagent(
 
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
 
-    system_prompt = _inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))
+    system_prompt = _inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
 
     tool_timeout = _compute_tool_timeout(timeout)
@@ -866,7 +883,7 @@ async def _run_subagent_native(
         f"max_iter={max_iter}, tools={sorted(allowed_tools)})"
     )
 
-    system_prompt = _inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))
+    system_prompt = _inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
     tool_timeout = _compute_tool_timeout(timeout)
 

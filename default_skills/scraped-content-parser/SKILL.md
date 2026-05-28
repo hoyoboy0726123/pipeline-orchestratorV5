@@ -147,17 +147,76 @@ parser 抽 content 時要清掉:
 
 這種檔**不要靠「讀樣本猜結構」** — 樣本很可能整段落在 chrome 區、你會找不到商品、然後迷路。
 
-**正確做法:用 grep 反向定位**
-1. 先想清楚「一筆商品 / 記錄」的**唯一 URL 特徵**(商品詳情頁的 URL pattern):
-   - momo:`GoodsDetail.jsp?i_code=數字`
-   - PChome:`/prod/英數`
-   - Amazon:`/dp/十碼ASIN`
-   - 一般詳情頁:`/p/數字`、`?id=數字` 之類
-2. 用 `grep` 直接搜這個 pattern、看它命中哪些行 — 那些行就是**真實商品列**所在
-3. parser 錨定在這些行上(用同樣的 URL pattern 當「記錄選擇器」),從每個命中點往外抓標題 / 價格
-4. 完全不要被 chrome 行干擾 — chrome 行不含商品詳情 URL、自然被你的 pattern 過濾掉
+**正確做法:用 grep 反向定位(購物站、論壇、新聞列表都適用)**
+1. 先想清楚「一筆記錄」的**唯一 URL 特徵**(該筆詳情頁 / 貼文頁的 URL pattern):
+   - **購物站**:momo `GoodsDetail.jsp?i_code=數字`、PChome `/prod/英數`、Amazon `/dp/十碼ASIN`、博客來 `/products/數字`
+   - **論壇 / 新聞**:Hacker News `item?id=數字`、Reddit `/comments/英數`、PTT `/bbs/<板>/M.數字`、一般新聞 `/article/`、`/news/數字`
+   - **通用**:`/p/數字`、`?id=數字`、`/post/英數` 之類
+2. 用 `grep` 直接搜這個 pattern、看它命中哪些行 — 那些行就是**真實記錄列**所在
+3. parser 錨定在這些行上(用同樣的 URL pattern 當「記錄選擇器」),從每個命中點往外抓欄位(商品=名稱/價格、貼文=標題/分數/留言數)
+4. 完全不要被 chrome / 雜訊行干擾 — 它們不含「記錄 URL」、自然被你的 pattern 過濾掉
+
+**⚠️ 錨定「記錄 URL」會自動排除這些常見雜訊**(實測 HN 踩過、抓到一堆 logo+作者):
+- 網站 logo / icon 圖片(`![...](y18.svg)` 之類)— 不是 `item?id=` → 不收
+- 作者 / 使用者連結(HN `user?id=`、各站 `/u/`、`@帳號`)— 是「人」不是「記錄」→ 不收
+- 導覽 / 分頁 / 標籤連結(`登入`、`下一頁`、`hide`、`past`)→ 不收
+→ **只 finditer 記錄 URL pattern、其餘一律不錨定**,就不會混進這些東西。
 
 這比「切塊 + 猜」對巨大稀疏檔可靠得多。
+
+**🚫 反錯位鐵律:每個 /prod/ 命中點「就地」抓 name+price、禁止分開收集再 zip**
+
+實測踩過的最嚴重錯誤:parser 寫成「先用一個 regex 把**所有**商品名收成 list A、再用另一個 regex 把**所有**價格收成 list B、最後 `zip(A, B)`」。
+→ 一旦名稱數 ≠ 價格數(分類列、廣告、缺價商品都會讓兩邊長度不一致),**整批名稱與價格全部錯位** — Katana 配到別人的價、RTX5090 機種標成 $21,900 這種荒謬結果。
+
+**正確**:以**每一個 `/prod/` 命中行為一筆記錄的錨點**,在「這一筆的鄰近範圍內」同時抓它自己的 name 和 price,綁成同一個 dict。一筆抓不到價格就讓該筆 price 留空、**絕不**用別筆的價格補。
+```python
+# ✅ 對:逐錨點就地配對
+for m in re.finditer(r'/prod/[A-Za-z0-9-]+', text):
+    block = text[m.start()-300 : m.start()+300]   # 該商品的鄰近區塊
+    name  = extract_name(block)                     # 只從這塊抓
+    price = extract_price(block)                    # 只從這塊抓
+    if name: records.append({"名稱": name, "價格": price or ""})
+# ❌ 錯:names = re.findall(...); prices = re.findall(...); zip(names, prices)  ← 會錯位
+```
+
+**🧼 抽出的商品名要洗掉 markdown 連結殘留(實測常見、必做)**
+
+在 markdown 裡錨定 `/prod/` URL 往外抓商品名時、很容易連 markdown 連結語法一起抓進來、得到像這樣的垃圾名:
+```
+](https://24h.pchome.com.tw/) 全站 [最近看過](https...
+```
+這不是商品名、是 markdown link 語法 `[文字](url)` / **圖片語法 `![alt](url)`** 的碎片 + 站內導覽字。parser 抽完 `product_name` 後**一律過一道清洗 + 丟棄判斷**:
+- 砍 markdown 圖片語法:`re.sub(r'!\[[^\]]*\]\([^)]*\)', '', name)`(去 `![alt](url)`)
+- 砍 markdown 連結語法:`re.sub(r'\]\([^)]*\)', '', name)`(去 `](url)`)、再砍殘留的 `!`、`[`、`]`
+- 砍導覽字 token:`全站`、`最近看過`、`購物車`、`會員中心`、`登入`、`註冊`、`分類`、`促銷`、`活動`、`看更多`、`依價位分類`、行首行尾的 `|` `>` 分隔符
+- 砍首尾空白與標點
+- **丟棄整筆(不收)的條件**(實測 PChome 撈到一堆這種):
+  - 清完 `len < 4`、或變空字串
+  - 名稱是**純數字 / 純價格字串**(`![236243`→`236243`、`$30000`、`70000以上`)— 這是圖片 ID 或價格篩選列、不是商品
+  - 名稱是**價格區間 / 分類標籤**(`$30000 以下`、`$30000-$40000`、`70000以上`、`依價位分類`)
+  - 正向檢查:真商品名通常含品牌/型號/規格字(中英數混、長度 > 8),不像商品名的剔除
+
+```python
+import re
+NAV = ("全站","最近看過","購物車","會員中心","登入","註冊","分類","促銷","活動","看更多","依價位分類")
+def clean_name(name: str) -> str:
+    name = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", name)  # 去 ![alt](url) 圖片語法
+    name = re.sub(r"\]\([^)]*\)", "", name)            # 去 ](url) 連結語法
+    name = re.sub(r"[!\[\]]", "", name)                # 去殘留 ! [ ]
+    for w in NAV:
+        name = name.replace(w, "")
+    return name.strip(" |>·、,")
+
+def is_real_product(name: str) -> bool:
+    n = clean_name(name)
+    if len(n) < 4: return False
+    if re.fullmatch(r"[\$\d,\s\-]+(以下|以上|起)?", n): return False  # 純數字/價格區間
+    if n in ("依價位分類","看更多","全站"): return False
+    return True
+# 用法:for it in raw: if is_real_product(it["名稱"]): records.append({"名稱": clean_name(it["名稱"]), ...})
+```
+⚠️ 驗證時抽查 2-3 筆 `product_name`:若仍見到 `![`、`](http`、`全站`、`依價位分類`、`看更多`、純數字名 → 清洗/丟棄沒生效、回來修再跑、**不要**帶著殘留 done。
 
 ## Step 4:寫解析器 `parser.py`
 
