@@ -3027,23 +3027,6 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 - 最後一個 skill 節點當「比較 / 分析節點」、用多個 `{{ steps.X.output.path }}` 讀進 3 個 JSON 彙整
 - runner 是線性執行 → 節點排成一直線即可（3 站依序爬、非真平行、但結果一樣）
 
-### 🔬 爬蟲解析該掛 skill 還是 subagent(A/B 實測定論、別再二選一猜)
-
-實測:同一份爬蟲輸出、只換解析方式比品質:
-
-| 站型 | scraped-content-parser **skill** | web_parser **subagent** |
-|---|---|---|
-| 論壇(Reddit r/ASUS) | 6 筆乾淨去重 | 67 筆爆量、含側欄/重複雜訊 |
-| 購物站(PChome) | 抽到真商品(名+價+/prod/) | **timeout 跑不完** |
-
-**定論:把爬蟲輸出抽成結構化逐筆資料(留言 / 商品 / 列表 / 搜尋結果)→ 預設掛 `scraped-content-parser` skill。**
-- 理由:skill 是「LLM 看樣本寫一支確定性 parser、程式跑完整檔」、購物站完勝(subagent 直接 timeout)、論壇也較乾淨;且 Recipe 快取、下次同站秒過、省 token。
-- **`web_parser` subagent 是後備、不是首選**:只在「結構極不規則、每筆要逐項語意判斷(混多種貼文格式、要順手標 sentiment / 分類)、且一次性不需快取」時才用。
-
-**解析「之後」的推理 / 分析 / 寫報告才用 subagent**:抽完的 JSON list → 寫日報 = `report_writer`、算指標+chart = `data_analyst`、研究綜述 = `researcher`、比對價格 = `data_differ`。
-
-> 一句話:**解析交 skill、思考交 subagent**。(非絕對 — 結構極亂需逐筆語意判斷時、解析才退回 web_parser subagent。)
-
 ## 5. 影片爬蟲節點（web_crawler，wc_mode: video）
 **使用者說**：貼 YouTube / Vimeo / Bilibili 連結「下載」「抓影片」
 ```yaml
@@ -3149,8 +3132,8 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 2. 剛好有 mounted skill 完全 fit(scraped-content-parser 處理 PTT) → skill_mode + skill
 
 ⚠ **常見錯誤路由**(別犯):
-- ❌ 「爬 Reddit 後寫摘要」→ 第一直覺用 ad-hoc skill_mode、想說「不就是 LLM 寫個摘要嘛」
-  ✅ 正確:**scraped-content-parser skill**(抽結構化資料、A/B 實測較乾淨)+ **report_writer**(寫報告)兩步
+- ❌ 「爬 Reddit 後寫摘要」→ 第一直覺用 skill_mode、想說「不就是 LLM 寫個摘要嘛」
+  ✅ 正確:**web_parser**(抽結構化資料)+ **report_writer / summarizer**(寫報告)兩步
 - ❌ 「比對價格」→ 第一直覺用 skill_mode
   ✅ 正確:**data_differ**(固定 schema 不 drift)
 - ❌ 「寫 TG 通知文」→ 第一直覺用 batch 寫死 message
@@ -3165,14 +3148,12 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 **拆兩步公式**(看到上述訊號就反射用):
 ```
-step 1: web_crawler              抓回原始 markdown / HTML
-step 2: skill scraped-content-parser  每筆抽結構化欄位 → JSON list
-                                 (例:[{title, url, score, top_comment}])
-                                 ← 預設用 skill(deterministic + Recipe 快取、A/B 實測比 subagent 乾淨)
-                                 ← 只有「結構極亂、每筆要逐項語意判斷」才退回 subagent web_parser
+step 1: web_crawler         抓回原始 markdown / HTML
+step 2: subagent web_parser 每筆抽結構化欄位 → JSON list
+                              (例:[{title, url, score, top_comment, sentiment}])
 step 3: subagent report_writer / summarizer
-                                 讀 JSON list → 寫成對外格式
-                                 (日報 markdown / 推播 / 摘要報告)
+                              讀 JSON list → 寫成對外格式
+                              (日報 markdown / 推播 / 摘要報告)
 ```
 
 **為什麼不能直接用 summarizer 一步走?**
@@ -3182,18 +3163,18 @@ step 3: subagent report_writer / summarizer
 
 **判斷小竅門**:
 - 上游是「**一篇** 長文 / 一份 PDF / 一份 report」→ summarizer 對(壓縮)
-- 上游是「**多筆** 貼文 / 商品 / 列表 row」→ scraped-content-parser skill + report_writer 對(抽 + 寫)
+- 上游是「**多筆** 貼文 / 商品 / 列表 row」→ web_parser + report_writer 對(抽 + 寫)
 
 ❌ 錯誤(實測案例):
 - 「每天抓 Reddit r/ASUS 熱門 → AI 摘要 → 寄信」用 summarizer 一步
 ✅ 正確:
-- web_crawler(抓列表+子頁)→ scraped-content-parser skill(每篇抽 title/score/url/top_comment)
+- web_crawler(抓列表+子頁)→ web_parser(每篇抽 title/score/url/top_comment)
   → report_writer(寫逐篇條列日報)→ outlook_automation(寄信)
 
 ### 反射式對照(看到關鍵字直接選 role、不要再想)
 
 ```
-爬蟲後抽結構化資料         → scraped-content-parser skill(首選);結構極亂需逐筆語意判斷才退 web_parser subagent
+爬蟲後解析 / 抽結構化資料  → web_parser
 比對 / diff / 找差異       → data_differ
 轉檔 / 格式轉換             → data_transformer
 長文壓縮摘要                → summarizer
@@ -3229,7 +3210,7 @@ PPT 大綱結構                → presentation_designer
 
 「爬蟲 → 整理 → 寄信」這種**多步 pipeline**、每一步分別套對應 role:
 - 爬蟲 = `web_crawler` 節點
-- 整理 = `scraped-content-parser` skill(抽結構、首選)+ `report_writer` subagent(寫報告)
+- 整理 = `web_parser` subagent(抽結構)+ `report_writer` subagent(寫報告)
 - 寄信 = `outlook_automation` 節點
 
 **不要**一個「整理」步用 ad-hoc skill_mode、那是把問題全推給 LLM 自由發揮、容易 schema drift 或輸出品質爛。
@@ -3263,7 +3244,7 @@ PPT 大綱結構                → presentation_designer
 **Tier 1 資料處理:**
 | 任務 | role |
 |---|---|
-| 爬蟲後解析非結構文本 → 乾淨 JSON | `web_parser`(**後備** — 抽結構化逐筆資料首選 `scraped-content-parser` skill、見 §4.5 A/B 定論)|
+| 爬蟲後解析非結構文本 → 乾淨 JSON | `web_parser` |
 | 兩份資料 → diff(固定 schema {changed, added, removed, modified}) | `data_differ` |
 | 格式轉換 CSV ↔ JSON ↔ Excel ↔ Markdown | `data_transformer` |
 | 長文(>3000 字)→ TL;DR + bullet + 引用 | `summarizer` |
