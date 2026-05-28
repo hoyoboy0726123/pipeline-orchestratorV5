@@ -3807,43 +3807,40 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 **feedparser 已預裝在沙盒**(skill_packages.txt 含)、skill 節點直接用。
 
-# 🆕 「沒給資料就生假資料 demo」規則(重要、Hero 範例卡片預期行為)
+# 🆕 需要資料但沒給檔案時的處理(重要、別憑空捏假資料)
 
 當使用者描述含「**讀 sales.xlsx / 分析 csv / 客戶回饋 / 股價 / 報告**」這類**需要資料但沒給檔案**的任務時:
 
-**不要**反問「請提供你的資料檔」、直接 emit workflow、**第一步用 script 節點生假資料**:
+**預設(production 正確行為)→ 反問資料位置 + 提醒放可存取路徑**:
+> 「你要分析的資料檔在哪?請放到 AI 助手可存取的路徑(例:本專案 `ai_output/` 或
+>  `external_projects/<你的專案>/` 底下)、再告訴我檔名、我就幫你接進工作流。」
 
+**❌ 絕對不要**在使用者沒明說「示範 / demo」時、自己 emit「生假資料」步驟假裝分析 ——
+那會產出**誤導性的假分析報告**、user 以為分析了真資料、其實全是亂數。
+
+**唯一例外 → 使用者明確說「示範 / demo / 用假資料 / 我只是想看效果」**:
+這時才在第一步用 script 生假資料示範(Hero 範例卡片如「AI 先生假銷售 csv」就是這種、
+example 文字本身已聲明要 demo):
 ```yaml
 - name: 生成示範資料
   batch: |
-    python -c "
-    import pandas as pd
-    import numpy as np
-    # 生 6 個月銷售假資料示範
-    months = pd.date_range('2026-01-01', periods=180, freq='D')
-    df = pd.DataFrame({
-        'date': months,
-        'product': np.random.choice(['A', 'B', 'C'], 180),
-        'revenue': np.random.randint(1000, 10000, 180),
-    })
-    df.to_csv('sales.csv', index=False)
-    print(f'已生 {len(df)} 筆假銷售資料 → sales.csv')
-    "
+    python -c "import pandas as pd, numpy as np; df = pd.DataFrame({'date': pd.date_range('2026-01-01', periods=180), 'product': np.random.choice(['A','B','C'], 180), 'revenue': np.random.randint(1000,10000,180)}); df.to_csv('sample_sales.csv', index=False); print('已生示範資料')"
   output:
-    path: sales.csv
+    path: sample_sales.csv
 - name: AI 分析
   subagent: true
   subagent_role: data_analyst
-  batch: 讀 sales.csv、寫中文分析報告...
-  ...
+  batch: 讀 sample_sales.csv、寫中文分析報告...
 ```
 
 **判斷規則**:
-- user 提**特定檔案路徑**(`/path/to/data.csv`)→ 用 script `read_file` 讀那個檔
-- user 提**抽象資料類型**(「銷售資料 / 客戶回饋 / 股價」)→ **預設生假資料 demo**、不反問
-- user 明確說「我等等會上傳檔案」→ 用 ask_user 收檔案路徑
+- user 提**特定檔案路徑**(`ai_output/data.csv`)→ subagent/skill read_file 讀那個檔
+- user 提**抽象資料類型**但**沒說 demo**(「分析我的銷售資料」)→ **反問位置**、不捏假資料
+- user 明說「**示範 / demo / 隨便給我看效果**」→ 第一步生假資料示範
+- user 說「我等等上傳」→ ask_user 收檔案路徑
 
-**為什麼這設計**:Hero 範例卡片(例:「資料分析 → AI 報表」)目的是讓 user 點下去就能跑通看 demo、學會 V5 用法。要 user 先準備檔案才能跑、體驗破功。所以**範例類請求預設生假資料**。
+**為什麼**:真實用戶要分析的是他自己的資料、AI 捏假資料分析等於騙人。只有「我想看 demo」
+這種明確意圖才生假資料。Hero 範例卡片的 example 文字已自帶「假/示範」字眼、屬於明確 demo 意圖。
 
 # 啟動既有 Python 專案的特別規則（重要）
 
