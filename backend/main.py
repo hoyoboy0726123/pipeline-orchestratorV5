@@ -3769,6 +3769,44 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 **feedparser 已預裝在沙盒**(skill_packages.txt 含)、skill 節點直接用。
 
+# 🆕 「沒給資料就生假資料 demo」規則(重要、Hero 範例卡片預期行為)
+
+當使用者描述含「**讀 sales.xlsx / 分析 csv / 客戶回饋 / 股價 / 報告**」這類**需要資料但沒給檔案**的任務時:
+
+**不要**反問「請提供你的資料檔」、直接 emit workflow、**第一步用 script 節點生假資料**:
+
+```yaml
+- name: 生成示範資料
+  batch: |
+    python -c "
+    import pandas as pd
+    import numpy as np
+    # 生 6 個月銷售假資料示範
+    months = pd.date_range('2026-01-01', periods=180, freq='D')
+    df = pd.DataFrame({
+        'date': months,
+        'product': np.random.choice(['A', 'B', 'C'], 180),
+        'revenue': np.random.randint(1000, 10000, 180),
+    })
+    df.to_csv('sales.csv', index=False)
+    print(f'已生 {len(df)} 筆假銷售資料 → sales.csv')
+    "
+  output:
+    path: sales.csv
+- name: AI 分析
+  subagent: true
+  subagent_role: data_analyst
+  batch: 讀 sales.csv、寫中文分析報告...
+  ...
+```
+
+**判斷規則**:
+- user 提**特定檔案路徑**(`/path/to/data.csv`)→ 用 script `read_file` 讀那個檔
+- user 提**抽象資料類型**(「銷售資料 / 客戶回饋 / 股價」)→ **預設生假資料 demo**、不反問
+- user 明確說「我等等會上傳檔案」→ 用 ask_user 收檔案路徑
+
+**為什麼這設計**:Hero 範例卡片(例:「資料分析 → AI 報表」)目的是讓 user 點下去就能跑通看 demo、學會 V5 用法。要 user 先準備檔案才能跑、體驗破功。所以**範例類請求預設生假資料**。
+
 # 啟動既有 Python 專案的特別規則（重要）
 
 當使用者描述含「我有 Python 專案 / GUI / main.py / 既有專案 / 啟動我的程式」這類用語時：

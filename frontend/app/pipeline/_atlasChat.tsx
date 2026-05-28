@@ -747,19 +747,24 @@ function ActionGlyph({ id, size = 28, palette: c }: { id: ActionId; size?: numbe
           <path d="M9 9 L23 9 M9 9 L16 22 M23 9 L16 22" stroke={c.fg} strokeWidth="1" opacity="0.4" />
         </svg>
       )
-    case 'schedule':
+    case 'research':
+      // 放大鏡 + 書本(研究)
       return (
         <svg {...props}>
-          <circle cx="16" cy="16" r="11" fill="none" stroke={c.fg} strokeWidth="1.5" />
-          <path d="M16 8 L16 16 L22 19" stroke={c.a1} strokeWidth="2.4" strokeLinecap="round" fill="none" />
-          <circle cx="16" cy="16" r="1.8" fill={c.a1} />
+          <rect x="6" y="6" width="14" height="18" rx="1.5" fill={c.a2} />
+          <path d="M10 11 L17 11 M10 14 L17 14 M10 17 L15 17" stroke={c.fg} strokeWidth="1.2" strokeLinecap="round" opacity="0.6" />
+          <circle cx="22" cy="22" r="5" fill="none" stroke={c.a1} strokeWidth="2.4" />
+          <path d="M26 26 L29 29" stroke={c.a1} strokeWidth="2.4" strokeLinecap="round" />
         </svg>
       )
-    case 'notify':
+    case 'compete':
+      // 矩陣 / 對比表(競品)
       return (
         <svg {...props}>
-          <path d="M16 4 C11 4 8 7 8 12 V18 L5 22 H27 L24 18 V12 C24 7 21 4 16 4 Z" fill={c.a3} />
-          <circle cx="16" cy="26" r="2.2" fill={c.a1} />
+          <rect x="5" y="5" width="9" height="9" rx="1" fill={c.a1} />
+          <rect x="18" y="5" width="9" height="9" rx="1" fill={c.a2} />
+          <rect x="5" y="18" width="9" height="9" rx="1" fill={c.a3} />
+          <rect x="18" y="18" width="9" height="9" rx="1" fill="none" stroke={c.fg} strokeWidth="1.5" />
         </svg>
       )
     case 'db-report':
@@ -810,7 +815,7 @@ function AtlasMark({ size = 32 }: { size?: number }) {
 // ── 8 個 ACTIONS(對齊 V5 真實功能)─────────────────────────────────────
 type ActionId =
   | 'chain' | 'scrape-ai' | 'existing' | 'multiagent'
-  | 'schedule' | 'notify' | 'db-report' | 'monitor'
+  | 'research' | 'compete' | 'db-report' | 'monitor'
 
 interface AtlasAction {
   id: ActionId
@@ -822,69 +827,72 @@ interface AtlasAction {
 
 // 卡片內容對齊 V5 真實節點集合(網頁爬蟲 / AI 技能 / 多代理 / 人工確認 / Outlook
 // / 視覺驗證 / 啟動既有 Python 專案 等)、與 buildWelcomeMessage 的範例呼應。
+//
+// ⚠ 所有 example 都設計成「點下去 AI 助手能寫出可直接跑通的 YAML」、不依賴 user
+// 提供額外檔案。需要資料的 case(資料分析、多代理)由 AI 助手在第一步生假資料 demo。
 const ATLAS_ACTIONS: AtlasAction[] = [
   {
     id: 'chain', title: 'Python 腳本串接', desc: '把幾個 .py 串成一條工作流', tag: 'Workflow',
     examples: [
-      '把 stage1.py / stage2.py / stage3.py 串成財務報表',
-      '加錯誤重試與失敗 Telegram 通知',
-      '搭配排程、每天早上 9 點自動跑',
+      '跑 V5 內建 Q1 財務四階段(stage1→2→3→4)展示純腳本串接',
+      'finance pipeline 第 3 步後插 AI 健康判讀 + 條件分流',
+      '腳本串接 + 失敗 Telegram 通知 + 每天 9 點排程',
     ],
   },
   {
     id: 'scrape-ai', title: '爬蟲 + AI + Outlook', desc: '抓 → 摘要 → 確認 → 寄信', tag: 'Pipeline',
     examples: [
       '每天抓 Reddit r/ASUS 熱門 → AI 摘要 → Telegram 確認 → Outlook 寄信',
-      '監控 5 個競品官網 → 變化偵測 → Telegram 通知',
-      '讀 PDF 報告 → AI 重點 → Outlook 草稿',
+      '抓 Hacker News top 10 → 中文翻譯 + 重點 → Outlook 草稿',
+      '抓 PTT 股版前 10 篇 → 重點整理 → Telegram 推送',
     ],
   },
   {
-    id: 'existing', title: '啟動既有 Python 專案', desc: '把自家專案接進來自動跑', tag: 'Import',
+    id: 'existing', title: '啟動既有 Python 專案', desc: 'AI 讀源碼、拆 CLI 參數、ask_user 互動', tag: 'Import',
     examples: [
-      '把 external_projects/ 內的專案接進來、跑 main.py 排程',
-      '跑既有 Jupyter Notebook 當定時任務',
-      '已有 CLI 工具透過 Atlas 觸發、自動寫入 ai_output',
+      '跑 V5 內建 interactive_demo 報表工具、AI 讀源碼判斷 CLI 參數',
+      '對既有 GUI/CLI 專案、AI 用 ask_user 收 user 選擇再組合參數跑',
+      '把 main_cli.py 包成可互動工作流、選報表類型 / 格式 / 期間',
     ],
   },
   {
     id: 'multiagent', title: '多代理探索分析', desc: '不確定怎麼做、讓 AI 邊想邊改', tag: 'Agent',
     examples: [
-      '丟一份 sales.xlsx、AI 自己決定分析方向',
-      '客服回饋自動分類、產 5 大主題摘要',
-      '研究員 + 評論員雙角色、產出深度報告',
+      'AI 先生假 sales.xlsx(100 筆) → data_analyst 探索式分析',
+      'AI 生假 PR 描述 → critic 審查 + 改善建議',
+      '指定研究主題 → researcher 收料 + report_writer 寫成報告',
     ],
   },
   {
-    id: 'schedule', title: '排程定時任務', desc: '每天 / 每週自動執行', tag: 'Cron',
+    id: 'research', title: '網路研究報告', desc: 'web_search 收料、寫深度報告', tag: 'Research',
     examples: [
-      '週一早上彙整上週銷售數字',
-      '每小時檢查股價、超過閾值 Telegram 通知',
-      '月底自動寄出客戶月報',
+      '研究「2026 AI 筆電市場」→ researcher 收料寫深度報告',
+      '查「最新 LLM benchmark 排名」→ trend_analyst 趨勢分析',
+      '彙整 2026 H1 NVIDIA 技術發表 → 中文研究報告',
     ],
   },
   {
-    id: 'notify', title: '人工確認與通知串', desc: '重要步驟暫停、TG 推按鈕等真人核可', tag: 'Trigger',
+    id: 'compete', title: '競品深度分析', desc: '多家對比、矩陣表 + 強弱', tag: 'Compete',
     examples: [
-      '寄信前先 TG 推草稿、按鈕確認才送出',
-      '錯誤發生 → 自動 TG 推訊息給我',
-      '長 workflow 跑完自動推完成通知',
+      'ASUS vs MSI vs Lenovo 電競筆電矩陣比較',
+      '抓 3 家定價頁面 → data_differ → 變動 Telegram 通知',
+      'iPhone 16 vs Galaxy S25 vs Pixel 9 → 規格 + 口碑 + 價格矩陣',
     ],
   },
   {
     id: 'db-report', title: '資料分析 → AI 報表', desc: 'pandas + AI 寫洞察', tag: 'Insight',
     examples: [
-      '讀 Excel/CSV、AI 寫一頁中文分析',
-      '透視表 + 長條圖、產出 dashboard.xlsx',
-      '多檔合併、AI 找趨勢、輸出 docx 報告',
+      'AI 先生 6 個月假銷售 csv → pandas 分析 → 中文 markdown 報告',
+      'AI 生假客戶回饋 20 筆 → 自動分類 → 主題摘要報告',
+      'AI 生假股價時序 12 個月 → 趨勢圖 + 洞察',
     ],
   },
   {
     id: 'monitor', title: '網頁變化偵測', desc: '定時抓網頁、變動就通知', tag: 'Watch',
     examples: [
-      '競品定價頁面變動就 Telegram 通知',
-      '官方公告頁有新文章自動寄信',
-      '指定關鍵字出現在頁面就推播',
+      '監控 PChome ASUS 筆電專區價格變動、變動就 Telegram 通知',
+      'ASUS 官方公告頁(asus.com/news/)有新文章 → 自動寄信',
+      'PTT 看板出現關鍵字「ROG」就推播提醒',
     ],
   },
 ]
