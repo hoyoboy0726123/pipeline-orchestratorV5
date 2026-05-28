@@ -3494,6 +3494,14 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
   expression: "{{ steps.統計.output.負評百分比 | int > 40 }}"
 ```
 
+**🚨 引用欄位名必須跟 skill 實際輸出的 JSON key「一字不差」(實測踩過、會整步炸):**
+- `{{ steps.X.output.<欄位> }}` 的 `<欄位>` 必須是該步 JSON 檔裡**真的有**的 key。猜錯 / 用不存在的欄位
+  → 變數展開報 `'dict object' has no attribute '<欄位>'`、**整個下游 step 直接 fail**。
+- ❌ **最常犯**:憑空寫 `{{ steps.X.output.value }}`(以為 skill 會輸出 `value` 欄位)。skill 的 JSON key 是它自己取的、**不會剛好叫 `value`**。
+- ✅ **正解**:在那一步的 batch **明確指定要輸出的欄位名**(用固定英文、如 `report_format` / `order_id`),下游就引用那個名。
+  例:batch 寫「把使用者選的格式存成 choice.json、欄位名叫 `report_format`」→ 下游 `{{ steps.選格式.output.report_format }}`。
+- 跨步驟傳「使用者 ask_user 選的值 / 算出的值」到下游 script/CLI 參數時,一律走這個「**指定固定欄位名 → 引用同名**」的模式,不要假設欄位名、不要用 `.value`。
+
 ### IF 模式（`expression` + `on_true` / `on_false`）
 ```yaml
 - name: count_orders
