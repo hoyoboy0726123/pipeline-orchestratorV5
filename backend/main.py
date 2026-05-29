@@ -4455,7 +4455,7 @@ def _memory_snapshot_text() -> str:
         if not get_settings().get("memory_enabled", True):
             return ""
         import memory as _mem
-        facts = _mem.snapshot(limit=8)
+        facts = _mem.snapshot(limit=25)
     except Exception:
         return ""
     if not facts:
@@ -4466,8 +4466,10 @@ def _memory_snapshot_text() -> str:
     for f in facts:
         src = "(推測)" if f.get("source") == "inferred" else ""
         lines.append(f"  - {f['key']} = {f['value']}{src}")
-    lines.append("若使用者明確要你「記住 / 記一下」某事 → 呼叫 remember_fact(走 confirm 兩步);"
-                 "標(推測)的是系統推斷、可能不準,使用者更正時用 forget_fact 或重記。")
+    lines.append("使用者問他自己的偏好 / 習慣(例「我都用哪個模型」「我報告要多長」「我幾點跑」)時 ——"
+                 "先看上面這份記憶回答;**若上面沒列到該項、先呼叫 list_facts 查全部記憶再回答,不要直接說「沒記錄」、"
+                 "也不要去查系統當前狀態(模型設定 / cron)當作答案**。"
+                 "使用者明確要你「記住」某事 → remember_fact(confirm 兩步);標(推測)是系統推斷、可能不準,更正用 forget_fact。")
     return "\n".join(lines)
 
 

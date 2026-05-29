@@ -139,6 +139,8 @@ def count_facts(user_id: str = "local") -> int:
     return row[0] if row else 0
 
 
-def snapshot(limit: int = 8, user_id: str = "local") -> list[dict]:
-    """給 system prompt 注入用:最近更新的 top-N facts。"""
+def snapshot(limit: int = 25, user_id: str = "local") -> list[dict]:
+    """給 system prompt 注入用:最近更新的 top-N facts。
+    25 筆 ≈ 1-2K token,個人偏好通常 <25 筆能全帶進 context、recall 不漏;
+    超過 25 筆才需靠 list_facts 主動查(system prompt 有引導)。"""
     return list_facts(limit=limit, user_id=user_id)
