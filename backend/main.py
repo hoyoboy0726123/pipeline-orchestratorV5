@@ -3632,8 +3632,10 @@ condition 節點後面的每個 step、**必須**能被以下其中一種方式�
   使用者說「放在 X」→ 把 X 帶進去
 - **max_iter**：簡單任務 6-8、複雜任務 10-15。**不要設 5 以下**:寫 .py + 跑 + done
   最少 3 輪、LLM 多繞 read_file / 試錯就 5-7 輪、設 5 高機率 max_iter exceeded 失敗
-  ⚠️ **解析爬蟲/大檔(web_parser、scraped-content-parser、讀數十 KB 以上原始內容)→ 設 12-15**:
-  大檔要分段讀 + 寫 parser + 試跑修正,8 輪常不夠(實測 548KB Reddit 內容 8 輪 max_iter 失敗)
+  ⚠️ **解析爬蟲/大檔(web_parser、scraped-content-parser、讀數十 KB 以上原始內容)→ 維持 8、不要調高**:
+  瓶頸是「不收斂」不是「輪數」—— 實測強模型給 12 輪反而燒近 2 倍 token 仍失敗。
+  正解寫進 batch:**「看前面少量樣本→寫一支確定性 parser 一次跑完整檔→寫出 JSON 就 done,
+  不要逐筆讀、不要反覆優化解析」**;真的卡住寧可 fail 重派、別靠加輪數硬撐
 - **失敗時不要自動重派同樣 prompt**:看 check_subagent_status 的 error / summary、
   跟使用者說「跑了 N 輪沒完成、原因 X」、讓使用者決定:加 max_iter 重派 / 改任務描述 / 放棄。
   連續派 3 次都 max_iter exceeded 等於白燒 token、要主動 stop

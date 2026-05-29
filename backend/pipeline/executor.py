@@ -3697,8 +3697,21 @@ async def _execute_skill_native_loop(
         tool_calls = list(getattr(response, "tool_calls", []) or [])
         content_str = response.content if isinstance(response.content, str) else ""
 
-        # 沒 tool_calls → 視為 prose、累計 consecutive_no_tool
+        # 沒 tool_calls → Claude 原生 end_turn(想結束)。對齊 Anthropic 官方:
+        # 完成時就不呼叫工具、回純文字,這是天生的結束信號、不是異常。
+        # 若 output 檔已 ready → 視為正常完成,別當 consecutive_no_tool 懲罰逼它空轉。
         if not tool_calls:
+            _ready_et, _sz_et, _ = _output_is_ready()
+            if _ready_et:
+                logger.info(
+                    f"[{step_name}] ✅ LLM 回 end_turn(純文字結束)且輸出檔已 ready"
+                    f"({_sz_et:,} bytes)→ 視為完成(對齊原生 end_turn 結束)"
+                )
+                return ExecResult(
+                    exit_code=0,
+                    stdout=_build_clean_success_stdout(all_stdout, "[Skill 完成]"),
+                    stderr="",
+                )
             consecutive_no_tool += 1
             logger.warning(
                 f"[{step_name}] ⚠ 第 {iteration + 1} 輪沒 tool_calls"

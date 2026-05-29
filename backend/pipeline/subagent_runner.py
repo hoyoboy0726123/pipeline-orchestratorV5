@@ -1062,8 +1062,30 @@ async def _run_subagent_native(
         tool_calls = list(getattr(response, "tool_calls", []) or [])
         content_str = response.content if isinstance(response.content, str) else ""
 
-        # ── 沒 tool_calls → 純 prose、累計 consecutive_no_tool ─────
+        # ── 沒 tool_calls → Claude 原生 end_turn(想結束)─────
+        # 對齊 Anthropic 官方:Claude 完成時就「不呼叫工具、回純文字」(end_turn),
+        # 這是天生的結束信號、不是異常。若此時 output 檔已存在且有效 → 視為正常完成,
+        # 別把它當 consecutive_no_tool 懲罰、逼它繼續呼叫工具(那會害強模型空轉燒 token)。
         if not tool_calls:
+            if output_path:
+                try:
+                    _pp = Path(output_path)
+                    if _pp.exists():
+                        _floor = 5000 if _pp.suffix.lower() in {".pptx", ".docx", ".xlsx"} else 100
+                        _osz = _pp.stat().st_size
+                        if _osz >= _floor:
+                            log.info(
+                                f"[{step_name}] ✅ LLM 回 end_turn(純文字結束)且輸出檔 {_pp.name} "
+                                f"已存在有效({_osz:,} bytes)→ 視為完成(對齊原生 end_turn 結束)"
+                            )
+                            return SubagentResult(
+                                success=True,
+                                final_message=content_str or f"完成:{_pp.name}({_osz:,} bytes)",
+                                iterations=iteration, tool_calls_made=tool_calls_made,
+                                token_usage=accumulated_usage,
+                            )
+                except OSError:
+                    pass
             consecutive_no_tool += 1
             log.warning(
                 f"[{step_name}] ⚠ 第 {iteration} 輪沒 tool_calls(reply {len(content_str)} 字)、"
@@ -1202,9 +1224,9 @@ async def _run_subagent_native(
                             if output_ready_no_done_count_sub >= 1:
                                 messages.append(HumanMessage(content=(
                                     f"[系統] ✅ 目標檔案 {output_path} 已存在({_sz_sub:,} bytes)且本輪未改檔。"
-                                    f"如果在 polish 直接寫檔(run_python)、系統會偵測 mtime 變動允許繼續。"
-                                    f"如果只是 verify、**請立刻 done** 結束 step。"
-                                    f"連續 4 輪不動檔也不 done 會被強制收尾。"
+                                    f"如果還要 polish 就直接寫檔(run_python)、系統會偵測 mtime 變動允許繼續。"
+                                    f"如果已完成 — **直接回一句話結束即可(不必再呼叫任何工具)**,或呼叫 done。"
+                                    f"不要為了「再確認/再優化」反覆呼叫工具空轉。連續 4 輪不動檔也不收尾會被強制結束。"
                                 )))
                     else:
                         # size 不夠 → 重置 + 清 mtime 追蹤
