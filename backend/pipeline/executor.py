@@ -3571,6 +3571,11 @@ async def _execute_skill_native_loop(
     _RETRIABLE = (
         "503", "429", "unavailable", "rate limit", "rate_limit",
         "overloaded", "internal error", "500", "deadline", "resource_exhausted",
+        # 網路瞬斷 / DNS 抖動 — 退避重連、不直接判失敗
+        "apiconnectionerror", "connection error", "connection refused",
+        "connection reset", "connection aborted", "getaddrinfo",
+        "timed out", "timeout", "temporarily unavailable", "econnreset",
+        "remotedisconnected", "max retries",
     )
 
     for iteration in range(SKILL_MAX_ITERATIONS):

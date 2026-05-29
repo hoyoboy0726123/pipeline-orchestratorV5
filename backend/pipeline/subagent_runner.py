@@ -507,6 +507,11 @@ async def run_subagent(
             "503", "429", "unavailable", "rate limit", "rate_limit",
             "service_unavailable", "overloaded", "internal error", "500",
             "deadline exceeded", "resource_exhausted",
+            # 網路瞬斷 / DNS 抖動 — 不該直接判失敗、退避重連
+            "apiconnectionerror", "connection error", "connection refused",
+            "connection reset", "connection aborted", "getaddrinfo",
+            "timed out", "timeout", "temporarily unavailable", "econnreset",
+            "remotedisconnected", "max retries",
         )
         llm_result = None
         last_llm_err: Optional[Exception] = None
@@ -949,6 +954,11 @@ async def _run_subagent_native(
         "503", "429", "unavailable", "rate limit", "rate_limit",
         "service_unavailable", "overloaded", "internal error", "500",
         "deadline exceeded", "resource_exhausted",
+        # 網路瞬斷 / DNS 抖動 — 不該直接判失敗、退避重連
+        "apiconnectionerror", "connection error", "connection refused",
+        "connection reset", "connection aborted", "getaddrinfo",
+        "timed out", "timeout", "temporarily unavailable", "econnreset",
+        "remotedisconnected", "max retries",
     )
 
     for i in range(max_iter):
