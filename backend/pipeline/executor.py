@@ -8,6 +8,7 @@ Skill 模式：LLM 解讀自然語言任務描述，自主撰寫並執行程式�
 """
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -3507,6 +3508,11 @@ async def _execute_skill_native_loop(
             "✓ 正確:直接 emit tool_calls(API 結構化欄位)、不要在 reply 文字內寫 `<tool>` tag。\n"
             "✗ 錯誤:寫 `<tool>run_python</tool>\\n```python\\n...` 純文字 — orchestrator 不會解析、會被視為沒呼叫 tool。\n"
             "上面 system prompt 內若有 `<tool>...</tool>` 範例、那是文字協議的舊範例、本次 native 模式請忽略格式、保留語意(該用哪個 tool / 何時 done)。\n"
+            "\n## 🔁 失敗重試規則(重要)\n"
+            "若某次 run_python / run_shell 失敗(回傳含 `[exit code: N]` / Error / traceback)、"
+            "**禁止把相同的程式碼或命令原封不動再送一次** — 那只會得到一模一樣的錯誤、純粹浪費。\n"
+            "你必須:① 先讀錯誤訊息找真因 → ② **實質改寫**(換 API 用法 / 修語法 / 補缺套件 / 換做法)再試;"
+            "③ 若連續嘗試都修不動、坦白呼叫 done(success=false)說明卡在哪、不要硬撐重送相同內容。\n"
         )
         messages[0] = SystemMessage(
             content=messages[0].content + _native_override,
@@ -3520,6 +3526,14 @@ async def _execute_skill_native_loop(
     prose_before_tool_violations = 0   # task #160:有 tool_calls 但 content 過長累計
     fake_done_count = 0
     _FAKE_DONE_LIMIT_SKILL = 3
+
+    # ── 不收斂守門(task #187、2026-05-29):偵測「相同 tool input 重複失敗」死循環 ──
+    # 真實案例:Gemma 寫的 docx-js code 有 API bug、node rc=1,它每輪重寫一模一樣的
+    # 9230 字 code、又 rc=1、鬼打牆到 max_iter(空轉 6 分鐘燒 quota)。
+    # 同一份失敗 input hash:第 2 次→注入「別重送」強提示、第 3 次→提早中止 + 診斷。
+    repeat_fail_hashes: dict[str, int] = {}
+    _REPEAT_FAIL_REMIND_AT = 2
+    _REPEAT_FAIL_ABORT_AT = 3
 
     # Output-ready 自動 done 偵測:LLM 寫成 output 檔後常持續 verify / thumbnail / preview
     # 不主動 done(2026-05-26 PPT workflow 真實案例:iter 11 寫成、iter 12-20 全空轉燒 ~770K tokens)。
@@ -3744,6 +3758,7 @@ async def _execute_skill_native_loop(
             else:
                 regular_calls.append(tc)
 
+        _repeat_fail_reminder: Optional[str] = None
         for tc in regular_calls:
             tc_name = tc.get("name", "")
             tc_id = tc.get("id") or ""
@@ -3768,6 +3783,41 @@ async def _execute_skill_native_loop(
             elif tc_name == "run_shell":
                 last_run_shell_ok = "[exit code:" not in result
 
+            # ── 不收斂守門:相同失敗 input 重複偵測 ──
+            _call_failed = ("[exit code:" in result) or result.startswith("[執行失敗]")
+            if _call_failed and tc_name in ("run_python", "run_shell"):
+                _fh = hashlib.md5(
+                    (tc_name + "\x00"
+                     + json.dumps(tc_args, ensure_ascii=False, sort_keys=True))
+                    .encode("utf-8", "replace")
+                ).hexdigest()
+                repeat_fail_hashes[_fh] = repeat_fail_hashes.get(_fh, 0) + 1
+                _rep = repeat_fail_hashes[_fh]
+                if _rep >= _REPEAT_FAIL_ABORT_AT:
+                    err_msg = (
+                        f"相同的 {tc_name} input 連續失敗 {_rep} 次(內容完全相同、錯誤相同)、"
+                        f"判定不收斂、提早中止避免空轉燒 token。"
+                        f"可能此任務超出當前模型能力(常見:docx-js 等嚴格 API)、"
+                        f"建議改用強模型或換做法。"
+                    )
+                    logger.error(f"[{step_name}] ✗ 不收斂守門觸發:{err_msg}")
+                    return ExecResult(
+                        exit_code=1,
+                        stdout="\n".join(all_stdout),
+                        stderr=err_msg,
+                        agent_concluded_fail=True,
+                    )
+                if _rep >= _REPEAT_FAIL_REMIND_AT and _repeat_fail_reminder is None:
+                    _repeat_fail_reminder = (
+                        f"[系統] ⚠ 你已用**完全相同**的 {tc_name} 內容失敗 {_rep} 次。"
+                        f"再送一次必然得到同樣的錯。請先讀上面錯誤訊息找真因、"
+                        f"**實質改寫**(換 API 用法 / 修語法 / 補缺套件)再試;"
+                        f"若真的修不動就呼叫 done(success=false)說明卡點、別再重送相同內容。"
+                    )
+                    logger.warning(
+                        f"[{step_name}] 🔁 相同 {tc_name} 失敗第 {_rep} 次、注入「別重送」提示"
+                    )
+
             all_stdout.append(f"[{tc_name}] {result[:500]}")
             acc_tool_calls.append({
                 "name": tc_name,
@@ -3788,6 +3838,11 @@ async def _execute_skill_native_loop(
                 )
 
             messages.append(ToolMessage(content=result, tool_call_id=tc_id))
+
+        # 不收斂守門:本輪偵測到相同失敗重送 → 注入一次「別重送」強提示
+        # (放在所有 tool 結果後、維持 tool_call/tool_result 配對、再加 human turn)
+        if _repeat_fail_reminder is not None:
+            messages.append(HumanMessage(content=_repeat_fail_reminder))
 
         # Output-ready 自動 done 偵測 — mtime-based、區分「真 polish」vs「純空轉」
         if done_call is None:

@@ -1096,6 +1096,7 @@ async def _run_subagent_native(
         # 跑非 done 的 tool、每個 append ToolMessage
         last_tool_name_this_iter: Optional[str] = None
         last_tool_result_this_iter: Optional[str] = None
+        _web_searched_this_iter = False
         for tc in regular_calls:
             tc_name = tc.get("name", "")
             tc_id = tc.get("id") or ""
@@ -1121,6 +1122,8 @@ async def _run_subagent_native(
             })
             last_tool_name_this_iter = tc_name
             last_tool_result_this_iter = result
+            if tc_name == "web_search":
+                _web_searched_this_iter = True
 
             # 截斷大 result(防 context 雪崩)
             _MAX = 3000 if tc_name == "read_file" else 5000
@@ -1156,6 +1159,14 @@ async def _run_subagent_native(
                                 )
                             last_output_mtime_sub = _mt_sub
                             output_ready_no_done_count_sub = 0
+                        elif _web_searched_this_iter:
+                            # 本輪有 web_search = 還在蒐集素材、不是空轉 → 不計入強制收尾
+                            # (researcher 真實案例:寫一次 notes 後連搜 4 次、被誤判空轉提早切斷)
+                            output_ready_no_done_count_sub = 0
+                            log.info(
+                                f"[{step_name}] 🔎 本輪 web_search 蒐集中(mtime 未變但非空轉)"
+                                f"→ 重置強制收尾 counter"
+                            )
                         else:
                             # mtime 沒變 = LLM 純空轉 → 累計
                             output_ready_no_done_count_sub = locals().get(
@@ -1246,7 +1257,31 @@ async def _run_subagent_native(
             break
 
     else:
-        # max_iter 用完沒 done
+        # max_iter 用完沒 done — 但若 output_path 已存在且有效 → 視為成功、不判失敗
+        # (強模型如 Claude 太認真、搜/寫到上限還沒 formally call done,產出其實是好的,
+        #  不該逼人工 resume。2026-05-29 AI server researcher iter14/14、notes 22KB 案例)
+        if output_path:
+            try:
+                _pp = Path(output_path)
+                if _pp.exists():
+                    _ofloor = 5000 if _pp.suffix.lower() in {".pptx", ".docx", ".xlsx"} else 100
+                    _osz = _pp.stat().st_size
+                    if _osz >= _ofloor:
+                        log.warning(
+                            f"[{step_name}] ⚠ 達 max_iter 未 done,但輸出檔 {_pp.name} "
+                            f"已存在且有效({_osz:,} bytes)→ 視為成功收尾"
+                        )
+                        return SubagentResult(
+                            success=True,
+                            final_message=(
+                                f"系統收尾:達 max_iter({max_iter})未主動 done,"
+                                f"但輸出檔 {_pp.name}({_osz:,} bytes)已存在且有效、視為成功。"
+                            ),
+                            iterations=iterations_done, tool_calls_made=tool_calls_made,
+                            token_usage=accumulated_usage,
+                        )
+            except OSError:
+                pass
         return SubagentResult(
             success=False,
             final_message=f"(超過 {max_iter} 輪未 done)最後 reply:{(content_str or '')[:200]}",
