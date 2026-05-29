@@ -864,9 +864,9 @@ const ATLAS_ACTIONS: AtlasAction[] = [
     ],
   },
   {
-    id: 'research', title: '網路研究報告', desc: 'web_search 收料、寫深度報告', tag: 'Research',
+    id: 'research', title: '深度研究 → Word 報告', desc: '收料 → 分析 → 深報告 → 產出 Word', tag: 'Research',
     examples: [
-      '研究「2026 AI 筆電市場」→ researcher 收料寫深度報告',
+      '深度研究「2026 AI 伺服器市場」:researcher 拆面向收料 → data_analyst 抽數據 → report_writer 寫上萬字深度報告 → docx 技能輸出正式 Word 檔',
       '查「最新 LLM benchmark 排名」→ trend_analyst 趨勢分析',
       '彙整 2026 H1 NVIDIA 技術發表 → 中文研究報告',
     ],
