@@ -2024,6 +2024,97 @@ def list_workflow_variables(query: str) -> str:
     }, ensure_ascii=False, indent=2)
 
 
+# ── 長期記憶工具(階段1:facts 語意記憶)──────────────────────────
+# 只在 settings.memory_enabled=True 時被掛載(main.py _active_tools filter)。
+# 寫操作(remember/forget)走 two-step confirm;recall/list/state 是讀、不必 confirm。
+
+@tool
+def remember_fact(key: str, value: str, category: str = "fact", confirm: bool = False) -> str:
+    """把一個關於使用者的事實 / 偏好記進長期記憶、跨對話永久保留(讓助手越用越懂使用者)。
+
+    什麼時候用:使用者明確說「記一下 / 記住 / 以後都這樣」,或表達了穩定偏好
+    (例「報告我都要正式 Word」「不要爬 PChome」「我做硬體競品研究」)。
+    ⚠️ 一次性需求不要記。敏感資料(密碼 / API key)會被系統拒記。
+
+    Args:
+        key: 短鍵、英數底線(例 'report_format' / 'domain' / 'avoid_sites')
+        value: 內容(例 '正式 Word' / '硬體競品研究')
+        category: workflow_pref(工作流偏好)/ domain(領域)/ past_decision(過去取捨)
+                  / vocabulary(慣用詞)/ preference / fact
+        confirm: False=預覽、True=真寫(取得使用者同意後才設 True)
+    """
+    import memory as _mem
+    key = (key or "").strip()
+    value = (value or "").strip()
+    if not key or not value:
+        return "key 與 value 都不可空"
+    hit = _mem.is_sensitive(value)
+    if hit:
+        return f"⛔ 拒記:這看起來像敏感資料(密碼 / 金鑰),不收進記憶。"
+    if not confirm:
+        prev = _mem.recall_fact(key)
+        prev_line = f"\n（會覆蓋舊值：{prev['value']}）" if prev.get("found") else ""
+        return (f"📝 預覽:要記住「{key} = {value}」(分類 {category}){prev_line}\n"
+                f"⚠️ 取得使用者同意(『好』『記』『OK』)後,再次呼叫本工具並設 confirm=True。")
+    r = _mem.remember_fact(key, value, category=category, source="user_told", confidence=1.0)
+    if not r.get("ok"):
+        return f"記憶失敗:{r.get('error')}"
+    return f"✅ 已記住:{key} = {value}(分類 {category})。之後跨對話都記得。"
+
+
+@tool
+def recall_fact(key: str) -> str:
+    """從長期記憶查一個 key 的值。找不到會說明。"""
+    import memory as _mem
+    r = _mem.recall_fact((key or "").strip())
+    if not r.get("found"):
+        return f"記憶裡沒有 '{key}'。"
+    src = "(推測)" if r.get("source") == "inferred" else ""
+    return f"{key} = {r['value']}{src}(分類 {r.get('category')})"
+
+
+@tool
+def list_facts(category: str = "", limit: int = 20) -> str:
+    """列出記得的事實 / 偏好。可選 category 過濾。"""
+    import memory as _mem
+    cat = (category or "").strip() or None
+    rows = _mem.list_facts(category=cat, limit=int(limit))
+    if not rows:
+        return "目前沒有任何記憶。"
+    lines = []
+    for r in rows:
+        src = "(推測)" if r.get("source") == "inferred" else ""
+        lines.append(f"- [{r.get('category')}] {r['key']} = {r['value']}{src}")
+    return f"目前記得 {len(rows)} 筆:\n" + "\n".join(lines)
+
+
+@tool
+def forget_fact(key: str, confirm: bool = False) -> str:
+    """從長期記憶刪掉一個 key(使用者說「忘掉 / 別記 X」時用)。走 two-step。"""
+    import memory as _mem
+    key = (key or "").strip()
+    if not confirm:
+        prev = _mem.recall_fact(key)
+        if not prev.get("found"):
+            return f"記憶裡本來就沒有 '{key}'、不必刪。"
+        return (f"🗑️ 預覽:要刪掉記憶「{key} = {prev['value']}」\n"
+                f"⚠️ 取得使用者同意後,再次呼叫本工具並設 confirm=True。")
+    r = _mem.forget_fact(key)
+    return f"✅ 已刪掉記憶 '{key}'。" if r.get("deleted") else f"記憶裡沒有 '{key}'。"
+
+
+@tool
+def memory_state() -> str:
+    """看記憶現況:記了幾筆、最近幾筆是什麼。"""
+    import memory as _mem
+    n = _mem.count_facts()
+    if n == 0:
+        return "長期記憶目前是空的(還沒記任何事)。"
+    top = _mem.list_facts(limit=5)
+    lines = [f"- [{r.get('category')}] {r['key']} = {r['value']}" for r in top]
+    return f"長期記憶:共 {n} 筆。最近 5 筆:\n" + "\n".join(lines)
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
@@ -2037,5 +2128,8 @@ CHAT_TOOLS = [
     read_subagent_file, send_subagent_file_to_tg,    # 子代理產物 讀 / 傳 TG(限定 task working_dir)
     cancel_subagent_task,                            # 中止正在跑的子代理(asyncio.cancel + push TG)
     read_help_doc,                                   # 進階用法 lazy doc(chain / files / cancel)
+    remember_fact, recall_fact, list_facts, forget_fact, memory_state,  # 長期記憶(memory_enabled 時掛載)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}
+# 記憶工具名單(main.py 依 settings.memory_enabled 決定掛不掛)
+MEMORY_TOOL_NAMES = {"remember_fact", "recall_fact", "list_facts", "forget_fact", "memory_state"}

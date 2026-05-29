@@ -1056,6 +1056,37 @@ export async function setSandboxMode(mode: 'host' | 'wsl_docker'): Promise<Sandb
   return res.json()
 }
 
+// ── AI 助手長期記憶 ───────────────────────────────────────
+export interface MemorySettings { enabled: boolean; aggressive: boolean; fact_count?: number }
+export interface MemoryFact { key: string; value: string; category: string; source: string; confidence: number; updated_at: number }
+
+export async function getMemorySettings(): Promise<MemorySettings> {
+  const res = await fetchWithRetry(`${BASE}/settings/memory`)
+  if (!res.ok) throw new Error('讀取記憶設定失敗')
+  return res.json()
+}
+
+export async function setMemorySettings(payload: { enabled?: boolean; aggressive?: boolean }): Promise<MemorySettings> {
+  const res = await fetch(`${BASE}/settings/memory`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error('切換記憶設定失敗')
+  return res.json()
+}
+
+export async function listMemoryFacts(): Promise<MemoryFact[]> {
+  const res = await fetchWithRetry(`${BASE}/memory/facts`)
+  if (!res.ok) throw new Error('讀取記憶清單失敗')
+  return (await res.json()).facts || []
+}
+
+export async function deleteMemoryFact(key: string): Promise<void> {
+  const res = await fetch(`${BASE}/memory/facts/${encodeURIComponent(key)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('刪除記憶失敗')
+}
+
 // ── Skill 檔案目錄 ────────────────────────────────────────
 export interface SkillsDirStatus {
   skills_dir: string        // 使用者設定的自訂路徑（空 = 用預設）

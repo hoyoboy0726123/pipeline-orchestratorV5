@@ -57,6 +57,15 @@ _DEFAULT = {
     # 結束後自動還原。避免 V5 視窗擋住要自動化的目標 app。
     # 預設 OFF — 使用者自己決定要不要打擾桌面。並發 workflow 用 ref-count 處理。
     "auto_minimize_for_computer_use": False,
+    # AI 助手長期記憶(facts 語意記憶):記得使用者偏好 / 事實、跨對話「越用越懂」。
+    # 開 → 提供 remember/recall 等記憶工具 + 每輪注入記憶快照進 system prompt。
+    # 關 → 完全不載入記憶工具、不注入快照(已存的記憶保留、不刪)。預設 ON。
+    "memory_enabled": True,
+    # 激進學習:對話結束自動「推斷」使用者偏好存成低信心 inferred fact(不必明說「記下」)。
+    # 開 → 越用越懂最快,但 AI 可能過度推斷 / 記錯(都標(推測)、可改可刪)。
+    # 關 → 只記使用者明確說「記下」的事(保守、零誤記)。預設 OFF — 要積極才開。
+    # 依賴 memory_enabled;memory_enabled 關時此項無效。
+    "memory_aggressive": False,
 }
 
 _cache: Optional[dict] = None
@@ -195,6 +204,25 @@ def set_auto_minimize_for_computer_use(enabled: bool) -> dict:
     with _lock:
         existing = _cache if _cache else _load_from_disk()
         existing["auto_minimize_for_computer_use"] = enabled
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
+
+
+# ── AI 助手記憶開關（獨立 setter） ────────────────────────────────
+def set_memory_settings(enabled: Optional[bool] = None,
+                        aggressive: Optional[bool] = None) -> dict:
+    """切換長期記憶開關。enabled=主開關;aggressive=激進自動萃取(依賴 enabled)。
+    傳 None 的欄位保持原值。"""
+    global _cache
+    with _lock:
+        existing = _cache if _cache else _load_from_disk()
+        if enabled is not None:
+            existing["memory_enabled"] = bool(enabled)
+        if aggressive is not None:
+            existing["memory_aggressive"] = bool(aggressive)
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)

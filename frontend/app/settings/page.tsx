@@ -1604,6 +1604,116 @@ function ComputerUseAutoMinimizeSection() {
 }
 
 
+// ── AI 助手長期記憶 Section ───────────────────────────────────────────────────
+function MemorySection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [aggressive, setAggressive] = useState(false)
+  const [facts, setFacts] = useState<{ key: string; value: string; category: string; source: string }[]>([])
+  const [busy, setBusy] = useState(false)
+
+  const loadFacts = () => {
+    fetch('/api/backend/memory/facts')
+      .then(r => r.json()).then(d => setFacts(d.facts || [])).catch(() => {})
+  }
+  useEffect(() => {
+    fetch('/api/backend/settings/memory')
+      .then(r => r.json())
+      .then(d => { setEnabled(!!d.enabled); setAggressive(!!d.aggressive) })
+      .catch(() => setEnabled(true))
+    loadFacts()
+  }, [])
+
+  const put = async (payload: { enabled?: boolean; aggressive?: boolean }) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/backend/settings/memory', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      })
+      if (!res.ok) throw new Error()
+      const d = await res.json()
+      setEnabled(!!d.enabled); setAggressive(!!d.aggressive)
+      toast.success('記憶設定已更新')
+    } catch { toast.error('設定切換失敗') } finally { setBusy(false) }
+  }
+
+  const delFact = async (key: string) => {
+    try {
+      await fetch(`/api/backend/memory/facts/${encodeURIComponent(key)}`, { method: 'DELETE' })
+      setFacts(f => f.filter(x => x.key !== key)); toast.success(`已忘記「${key}」`)
+    } catch { toast.error('刪除失敗') }
+  }
+
+  if (enabled === null) return null
+  const Toggle = ({ on, onClick, color = 'bg-violet-500', disabled = false }: { on: boolean; onClick: () => void; color?: string; disabled?: boolean }) => (
+    <button onClick={onClick} disabled={disabled}
+      className={cn('relative w-12 h-7 rounded-full transition-colors shrink-0', on ? color : 'bg-gray-300', disabled && 'opacity-50 cursor-not-allowed')}>
+      <span className={cn('absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform', on ? 'translate-x-5' : 'translate-x-0')} />
+    </button>
+  )
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center text-xl">🧠</div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">AI 助手長期記憶</h2>
+          <p className="text-sm text-gray-500">記得你的偏好 / 事實,跨對話「越用越懂你」</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {/* 主開關 */}
+        <div className="p-5 flex items-start justify-between gap-4 border-b border-gray-100">
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">開啟長期記憶</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              開 → AI 助手能記住你明確要它記的偏好 / 事實(走確認),每次對話自動參考。
+              關 → 不載入記憶工具、不注入記憶(已存的不刪、之後再開仍在)。敏感資料(密碼 / 金鑰)一律拒記。
+            </p>
+          </div>
+          <Toggle on={enabled} onClick={() => put({ enabled: !enabled })} disabled={busy} />
+        </div>
+
+        {/* 激進萃取開關 */}
+        <div className={cn('p-5 flex items-start justify-between gap-4 border-b border-gray-100', !enabled && 'opacity-40 pointer-events-none')}>
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">激進學習(自動推斷偏好)</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              開 → 每次對話結束自動「推斷」你的偏好存成<b>低信心(推測)</b>記憶、不必你明說「記下」,越用越懂最快;
+              但 AI 可能過度推斷 / 記錯(都標(推測)、你可隨時刪)。關 → 只記你明確說「記下」的事(保守、零誤記)。
+            </p>
+            <p className="text-[11px] text-amber-600 mt-1">⚠️ 預設關閉。要 AI 更積極學你再開。</p>
+          </div>
+          <Toggle on={aggressive} onClick={() => put({ aggressive: !aggressive })} color="bg-amber-500" disabled={busy || !enabled} />
+        </div>
+
+        {/* 記憶清單 */}
+        <div className="px-5 py-4 bg-gray-50/50">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-gray-600">目前記得 {facts.length} 筆</span>
+            <button onClick={loadFacts} className="text-xs text-violet-600 hover:underline">重新整理</button>
+          </div>
+          {facts.length === 0 ? (
+            <p className="text-xs text-gray-400">還沒記任何事。對話中跟 AI 說「記住我…」就會出現在這。</p>
+          ) : (
+            <div className="space-y-1.5">
+              {facts.map(f => (
+                <div key={f.key} className="flex items-center gap-2 text-xs bg-white rounded-lg border border-gray-100 px-3 py-2">
+                  <span className="px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 shrink-0">{f.category}</span>
+                  <span className="font-medium text-gray-700 shrink-0">{f.key}</span>
+                  <span className="text-gray-500 truncate flex-1">= {f.value}{f.source === 'inferred' && <span className="text-amber-500">(推測)</span>}</span>
+                  <button onClick={() => delFact(f.key)} className="text-gray-300 hover:text-red-500 shrink-0" title="忘記這條">🗑</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Skill Sandbox Section (V3) ────────────────────────────────────────────────
 function SandboxSection() {
   const [status, setStatus] = useState<SandboxStatus | null>(null)
@@ -2475,6 +2585,9 @@ export default function SettingsPage() {
 
         {/* computer_use 自動縮視窗 */}
         <ComputerUseAutoMinimizeSection />
+
+        {/* AI 助手長期記憶 */}
+        <MemorySection />
 
         {/* 提示 */}
         <div className="mt-4 text-xs text-gray-500 space-y-1">

@@ -1453,6 +1453,60 @@ async def put_auto_minimize_for_computer_use(req: AutoMinimizeRequest):
     return {"enabled": bool(updated.get("auto_minimize_for_computer_use", False))}
 
 
+class MemorySettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    aggressive: Optional[bool] = None
+
+
+@app.get("/settings/memory")
+async def get_memory_settings():
+    """AI 助手長期記憶開關 + 現況。"""
+    from settings import get_settings
+    s = get_settings()
+    out = {
+        "enabled": bool(s.get("memory_enabled", True)),
+        "aggressive": bool(s.get("memory_aggressive", False)),
+        "fact_count": 0,
+    }
+    try:
+        import memory as _mem
+        out["fact_count"] = _mem.count_facts()
+    except Exception:
+        pass
+    return out
+
+
+@app.put("/settings/memory")
+async def put_memory_settings(req: MemorySettingsRequest):
+    """切換長期記憶主開關 / 激進萃取開關。"""
+    from settings import set_memory_settings
+    updated = set_memory_settings(enabled=req.enabled, aggressive=req.aggressive)
+    return {
+        "enabled": bool(updated.get("memory_enabled", True)),
+        "aggressive": bool(updated.get("memory_aggressive", False)),
+    }
+
+
+@app.get("/memory/facts")
+async def list_memory_facts(category: Optional[str] = None, limit: int = 100):
+    """列出 AI 助手記得的事實 / 偏好(設定頁管理用)。"""
+    try:
+        import memory as _mem
+        return {"facts": _mem.list_facts(category=category, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"讀取記憶失敗: {e}")
+
+
+@app.delete("/memory/facts/{key}")
+async def delete_memory_fact(key: str):
+    """刪掉一條記憶(設定頁手動管理)。"""
+    try:
+        import memory as _mem
+        return _mem.forget_fact(key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"刪除記憶失敗: {e}")
+
+
 class SandboxModeRequest(BaseModel):
     mode: str  # "host" | "wsl_docker"
 
@@ -4381,6 +4435,42 @@ def _friendly_llm_error(e: Exception) -> tuple[int, str]:
     return 500, f"LLM 呼叫失敗（{name}）：{msg[:300]}"
 
 
+def _memory_filtered_tools(tools: list) -> list:
+    """memory_enabled=False 時把記憶工具從工具清單拿掉(省 schema token)。"""
+    try:
+        from settings import get_settings
+        if get_settings().get("memory_enabled", True):
+            return tools
+        from chat_tools import MEMORY_TOOL_NAMES
+        return [t for t in tools if t.name not in MEMORY_TOOL_NAMES]
+    except Exception:
+        return tools
+
+
+def _memory_snapshot_text() -> str:
+    """記憶快照(注入 system 之後的獨立 message、不污染 cacheable 主 prompt)。
+    memory_enabled=False 或無 facts → 回空字串。"""
+    try:
+        from settings import get_settings
+        if not get_settings().get("memory_enabled", True):
+            return ""
+        import memory as _mem
+        facts = _mem.snapshot(limit=8)
+    except Exception:
+        return ""
+    if not facts:
+        # 還沒記任何事 — 仍告訴 LLM 它有記憶能力,否則永遠不會主動 remember
+        return ("[你具備長期記憶。使用者明確要你「記住 / 記一下」偏好或事實時(例「我報告都要正式 Word」),"
+                "呼叫 remember_fact(走 confirm 兩步)記下,跨對話永久記得。一次性需求不要記。]")
+    lines = ["[關於這位使用者,你已經記得這些(長期記憶、可直接參考、不必再查工具):]"]
+    for f in facts:
+        src = "(推測)" if f.get("source") == "inferred" else ""
+        lines.append(f"  - {f['key']} = {f['value']}{src}")
+    lines.append("若使用者明確要你「記住 / 記一下」某事 → 呼叫 remember_fact(走 confirm 兩步);"
+                 "標(推測)的是系統推斷、可能不準,使用者更正時用 forget_fact 或重記。")
+    return "\n".join(lines)
+
+
 async def _chat_agent_loop(
     req: PipelineChatRequest,
     on_tool_event=None,
@@ -4431,6 +4521,7 @@ async def _chat_agent_loop(
     _active_tools = CHAT_TOOLS if _channel == "telegram" else [
         t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS
     ]
+    _active_tools = _memory_filtered_tools(_active_tools)   # memory_enabled=False → 拿掉記憶工具
     try:
         llm_with_tools = llm.bind_tools(_active_tools)
     except Exception as e:
@@ -4444,6 +4535,11 @@ async def _chat_agent_loop(
     # (今日日期、in-flight digest)應放在底稿後面、保最大化 cache prefix。
     _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
     lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
+    # 記憶快照:獨立一條 system message(不帶 cache_control)、放在 cacheable 主 prompt 之後、
+    # 不污染主 prompt 的 cache。memory_enabled=False 或無 facts → 空、不加。
+    _mem_snap = _memory_snapshot_text()
+    if _mem_snap:
+        lc_messages.append(SystemMessage(content=_mem_snap))
     # 只取最近 _CHAT_HISTORY_CAP 則訊息送進 LLM、避免對話太長 token 爆炸
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
@@ -4657,6 +4753,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         "cancel_subagent_task", "read_help_doc",
     }
     _active_tools = [t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS]
+    _active_tools = _memory_filtered_tools(_active_tools)   # memory_enabled=False → 拿掉記憶工具
     try:
         llm_with_tools = llm.bind_tools(_active_tools)
     except Exception as e:
@@ -4667,6 +4764,10 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
     # Prompt caching (#153):chat/stream endpoint 同 _chat_agent_loop 處理
     _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
     lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
+    # 記憶快照:獨立 system message、不帶 cache_control、不污染主 prompt cache(同 _chat_agent_loop)
+    _mem_snap = _memory_snapshot_text()
+    if _mem_snap:
+        lc_messages.append(SystemMessage(content=_mem_snap))
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
         cls = HumanMessage if m["role"] == "user" else AIMessage
