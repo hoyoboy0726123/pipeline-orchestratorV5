@@ -2502,7 +2502,7 @@ async def _run_pipeline_inner(
                     # ── 自我修復攔截:開關開 + 次數未滿 + step 可修 → 背景 AI 修復、不轉人工 ──
                     # (缺套件 missing_dependency / rate_limited 在前面的分支已 return、不會走到這、
                     #  那些不該自動改 YAML。只有「一般 failure」才進自我修復。)
-                    if _should_self_heal(run, step):
+                    if _should_self_heal(run, step, val, exec_result):
                         await _enter_self_heal(run, val, step, step_num, exec_result, logger)
                         unregister_task(run.run_id)
                         return run.run_id  # 背景修復中、runner 先退出
@@ -2575,7 +2575,23 @@ def _self_heal_max() -> int:
         return 2
 
 
-def _should_self_heal(run, step) -> bool:
+def _is_stuck_failure(val, exec_result) -> bool:
+    """卡死 / 不收斂型失敗(步驟跑很久才失敗:subagent 撞 max_iter、timeout、連續無 tool)。
+    這類重跑會再卡一次、改 YAML 也救不了根本問題 → 不修、直接轉人工,避免把時間放大數倍
+    (實測 H3 coder 撞 max_iter、self_heal 重跑 → 卡 50 分鐘)。對齊 [[non-convergence-guard]]。"""
+    blob = (
+        (getattr(val, "reason", "") or "") + " "
+        + (getattr(exec_result, "error", "") or "") + " "
+        + (getattr(exec_result, "stderr", "") or "")
+    ).lower()
+    for kw in ("reached_max_iter", "max_iter", "timeout", "timed out", "逾時",
+               "不收斂", "非收斂", "consecutive_no_tool"):
+        if kw in blob:
+            return True
+    return False
+
+
+def _should_self_heal(run, step, val=None, exec_result=None) -> bool:
     try:
         from settings import get_settings
         s = get_settings()
@@ -2585,7 +2601,12 @@ def _should_self_heal(run, step) -> bool:
         return False
     if getattr(run, "self_heal_count", 0) >= _self_heal_max():
         return False
-    return _step_is_healable(step)
+    if not _step_is_healable(step):
+        return False
+    # 卡死型失敗不重跑(重跑會再卡、放大時間)→ 交人工
+    if _is_stuck_failure(val, exec_result):
+        return False
+    return True
 
 
 def _ai_gave_up(reply: str) -> bool:
