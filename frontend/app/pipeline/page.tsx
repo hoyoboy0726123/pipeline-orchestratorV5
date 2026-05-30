@@ -431,7 +431,9 @@ export default function PipelinePage() {
   const runStatusRef = useRef(runStatus)
   const setRunStatus = (v: typeof runStatus) => { runStatusRef.current = v; _setRunStatus(v) }
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
-  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval'>('failure')
+  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval' | 'self_heal'>('failure')
+  // Phase 3 自我修復回寫:修復成功跑完後,問是否把修好的 YAML 存回存檔工作流
+  const [healWriteback, setHealWriteback] = useState<{ runId: string; workflowId: string } | null>(null)
   const [askUserOptions, setAskUserOptions] = useState<string[]>([])
   const [askUserContext, setAskUserContext] = useState('')
   const [askUserAnswer, setAskUserAnswer] = useState('')
@@ -565,7 +567,7 @@ export default function PipelinePage() {
             setRunStatus('awaiting')
             setAwaitingRunId(active.run_id)
             const at = (active as any).awaiting_type
-            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
+            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
             setAwaitingType(mapped)
             setAwaitingMessage((active as any).awaiting_message || '')
             setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1451,7 +1453,7 @@ export default function PipelinePage() {
                 setRunStatus('awaiting')
                 setAwaitingRunId(active.run_id)
                 const at = (active as any).awaiting_type
-                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
+                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
                 setAwaitingType(mapped)
                 setAwaitingMessage((active as any).awaiting_message || '')
                 setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1542,7 +1544,7 @@ export default function PipelinePage() {
           setRunStatus('awaiting')
           setAwaitingRunId(runId)
           const at = data.awaiting_type
-          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
+          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
           setAwaitingType(mapped)
           setAwaitingMessage(data.awaiting_message || '')
           setAwaitingSuggestion(data.awaiting_suggestion || '')
@@ -1590,6 +1592,10 @@ export default function PipelinePage() {
         setRunStatus(success ? 'success' : 'failed')
         setAwaitingRunId(null)
         toast[success ? 'success' : 'error'](success ? 'Pipeline 執行完成 ✓' : data.status === 'aborted' ? 'Pipeline 已中止' : 'Pipeline 執行失敗')
+        // Phase 3:自我修復成功跑完 → 提示是否把修好的 YAML 回寫存檔工作流(否則下次跑同工作流仍踩同錯)
+        if (success && (data.self_heal_count || 0) > 0 && data.workflow_id) {
+          setHealWriteback({ runId: data.run_id, workflowId: data.workflow_id })
+        }
         // 成功且有待確認的 recipes → 顯示確認對話框
         if (success && data.pending_recipes && data.pending_recipes.length > 0) {
           setPendingRecipeRunId(data.run_id)
@@ -1624,7 +1630,7 @@ export default function PipelinePage() {
   const [hintText, setHintText] = useState('')
   const [showHintInput, setShowHintInput] = useState(false)
 
-  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev', hint?: string) => {
+  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev' | 'self_heal_now', hint?: string) => {
     if (!awaitingRunId) return
     const rid = awaitingRunId
 
@@ -1959,6 +1965,50 @@ export default function PipelinePage() {
           </Panel>
         </ReactFlow>
 
+        {/* Phase 3:自我修復成功跑完 → 問是否回寫存檔工作流 */}
+        {healWriteback && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-emerald-50 border border-emerald-300 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
+            <span className="text-emerald-700 font-medium text-sm">✅ 這條工作流是 AI 自動修復後跑成功的</span>
+            <p className="text-xs text-emerald-800 leading-relaxed">
+              要把 AI 修好的版本<b>存回這個工作流</b>嗎?存回後下次跑就不會再踩同樣的錯;不存的話這次的修正只用於本次執行。
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/backend/pipeline/runs/${healWriteback.runId}/heal-writeback`, { method: 'POST' })
+                    if (!res.ok) throw new Error()
+                    toast.success('已把修好的版本存回工作流 ✓')
+                    setHealWriteback(null)
+                  } catch { toast.error('回寫失敗') }
+                }}
+                className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 whitespace-nowrap"
+              >💾 存回工作流</button>
+              <button
+                onClick={() => setHealWriteback(null)}
+                className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-xs font-medium hover:bg-gray-300 whitespace-nowrap"
+              >不用,這次就好</button>
+            </div>
+          </div>
+        )}
+
+        {/* AI 自我修復中(唯讀過渡狀態)*/}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'self_heal' && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-cyan-50 border border-cyan-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+              <span className="text-cyan-700 font-medium text-sm">🔧 AI 正在自我修復…</span>
+              <button onClick={() => handleDecision('abort')} className="ml-auto px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
+            </div>
+            {awaitingMessage && (
+              <div className="bg-cyan-100 border border-cyan-200 rounded-lg px-3 py-2">
+                <p className="text-xs text-cyan-800 leading-relaxed">{awaitingMessage}</p>
+              </div>
+            )}
+            <p className="text-[11px] text-cyan-600">AI 會讀 log、比對自己寫的 YAML、找錯改好後自動重跑。修不好會自動轉人工決策。</p>
+          </div>
+        )}
+
         {/* Awaiting human decision banner */}
         {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'failure' && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-amber-50 border border-amber-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
@@ -1978,6 +2028,11 @@ export default function PipelinePage() {
                   title="認為失敗是因為上一步沒做好;清掉上一步 + 當前步結果、從上一步重跑"
                   className="px-3 py-1.5 bg-teal-600 text-white rounded-lg text-xs font-medium hover:bg-teal-700 whitespace-nowrap"
                 >↩ 重做上一步</button>
+                <button
+                  onClick={() => handleDecision('self_heal_now')}
+                  title="讓 AI 讀執行 log + 比對自己寫的 YAML、自動找錯改好後重跑"
+                  className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg text-xs font-medium hover:bg-cyan-700 whitespace-nowrap"
+                >🔧 讓 AI 試修</button>
                 <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
               </div>
             </div>

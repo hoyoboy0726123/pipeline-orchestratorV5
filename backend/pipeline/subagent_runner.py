@@ -1237,6 +1237,29 @@ async def _run_subagent_native(
             except OSError:
                 pass
 
+        # ── 收斂守門:深度搜尋型任務(researcher)迭代過半仍在搜 → 提醒停搜寫報告 ──
+        # 對應「沒給模型正確的停止信號」根因(同 Claude end_turn 那次):模型被 prompt
+        # 驅動一直 web_search 不收斂、撞 max_iter 報告卻沒寫出來。runtime 在過半時主動
+        # 發一次「該停搜、寫報告」的信號(只發一次、不打擾正常收斂的 run)。
+        if (
+            done_call is None and output_path and max_iter >= 8
+            and _web_searched_this_iter
+            and (i + 1) >= max_iter * 0.6
+            and not locals().get("_converge_steer_sent", False)
+        ):
+            _converge_steer_sent = True
+            _remain = max_iter - (i + 1)
+            log.info(
+                f"[{step_name}] ⏳ 迭代過半({i + 1}/{max_iter})仍在 web_search、"
+                f"注入收斂提醒(剩 {_remain} 輪)"
+            )
+            messages.append(HumanMessage(content=(
+                f"[系統] 你已用掉 {i + 1}/{max_iter} 輪、只剩 {_remain} 輪。"
+                f"若手上素材已足以撐起多章節報告,請**立刻停止搜尋** —— "
+                f"下一輪直接用 run_python 把所有 notes 彙整成最終報告寫到 {output_path}、再 done。"
+                f"**不要再開新的 web_search**,否則會用光輪數、報告沒寫出來 = 整步失敗。"
+            )))
+
         # ── 處理 done(如有)── 驗證 output 存在、否則 reject + reminder
         if done_call is not None:
             tc_id = done_call.get("id") or ""

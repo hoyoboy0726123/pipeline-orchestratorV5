@@ -1714,6 +1714,85 @@ function MemorySection() {
 }
 
 
+function SelfHealSection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [maxAttempts, setMaxAttempts] = useState(2)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/backend/settings/self-heal')
+      .then(r => r.json())
+      .then(d => { setEnabled(!!d.enabled); setMaxAttempts(d.max_attempts || 2) })
+      .catch(() => setEnabled(false))
+  }, [])
+
+  const put = async (payload: { enabled?: boolean; max_attempts?: number }) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/backend/settings/self-heal', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      })
+      if (!res.ok) throw new Error()
+      const d = await res.json()
+      setEnabled(!!d.enabled); setMaxAttempts(d.max_attempts || 2)
+      toast.success('自我修復設定已更新')
+    } catch { toast.error('設定切換失敗') } finally { setBusy(false) }
+  }
+
+  if (enabled === null) return null
+  const Toggle = ({ on, onClick, disabled = false }: { on: boolean; onClick: () => void; disabled?: boolean }) => (
+    <button onClick={onClick} disabled={disabled}
+      className={cn('relative w-12 h-7 rounded-full transition-colors shrink-0', on ? 'bg-teal-500' : 'bg-gray-300', disabled && 'opacity-50 cursor-not-allowed')}>
+      <span className={cn('absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform', on ? 'translate-x-5' : 'translate-x-0')} />
+    </button>
+  )
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-teal-100 flex items-center justify-center text-xl">🔧</div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">工作流自我修復</h2>
+          <p className="text-sm text-gray-500">步驟失敗時,讓 AI 讀 log + 改 YAML + 重跑,自動修到好</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {/* 主開關 */}
+        <div className="p-5 flex items-start justify-between gap-4 border-b border-gray-100">
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">開啟自我修復</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              開 → 某步驟失敗(重試耗盡)時,AI 助手自動讀執行 log、比對自己寫的 YAML、找出錯誤、改好、從失敗步重跑;
+              到上限仍沒修好才轉人工決策。關(預設)→ 失敗即停下等你決定。
+            </p>
+            <p className="text-[11px] text-amber-600 mt-1">⚠️ 預設關閉。自動改 YAML 有風險,確認要無人值守再開。</p>
+          </div>
+          <Toggle on={enabled} onClick={() => put({ enabled: !enabled })} disabled={busy} />
+        </div>
+
+        {/* 次數上限 */}
+        <div className={cn('p-5 flex items-center justify-between gap-4', !enabled && 'opacity-40 pointer-events-none')}>
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">最多自動修復次數</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              單次執行最多自動嘗試幾輪「診斷 → 改 YAML → 重跑」。到上限仍失敗就轉人工。範圍 1~5。
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button onClick={() => put({ max_attempts: Math.max(1, maxAttempts - 1) })} disabled={busy || maxAttempts <= 1}
+              className="w-8 h-8 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40">−</button>
+            <span className="w-8 text-center text-sm font-semibold text-gray-800">{maxAttempts}</span>
+            <button onClick={() => put({ max_attempts: Math.min(5, maxAttempts + 1) })} disabled={busy || maxAttempts >= 5}
+              className="w-8 h-8 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40">＋</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Skill Sandbox Section (V3) ────────────────────────────────────────────────
 function SandboxSection() {
   const [status, setStatus] = useState<SandboxStatus | null>(null)
@@ -2588,6 +2667,8 @@ export default function SettingsPage() {
 
         {/* AI 助手長期記憶 */}
         <MemorySection />
+
+        <SelfHealSection />
 
         {/* 提示 */}
         <div className="mt-4 text-xs text-gray-500 space-y-1">

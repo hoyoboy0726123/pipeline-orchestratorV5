@@ -2499,6 +2499,13 @@ async def _run_pipeline_inner(
                         f"步驟 {step_num} 缺套件 {missing_pkgs} → 等待用戶確認安裝"
                     )
                 else:
+                    # ── 自我修復攔截:開關開 + 次數未滿 + step 可修 → 背景 AI 修復、不轉人工 ──
+                    # (缺套件 missing_dependency / rate_limited 在前面的分支已 return、不會走到這、
+                    #  那些不該自動改 YAML。只有「一般 failure」才進自我修復。)
+                    if _should_self_heal(run, step):
+                        await _enter_self_heal(run, val, step, step_num, exec_result, logger)
+                        unregister_task(run.run_id)
+                        return run.run_id  # 背景修復中、runner 先退出
                     run.awaiting_type = "failure"
                     run.awaiting_message = val.reason or ""
                     run.awaiting_suggestion = val.suggestion or ""
@@ -2525,6 +2532,267 @@ async def _run_pipeline_inner(
     logger.info(f"Pipeline {config.name} 全部完成！")
     await _notify_final(run, config)
     return run.run_id
+
+
+# ── 自我修復(Self-Healing)────────────────────────────────────────────────────
+# 某步驟失敗(重試耗盡)且使用者開啟自我修復:讓 AI 助手讀 log + 比對自己寫的 YAML、
+# 找 root cause、改 run.config_dict(這次 run 的暫存 YAML、**不碰存檔 workflow**)、從失敗步重跑。
+# 到 self_heal_max_attempts / AI 認輸 / 不收斂 → fallback 回 awaiting_type=failure 人工決策。
+# 設計與 retry_with_hint 同源(deepcopy/改/存回 run/重跑),差別是改整份 YAML 而非單步 batch。
+_SELF_HEAL_HARD_CAP = 5
+_SELF_HEAL_LOG_LINES = 160
+
+_SELF_HEAL_SYSTEM_HINT = (
+    "【自動修復模式】你正在背景自動修復一個失敗的工作流,沒有使用者在線回答問題。\n"
+    "鐵則:\n"
+    "1. 仔細讀 log 與目前 YAML、判斷失敗 root cause(YAML 規劃錯 / 路徑錯 / 步驟順序錯 / "
+    "缺前置步驟 / 參數錯 / batch 描述不清 / max_iter 太低 等)。\n"
+    "2. 只改必要處、輸出**完整**修正後 workflow YAML(用 ```yaml 區塊),不要省略任何步驟。\n"
+    "3. 用一兩句說明你改了什麼、為什麼。\n"
+    "4. 若判斷這**不是改 YAML 能修**的(外部服務 503 / 需使用者授權 / 缺套件)→ 明講"
+    "「無法自動修復」+ 原因,**不要硬改、不要輸出 YAML**。\n"
+    "5. 輸出格式跟你平常生成工作流給桌面 web 完全一樣:**先單獨寫一行 `YAML_READY`、"
+    "緊接著 ```yaml 區塊**(系統靠 YAML_READY 標記偵測並自動套用)。少了 YAML_READY 系統會抓不到、修復就失敗。\n"
+    "6. **絕對不要呼叫 save_workflow_yaml / start_workflow 或任何工具** —— 只要 emit YAML_READY + ```yaml``` 即可。"
+)
+
+
+def _step_is_healable(step) -> bool:
+    """只修 AI 靠改 YAML 能救的節點。human_confirm(人為)/ computer_use / visual_validation /
+    outlook(環境相關、改 YAML 沒用)/ condition(分支邏輯、極少是失敗源)不修。"""
+    for attr in ("human_confirm", "computer_use", "visual_validation",
+                 "outlook_automation", "condition"):
+        if getattr(step, attr, False):
+            return False
+    return True
+
+
+def _self_heal_max() -> int:
+    try:
+        from settings import get_settings
+        return min(_SELF_HEAL_HARD_CAP, int(get_settings().get("self_heal_max_attempts", 2) or 2))
+    except Exception:
+        return 2
+
+
+def _should_self_heal(run, step) -> bool:
+    try:
+        from settings import get_settings
+        s = get_settings()
+    except Exception:
+        return False
+    if not s.get("self_heal_enabled", False):
+        return False
+    if getattr(run, "self_heal_count", 0) >= _self_heal_max():
+        return False
+    return _step_is_healable(step)
+
+
+def _ai_gave_up(reply: str) -> bool:
+    if not reply:
+        return False
+    low = reply.replace(" ", "")
+    for kw in ("無法自動修復", "無法修復", "不是改YAML", "非YAML能修", "無法靠YAML",
+               "需要使用者", "需要授權", "外部服務", "cannotfix", "cannotbefixed"):
+        if kw.replace(" ", "") in low:
+            return True
+    return False
+
+
+def _yaml_near_identical(a: str, b: str) -> bool:
+    """新舊 YAML 是否「沒有實質修改」→ 視為不收斂。
+    比 steps 的語義內容(name/batch/各節點旗標),不用字串相似度 —— 字串 ratio 對小工作流
+    太鈍(改一個關鍵字如 prnt→print 的 ratio 仍 >0.985 會被誤判沒改)。只要任何 step 的
+    name/batch 變了就算有實質改動、放行。"""
+    import yaml as _y
+
+    def _sig(s):
+        try:
+            d = _y.safe_load(s) or {}
+            steps = d.get("steps", []) if isinstance(d, dict) else []
+            return [
+                (st.get("name"), st.get("batch"), st.get("skill_mode"),
+                 st.get("subagent_role"), st.get("subagent_max_iter"))
+                for st in steps if isinstance(st, dict)
+            ]
+        except Exception:
+            return None
+
+    sa, sb = _sig(a), _sig(b)
+    if sa is None or sb is None:
+        # parse 失敗 → 退回字串完全相等比較(只有一字不差才算沒改)
+        return (a or "").strip() == (b or "").strip()
+    return sa == sb
+
+
+def _format_prior_attempts(prior: list) -> str:
+    if not prior:
+        return "(這是第一次修復、沒有先前嘗試)"
+    lines = []
+    for p in prior:
+        lines.append(f"- 第 {p.get('attempt', '?')} 次:{(p.get('diagnosis') or '')[:300]}")
+    return "\n".join(lines)
+
+
+async def _notify_self_heal(run: PipelineRun, text: str):
+    """自我修復進度通知(TG)。desktop run 沒 chat_id 時 _tg_send 自行略過。"""
+    try:
+        await _tg_send(run.telegram_chat_id, f"🔧 <b>{run.pipeline_name}</b>\n{text}")
+    except Exception:
+        pass
+
+
+async def _enter_self_heal(run, val, step, step_num, exec_result, logger) -> None:
+    """進入修復過渡狀態 + 背景啟動修復(不阻塞 runner)。"""
+    max_n = _self_heal_max()
+    run.self_heal_count = getattr(run, "self_heal_count", 0) + 1
+    run.status = "awaiting_human"
+    run.awaiting_type = "self_heal"
+    run.awaiting_message = f"AI 自我修復中(第 {run.self_heal_count}/{max_n} 次)…失敗步驟:{step.name}"
+    run.awaiting_suggestion = ""
+    get_store().save(run)
+    logger.warning(
+        f"步驟 {step_num}「{step.name}」失敗 → 啟動自我修復(第 {run.self_heal_count}/{max_n} 次)"
+    )
+    await _notify_self_heal(
+        run, f"步驟「{step.name}」失敗、AI 正在自動修復(第 {run.self_heal_count}/{max_n} 次)…"
+    )
+    _stderr_tail = ""
+    if exec_result is not None and getattr(exec_result, "stderr", ""):
+        _stderr_tail = (exec_result.stderr or "")[-1500:]
+    asyncio.create_task(_run_self_heal_then_resume(
+        run.run_id, step.name, run.current_step,
+        val.reason or "", val.suggestion or "", _stderr_tail,
+    ))
+
+
+async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index,
+                                     fail_reason, fail_suggestion, stderr_tail):
+    """背景:讀 log → AI 改 YAML → 套用 → 從失敗步重跑。失敗則 fallback 人工。"""
+    store_ = get_store()
+    run = store_.load(run_id)
+    if not run:
+        return
+    logger = resume_run_logger(run.run_id, run.log_path)
+
+    def _fallback(msg):
+        run.status = "awaiting_human"
+        run.awaiting_type = "failure"
+        run.awaiting_message = msg
+        run.awaiting_suggestion = fail_suggestion
+        store_.save(run)
+
+    try:
+        import yaml as _yaml
+        log_tail = get_run_log_tail(run_id, lines=_SELF_HEAL_LOG_LINES)
+        current_yaml = _yaml.safe_dump(run.config_dict, allow_unicode=True, sort_keys=False)
+        prior = getattr(run, "self_heal_history", []) or []
+
+        heal_instruction = (
+            "工作流「" + run.pipeline_name + "」執行到步驟「" + failed_step_name
+            + "」失敗,需要你修復。\n\n"
+            "=== 驗證判定 ===\n" + (fail_reason or "(無)") + "\n\n"
+            "=== 原建議 ===\n" + (fail_suggestion or "(無)") + "\n\n"
+            "=== 失敗步驟 stderr(末段)===\n" + (stderr_tail or "(無)") + "\n\n"
+            "=== 執行 log(末段、錯誤通常在這)===\n" + (log_tail or "(無)") + "\n\n"
+            "=== 目前完整 YAML ===\n```yaml\n" + current_yaml + "\n```\n\n"
+            "=== 之前的修復嘗試(別重蹈覆轍)===\n" + _format_prior_attempts(prior) + "\n\n"
+            "請判斷 root cause、輸出修正後的**完整** YAML(```yaml 區塊)、並用一兩句說明改了什麼。"
+            "若判斷非 YAML 能修(外部服務掛 / 需授權 / 缺套件)→ 明說「無法自動修復」+ 原因、不要輸出 YAML。"
+        )
+
+        from main import _chat_agent_loop, PipelineChatRequest
+        # 不帶 workflow_id:heal_instruction 已含完整 current YAML,再注入「現有工作流」context
+        # 會讓 AI 進入「改現有工作流」模式、傾向呼叫 save_workflow_yaml 工具(要兩步確認)
+        # 而非直接在回覆吐 ```yaml``` → 我們抓不到 yaml_content。實測這是修復失敗主因。
+        result = await _chat_agent_loop(PipelineChatRequest(
+            messages=[{"role": "user", "content": heal_instruction}],
+            workflow_id=None,
+            extra_system=_SELF_HEAL_SYSTEM_HINT,
+        )) or {}
+
+        new_yaml = result.get("yaml_content")
+        yaml_err = result.get("yaml_error")
+        reply = result.get("reply") or ""
+
+        if not new_yaml or yaml_err or _ai_gave_up(reply):
+            reason = yaml_err or (("AI 判定無法修復:" + reply[:200]) if _ai_gave_up(reply)
+                                  else "AI 未產出修正 YAML")
+            logger.warning("自我修復未產出可用 YAML → 轉人工:" + str(reason)[:200])
+            _fallback("AI 自我修復未解決(" + str(reason)[:200] + ")。原失敗:" + (fail_reason or ""))
+            await _notify_self_heal(run, "⚠️ AI 自我修復未能解決、轉交人工決策。")
+            return
+
+        if _yaml_near_identical(new_yaml, current_yaml):
+            logger.warning("自我修復新舊 YAML 幾乎相同(疑似不收斂)→ 轉人工")
+            _fallback("AI 自我修復未產生實質變更(疑似不收斂)。原失敗:" + (fail_reason or ""))
+            await _notify_self_heal(run, "⚠️ AI 修復沒有實質變更、轉交人工決策。")
+            return
+
+        try:
+            new_dict = _yaml.safe_load(new_yaml)
+            if isinstance(new_dict, dict) and "pipeline" in new_dict:
+                new_dict = new_dict["pipeline"]
+            if not isinstance(new_dict, dict):
+                raise ValueError("YAML 頂層不是 mapping")
+            PipelineConfig.from_dict(new_dict)  # schema 驗、不合會 raise
+        except Exception as _e:
+            logger.warning("自我修復 YAML 不合 schema → 轉人工:" + str(_e)[:200])
+            _fallback("AI 修復的 YAML 不合格式:" + str(_e)[:200] + "。原失敗:" + (fail_reason or ""))
+            await _notify_self_heal(run, "⚠️ AI 修復的 YAML 格式錯誤、轉人工。")
+            return
+
+        # 保留內部旗標(_workflow_id 等),新 YAML 不會帶 → 從舊 config_dict 補回
+        for k, v in (run.config_dict or {}).items():
+            if k.startswith("_") and k not in new_dict:
+                new_dict[k] = v
+
+        import hashlib as _hl
+        run.self_heal_history = list(prior) + [{
+            "attempt": run.self_heal_count,
+            "diagnosis": reply[:600],
+            "old_yaml_hash": _hl.md5(current_yaml.encode("utf-8", "replace")).hexdigest()[:12],
+        }]
+        run.config_dict = new_dict
+
+        # 重定位失敗步(名稱對得到 → 回該步;對不到 → 從 0 重跑整條)
+        restart_idx = 0
+        for i, st in enumerate(new_dict.get("steps", [])):
+            if isinstance(st, dict) and st.get("name") == failed_step_name:
+                restart_idx = i
+                break
+        run.current_step = restart_idx
+        run.step_results = [sr for i, sr in enumerate(run.step_results) if i < restart_idx]
+        run.awaiting_type = ""
+        run.awaiting_message = ""
+        run.awaiting_suggestion = ""
+        run.status = "running"
+        store_.save(run)
+        logger.info(
+            "自我修復套用新 YAML、從步驟 " + str(restart_idx + 1) + " 重跑。診斷:" + reply[:150]
+        )
+        await _notify_self_heal(
+            run, "✅ AI 已修復、從步驟 " + str(restart_idx + 1) + " 重跑。\n修了什麼:" + reply[:300]
+        )
+
+        async def _delayed_heal_start():
+            await asyncio.sleep(0.3)
+            t = asyncio.create_task(run_pipeline(
+                config_dict=run.config_dict,
+                chat_id=run.telegram_chat_id,
+                run_id=run.run_id,
+                start_from_step=restart_idx,
+            ))
+            register_task(run.run_id, t)
+
+        asyncio.create_task(_delayed_heal_start())
+
+    except Exception as e:
+        logger.error("自我修復過程出錯:" + type(e).__name__ + ": " + str(e))
+        try:
+            _fallback("AI 自我修復過程出錯:" + str(e)[:200] + "。原失敗:" + (fail_reason or ""))
+        except Exception:
+            pass
 
 
 # ── Human-in-the-loop resume ─────────────────────────────────────────────────
@@ -2848,5 +3116,30 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
 
         asyncio.create_task(_delayed_continue())
         return f"✅ 確認通過，繼續執行步驟 {next_step + 1}/{total}"
+
+    elif decision == "self_heal_now":
+        # 使用者在 failure 卡片手動點「讓 AI 試修」— 觸發一次自我修復(不看開關、仍受硬上限)
+        if run.awaiting_type not in ("failure", "self_heal"):
+            return "⚠️ 目前狀態無法觸發自我修復"
+        if getattr(run, "self_heal_count", 0) >= _SELF_HEAL_HARD_CAP:
+            return f"⚠️ 已達自我修復硬上限({_SELF_HEAL_HARD_CAP} 次)、請改用其他決策"
+        failed_idx = run.current_step
+        steps_ = run.config_dict.get("steps", []) if isinstance(run.config_dict, dict) else []
+        failed_name = steps_[failed_idx].get("name", "") if failed_idx < len(steps_) else ""
+        fr = run.awaiting_message or ""
+        fs = run.awaiting_suggestion or ""
+        stderr_tail = ""
+        if failed_idx < len(run.step_results):
+            stderr_tail = (getattr(run.step_results[failed_idx], "stderr_tail", "") or "")[-1500:]
+        run.self_heal_count = getattr(run, "self_heal_count", 0) + 1
+        run.status = "awaiting_human"
+        run.awaiting_type = "self_heal"
+        run.awaiting_message = f"AI 自我修復中(手動觸發、第 {run.self_heal_count} 次)…失敗步驟:{failed_name}"
+        run.awaiting_suggestion = ""
+        store.save(run)
+        asyncio.create_task(_run_self_heal_then_resume(
+            run.run_id, failed_name, failed_idx, fr, fs, stderr_tail,
+        ))
+        return f"🔧 已啟動 AI 自我修復(第 {run.self_heal_count} 次)、修好會自動重跑"
 
     return "❓ 未知決策"

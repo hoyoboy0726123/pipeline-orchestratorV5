@@ -1506,6 +1506,36 @@ async def put_memory_settings(req: MemorySettingsRequest):
     }
 
 
+class SelfHealSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    max_attempts: Optional[int] = None
+
+
+@app.get("/settings/self-heal")
+async def get_self_heal_settings():
+    """工作流自我修復開關 + 次數上限。"""
+    from settings import get_settings
+    s = get_settings()
+    return {
+        "enabled": bool(s.get("self_heal_enabled", False)),
+        "max_attempts": int(s.get("self_heal_max_attempts", 2)),
+    }
+
+
+@app.put("/settings/self-heal")
+async def put_self_heal_settings(req: SelfHealSettingsRequest):
+    """切換自我修復開關 / 次數上限(1~5)。"""
+    from settings import set_self_heal_settings
+    try:
+        updated = set_self_heal_settings(enabled=req.enabled, max_attempts=req.max_attempts)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "enabled": bool(updated.get("self_heal_enabled", False)),
+        "max_attempts": int(updated.get("self_heal_max_attempts", 2)),
+    }
+
+
 @app.get("/memory/facts")
 async def list_memory_facts(category: Optional[str] = None, limit: int = 100):
     """列出 AI 助手記得的事實 / 偏好(設定頁管理用)。"""
@@ -2374,6 +2404,36 @@ async def get_pipeline_run(run_id: str):
     return _run_to_dict(run)
 
 
+@app.post("/pipeline/runs/{run_id}/heal-writeback")
+async def heal_writeback(run_id: str):
+    """把自我修復成功的 run 暫存 YAML 回寫到存檔 workflow(使用者在完成提示確認後才呼叫)。
+    Phase 3:讓修復成果沉澱,下次跑同工作流不再踩同樣的錯。"""
+    from pipeline.store import get_store
+    from db import update_workflow
+    import yaml as _yaml
+    run = get_store().load(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="找不到 pipeline run")
+    if not run.workflow_id:
+        raise HTTPException(status_code=400, detail="此執行沒有關聯存檔工作流(臨時執行、無法回寫)")
+    if getattr(run, "self_heal_count", 0) <= 0:
+        raise HTTPException(status_code=400, detail="此執行沒有經過自我修復、無需回寫")
+    clean = {k: v for k, v in (run.config_dict or {}).items() if not k.startswith("_")}
+    yaml_str = _yaml.safe_dump(clean, allow_unicode=True, sort_keys=False)
+    patch = {"yaml": yaml_str}
+    try:
+        from yaml_to_canvas import yaml_to_canvas
+        canvas = yaml_to_canvas(yaml_str)
+        if canvas:
+            patch["canvas"] = canvas
+    except Exception:
+        pass
+    wf = update_workflow(run.workflow_id, patch)
+    if not wf:
+        raise HTTPException(status_code=404, detail="找不到要回寫的工作流")
+    return {"ok": True, "workflow_id": run.workflow_id, "name": wf.get("name", "")}
+
+
 @app.delete("/pipeline/runs/{run_id}")
 async def delete_pipeline_run(run_id: str):
     from pipeline.store import get_store
@@ -2384,8 +2444,8 @@ async def delete_pipeline_run(run_id: str):
 
 @app.post("/pipeline/runs/{run_id}/resume")
 async def resume_pipeline_run(run_id: str, req: PipelineDecisionRequest):
-    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer", "install_dep", "approve_command", "deny_command", "hint_command", "redo_prev"):
-        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer / install_dep / approve_command / deny_command / hint_command / redo_prev")
+    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer", "install_dep", "approve_command", "deny_command", "hint_command", "redo_prev", "self_heal_now"):
+        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer / install_dep / approve_command / deny_command / hint_command / redo_prev / self_heal_now")
     from pipeline.runner import resume_pipeline
     msg = await resume_pipeline(run_id, req.decision, hint=req.hint or "")
     return {"message": msg}
@@ -3484,6 +3544,8 @@ PPT 大綱結構                → presentation_designer
 - 預設 5、實際 data_analyst / coder 經常需要 6-10 輪(讀資料 → 試錯 → 寫產物 → 驗證 → done)
 - max_iter 用完 = step 失敗
 - 修法:**data_analyst / coder 至少 8、複雜任務 10-12**;critic / planner 維持 3-5 就夠
+- ⚠️ **researcher 深度研究務必給 12-14**:它要搜 3-4 個面向、每面向落地寫 notes、再彙整成多章節報告 + done,
+  搜寫各吃一輪、10 輪幾乎一定不夠(會撞 max_iter、報告沒寫出來就整步失敗)。給足輪數讓它能正常收斂。
 
 **錯誤 3:`batch` 描述太籠統 → LLM 多輪推理走不出來**
 - 「分析這份資料」→ LLM 不知道要分析什麼、要產什麼格式、寫到哪
@@ -5155,6 +5217,8 @@ def _run_to_dict(r):
         "awaiting_message": getattr(r, 'awaiting_message', '') or '',
         "awaiting_suggestion": getattr(r, 'awaiting_suggestion', '') or '',
         "input_params": getattr(r, 'input_params', None) or {},
+        "workflow_id": getattr(r, 'workflow_id', None),
+        "self_heal_count": getattr(r, 'self_heal_count', 0),
     }
 
 

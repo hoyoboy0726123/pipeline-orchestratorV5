@@ -332,7 +332,7 @@ export async function deletePipelineRun(runId: string): Promise<void> {
   if (!res.ok) throw new Error('刪除失敗')
 }
 
-export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev', hint?: string): Promise<{ message: string }> {
+export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev' | 'self_heal_now', hint?: string): Promise<{ message: string }> {
   const body: Record<string, string> = { decision }
   if (hint) body.hint = hint
   const res = await fetch(`${BASE}/pipeline/runs/${runId}/resume`, {

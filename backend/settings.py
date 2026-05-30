@@ -66,6 +66,14 @@ _DEFAULT = {
     # 關 → 只記使用者明確說「記下」的事(保守、零誤記)。預設 OFF — 要積極才開。
     # 依賴 memory_enabled;memory_enabled 關時此項無效。
     "memory_aggressive": False,
+    # 工作流自我修復:某步驟失敗(重試耗盡)時,讓 AI 助手讀 log + 比對自己寫的 YAML、
+    # 找出錯誤、改 YAML、從失敗步重跑,循環到成功或達上限才轉人工決策。
+    # 開 → 失敗自動背景修復(前端/TG 看得到「AI 修復中 N/M」)。
+    # 關(預設)→ 維持現狀:失敗即轉 awaiting_human 等人工。預設 OFF — 自動改 YAML 有風險、要明確開。
+    "self_heal_enabled": False,
+    # 單次 run 最多自動修復幾次(每次 = 一輪「讀 log → 改 YAML → 重跑」)。
+    # 2 是安全預設:夠救「路徑錯/參數錯/缺前置步驟」這類一兩次能修好的、又不會無限燒 token。硬 cap 5。
+    "self_heal_max_attempts": 2,
 }
 
 _cache: Optional[dict] = None
@@ -238,6 +246,27 @@ def set_skills_dir(path: str) -> dict:
     with _lock:
         existing = _cache if _cache else _load_from_disk()
         existing["skills_dir"] = path
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
+
+
+# ── 工作流自我修復開關（獨立 setter） ─────────────────────────────
+def set_self_heal_settings(enabled: Optional[bool] = None,
+                           max_attempts: Optional[int] = None) -> dict:
+    """切換自我修復開關 / 次數上限。傳 None 的欄位保持原值。max_attempts 限 1~5。"""
+    global _cache
+    with _lock:
+        existing = _cache if _cache else _load_from_disk()
+        if enabled is not None:
+            existing["self_heal_enabled"] = bool(enabled)
+        if max_attempts is not None:
+            n = int(max_attempts)
+            if n < 1 or n > 5:
+                raise ValueError("self_heal_max_attempts 需介於 1~5")
+            existing["self_heal_max_attempts"] = n
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)
