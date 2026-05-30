@@ -4469,8 +4469,102 @@ def _memory_snapshot_text() -> str:
     lines.append("使用者問他自己的偏好 / 習慣(例「我都用哪個模型」「我報告要多長」「我幾點跑」)時 ——"
                  "先看上面這份記憶回答;**若上面沒列到該項、先呼叫 list_facts 查全部記憶再回答,不要直接說「沒記錄」、"
                  "也不要去查系統當前狀態(模型設定 / cron)當作答案**。"
+                 "使用者問「上次 / 之前聊的那個…」「我們之前討論的 X 結論」這類過去對話的事 → 呼叫 recall_episode 查對話摘要。"
                  "使用者明確要你「記住」某事 → remember_fact(confirm 兩步);標(推測)是系統推斷、可能不準,更正用 forget_fact。")
     return "\n".join(lines)
+
+
+_autoshelve_tasks: set = set()
+
+
+async def _autoshelve_memory(messages: list, reply: str, workflow_id=None):
+    """對話結束時 fire-and-forget:摘要這段對話存成 episode;memory_aggressive 開時
+    順便保守萃取使用者偏好存 inferred fact。memory_enabled=False 或對話太短 → 跳過。"""
+    try:
+        from settings import get_settings
+        s = get_settings()
+        if not s.get("memory_enabled", True):
+            return
+        convo = [m for m in (messages or []) if m.get("role") in ("user", "assistant") and m.get("content")]
+        if sum(1 for m in convo if m["role"] == "user") < 2:
+            return  # 至少兩輪使用者發言才值得存(避免一次性問答洗版)
+        convo = convo + [{"role": "assistant", "content": reply}]
+        import hashlib as _h, json as _j, re as _re
+        first_user = next((m["content"] for m in convo if m["role"] == "user"), "")
+        conv_key = workflow_id or ("c_" + _h.md5(first_user.encode("utf-8", "replace")).hexdigest()[:12])
+        aggressive = bool(s.get("memory_aggressive", False))
+        import memory as _mem
+        from llm_factory import build_llm
+        from langchain_core.messages import SystemMessage, HumanMessage
+        convo_text = "\n".join(f"{m['role']}: {str(m['content'])[:500]}" for m in convo[-24:])
+        if aggressive:
+            instr = ('用 1-3 句繁體中文摘要這段對話(使用者想做什麼、實際做了什麼)。'
+                     '另外【積極】抓出使用者透露的偏好 / 習慣 / 身份 / 領域 / 慣用做法 —— '
+                     '寧可多抓也不要漏;只排除「這次一次性的具體任務」。'
+                     '範例:使用者說「我習慣看正式 Word 排版、markdown 我不太看」'
+                     '→ prefs 應含 {"key":"report_format","value":"偏好正式 Word、不要 markdown","category":"workflow_pref"}。'
+                     '真的完全沒透露任何偏好才給空陣列。'
+                     '只回 JSON、不要其他字:'
+                     '{"summary":"...","prefs":[{"key":"短鍵英數","value":"值","category":"workflow_pref|domain|preference"}]}')
+        else:
+            instr = ('用 1-3 句繁體中文摘要這段對話(使用者想做什麼、實際做了什麼)。'
+                     '只回 JSON、不要其他字:{"summary":"..."}')
+        llm = build_llm(temperature=0.2)
+        resp = await llm.ainvoke([SystemMessage(content=instr), HumanMessage(content=convo_text)])
+        # Gemma 4 / Claude 的 content 可能是 structured blocks(list of {type,text/thinking});
+        # 要抽 type=='text' 的 text、不能直接 str()(會變 Python repr、parse 不到 JSON)
+        _c = resp.content
+        if isinstance(_c, list):
+            txt = "".join(b.get("text", "") for b in _c if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            txt = _c if isinstance(_c, str) else str(_c)
+        mobj = _re.search(r"\{.*\}", txt, _re.DOTALL)
+        raw = mobj.group(0) if mobj else ""
+        data = {}
+        if raw:
+            try:
+                data = _j.loads(raw)               # 標準 JSON
+            except Exception:
+                try:
+                    import ast as _ast
+                    data = _ast.literal_eval(raw)  # Gemma 常回單引號 dict
+                    if not isinstance(data, dict):
+                        data = {}
+                except Exception:
+                    data = {}
+        # 連 dict 都解不出 → 退而求其次:整段清理後當摘要(至少 episode 存得進)
+        if not data.get("summary"):
+            _clean = _re.sub(r"```\w*|```", "", txt).strip()
+            data["summary"] = _clean[:300]
+        summary = (data.get("summary") or "").strip()
+        import logging as _lg2
+        if summary:
+            _mem.add_episode(conv_key, summary)
+        _lg2.getLogger(__name__).info(
+            f"[autoshelve] episode存={bool(summary)} aggressive={aggressive} "
+            f"prefs={len(data.get('prefs') or [])} summary={summary[:40]!r}")
+        if aggressive:
+            for p in (data.get("prefs") or [])[:5]:
+                k = (p.get("key") or "").strip()
+                v = (p.get("value") or "").strip()
+                if k and v:
+                    rr = _mem.remember_fact(k, v, category=p.get("category", "preference"),
+                                            source="inferred", confidence=0.6)
+                    _lg2.getLogger(__name__).info(f"[autoshelve] 萃取記入 {k}={v} → {rr.get('ok')}")
+    except Exception as e:
+        import logging as _lg
+        _lg.getLogger(__name__).warning(f"[autoshelve] 失敗(不影響對話):{type(e).__name__}: {e}")
+
+
+def _fire_autoshelve(messages: list, reply: str, workflow_id=None):
+    """非阻塞觸發 autoshelve(保存 task 引用避免 GC)。"""
+    try:
+        import asyncio as _aio
+        t = _aio.create_task(_autoshelve_memory(messages, reply, workflow_id))
+        _autoshelve_tasks.add(t)
+        t.add_done_callback(_autoshelve_tasks.discard)
+    except Exception:
+        pass
 
 
 async def _chat_agent_loop(
@@ -4698,6 +4792,8 @@ async def _chat_agent_loop(
             except Exception as e:
                 yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
 
+    # 對話結束 → 背景摘要存 episode(+ aggressive 時萃取偏好);不阻塞回應
+    _fire_autoshelve(req.messages, content or "", req.workflow_id)
     return {"reply": content, "has_yaml": has_yaml, "yaml_content": yaml_content, "yaml_error": yaml_error}
 
 
@@ -4916,6 +5012,8 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
             except Exception as e:
                 yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
 
+    # 對話結束 → 背景摘要存 episode(+ aggressive 時萃取偏好);不阻塞回應
+    _fire_autoshelve(req.messages, content or "", req.workflow_id)
     yield {
         "type": "done",
         "reply": content,

@@ -2104,15 +2104,31 @@ def forget_fact(key: str, confirm: bool = False) -> str:
 
 
 @tool
-def memory_state() -> str:
-    """看記憶現況:記了幾筆、最近幾筆是什麼。"""
+def recall_episode(query: str, max_results: int = 5) -> str:
+    """查過去對話的摘要 —— 使用者問「上次 / 之前聊的那個…」「我們之前討論的 X 結論是?」
+    這類「過去發生的事」(不是單點偏好)時用。語意檢索、用不同詞也找得到。"""
     import memory as _mem
-    n = _mem.count_facts()
-    if n == 0:
-        return "長期記憶目前是空的(還沒記任何事)。"
+    eps = _mem.recall_episode((query or "").strip(), max_results=int(max_results))
+    if not eps:
+        return "過去對話摘要裡找不到相關的。可請使用者多給點線索。"
+    lines = [f"- {e['summary']}" for e in eps]
+    return "找到這些過去對話的摘要(可據此回答使用者):\n" + "\n".join(lines)
+
+
+@tool
+def memory_state() -> str:
+    """看記憶現況:記了幾筆事實、幾段對話摘要、最近幾筆是什麼。"""
+    import memory as _mem
+    nf = _mem.count_facts()
+    ne = _mem.count_episodes()
+    if nf == 0 and ne == 0:
+        return "長期記憶目前是空的(還沒記任何事實、也沒對話摘要)。"
     top = _mem.list_facts(limit=5)
     lines = [f"- [{r.get('category')}] {r['key']} = {r['value']}" for r in top]
-    return f"長期記憶:共 {n} 筆。最近 5 筆:\n" + "\n".join(lines)
+    body = f"長期記憶:{nf} 筆事實偏好、{ne} 段對話摘要。"
+    if lines:
+        body += "\n最近 5 筆偏好:\n" + "\n".join(lines)
+    return body
 
 
 # Module-level export 給 main.py 用
@@ -2128,8 +2144,8 @@ CHAT_TOOLS = [
     read_subagent_file, send_subagent_file_to_tg,    # 子代理產物 讀 / 傳 TG(限定 task working_dir)
     cancel_subagent_task,                            # 中止正在跑的子代理(asyncio.cancel + push TG)
     read_help_doc,                                   # 進階用法 lazy doc(chain / files / cancel)
-    remember_fact, recall_fact, list_facts, forget_fact, memory_state,  # 長期記憶(memory_enabled 時掛載)
+    remember_fact, recall_fact, list_facts, forget_fact, recall_episode, memory_state,  # 長期記憶(memory_enabled 時掛載)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}
 # 記憶工具名單(main.py 依 settings.memory_enabled 決定掛不掛)
-MEMORY_TOOL_NAMES = {"remember_fact", "recall_fact", "list_facts", "forget_fact", "memory_state"}
+MEMORY_TOOL_NAMES = {"remember_fact", "recall_fact", "list_facts", "forget_fact", "recall_episode", "memory_state"}
