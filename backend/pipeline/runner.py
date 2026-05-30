@@ -1536,13 +1536,18 @@ async def _run_pipeline_inner(
                     raise _CondError("condition 節點需填 expression(IF)或 switch(Switch)")
             except _CondError as _ce:
                 logger.error(f"[{step.name}] condition 求值失敗:{_ce}")
+                _cond_sugg = (
+                    "檢查 expression / switch 表達式語法、引用變數是否存在。"
+                    "Jinja2 判斷包含用 \"'關鍵字' in 變數\"、不是 .contains();"
+                    "字串相等用 ==;list/dict 取值用 []。"
+                )
                 step_result = StepResult(
                     step_index=run.current_step, step_name=step.name,
                     exit_code=1, stdout_tail="",
                     stderr_tail=str(_ce),
                     validation_status="failed",
                     validation_reason=f"condition 求值失敗:{_ce}",
-                    validation_suggestion="檢查 expression / switch 表達式是否合法、引用變數是否存在",
+                    validation_suggestion=_cond_sugg,
                     retries_used=0,
                     started_at=step_started_at,
                     ended_at=datetime.now().isoformat(),
@@ -1551,10 +1556,20 @@ async def _run_pipeline_inner(
                     run.step_results[run.current_step] = step_result
                 else:
                     run.step_results.append(step_result)
-                run.status = "failed"
-                run.ended_at = datetime.now().isoformat()
+                # 走 awaiting_human=failure(讓人工 / 自我修復能改表達式重跑),不直接判 failed —
+                # condition 求值失敗多半是表達式語法錯(如 .contains)、是 self_heal 改 YAML 能修的
+                run.status = "awaiting_human"
+                run.awaiting_type = "failure"
+                run.awaiting_message = f"condition 求值失敗:{_ce}"
+                run.awaiting_suggestion = _cond_sugg
                 store.save(run)
-                await _notify_final(run, config)
+                await _notify_failure(
+                    run,
+                    ValidationResult(status="failed",
+                                     reason=f"condition 求值失敗:{_ce}",
+                                     suggestion=_cond_sugg),
+                    step.name,
+                )
                 unregister_task(run.run_id)
                 return run.run_id
 

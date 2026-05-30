@@ -3657,6 +3657,15 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
   on_false: 簡易處理      # 不成立 → 跳到這個 step name（留空 = 結束流程）
 ```
 
+### ⚠️ 表達式語法鐵律（`expression` / `switch` 是 **Jinja2**、不是 Python）
+寫錯會直接「condition 求值失敗」、整步 fail，務必照下面寫:
+- **判斷「包含」用 `'關鍵字' in 變數`、絕對不要用 `.contains()`**(Jinja2 / dict 沒有 contains 方法):
+  - ✅ `expression: "{{ 'AI' in steps.摘要.output.stdout }}"`
+  - ❌ `expression: "{{ steps.摘要.output.stdout.contains('AI') }}"`(求值失敗)
+- 字串相等用 `==`;數字比較先轉型:`{{ steps.統計.output.數量 | int > 10 }}`
+- 只能引用 output namespace **真的有的 key**(不確定 → 讓上游 skill 明確 export、或用固定 key `stdout`)
+- 表達式只回傳 bool(IF)或可比對純值(Switch);別寫多行 / 別有副作用
+
 ### Switch 模式（`switch` + `cases`，忽略 `expression`）
 ```yaml
 - name: read_status

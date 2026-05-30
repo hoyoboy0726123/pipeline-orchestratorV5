@@ -4649,9 +4649,23 @@ async def execute_step_with_web_crawler(
         return ExecResult(exit_code=1, stdout="",
                           stderr=f"爬取失敗（tier={result.tier}）：{result.error}")
 
+    # 404 fail-fast:crawl 本身「成功」回傳、但抓到的是 HTTP 4xx/5xx 錯誤頁 或 內容過短的空殼
+    # (JS 未渲染 / 反爬擋頁)→ 直接判 fail,別把錯誤頁當成功往下傳、害下游 parser 解析空殼才爆。
+    # (對齊 crawl_empty_diagnosis:先看 status + word_count;404 頁/空殼不是有效內容)
+    _wc = len(result.markdown.split())
+    _sc = getattr(result, "status_code", None)
+    if isinstance(_sc, int) and _sc >= 400:
+        return ExecResult(exit_code=1, stdout="",
+            stderr=(f"爬到 HTTP {_sc} 錯誤頁（tier={result.tier}、字數={_wc}）→ "
+                    f"URL 可能失效 / 改版 / 反爬,請確認網址正確。不把錯誤頁當成功往下傳。"))
+    if _wc < 30:
+        return ExecResult(exit_code=1, stdout="",
+            stderr=(f"爬取內容過少（僅 {_wc} 字、status={_sc}、tier={result.tier}）→ "
+                    f"可能是空殼 / JS 未渲染 / 反爬擋頁,非有效內容,無法供下游解析。"))
+
     summary = (
         f"[爬蟲完成] tier={result.tier} status={result.status_code} "
-        f"title={result.title!r} 字數={len(result.markdown.split())} "
+        f"title={result.title!r} 字數={_wc} "
         f"耗時={result.duration_ms}ms → {output_path}"
     )
     return ExecResult(exit_code=0, stdout=summary, stderr="")
