@@ -205,9 +205,33 @@ def add_episode(conv_key: str, summary: str, tags: str = "", user_id: str = "loc
     return {"ok": True, "conv_key": conv_key, "has_vector": emb is not None, "updated_at": now}
 
 
+def backfill_embeddings(user_id: str = "local", limit: int = 30) -> int:
+    """把沒有向量的舊 episode 補上 embedding(無縫銜接:使用者後來才加 Gemini key)。
+    embed 失敗(無 key/套件)立即停、不空轉。回補了幾筆。"""
+    if _np is None:
+        return 0
+    with _lock:
+        miss = _db().execute(
+            "SELECT conv_key, summary FROM episodes WHERE user_id=? AND embedding IS NULL LIMIT ?",
+            (user_id, limit)).fetchall()
+    done = 0
+    for ck, summ in miss:
+        e = embed(summ)
+        if e is None:
+            break  # 沒 embedding 能力 → 停(維持關鍵字降級)
+        with _lock:
+            _db().execute("UPDATE episodes SET embedding=? WHERE user_id=? AND conv_key=?",
+                          (e.astype(_np.float32).tobytes(), user_id, ck))
+            _db().commit()
+        done += 1
+    return done
+
+
 def recall_episode(query: str, max_results: int = 5, user_id: str = "local") -> list[dict]:
-    """語意檢索過去對話摘要。有 embedding → cosine top-k;否則 → 關鍵字 LIKE。"""
+    """語意檢索過去對話摘要。有 embedding → cosine top-k;否則 → 關鍵字 LIKE。
+    查詢時順手補舊 episode 的向量(加 key 後自我修復、無縫銜接)。"""
     query = (query or "").strip()
+    backfill_embeddings(user_id)   # 加 key 後第一次查 → 把舊 episode 補上向量
     with _lock:
         rows = _db().execute(
             "SELECT conv_key, summary, embedding, tags, updated_at FROM episodes WHERE user_id=? "
