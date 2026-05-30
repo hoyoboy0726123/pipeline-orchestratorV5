@@ -166,10 +166,54 @@ def snapshot(limit: int = 25, user_id: str = "local") -> list[dict]:
 
 
 # ─── Episodic(對話摘要 + 向量/關鍵字檢索)──────────────────────
-def embed(text: str) -> "Optional[_np.ndarray]":
-    """用 Gemini gemini-embedding-001 把文字轉向量。無 key / 套件 / 失敗 → None(降級關鍵字)。"""
-    if _np is None:
+# 地端向量模型(provider != gemini 時用、資料完全不外送):
+#   paraphrase-multilingual-MiniLM-L12-v2(多語言含繁中、384 維、僅 ~220MB、fastembed ONNX 跑、不拖 torch)。
+# 本應用首次啟動會在背景預載(下載到 HF cache);沒裝 fastembed / 下載失敗 → 降級關鍵字檢索 + 啟動時提示。
+_LOCAL_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+_local_embedder = None
+_local_failed = False
+
+
+def _get_local_embedder():
+    """lazy 取得地端 fastembed embedder(單例;首次會載/下載模型)。失敗回 None 並記旗標。"""
+    global _local_embedder, _local_failed
+    if _local_embedder is not None or _local_failed:
+        return _local_embedder
+    try:
+        from fastembed import TextEmbedding
+        _local_embedder = TextEmbedding(model_name=_LOCAL_MODEL)
+    except Exception as e:
+        _local_failed = True
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[memory] 地端向量模型未就緒、episodic 降級關鍵字檢索:{type(e).__name__}: {e}")
+    return _local_embedder
+
+
+def warmup_local_embedder() -> bool:
+    """應用啟動時呼叫:預載地端模型(觸發下載)。回是否就緒。"""
+    em = _get_local_embedder()
+    if em is None:
+        return False
+    try:
+        list(em.embed(["warmup"]))
+        return True
+    except Exception:
+        return False
+
+
+def _embed_local(text: str) -> "Optional[_np.ndarray]":
+    em = _get_local_embedder()
+    if em is None:
         return None
+    try:
+        v = list(em.embed([text]))
+        return _np.array(v[0], dtype=_np.float32) if v else None
+    except Exception:
+        return None
+
+
+def _embed_gemini(text: str) -> "Optional[_np.ndarray]":
     from config import GEMINI_API_KEY
     if not GEMINI_API_KEY:
         return None
@@ -177,13 +221,31 @@ def embed(text: str) -> "Optional[_np.ndarray]":
         url = ("https://generativelanguage.googleapis.com/v1beta/"
                f"models/gemini-embedding-001:embedContent?key={GEMINI_API_KEY}")
         body = json.dumps({"model": "models/gemini-embedding-001",
-                           "content": {"parts": [{"text": text[:8000]}]}}).encode()
+                           "content": {"parts": [{"text": text}]}}).encode()
         rq = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         resp = json.loads(urllib.request.urlopen(rq, timeout=20).read().decode())
         vals = resp.get("embedding", {}).get("values")
         return _np.array(vals, dtype=_np.float32) if vals else None
     except Exception:
         return None
+
+
+def embed(text: str) -> "Optional[_np.ndarray]":
+    """文字轉向量。隱私一致性:provider=gemini(已用雲端)→ Gemini API embedding;
+    其他 provider(ollama / groq / openai / anthropic)→ 地端 MiniLM、資料完全不外送。
+    都不行 → None(降級關鍵字檢索)。"""
+    if _np is None:
+        return None
+    text = (text or "")[:8000]
+    try:
+        from settings import get_settings
+        provider = (get_settings().get("provider") or "").lower()
+    except Exception:
+        provider = ""
+    if provider == "gemini":
+        return _embed_gemini(text)   # 雲端(已接受外送)
+    return _embed_local(text)        # 地端、不外送
+    return _embed_gemini(text)             # 雲端
 
 
 def add_episode(conv_key: str, summary: str, tags: str = "", user_id: str = "local") -> dict:
@@ -205,20 +267,25 @@ def add_episode(conv_key: str, summary: str, tags: str = "", user_id: str = "loc
     return {"ok": True, "conv_key": conv_key, "has_vector": emb is not None, "updated_at": now}
 
 
-def backfill_embeddings(user_id: str = "local", limit: int = 30) -> int:
-    """把沒有向量的舊 episode 補上 embedding(無縫銜接:使用者後來才加 Gemini key)。
-    embed 失敗(無 key/套件)立即停、不空轉。回補了幾筆。"""
-    if _np is None:
+def backfill_embeddings(user_id: str = "local", target_dim: "Optional[int]" = None, limit: int = 30) -> int:
+    """把「無向量 或 維度與當前模型不符」的 episode 重算 embedding。
+    無縫銜接:① 後來加 Gemini key ② 切換 provider 導致維度改變(Gemini 3072 ↔ 地端 384)。
+    target_dim = 當前 embed 的維度;embed 失敗即停、不空轉。回補了幾筆。"""
+    if _np is None or target_dim is None:
         return 0
     with _lock:
-        miss = _db().execute(
-            "SELECT conv_key, summary FROM episodes WHERE user_id=? AND embedding IS NULL LIMIT ?",
-            (user_id, limit)).fetchall()
+        rows = _db().execute(
+            "SELECT conv_key, summary, embedding FROM episodes WHERE user_id=?", (user_id,)).fetchall()
     done = 0
-    for ck, summ in miss:
+    for ck, summ, emb in rows:
+        if done >= limit:
+            break
+        cur = len(_np.frombuffer(emb, dtype=_np.float32)) if emb else 0
+        if cur == target_dim:
+            continue  # 已是當前模型維度
         e = embed(summ)
-        if e is None:
-            break  # 沒 embedding 能力 → 停(維持關鍵字降級)
+        if e is None or len(e) != target_dim:
+            break  # 沒 embedding 能力 / 維度不穩 → 停(維持降級)
         with _lock:
             _db().execute("UPDATE episodes SET embedding=? WHERE user_id=? AND conv_key=?",
                           (e.astype(_np.float32).tobytes(), user_id, ck))
@@ -229,17 +296,27 @@ def backfill_embeddings(user_id: str = "local", limit: int = 30) -> int:
 
 def recall_episode(query: str, max_results: int = 5, user_id: str = "local") -> list[dict]:
     """語意檢索過去對話摘要。有 embedding → cosine top-k;否則 → 關鍵字 LIKE。
-    查詢時順手補舊 episode 的向量(加 key 後自我修復、無縫銜接)。"""
+    查詢時順手把「無向量 / 維度不符(切過 provider)」的舊 episode 重算 → 自我修復、無縫銜接。"""
     query = (query or "").strip()
-    backfill_embeddings(user_id)   # 加 key 後第一次查 → 把舊 episode 補上向量
+    qemb = embed(query) if query else None
+    qd = len(qemb) if qemb is not None else None
+    if qd:
+        backfill_embeddings(user_id, target_dim=qd)   # 補無向量 / 遷移維度
     with _lock:
         rows = _db().execute(
             "SELECT conv_key, summary, embedding, tags, updated_at FROM episodes WHERE user_id=? "
             "ORDER BY updated_at DESC LIMIT 500", (user_id,)).fetchall()
     if not rows:
         return []
-    qemb = embed(query) if query else None
-    vec_rows = [(r, _np.frombuffer(r[2], dtype=_np.float32)) for r in rows if r[2]] if (qemb is not None and _np is not None) else []
+    # 只比對「維度 == 當前 query 維度」的向量(切過 provider 的舊維度直接忽略、走關鍵字)
+    vec_rows = []
+    if qemb is not None and _np is not None:
+        for r in rows:
+            if not r[2]:
+                continue
+            v = _np.frombuffer(r[2], dtype=_np.float32)
+            if len(v) == qd:
+                vec_rows.append((r, v))
     if qemb is not None and vec_rows:
         mat = _np.stack([v for _, v in vec_rows])
         sims = mat @ qemb / (_np.linalg.norm(mat, axis=1) * _np.linalg.norm(qemb) + 1e-9)

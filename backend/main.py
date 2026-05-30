@@ -118,6 +118,25 @@ async def startup():
     from telegram_handler import start_polling as tg_start
     await tg_start()
     print("✅ Telegram callback polling 已啟動")
+    # 首次啟動預載地端向量模型(背景 thread、不卡啟動)。失敗 → 明確提示、episodic 降級關鍵字。
+    from settings import get_settings as _gs_startup
+    if _gs_startup().get("memory_enabled", True):
+        import threading as _th
+
+        def _warmup_mem():
+            try:
+                import memory as _mem
+                ok = _mem.warmup_local_embedder()
+                if ok:
+                    print("✅ 記憶:地端向量模型已就緒(MiniLM 多語言)")
+                else:
+                    print("⚠️ 記憶:地端向量模型未就緒(可能首啟下載失敗 / 無網路 / 未裝 fastembed)、"
+                          "episodic 暫用關鍵字檢索。修復:確認網路後重啟、或 pip install fastembed。"
+                          "(provider=gemini 時用雲端 embedding、不受影響)")
+            except Exception as e:
+                print(f"⚠️ 記憶:地端向量模型預載例外、episodic 降級關鍵字:{type(e).__name__}: {e}")
+
+        _th.Thread(target=_warmup_mem, daemon=True).start()
 
 
 @app.on_event("shutdown")

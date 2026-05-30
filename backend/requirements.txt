@@ -52,3 +52,7 @@ onnxruntime
 # 簡繁體歸一化 — RapidOCR 中文模型訓練語料以簡體為主,target 通常是繁體
 # (例如「軟」會被讀成「软」、「畫」讀成「画」),歸一後雙邊都轉簡體再比對
 opencc-python-reimplemented
+# AI 助手長期記憶 — 地端向量檢索(provider != gemini 時用、資料不外送)。
+# ONNX runtime、不拖 torch;首次啟動自動下載 MiniLM 多語言模型(~220MB)。
+# 沒裝 / 下載失敗 → episodic 自動降級關鍵字檢索(facts 記憶不受影響)。
+fastembed
