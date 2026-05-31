@@ -3039,6 +3039,10 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 **使用者說**：「審核」「確認」「給我看一下再繼續」「需要我點頭」
 **也包含「發 TG / Telegram 通知 / 訊息 / 提醒 / 推播給我」「通知我 X」** —— human_confirm 會把 `message` 的內容**發到 Telegram**(`notify_telegram` 預設 true),這就是平台「主動發 TG 訊息給使用者」的**唯一正確作法**。
 🚫 **絕對不要用 `skill_mode` 或 script 去發 TG / Telegram** —— AI 技能在沙盒容器裡跑、碰不到 TG token、根本發不出去,LLM 只會「假裝已送」寫個成功訊息騙過流程(實測踩過)。**要發任何 TG 訊息,一律拉 human_confirm 節點、把要發的內容寫進 `message`**;若只想單純通知、不想卡住等人按,加 `hc_on_timeout: continue` + 短 `timeout` 讓它發完自動往下。
+⚠️ **`message` 要寫「真正要發給人看的文字內容」,絕對不要寫 `{{ steps.X.output.path }}`** —— 那是檔案路徑,發到 TG 只會顯示一串路徑、看不到內容。要讓使用者看到上一步產出的**檔案內容**,兩種正確做法:
+  ① 內容在檔案裡(md/txt/報表)→ 設 `send_prev_output: true` 把檔案附到 TG,`message` 只寫提示語(例「今日優先清單已整理、請查閱附件」)。
+  ② 想把內容直接顯示在訊息文字裡(不另開附件)→ 讓**前一步直接產出「最終要發的純文字」**,human_confirm 緊接其後設 `send_prev_output: true`;或在 message 用 Jinja 嵌入該步的**內容欄位**(不是 `.path`)。
+  ❌ `message: "{{ steps.撰寫文案.output.path }}"`(只會發出路徑字串) → ✅ `message: 今日摘要已整理、請查閱附件` + `send_prev_output: true`。
 ```yaml
 - name: 審核摘要
   human_confirm: true
@@ -3548,6 +3552,9 @@ PPT 大綱結構                → presentation_designer
 - 修法:**data_analyst / coder 至少 8、複雜任務 10-12**;critic / planner 維持 3-5 就夠
 - ⚠️ **researcher 深度研究務必給 12-14**:它要搜 3-4 個面向、每面向落地寫 notes、再彙整成多章節報告 + done,
   搜寫各吃一輪、10 輪幾乎一定不夠(會撞 max_iter、報告沒寫出來就整步失敗)。給足輪數讓它能正常收斂。
+- ⚠️ **evaluator / 判斷評估類(挑優先、選項評分、需求驗收等)、且要「先讀大檔再綜合判斷」的步驟,給 12-14**:
+  要讀進整份清單/資料、逐項多面向分析、再寫出結論檔,輪數不足會「還在判斷就撞 max_iter、結論檔沒寫出來」整步失敗
+  (實測強模型判斷越仔細、越吃輪數)。**凡是「讀大輸入 → 多維判斷 → 產出結論」的 subagent,max_iter 一律抓 ≥12。**
 
 **錯誤 3:`batch` 描述太籠統 → LLM 多輪推理走不出來**
 - 「分析這份資料」→ LLM 不知道要分析什麼、要產什麼格式、寫到哪
