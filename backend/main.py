@@ -3037,6 +3037,8 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 ## 3. 人工確認節點（human_confirm）
 **使用者說**：「審核」「確認」「給我看一下再繼續」「需要我點頭」
+**也包含「發 TG / Telegram 通知 / 訊息 / 提醒 / 推播給我」「通知我 X」** —— human_confirm 會把 `message` 的內容**發到 Telegram**(`notify_telegram` 預設 true),這就是平台「主動發 TG 訊息給使用者」的**唯一正確作法**。
+🚫 **絕對不要用 `skill_mode` 或 script 去發 TG / Telegram** —— AI 技能在沙盒容器裡跑、碰不到 TG token、根本發不出去,LLM 只會「假裝已送」寫個成功訊息騙過流程(實測踩過)。**要發任何 TG 訊息,一律拉 human_confirm 節點、把要發的內容寫進 `message`**;若只想單純通知、不想卡住等人按,加 `hc_on_timeout: continue` + 短 `timeout` 讓它發完自動往下。
 ```yaml
 - name: 審核摘要
   human_confirm: true
