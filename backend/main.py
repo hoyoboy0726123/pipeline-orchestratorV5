@@ -4163,10 +4163,12 @@ LLM agent 對「邊角案例清單」「禁止 X 禁止 Y 禁止 Z」這類**防
 # 新增模板時兩邊都要加；只在前端加 → AI 助手不會推薦；只在這裡加 → UI 看不到。
 _OUTLOOK_TEMPLATES_FOR_PROMPT = [
     ("daily_todo", "整理符合條件信件 → 待辦清單",
-     "掃指定資料夾的信，按條件過濾，整理成 markdown / xlsx 待辦清單",
+     "掃指定資料夾的信，按條件過濾，整理成 markdown / xlsx 待辦清單。"
+     "⭐ 想整理「某時間範圍 / 某資料夾的所有信」(不限特定關鍵字)就用這個 — 例『整理今天/某日的信』『當日工作清單』。",
      "folder, subject, sender, since, until, unread_only, output_format"),
     ("search_summary", "指定關鍵字撈相關信件 → 摘要報告",
-     "用 LLM 摘要符合條件的信件群、產出報告",
+     "用 LLM 摘要符合條件的信件群、產出報告。"
+     "⚠️ **必須有明確關鍵字 / 主題**(keywords)才用;若只是『整理某時段全部信、沒特定關鍵字』→ 改用 daily_todo,用這個會撈 0 封。",
      "keywords, search_in, folder, since, until, detail_level, output_format"),
     ("unanswered", "未回覆超過 N 天的信",
      "找出收件匣中我還沒回過、且收件超過指定天數的信",
