@@ -3655,6 +3655,20 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 # ============================================================
 # Skill recipe 儲存(native + text loop 共用、避免 drift)
 # ============================================================
+def _recipe_code_from(shell_cmd: Optional[str], py_code: Optional[str]) -> Optional[str]:
+    """recipe 要存的 code:**優先**用「跑某支 .py 的 run_shell 指令」(= cli-extractor /
+    既有 CLI 的實際執行,已含使用者選擇),包成 subprocess 可重播;否則退回最後一段成功的
+    run_python code。優先 shell 是因為 agent 常在 run_shell 跑完 CLI 後又補一個只 print
+    output 存在的驗證 run_python,若取「最近成功動作」會被驗證步驟蓋掉(E2E 抓到的破綻)。"""
+    if shell_cmd:
+        return (
+            "import subprocess, sys\n"
+            f"_p = subprocess.run({shell_cmd!r}, shell=True)\n"
+            "sys.exit(_p.returncode)"
+        )
+    return py_code
+
+
 def _save_skill_recipe(
     *, pipeline_id, rkey, task_description, input_paths, output_path,
     code, was_interactive, runtime, silent_recipe, no_save_recipe,
@@ -3789,6 +3803,7 @@ async def _execute_skill_native_loop(
     last_run_python_ok: Optional[bool] = None
     last_run_shell_ok: Optional[bool] = None
     last_successful_code: Optional[str] = None  # 最後一段成功 run_python code → 供 recipe 儲存
+    last_successful_shell: Optional[str] = None  # 最後一條成功「跑 .py 腳本」的 run_shell(CLI 執行)→ recipe 優先用它
     was_interactive = False                      # 過程用過 ask_user → recipe 標記(replay 時提醒可能要再問)
     _recipe_start = _time.time()                 # 算 recipe runtime_sec 用
     consecutive_no_tool = 0
@@ -4097,18 +4112,13 @@ async def _execute_skill_native_loop(
             elif tc_name == "run_shell":
                 last_run_shell_ok = "[exit code:" not in result
                 if last_run_shell_ok:
-                    # cli-extractor / 既有 CLI 這種「靠 run_shell 跑 main_CLI.py <args>」的 skill:
-                    # 把成功的 run_shell 指令(已含使用者選擇)包成 subprocess、記成 recipe 可重播的 code。
-                    # 因為 last_successful_code 取「最近一次成功動作」,真正執行(帶參數那條)通常是 done 前
-                    # 最後一個成功 run_shell → recipe 就會是它(而非早期寫 main_CLI.py 的 run_python /
-                    # --help 探查)。replay = 重跑上次的指令 = 重跑上次的選擇(快速模式),省 LLM + 不再問。
+                    # cli-extractor / 既有 CLI 這種「靠 run_shell 跑 <某>.py <args>」的 skill:
+                    # 只記「執行某支 .py 腳本」的 run_shell(= CLI 執行、已含使用者選擇),
+                    # 不記 ls / cat / --help / 驗證類。recipe save 時**優先**用它,
+                    # 避免被後面補的驗證 run_python(只 print output 存在)蓋掉(E2E 抓到的破綻)。
                     _cmd = str(tc_args.get("command", "") or "")
-                    if _cmd:
-                        last_successful_code = (
-                            "import subprocess, sys\n"
-                            f"_p = subprocess.run({_cmd!r}, shell=True)\n"
-                            "sys.exit(_p.returncode)"
-                        )
+                    if ".py" in _cmd:
+                        last_successful_shell = _cmd
             elif tc_name == "ask_user":
                 was_interactive = True  # 用過人工問答 → recipe 標記(replay 時提醒可能要再問)
 
@@ -4214,11 +4224,12 @@ async def _execute_skill_native_loop(
                             f"({_size:,} bytes)已 ready 且 {output_ready_no_done_count} 輪未動、LLM 未 done"
                         )
                         _pending_fs = None
-                        if last_successful_code:
+                        _rc_code = _recipe_code_from(last_successful_shell, last_successful_code)
+                        if _rc_code:
                             _pending_fs = _save_skill_recipe(
                                 pipeline_id=pipeline_id, rkey=(recipe_step_key or step_name),
                                 task_description=task_description, input_paths=input_paths,
-                                output_path=output_path, code=last_successful_code,
+                                output_path=output_path, code=_rc_code,
                                 was_interactive=was_interactive, runtime=_time.time() - _recipe_start,
                                 silent_recipe=silent_recipe, no_save_recipe=no_save_recipe,
                                 logger=logger, step_name=step_name,
@@ -4314,11 +4325,12 @@ async def _execute_skill_native_loop(
             # 成功 → 存 recipe(下次同任務 + 同輸入指紋直接 replay、省 LLM token)
             # native loop 原本省略了這段(MVP)→ native 成預設後 skill recipe 整個沒在存,這裡補回。
             _pending = None
-            if _success and last_successful_code:
+            _rc_code = _recipe_code_from(last_successful_shell, last_successful_code)
+            if _success and _rc_code:
                 _pending = _save_skill_recipe(
                     pipeline_id=pipeline_id, rkey=(recipe_step_key or step_name),
                     task_description=task_description, input_paths=input_paths,
-                    output_path=output_path, code=last_successful_code,
+                    output_path=output_path, code=_rc_code,
                     was_interactive=was_interactive, runtime=_time.time() - _recipe_start,
                     silent_recipe=silent_recipe, no_save_recipe=no_save_recipe,
                     logger=logger, step_name=step_name,
