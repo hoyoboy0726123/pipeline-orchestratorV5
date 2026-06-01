@@ -1,0 +1,97 @@
+# 範例工作流:電商營運儀表板(三個既有 CLI → 整合互動式 Excel)
+# ───────────────────────────────────────────────────────────────
+# 示範重點:你手上有三支「現成的命令列工具」(各自帶子命令與選項),
+#   這條流程示範如何 ——
+#     1) 不改原檔、直接由 AI 互動問你要跑哪個子命令 / 參數,再呼叫它
+#     2) 三支 CLI 各自產出一份結果資料(銷售 / 庫存 / 客戶)
+#     3) 最後一步把三份結果整合成「一個漂亮的 Excel 儀表板」——
+#        含原生圖表(長條圖 / 圓餅圖),圖表與儲存格數據連動、改數字圖會跟著變
+#
+#   ★ 重點:前三步是「skill 技能節點」但「不掛 python-cli-extractor」——
+#     因為這三支本來就是 argparse CLI、沒東西可拆,skill 直接讀懂參數、
+#     ask_user 問你選擇、再 run_shell 呼叫原檔即可。
+#
+# ⚠️ 此範例需要技能節點(會在沙盒/本機跑 Python);整合步驟需 openpyxl。
+#    執行時會問你三次(各 CLI 要跑哪個面向),回答後就會產出儀表板 Excel。
+# ───────────────────────────────────────────────────────────────
+name: 電商營運儀表板 (三 CLI 整合) (範例)
+validate: false
+steps:
+  # 1) 銷售分析 CLI —— 互動選 by / metric / top
+  - name: 銷售分析
+    skill_mode: true          # 注意:不掛 skill: python-cli-extractor(它本來就是 CLI)
+    batch: |
+      這是一支既有的 argparse 命令列工具:
+      "__PROJECT_ROOT__/test-workflows/ecommerce_dashboard/sales/main.py"
+      它有 report 子命令,選項:--by product|category|month、--metric revenue|units、--top N、--out、--format json|csv。
+      步驟:
+      1. 先用 run_shell 跑 `python "<上面那支 main.py>" report --help` 或讀檔確認參數。
+      2. 用 ask_user 問我:要看哪個面向(by)、哪個指標(metric)、前幾名(top)。
+         告訴我預設建議:by=product、metric=revenue、top=5;我若說「用預設」就照這組。
+      3. 用 run_shell 直接執行原檔(不要改寫、不要產生 main_CLI.py):
+         python "<main.py>" report --by <選擇> --metric <選擇> --top <選擇> --out "<本步驟 output.path>" --format json
+      4. 確認 output.path 的 json 產生後 done。
+    output:
+      path: sales.json
+      description: "銷售分析結果(title + data:{label:value})"
+    timeout: 600
+
+  # 2) 庫存分析 CLI —— 互動選 view
+  - name: 庫存分析
+    skill_mode: true
+    batch: |
+      這是一支既有的 argparse 命令列工具:
+      "__PROJECT_ROOT__/test-workflows/ecommerce_dashboard/inventory/main.py"
+      它有 report 子命令,選項:--view stock|turnover|shortage、--top N、--out、--format json|csv。
+      步驟:
+      1. 讀檔或 --help 確認參數。
+      2. 用 ask_user 問我要看哪個視角(view);預設建議 view=shortage(低於安全庫存的缺口),我說「用預設」就照這個。
+      3. run_shell 直接執行原檔:
+         python "<main.py>" report --view <選擇> --out "<本步驟 output.path>" --format json
+      4. 確認 json 產生後 done。
+    output:
+      path: inventory.json
+      description: "庫存分析結果(title + data:{label:value})"
+    timeout: 600
+
+  # 3) 客戶分析 CLI —— 互動選 by / metric
+  - name: 客戶分析
+    skill_mode: true
+    batch: |
+      這是一支既有的 argparse 命令列工具:
+      "__PROJECT_ROOT__/test-workflows/ecommerce_dashboard/customers/main.py"
+      它有 report 子命令,選項:--by tier|region、--metric count|spend、--out、--format json|csv。
+      步驟:
+      1. 讀檔或 --help 確認參數。
+      2. 用 ask_user 問我要依哪個維度(by)、哪個指標(metric);預設建議 by=tier、metric=spend,我說「用預設」就照這組。
+      3. run_shell 直接執行原檔:
+         python "<main.py>" report --by <選擇> --metric <選擇> --out "<本步驟 output.path>" --format json
+      4. 確認 json 產生後 done。
+    output:
+      path: customers.json
+      description: "客戶分析結果(title + data:{label:value})"
+    timeout: 600
+
+  # 4) 整合儀表板 —— 把三份 json 合成一個含原生圖表的 Excel
+  - name: 整合營運儀表板
+    skill_mode: true
+    batch: |
+      用 openpyxl 把以下三份 JSON 整合成「一個」漂亮的 Excel 營運儀表板,輸出到本步驟的 output.path。
+      三份輸入檔(每份格式都是 {"title": "...", "data": {"標籤": 數值, ...}}):
+        - 銷售:{{ steps.銷售分析.output.path }}
+        - 庫存:{{ steps.庫存分析.output.path }}
+        - 客戶:{{ steps.客戶分析.output.path }}
+      要求(用 run_python、openpyxl;不要用 pandas to_excel 貼圖,要用 openpyxl 的原生圖表物件):
+      1. 三個分頁:「銷售」「庫存」「客戶」。每頁第一列寫標題(粗體、底色填充)、
+         接著兩欄寫該份 data 的 標籤 / 數值(含表頭「項目」「數值」),數值欄設千分位數字格式,欄寬加大。
+      2. 每頁加一個「原生圖表」並用 Reference 指向剛寫入的儲存格範圍(數據連動、改格子圖會變):
+         - 銷售頁:BarChart(長條圖)
+         - 庫存頁:BarChart(長條圖)
+         - 客戶頁:PieChart(圓餅圖)
+         圖表要有標題(用各 json 的 title)、放在表格右側(例如 anchor "D2")。
+      3. 再加一個「總覽」分頁放在最前面:列出三份報表的 title 與資料筆數、產生時間,當封面。
+      4. 存成 .xlsx 到 output.path。最後印出每頁列數與圖表類型,確認後 done。
+    output:
+      path: ecommerce_dashboard.xlsx
+      description: "整合三份分析的營運儀表板 Excel(含原生長條圖 / 圓餅圖)"
+    timeout: 900
