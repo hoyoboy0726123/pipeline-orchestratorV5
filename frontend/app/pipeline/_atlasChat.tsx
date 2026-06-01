@@ -185,6 +185,9 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   const SCRATCH_LS_KEY = 'pipeline-ai-chat-scratch-v1'
   // 防止 initial load 把自己又 persist 回去（會造成無限循環 / 覆蓋 race）
   const loadingRef = useRef(false)
+  // 「建立新工作流」時暫存目前對話 → 下次 activeId 切到新流時把它「複製」過去
+  //（目前工作流的對話原樣保留、不清空 = both）。
+  const carryOverRef = useRef<ChatMsg[] | null>(null)
 
   useEffect(() => {
     loadingRef.current = true
@@ -197,6 +200,21 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
       setMessages(loaded.length > 0 ? loaded : [loadWelcome()])
       // 讓 React render 完再釋放 loading flag，避免緊接著的 setMessages 被誤判為使用者輸入
       setTimeout(() => { loadingRef.current = false }, 0)
+    }
+    // carry-over:剛按「建立新工作流」→ activeId 已切到新流 → 把暫存對話「複製」過去
+    //（原工作流那邊的對話不動 = both）。略過抓新流空對話、改顯示帶過來的、並持久化到新流。
+    if (carryOverRef.current && activeId) {
+      const carried = carryOverRef.current
+      carryOverRef.current = null
+      applyLoaded(carried)
+      ;(async () => {
+        for (const m of carried) {
+          if (!m.content) continue
+          try { await appendWorkflowChat(activeId, m.role, m.content) } catch {/* ignore */}
+        }
+      })()
+      toast.success('已把這段對話帶到新工作流（原本的對話也保留著）')
+      return
     }
     if (activeId) {
       getWorkflowChat(activeId)
@@ -562,7 +580,12 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
                   {msg.hasYaml && msg.yaml && (
                     <div className="mt-1.5 grid grid-cols-2 gap-1">
                       <button
-                        onClick={() => onYamlApply(msg.yaml!, 'new')}
+                        onClick={() => {
+                          // 把目前對話複製一份帶去新工作流(目前的保留不動 = both)
+                          carryOverRef.current = (isWelcomeOnly(messages) ? [] : messages)
+                            .filter(m => !m.yamlError)
+                          onYamlApply(msg.yaml!, 'new')
+                        }}
                         disabled={!!msg.yamlError}
                         title={msg.yamlError
                           ? 'YAML 有解析錯誤、無法套用、請請 AI 重新產出完整 YAML'
