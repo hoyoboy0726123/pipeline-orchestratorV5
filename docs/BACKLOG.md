@@ -113,7 +113,9 @@
 
 - [x] **skill 驗證 agent → native FC**(2026-06-01 完成、E2E 過):`validator.validate_step_with_skill` 改 `bind_tools` + `response.tool_calls`(5 工具 run_python/run_shell/read_file/view_image/done、done 直接讀 args 拿 verdict、view_image 多模態)。E2E:skill 產 JSON → 驗證 agent 2 輪 read_file→done ok 約 7s(舊版卡 3 分鐘)。
 - [x] **Outlook agent → native FC**(2026-06-01 完成、E2E 過真實 Outlook):`executor.execute_step_with_outlook` 改 bind_tools(run_python/done/ask_user、保留 AST 白名單 + host 執行 + 守門)。E2E:讀收件匣總數 2 輪 22s、真讀 32500 封。**坑**:ask_user 的 `options:Optional[list]` → Gemini function declaration 400 INVALID_ARGUMENT → 拿掉 options(對齊 sandbox_tools gemma-safe schema:只 question+context、傳 [] 給 _wait_for_ask_user)。
-- [ ] **(低優先)兩個休眠 text-fallback loop**:`executor.py:2901`(skill text fallback)、`subagent_runner.py:521`(subagent text fallback)仍走 `<tool>` 文字協議,但只在 `SUBAGENT_LOOP_MODE=text`(非預設)才跑、是 native bind_tools 失敗時的安全網。gemma 預設走 native、不觸發。要嘛遷移、要嘛確認 native 夠穩後移除。
+- [ ] **🧹 [Cleanup 候選] 刪除兩個休眠 text-fallback loop**:`executor.py:2901`(skill text loop)、`subagent_runner.py:521`(subagent text loop)是舊版 `<tool>` 文字協議實作,**只在手動設 `.env SUBAGENT_LOOP_MODE=text` + 重啟才跑**(預設 native、無自動降級、確認過)。正常使用 = 死碼。
+  - 現況:留著當「強模型 debug 用的逃生門」(對 Claude/GPT 文字協議仍可用;對 gemma 壞)。
+  - 待辦:**確認 native 長期穩定後,直接刪掉這兩段 + 拿掉 `SUBAGENT_LOOP_MODE` 開關**,消滅「兩套 loop drift」的維護負擔(我們這次踩的 recipe/pip/守門漏遷都源於雙 loop)。屬 cleanup、非 bug,不急。
 - 一次性 LLM 呼叫(`validate_step` 一般驗證、`visual_validator`)**不需要** native FC(無工具迴圈、gemma 正常吐 JSON/text)。
 
 ---
