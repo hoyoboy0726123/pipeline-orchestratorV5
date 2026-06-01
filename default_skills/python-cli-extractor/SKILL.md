@@ -264,6 +264,19 @@ for f in files[:50]:  # 只 print 前 50 個、再多沒意義
 
 **控制 read 數量**:一次最多 read 10 個檔(每個 < 500 行);若專案大、優先 read entry + import depth ≤ 2 的模組、不要全 read。
 
+### 🚨 Windows-only 執行期依賴預檢(sandbox 模式:**讀完源碼後立刻做、別等到跑才發現**)
+
+讀源碼時**除了看 import、也要看函式體內的執行期呼叫**。若核心功能**靠 Windows-only 機制**才能完成,Linux 沙盒容器永遠跑不了 —— 這時**不要往下問參數、不要寫 main_CLI.py、不要試跑**,直接走下方「Windows-only 判定階」`done(success=false)` 引導使用者切 host。早期 fail-fast + 明確引導,遠勝填完參數後在最後一刻撞 `FileNotFoundError: 'powershell'`。
+
+**偵測訊號**(出現任一、且該功能核心就靠它):
+- `subprocess` / `os.system` / `os.popen` 字串含 `powershell` / `pwsh` / `cmd /c` / `wmic` / `reg ` / `where ` / 某個 Windows `.exe`
+- `import winrt` / `Windows.Media.*`(WinRT)、`win32com` / `win32api` / `pywin32` / `comtypes`、`ctypes.windll` / `ctypes.WinDLL`
+- 寫死的 Windows 系統路徑(`C:\Windows\System32\...`)
+
+> 範例(就是這次 SSD 失敗的型態):OCR 工具用 `subprocess.run(["powershell", ... Windows.Media.Ocr ...])` 做辨識 → 沙盒沒 powershell / WinRT → **預檢階段就判 Windows-only**,直接告知「請到設定頁切 host 重跑」,**不要**再 `ask_user` 問關鍵字 / 圖片路徑。
+
+⚠️ **分辨核心 vs 順手**:OCR 工具的辨識本體靠 WinRT = 核心 → 判 Windows-only。若只是某非必要分支用到、主功能不靠它 → 照常解耦、那分支略過即可、別誤判整個專案。
+
 **識別 GUI 框架**(看 import):
 | import | 框架 |
 |---|---|

@@ -2497,8 +2497,8 @@ export default function PipelinePage() {
               )}
               {logLines.map((line, i) => (
                 <div key={i} className={
-                  /error|fail|錯誤|失敗/i.test(line) ? 'text-red-400' :
-                  /warn|warning/i.test(line) ? 'text-yellow-400' :
+                  /\[ERROR\s*\]|Traceback|exit code: [1-9]/i.test(line) ? 'text-red-400' :
+                  /\[WARN/i.test(line) ? 'text-yellow-400' :
                   /success|完成|✓/i.test(line) ? 'text-green-400' :
                   'text-gray-300'
                 }>{line || '\u00a0'}</div>

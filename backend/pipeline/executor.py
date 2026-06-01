@@ -4045,12 +4045,16 @@ async def _execute_skill_native_loop(
             # 否則 log 只剩 args_keys、看不到 LLM 到底要跑什麼指令 / 程式碼(改 native 前的可見度)。
             _pv = (tc_args.get("command") or tc_args.get("code") or tc_args.get("question")
                    or tc_args.get("path") or tc_args.get("query") or "")
-            _pv = str(_pv).strip().replace("\n", " ⏎ ")
-            if len(_pv) > 400:
-                _pv = _pv[:400] + f" …[共 {len(str(tc_args.get('code') or tc_args.get('command') or _pv))} 字]"
-            logger.info(f"[{step_name}] 🛠 tool={tc_name}" + (f" ｜ {_pv}" if _pv else f" (keys={list(tc_args.keys())})"))
-            # 完整參數 + 模型這輪的 prose/reasoning(若有)留 DEBUG、需要深查時看
-            logger.debug(f"[{step_name}] 🛠 {tc_name} full_args={tc_args}")
+            _pv = str(_pv).rstrip()
+            _full_len = len(_pv)
+            if _full_len > 1500:
+                _pv = _pv[:1500] + f"\n…[截斷、完整 {_full_len} 字]"
+            if _pv:
+                # 保留原始換行 → log 檢視器多行整齊顯示(對齊舊 text 模式的可讀性),
+                # 不要壓成單行;延續行沒有 [INFO] 等級標記 → 前端上中性灰、不會誤判紅字。
+                logger.info(f"[{step_name}] 🛠 tool={tc_name}（{_full_len} 字）:\n{_pv}")
+            else:
+                logger.info(f"[{step_name}] 🛠 tool={tc_name} (keys={list(tc_args.keys())})")
 
             # ── native loop:pip install 企圖(run_shell command + run_python code)→ 轉 missing_dependency ──
             # (共用 helper detect_pip_install:涵蓋 run_shell 的 pip 命令 + run_python code 內的
