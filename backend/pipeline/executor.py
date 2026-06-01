@@ -4094,6 +4094,15 @@ async def _execute_skill_native_loop(
                     missing_packages=_real_pkgs or None,
                 )
 
+            # run_shell 用:跑工具前先記 output 檔 mtime,跑完比對 → 只認「真的產出/更新 output」的
+            # .py 指令當 recipe(排除 --help / ls / 探查 / 驗證,那些不動 output 檔)。
+            _out_mtime_before = None
+            if tc_name == "run_shell" and output_path:
+                try:
+                    _out_mtime_before = Path(output_path).stat().st_mtime
+                except Exception:
+                    _out_mtime_before = None
+
             tool_fn = name_to_tool.get(tc_name)
             try:
                 if tool_fn is None:
@@ -4113,12 +4122,24 @@ async def _execute_skill_native_loop(
                 last_run_shell_ok = "[exit code:" not in result
                 if last_run_shell_ok:
                     # cli-extractor / 既有 CLI 這種「靠 run_shell 跑 <某>.py <args>」的 skill:
-                    # 只記「執行某支 .py 腳本」的 run_shell(= CLI 執行、已含使用者選擇),
-                    # 不記 ls / cat / --help / 驗證類。recipe save 時**優先**用它,
-                    # 避免被後面補的驗證 run_python(只 print output 存在)蓋掉(E2E 抓到的破綻)。
+                    # 只記「執行某支 .py 腳本、且真的寫出/更新了 output 檔」的 run_shell
+                    # (= CLI 實際執行、已含使用者選擇)。用 mtime 比對排除 --help / ls / 探查 /
+                    # 驗證類(那些不動 output);recipe save 時**優先**用它,避免被後面補的
+                    # 驗證 run_python(只 print output 存在)蓋掉(E2E 抓到的破綻)。
                     _cmd = str(tc_args.get("command", "") or "")
                     if ".py" in _cmd:
-                        last_successful_shell = _cmd
+                        if output_path:
+                            try:
+                                _mt_after = Path(output_path).stat().st_mtime
+                            except Exception:
+                                _mt_after = None
+                            if _mt_after is not None and (
+                                _out_mtime_before is None or _mt_after > _out_mtime_before
+                            ):
+                                last_successful_shell = _cmd  # 這條真的產出了 output
+                        else:
+                            # 無 output_path 可比對 → 退回寬鬆(仍優於完全不抓)
+                            last_successful_shell = _cmd
             elif tc_name == "ask_user":
                 was_interactive = True  # 用過人工問答 → recipe 標記(replay 時提醒可能要再問)
 
