@@ -33,6 +33,23 @@ PIPELINE_DIR       = Path(os.getenv("PIPELINE_DIR", "~/pipelines")).expanduser()
 OUTPUT_BASE_PATH.mkdir(parents=True, exist_ok=True)
 PIPELINE_DIR.mkdir(parents=True, exist_ok=True)
 
+# external_projects:使用者放自己的 Python 專案 / 腳本的標準位置(AI 助手會引導放這、再給路徑)。
+# 空資料夾 git 不追蹤、全新 clone 不會有 → 啟動時確保建立 + 放一份 README 說明用途。
+EXTERNAL_PROJECTS_DIR = _REPO_ROOT / "external_projects"
+EXTERNAL_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+_ext_readme = EXTERNAL_PROJECTS_DIR / "README.txt"
+if not _ext_readme.exists():
+    try:
+        _ext_readme.write_text(
+            "把你自己的 Python 專案 / 腳本放在這個資料夾底下\n"
+            "(例:external_projects\\my_tool\\main.py),再告訴 AI 助手腳本的路徑或檔名,\n"
+            "它就能把你的腳本接進工作流執行。\n\n"
+            "說明:AI 生成的程式碼在隔離沙盒容器內執行;放在這裡的專案,AI 技能才讀寫得到、能接進流程。\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
 
 # ── Auto-migration:舊 backend/ai_output → 新 OUTPUT_BASE_PATH(僅一次) ──
 # 背景:V5 內部統一 OUTPUT_BASE_PATH 之前(commit 53ed100 / 2026-05-24 前)、

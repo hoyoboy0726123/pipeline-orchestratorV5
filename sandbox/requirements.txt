@@ -34,3 +34,4 @@ yt-dlp
 markitdown[pptx]
 xlsxwriter
 tabulate
+pyfiglet

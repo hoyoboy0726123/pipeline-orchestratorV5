@@ -141,15 +141,36 @@ def _is_installed(pkg_name: str) -> bool:
     return normalize_pkg_name(pkg_name) in _pip_snapshot()
 
 
+def _pip_check_host() -> str:
+    """host 環境跑 `pip check` 偵測依賴衝突,回衝突摘要(無衝突回空字串)。
+    擋掉「後裝的套件升/降級了其他套件、弄壞既有專案」這種 silent breakage。"""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            capture_output=True, text=True, timeout=30,
+        )
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 or not out or "No broken requirements" in out:
+            return ""
+        return "\n".join(l for l in out.splitlines() if l.strip())[:600]
+    except Exception:
+        return ""
+
+
 def _pip_install(pkg_name: str) -> tuple[bool, str]:
-    """安裝單一套件，回傳 (成功, 訊息)"""
+    """安裝單一套件，回傳 (成功, 訊息)。裝完跑 pip check、有依賴衝突就附告警。"""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", pkg_name, "-q"],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0:
-            return True, f"✅ {pkg_name} 安裝成功"
+            msg = f"✅ {pkg_name} 安裝成功"
+            conflicts = _pip_check_host()
+            if conflicts:
+                msg += (f"\n⚠️ 依賴衝突告警(裝 {pkg_name} 後 pip check):\n{conflicts}\n"
+                        f"→ 可能影響其他既有專案、建議檢查版本相容性。")
+            return True, msg
         return False, f"❌ {pkg_name} 安裝失敗：{result.stderr.strip()}"
     except subprocess.TimeoutExpired:
         return False, f"❌ {pkg_name} 安裝逾時"
@@ -369,6 +390,22 @@ def _invalidate_sandbox_pip_cache() -> None:
         _SANDBOX_PIP_CACHE["data"] = {}
 
 
+def _sandbox_pip_check() -> str:
+    """沙盒容器內跑 `pip check` 偵測依賴衝突,回衝突摘要(無衝突回空字串)。"""
+    prefix = _sandbox_docker_prefix()
+    try:
+        r = subprocess.run(
+            ["wsl", "-e", *prefix, "exec", _SANDBOX_CONTAINER, "pip", "check"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 or not out or "No broken requirements" in out:
+            return ""
+        return "\n".join(l for l in out.splitlines() if l.strip())[:600]
+    except Exception:
+        return ""
+
+
 def _sandbox_pip_install(pkg_name: str) -> tuple[bool, str]:
     prefix = _sandbox_docker_prefix()
     try:
@@ -377,7 +414,12 @@ def _sandbox_pip_install(pkg_name: str) -> tuple[bool, str]:
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
         )
         if result.returncode == 0:
-            return True, f"✅ {pkg_name} 已安裝到沙盒容器"
+            msg = f"✅ {pkg_name} 已安裝到沙盒容器"
+            conflicts = _sandbox_pip_check()
+            if conflicts:
+                msg += (f"\n⚠️ 依賴衝突告警(裝 {pkg_name} 後容器 pip check):\n{conflicts}\n"
+                        f"→ 可能影響其他既有專案、建議檢查版本相容性。")
+            return True, msg
         return False, f"❌ {pkg_name} 沙盒安裝失敗：{(result.stderr or result.stdout or '').strip()[:500]}"
     except subprocess.TimeoutExpired:
         return False, f"❌ {pkg_name} 沙盒安裝逾時（>180 秒）"

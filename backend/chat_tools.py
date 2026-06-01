@@ -2131,6 +2131,152 @@ def memory_state() -> str:
     return body
 
 
+# ── 既有專案探查工具(啟動既有 Python 專案 / GUI / CLI 用) ──────────────────────
+# 敏感檔名 pattern(對齊 CLAUDE.md deny-list):這些檔一律不列出、不讀內容。
+_SENSITIVE_GLOBS = (
+    ".env", ".env.*", "*.key", "*.pem", "*.p12", "*.pfx",
+    "id_rsa*", "id_ed25519*", "*.gpg", "credentials*", "*credentials*",
+    "*secret*", "*token*", ".npmrc",
+)
+
+
+def _is_sensitive_filename(name: str) -> bool:
+    import fnmatch
+    low = (name or "").lower()
+    return any(fnmatch.fnmatch(low, p) for p in _SENSITIVE_GLOBS)
+
+
+def _detect_proj_venv(proj: Path) -> dict:
+    """偵測專案目錄下的虛擬環境(venv / .venv,Win Scripts / Unix bin)。
+    與 main.py 的 /fs/check-venv 同邏輯:venv 先(Windows 慣例)、誰先找到用誰。"""
+    import os
+    is_win = (os.name == "nt")
+    sub = "Scripts" if is_win else "bin"
+    py = "python.exe" if is_win else "python"
+    for vdir in ("venv", ".venv"):
+        vpy = proj / vdir / sub / py
+        if vpy.exists():
+            return {"has_venv": True, "python_path": str(vpy.resolve()), "venv_dir_name": vdir}
+    return {"has_venv": False, "python_path": None, "venv_dir_name": None}
+
+
+@tool
+def inspect_project(path: str) -> str:
+    """探查使用者既有的 Python 專案資料夾,為「啟動既有專案」工作流收集規劃所需資訊。
+
+    什麼時候用:使用者說「我有 Python 專案 / 啟動我的程式 / 跑 main.py」並給了資料夾路徑後,
+    **第一步就呼叫本工具**,別憑空猜入口或依賴。回傳 JSON:
+    - venv:虛擬環境偵測。has_venv=true 時 python_path 就是該專案的 python,
+      **組 batch 時把它當 python 前綴**(例 `"<python_path>" main.py --arg`)、確保依賴齊全、不會 ModuleNotFoundError。
+    - entry_candidates:入口候選(main.py / app.py / run.py / cli.py / manage.py …)
+    - dependency_files:依賴檔(requirements.txt / pyproject.toml / Pipfile …)
+    - top_level_tree:頂層目錄樹(限 2 層;.env / *.key / *secret* / *token* 等敏感檔一律不列)
+
+    拿到結果後的 SOP:用 read_project_file 讀入口檔判斷怎麼跑(argparse / input() / CLI 參數)→
+    ask_user 跟使用者確認入口與參數 → 組 script 節點 batch。
+    無 venv → 用 `python` 跑、並在規劃時提醒「此專案無虛擬環境、依賴可能缺、建議先建 venv」。
+
+    Args:
+        path: 專案資料夾的絕對路徑(例 C:\\Users\\me\\external_projects\\my_tool)
+    """
+    import os
+    p = (path or "").strip().strip('"').strip("'")
+    if not p:
+        return "請提供專案資料夾路徑(絕對路徑)。"
+    proj = Path(p).expanduser()
+    if not proj.exists():
+        return (f"路徑不存在:{proj}\n請確認專案已放好(建議放本專案 external_projects/<你的專案>/ 底下)、"
+                f"再給我正確的絕對路徑。")
+    if proj.is_file():
+        proj = proj.parent
+    venv = _detect_proj_venv(proj)
+    entry_names = ("main.py", "app.py", "run.py", "cli.py", "__main__.py",
+                   "manage.py", "start.py", "server.py", "gui.py", "bot.py")
+    dep_names = ("requirements.txt", "pyproject.toml", "Pipfile", "Pipfile.lock",
+                 "environment.yml", "setup.py", "setup.cfg", "poetry.lock")
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv",
+                 ".idea", ".vscode", ".mypy_cache", ".pytest_cache", "dist", "build", ".ruff_cache"}
+    entries, deps, readmes, tree = [], [], [], []
+    try:
+        for child in sorted(proj.iterdir(), key=lambda c: (c.is_file(), c.name.lower())):
+            nm = child.name
+            if _is_sensitive_filename(nm):
+                continue
+            if child.is_dir():
+                if nm in skip_dirs:
+                    tree.append(f"{nm}/  (略)")
+                    continue
+                tree.append(f"{nm}/")
+                try:  # 第二層只列 .py 與 dep 檔
+                    for g in sorted(child.iterdir()):
+                        if _is_sensitive_filename(g.name):
+                            continue
+                        if g.is_file() and (g.suffix == ".py" or g.name in dep_names):
+                            tree.append(f"  {nm}/{g.name}")
+                            if g.name in entry_names:
+                                entries.append(f"{nm}/{g.name}")
+                except Exception:
+                    pass
+            else:
+                tree.append(nm)
+                if nm in entry_names:
+                    entries.append(nm)
+                if nm in dep_names:
+                    deps.append(nm)
+                if nm.lower() in ("readme.md", "readme.txt", "readme.rst", "readme"):
+                    readmes.append(nm)
+    except Exception as e:
+        return f"讀取資料夾失敗:{e}"
+    if len(tree) > 120:
+        tree = tree[:120] + [f"...(還有 {len(tree) - 120} 項略過)"]
+    result = {
+        "project_dir": str(proj.resolve()),
+        "venv": venv,
+        "entry_candidates": entries or "(頂層沒找到常見入口檔、請看 top_level_tree 或讀 README)",
+        "dependency_files": deps,
+        "readme_files": readmes,
+        "top_level_tree": tree,
+        "hint": ("有 venv → batch 用 python_path 當前綴跑;無 venv → 用 python 並提醒依賴可能缺。"
+                 "下一步:read_project_file 讀入口檔/README 判斷怎麼跑與有哪些參數,再 ask_user 確認。"),
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@tool
+def read_project_file(path: str, max_chars: int = 8000) -> str:
+    """讀使用者既有專案裡的某個檔(原始碼 / README / requirements),判斷怎麼跑、有哪些 CLI 參數。
+
+    什麼時候用:inspect_project 之後,要讀入口檔(main.py 等)看它的 argparse / input() / 啟動方式,
+    或讀 README / requirements.txt 了解用法與依賴,據此組 batch 與 ask_user 的選項。
+    ⚠️ .env / *.key / credentials / *secret* / *token* 等敏感檔會被拒讀。
+
+    Args:
+        path: 檔案絕對路徑
+        max_chars: 最多回傳字元(預設 8000、避免 token 爆;超過會截斷並提示)
+    """
+    p = (path or "").strip().strip('"').strip("'")
+    if not p:
+        return "請提供檔案的絕對路徑。"
+    f = Path(p).expanduser()
+    if _is_sensitive_filename(f.name):
+        return f"⛔ 拒讀:{f.name} 屬敏感檔(.env / 金鑰 / 憑證 / token),不讀取內容。"
+    if not f.exists():
+        return f"檔案不存在:{f}"
+    if f.is_dir():
+        return f"{f} 是資料夾、不是檔案。要看目錄結構請用 inspect_project。"
+    try:
+        sz = f.stat().st_size
+        if sz > 2_000_000:
+            return f"檔案過大({sz} bytes),拒讀以免 token 爆。請改讀較小的入口檔 / README。"
+        raw = f.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"讀檔失敗:{e}"
+    n = max(500, int(max_chars))
+    if len(raw) > n:
+        return raw[:n] + f"\n\n...(檔案還有 {len(raw) - n} 字元被截斷;需要的話用更大的 max_chars 或讀特定段落)"
+    return raw or "(檔案是空的)"
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
@@ -2144,6 +2290,7 @@ CHAT_TOOLS = [
     read_subagent_file, send_subagent_file_to_tg,    # 子代理產物 讀 / 傳 TG(限定 task working_dir)
     cancel_subagent_task,                            # 中止正在跑的子代理(asyncio.cancel + push TG)
     read_help_doc,                                   # 進階用法 lazy doc(chain / files / cancel)
+    inspect_project, read_project_file,              # 探查既有專案 + 讀源碼(啟動既有 Python 專案、偵測 venv 用)
     remember_fact, recall_fact, list_facts, forget_fact, recall_episode, memory_state,  # 長期記憶(memory_enabled 時掛載)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}
