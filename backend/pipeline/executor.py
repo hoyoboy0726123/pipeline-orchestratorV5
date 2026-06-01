@@ -4382,23 +4382,23 @@ create_meeting(*, subject, start, end, location="", body="",
                reminder_minutes=15, send_invitation=True) -> str
 ```
 
-## 工具
+## 工具（原生 function calling）
 
-每次 reply 只能呼叫**一個**工具。格式嚴格如下，不可加 markdown code fence：
+本對話**使用原生 function calling API**、工具已透過 function_declarations 註冊。你**必須**透過 API 的 function_call 機制呼叫工具、**禁止**寫 `<tool>name</tool>` / `<input>...</input>` 這類文字格式 — 那種純文字 orchestrator 不會解析、會被視為沒呼叫任何工具。直接 emit 結構化 tool_calls 即可。
 
-```
-<tool>run_python</tool>
-<input>
-import pandas as pd
-from win32_helpers.outlook import search_mail
-df = search_mail(subject="報告", since="2026-04-25")
-print(df.head())
-</input>
-```
+可用工具：
+- **run_python(code)**：執行 Python 程式碼處理 Outlook 需求。
+  例：
+  ```python
+  import pandas as pd
+  from pipeline.win32_helpers.outlook import search_mail
+  df = search_mail(subject="報告", since="2026-04-25")
+  print(df.head())
+  ```
+- **done(success, summary)**：結束任務。success=true/false、summary 用中文說明結果（失敗時說明卡在哪）。
+- **ask_user(question, options, context)**：問使用者（極少用，例如「找到 50 封信，要不要全部處理？」）。
 
-或 `<tool>done</tool><input>{"success": true, "summary": "..."}</input>`。
-
-也可以呼叫 `<tool>ask_user</tool>` 問使用者（極少用，例如「找到 50 封信，要不要全部處理？」）。
+每次 reply 呼叫**一個**工具即可。
 
 ## 規則
 
@@ -4618,8 +4618,9 @@ async def execute_step_with_outlook(
             logger.warning(f"[{step_name}] ⚠ 預抓失敗：{err_pf}（LLM 將自己抓）")
 
     # LLM
-    from llm_factory import build_llm, invoke_with_streaming
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from llm_factory import build_llm
+    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+    from langchain_core.tools import tool as _lc_tool
     llm = build_llm(role=llm_role)
 
     user_prompt = _build_outlook_prompt(
@@ -4641,9 +4642,64 @@ async def execute_step_with_outlook(
     import time as _time
     start_time = _time.time()
 
+    # ── 3 個工具（native function calling）─────────────────────────────
+    # 這些 @tool wrapper 只負責「對 LLM 暴露乾淨 schema」、實際執行（AST 檢查 /
+    # sys.path 注入 / host 執行 / done 守門 / ask_user 等待）仍在下方 loop 處理，
+    # loop 看 tc["name"] 自己 dispatch（跟 validator 的 view_image/done 同模式）。
+    @_lc_tool
+    def run_python(code: str) -> str:
+        """執行 Python 程式碼來處理 Outlook 需求（寄信 / 讀信 / 行事曆 / 寫檔）。
+
+        Args:
+            code: 要執行的 Python 程式碼（完整可獨立執行；用 from pipeline.win32_helpers.outlook import ...）
+        Returns:
+            stdout + stderr（如有）
+        """
+        return "__RUN_PYTHON__"  # 不在此真執行、loop 看 tool name 做 AST 檢查 + host 執行
+
+    @_lc_tool
+    def done(success: bool, summary: str = "") -> str:
+        """結束任務、回傳最終結果。
+
+        Args:
+            success: 是否成功完成
+            summary: 結果說明（中文；失敗時說明卡在哪）
+        Returns:
+            結束標記
+        """
+        return "__DONE__"
+
+    @_lc_tool
+    def ask_user(question: str, context: str = "") -> str:
+        """需求模糊 / 缺關鍵資訊時問使用者（極少用）。
+
+        Args:
+            question: 要問的問題(若有多選請直接寫在問題內,例「A/B/C 哪個?」)
+            context: 補充情境（可省略）
+        Returns:
+            使用者的回答
+        """
+        return "__ASK_USER__"  # 不在此真執行、loop 看 tool name 等待使用者回答
+        # 註:不暴露 options 參數 — Gemini function declaration 對 Optional[list](anyOf/無 items)
+        # 會回 400 INVALID_ARGUMENT(E2E 抓到)。對齊 sandbox_tools.ask_user 的 gemma-safe schema。
+
+    outlook_tools = [run_python, done, ask_user]
+    name_to_tool = {t.name: t for t in outlook_tools}
+
+    try:
+        llm_with_tools = llm.bind_tools(outlook_tools)
+    except Exception as _be:
+        logger.error(f"[{step_name}] Outlook bind_tools 失敗：{_be}")
+        return ExecResult(
+            exit_code=-1, stdout="\n".join(all_stdout) or "",
+            stderr=f"Outlook bind_tools 失敗：{_be}",
+        )
+
+    consecutive_empty = 0  # 連續空回應守門：gemma native-FC config 下可能 tool_calls + content 皆空 → 早退、別空轉
+
     try:
         for iteration in range(OUTLOOK_AGENT_MAX_ITERATIONS):
-            logger.info(f"[{step_name}] Outlook 迭代 {iteration + 1}/{OUTLOOK_AGENT_MAX_ITERATIONS}")
+            logger.info(f"[{step_name}] Outlook 迭代 {iteration + 1}/{OUTLOOK_AGENT_MAX_ITERATIONS} [NATIVE]")
             if _time.time() - start_time > timeout:
                 logger.warning(f"[{step_name}] Outlook agent 整體 timeout（{timeout}s）達到")
                 return ExecResult(
@@ -4654,118 +4710,155 @@ async def execute_step_with_outlook(
             if iteration > 0:
                 await asyncio.sleep(OUTLOOK_AGENT_REQUEST_INTERVAL)
 
-            reply = (await invoke_with_streaming(
-                llm, messages, label=step_name, timeout=180.0, logger=logger,
-            )).strip()
-            logger.debug(f"[{step_name}] LLM 回覆：{reply[:1500]}")
+            response: AIMessage = await asyncio.wait_for(
+                llm_with_tools.ainvoke(messages), timeout=180.0
+            )
+            tool_calls = list(getattr(response, "tool_calls", []) or [])
+            content_str = response.content if isinstance(response.content, str) else ""
+            logger.info(
+                f"[{step_name}] LLM 回覆（content {len(content_str)} 字, tool_calls={len(tool_calls)}）"
+            )
+            if content_str:
+                logger.debug(f"[{step_name}] LLM content：{content_str[:1500]}")
 
-            tool_calls = _parse_skill_tool_calls(reply)
+            # AIMessage 進歷史（含 tool_calls、維持 tool_call/tool_result 配對）
+            messages.append(response)
+
             if not tool_calls:
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content="請使用 <tool>run_python</tool> 或 <tool>done</tool> 工具。"))
-                continue
-
-            call = tool_calls[0]
-            tool_name = call["tool"]
-            tool_input = call["input"]
-            logger.info(f"[{step_name}] tool={tool_name}, input_len={len(tool_input)}")
-
-            if tool_name == "done":
-                try:
-                    data = json.loads(tool_input)
-                    success = bool(data.get("success", False))
-                    summary = data.get("summary", data.get("error", ""))
-
-                    # 守門：宣稱成功但最近 run_python 失敗 → 拒絕
-                    if success and last_run_python_ok is False:
-                        logger.warning(f"[{step_name}] 在 run_python 失敗後送 done(success=true)，拒絕")
-                        messages.append(HumanMessage(content=reply))
-                        messages.append(HumanMessage(content=
-                            "[系統] 拒絕 done：上一次 run_python 失敗。先修錯再 done。"))
-                        continue
-                    # 守門：宣稱成功但 output 檔不存在
-                    if success and output_path and not Path(output_path).exists():
-                        logger.warning(f"[{step_name}] done 宣稱成功但 {output_path} 不存在，拒絕")
-                        messages.append(HumanMessage(content=reply))
-                        messages.append(HumanMessage(content=
-                            f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在。請用 run_python 實際寫入後再 done。"))
-                        continue
-
-                    all_stdout.append(f"[Outlook 完成] {summary}")
-                    logger.info(f"[{step_name}] {'成功' if success else '失敗'}：{summary}")
-                    final_stdout = (_build_clean_success_stdout(all_stdout, "[Outlook 完成]")
-                                    if success else "\n".join(all_stdout))
-                    return ExecResult(
-                        exit_code=0 if success else 1,
-                        stdout=final_stdout,
-                        stderr="" if success else summary,
+                # 連續空回應守門：tool_calls + content 皆空（content<5 字）→ streak++、連 2 次中止。
+                # gemma 在 native-FC config 下若不吐 tool 也不吐字會卡住，別空轉到上限。
+                if len(content_str.strip()) < 5:
+                    consecutive_empty += 1
+                    logger.warning(
+                        f"[{step_name}] ⚠ 第 {iteration + 1} 輪空回應"
+                        f"（tool_calls + content 皆空）、累計 {consecutive_empty}/2"
                     )
-                except json.JSONDecodeError:
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=
-                        '[系統] done 的 input 不是合法 JSON。格式：{"success": true/false, "summary": "..."}'))
-                    continue
-
-            if tool_name == "run_python":
-                # AST 檢查 — disallowed import 直接擋
-                try:
-                    errs = check_imports(tool_input)
-                except SyntaxError as e:
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=f"[系統] 你提交的 Python 有語法錯誤：{e}"))
-                    last_run_python_ok = False
-                    continue
-                if errs:
-                    err_msg = format_errors_for_agent(errs)
-                    logger.warning(f"[{step_name}] 偵測到 disallowed imports：{[e.module for e in errs]}")
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=err_msg))
-                    last_run_python_ok = False
-                    continue
-
-                # 執行（強制 host）
-                # 注入 sys.path 讓 subprocess 找得到 backend dir 裡的 win32_helpers / pipeline 套件
-                # （_skill_run_python 寫到 Windows temp 目錄後 spawn subprocess，預設 sys.path
-                # 沒有 backend dir → import win32_helpers / from pipeline.X 會 ModuleNotFoundError）
-                _injected_code = (
-                    f"import sys\n"
-                    f"sys.path.insert(0, r{repr(_backend_dir_for_outlook)})\n"
-                    + tool_input
-                )
-                tool_result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda ti=_injected_code, lg=logger, tt=_compute_tool_timeout(timeout): _execute_skill_tool(
-                        "run_python", ti, cwd=working_dir, run_id=run_id,
-                        logger=lg, force_host=True, tool_timeout=tt,
-                    ),
-                )
-                logger.debug(f"[{step_name}] 執行結果：{tool_result[:1500]}")
-                all_stdout.append(f"[run_python] {tool_result}")
-                last_run_python_ok = "[exit code:" not in tool_result
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=f"[工具結果 — run_python]\n{tool_result}"))
+                    if consecutive_empty >= 2:
+                        err_msg = (
+                            "Outlook agent 連續 2 輪空回應（tool_calls + content 皆空、"
+                            "疑似模型不相容 native function calling）、判定卡住、中止。"
+                        )
+                        logger.error(f"[{step_name}] ✗ {err_msg}")
+                        return ExecResult(
+                            exit_code=1, stdout="\n".join(all_stdout), stderr=err_msg,
+                        )
+                else:
+                    consecutive_empty = 0
+                messages.append(HumanMessage(content=
+                    "請使用工具（原生 function calling）呼叫 run_python / done / ask_user。"
+                    "不要用文字描述工具呼叫。"))
                 continue
 
-            if tool_name == "ask_user":
-                try:
-                    aq = json.loads(tool_input)
-                    question = aq.get("question", "")
-                    options = aq.get("options", [])
-                    context = aq.get("context", "")
-                except Exception:
-                    question, options, context = tool_input, [], ""
-                answer = await _wait_for_ask_user(
-                    run_id, question, options, context, logger, step_name,
-                )
-                all_stdout.append(f"[ask_user] {question} → {answer}")
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=f"[ask_user 答案] {answer}"))
-                continue
+            consecutive_empty = 0
 
-            # 不支援的工具
-            messages.append(HumanMessage(content=reply))
-            messages.append(HumanMessage(content=
-                f"[系統] 工具 {tool_name} 不在 Outlook 節點允許清單。可用：run_python / done / ask_user。"))
+            # 掃出 done（若有）、其餘工具先執行；done 在最後處理
+            done_call: Optional[dict] = None
+            regular_calls = []
+            for tc in tool_calls:
+                if tc.get("name") == "done":
+                    done_call = tc  # 多個 done 取最後一個
+                else:
+                    regular_calls.append(tc)
+
+            for tc in regular_calls:
+                tool_name = tc.get("name", "")
+                tc_id = tc.get("id") or ""
+                tc_args = tc.get("args", {}) or {}
+                logger.info(f"[{step_name}] tool={tool_name} [NATIVE]")
+
+                if tool_name == "run_python":
+                    tool_input = str(tc_args.get("code", "") or "")
+                    logger.info(f"[{step_name}] run_python input_len={len(tool_input)}")
+                    # AST 檢查 — disallowed import 直接擋
+                    try:
+                        errs = check_imports(tool_input)
+                    except SyntaxError as e:
+                        messages.append(ToolMessage(
+                            content=f"[系統] 你提交的 Python 有語法錯誤：{e}", tool_call_id=tc_id,
+                        ))
+                        last_run_python_ok = False
+                        continue
+                    if errs:
+                        err_msg = format_errors_for_agent(errs)
+                        logger.warning(f"[{step_name}] 偵測到 disallowed imports：{[e.module for e in errs]}")
+                        messages.append(ToolMessage(content=err_msg, tool_call_id=tc_id))
+                        last_run_python_ok = False
+                        continue
+
+                    # 執行（強制 host）
+                    # 注入 sys.path 讓 subprocess 找得到 backend dir 裡的 win32_helpers / pipeline 套件
+                    # （_skill_run_python 寫到 Windows temp 目錄後 spawn subprocess，預設 sys.path
+                    # 沒有 backend dir → import win32_helpers / from pipeline.X 會 ModuleNotFoundError）
+                    _injected_code = (
+                        f"import sys\n"
+                        f"sys.path.insert(0, r{repr(_backend_dir_for_outlook)})\n"
+                        + tool_input
+                    )
+                    tool_result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda ti=_injected_code, lg=logger, tt=_compute_tool_timeout(timeout): _execute_skill_tool(
+                            "run_python", ti, cwd=working_dir, run_id=run_id,
+                            logger=lg, force_host=True, tool_timeout=tt,
+                        ),
+                    )
+                    logger.debug(f"[{step_name}] 執行結果：{tool_result[:1500]}")
+                    all_stdout.append(f"[run_python] {tool_result}")
+                    last_run_python_ok = "[exit code:" not in tool_result
+                    messages.append(ToolMessage(content=tool_result, tool_call_id=tc_id))
+                    continue
+
+                if tool_name == "ask_user":
+                    question = str(tc_args.get("question", "") or "")
+                    options = tc_args.get("options") or []
+                    context = str(tc_args.get("context", "") or "")
+                    answer = await _wait_for_ask_user(
+                        run_id, question, options, context, logger, step_name,
+                    )
+                    all_stdout.append(f"[ask_user] {question} → {answer}")
+                    messages.append(ToolMessage(content=f"[ask_user 答案] {answer}", tool_call_id=tc_id))
+                    continue
+
+                # 不支援的工具（理論上 bind_tools 後不會發生）
+                messages.append(ToolMessage(
+                    content=(f"[系統] 工具 {tool_name} 不在 Outlook 節點允許清單。"
+                             f"可用：run_python / done / ask_user。"),
+                    tool_call_id=tc_id,
+                ))
+
+            # done 工具（在 regular_calls 全跑完後處理）
+            if done_call is not None:
+                tc_id = done_call.get("id") or ""
+                tc_args = done_call.get("args", {}) or {}
+                success = bool(tc_args.get("success", False))
+                summary = tc_args.get("summary") or tc_args.get("error") or ""
+
+                # 守門：宣稱成功但最近 run_python 失敗 → 拒絕
+                if success and last_run_python_ok is False:
+                    logger.warning(f"[{step_name}] 在 run_python 失敗後送 done(success=true)，拒絕")
+                    messages.append(ToolMessage(
+                        content="[系統] 拒絕 done：上一次 run_python 失敗。先修錯再 done。",
+                        tool_call_id=tc_id,
+                    ))
+                    continue
+                # 守門：宣稱成功但 output 檔不存在
+                if success and output_path and not Path(output_path).exists():
+                    logger.warning(f"[{step_name}] done 宣稱成功但 {output_path} 不存在，拒絕")
+                    messages.append(ToolMessage(
+                        content=(f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在。"
+                                 f"請用 run_python 實際寫入後再 done。"),
+                        tool_call_id=tc_id,
+                    ))
+                    continue
+
+                all_stdout.append(f"[Outlook 完成] {summary}")
+                logger.info(f"[{step_name}] {'成功' if success else '失敗'}：{summary}")
+                final_stdout = (_build_clean_success_stdout(all_stdout, "[Outlook 完成]")
+                                if success else "\n".join(all_stdout))
+                return ExecResult(
+                    exit_code=0 if success else 1,
+                    stdout=final_stdout,
+                    stderr="" if success else summary,
+                )
 
         # 達到迭代上限
         logger.warning(f"[{step_name}] Outlook agent 達迭代上限 {OUTLOOK_AGENT_MAX_ITERATIONS}")
