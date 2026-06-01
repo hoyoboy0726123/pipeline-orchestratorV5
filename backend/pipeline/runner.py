@@ -1347,6 +1347,20 @@ async def _run_pipeline_inner(
     config = PipelineConfig.from_dict(run.config_dict)
     use_recipe = run.config_dict.get("_use_recipe", False)
     workflow_id = run.config_dict.get("_workflow_id") or run.workflow_id
+    # 輸出目錄 / 日誌一律用「使用者在側邊欄看到的工作流名稱」(DB),不要用 AI 在 YAML 自取的
+    # name → 否則檔案落到 AI 自取的資料夾(如 demo_sales_analysis)、使用者依工作流名找不到檔。
+    # config.name 只用於輸出資料夾 / 日誌 / pipeline_id fallback,不影響步驟變數參照(那用 step name),
+    # 所以單點覆寫即可全覆蓋 _workflow_output_dir / default_wd / _resolve_path。
+    if workflow_id:
+        try:
+            from db import get_workflow as _get_wf
+            _wf_name = (((_get_wf(workflow_id) or {}).get("name")) or "").strip()
+            if _wf_name and _wf_name != config.name:
+                logger.info(f"輸出目錄改用工作流名稱「{_wf_name}」(原 YAML name「{config.name}」)")
+                config.name = _wf_name
+                run.pipeline_name = _wf_name
+        except Exception as _e:
+            logger.warning(f"查工作流名稱失敗、沿用 YAML name「{config.name}」:{_e}")
     store.save(run)
 
     # ── Step loop ────────────────────────────────────────────
