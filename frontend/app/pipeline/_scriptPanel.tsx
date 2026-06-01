@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 import { X, FolderOpen, ChevronDown, ChevronUp, Code2 } from 'lucide-react'
 import type { StepData, ScriptNode } from './_helpers'
-import { fsBrowse, fsCheckVenv } from '@/lib/api'
+import { fsBrowse, fsCheckVenv, fsNativePick } from '@/lib/api'
 import { toast } from 'sonner'
 import { VariableInput } from './_variablePicker'
 
@@ -169,22 +169,43 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
 
   const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400/20 bg-white font-mono'
 
+  // 套用選到的路徑(原生對話框與內建 modal 共用)
+  const applyPickedPath = (path: string, target: 'batch' | 'output') => {
+    if (target === 'batch') {
+      let prefix = selectedPrefix
+      if (path.endsWith('.sh'))                                { prefix = 'bash';             setSelectedPrefix('bash') }
+      else if (path.endsWith('.bat') || path.endsWith('.cmd')) { prefix = 'cmd /c';           setSelectedPrefix('cmd /c') }
+      else if (path.endsWith('.ps1'))                          { prefix = 'powershell -File'; setSelectedPrefix('powershell -File') }
+      else if (path.endsWith('.js') || path.endsWith('.mjs'))  { prefix = 'node';             setSelectedPrefix('node') }
+      else if (path.endsWith('.py') && !prefix)                { prefix = 'python';           setSelectedPrefix('python') }
+      upd({ batch: prefix ? `${prefix} ${path}` : path })
+    } else {
+      upd({ outputPath: path })
+    }
+  }
+
+  // 點資料夾鈕:先開 OS 原生對話框(Windows 檔案總管);原生不可用才 fallback 內建瀏覽 modal
+  const openPicker = async (target: 'batch' | 'output') => {
+    try {
+      const r = await fsNativePick(
+        target === 'batch'
+          ? { mode: 'open', py_only: true }
+          : { mode: 'save', default_name: 'output.json' }
+      )
+      if (r.path) { applyPickedPath(r.path, target); return }
+      if (r.error) { setBrowserTarget(target); return }   // 原生不可用 → fallback
+      // path=null 且無 error = 使用者按取消 → 不動作
+    } catch {
+      setBrowserTarget(target)
+    }
+  }
+
   return (
     <>
       {browserTarget && (
         <FileBrowser
           onSelect={path => {
-            if (browserTarget === 'batch') {
-              let prefix = selectedPrefix
-              if (path.endsWith('.sh'))                    { prefix = 'bash';    setSelectedPrefix('bash') }
-              else if (path.endsWith('.bat') || path.endsWith('.cmd')) { prefix = 'cmd /c'; setSelectedPrefix('cmd /c') }
-              else if (path.endsWith('.ps1'))              { prefix = 'powershell -File'; setSelectedPrefix('powershell -File') }
-              else if (path.endsWith('.js') || path.endsWith('.mjs')) { prefix = 'node'; setSelectedPrefix('node') }
-              else if (path.endsWith('.py') && !prefix)   { prefix = 'python'; setSelectedPrefix('python') }
-              upd({ batch: prefix ? `${prefix} ${path}` : path })
-            } else {
-              upd({ outputPath: path })
-            }
+            applyPickedPath(path, browserTarget)
             setBrowserTarget(null)
           }}
           onClose={() => setBrowserTarget(null)}
@@ -240,7 +261,7 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
                   showHint={false}
                 />
               </div>
-              <button onClick={() => setBrowserTarget('batch')}
+              <button onClick={() => openPicker('batch')}
                 className="shrink-0 w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 transition-colors mt-7">
                 <FolderOpen className="w-3.5 h-3.5" /></button>
             </div>
@@ -248,11 +269,18 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
               <div className="text-xs text-gray-400 font-mono bg-gray-50 rounded-lg px-2.5 py-1.5 break-all">▶ {data.batch}</div>
             )}
             {pyPath && (
-              <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
-                <input type="checkbox" checked={isUsingVenv} onChange={e => handleVenvToggle(e.target.checked)}
-                  disabled={venvChecking} className="w-3.5 h-3.5 rounded accent-indigo-500" />
-                <span className="text-xs text-gray-500">{venvChecking ? '偵測中…' : '使用虛擬環境（自動偵測 venv/ 或 .venv/）'}</span>
-              </label>
+              <>
+                <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                  <input type="checkbox" checked={isUsingVenv} onChange={e => handleVenvToggle(e.target.checked)}
+                    disabled={venvChecking} className="w-3.5 h-3.5 rounded accent-indigo-500" />
+                  <span className="text-xs text-gray-500">{venvChecking ? '偵測中…' : '使用虛擬環境（自動偵測 venv/ 或 .venv/）'}</span>
+                </label>
+                <p className="text-[11px] text-gray-400 mt-1 pl-5.5 leading-snug">
+                  {isUsingVenv
+                    ? '已用專案自帶的虛擬環境執行,依賴最齊全。'
+                    : '未勾 = 用系統全域 Python 執行(不會用本工具的環境)。若腳本有特殊依賴,建議勾選專案自帶的 venv,否則缺套件會直接失敗。'}
+                </p>
+              </>
             )}
           </div>
 
@@ -271,7 +299,7 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
                   showHint={false}
                 />
               </div>
-              <button onClick={() => setBrowserTarget('output')}
+              <button onClick={() => openPicker('output')}
                 className="shrink-0 w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 transition-colors mt-7">
                 <FolderOpen className="w-3.5 h-3.5" /></button>
             </div>

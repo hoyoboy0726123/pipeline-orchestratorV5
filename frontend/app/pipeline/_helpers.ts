@@ -388,7 +388,7 @@ let _webCrawlerCounter = 0
 export function newWebCrawlerData(index = 0): WebCrawlerData {
   _webCrawlerCounter++
   return {
-    name: `網頁爬蟲 ${_webCrawlerCounter}`,
+    name: `網頁爬蟲_${_webCrawlerCounter}`,
     mode: 'web',
     url: '',
     urls: [],
@@ -429,7 +429,7 @@ let _outlookCounter = 0
 export function newOutlookData(index = 0): OutlookData {
   _outlookCounter++
   return {
-    name: `Outlook 自動化 ${_outlookCounter}`,
+    name: `Outlook自動化_${_outlookCounter}`,
     template: '',
     freeText: '',
     params: {},
@@ -446,7 +446,7 @@ let _visualValidationCounter = 0
 export function newVisualValidationData(index = 0): VisualValidationData {
   _visualValidationCounter++
   return {
-    name: `視覺驗證 ${_visualValidationCounter}`,
+    name: `視覺驗證_${_visualValidationCounter}`,
     source: 'prev_output',
     prompt: '',
     searchRegion: [],
@@ -460,7 +460,7 @@ let _conditionCounter = 0
 export function newConditionData(index = 0): ConditionData {
   _conditionCounter++
   return {
-    name: `條件 ${_conditionCounter}`,
+    name: `條件_${_conditionCounter}`,
     mode: 'if',
     expression: '',
     onTrue: '',
@@ -478,7 +478,7 @@ let _confirmCounter = 0
 export function newHumanConfirmData(index = 0): HumanConfirmData {
   _confirmCounter++
   return {
-    name: `人工確認 ${_confirmCounter}`,
+    name: `人工確認_${_confirmCounter}`,
     message: '',
     notifyTelegram: true,
     screenshot: false,
@@ -496,7 +496,7 @@ let _computerUseCounter = 0
 export function newComputerUseData(index = 0): ComputerUseData {
   _computerUseCounter++
   return {
-    name: `桌面自動化 ${_computerUseCounter}`,
+    name: `桌面自動化_${_computerUseCounter}`,
     actions: [],
     assetsDir: '',
     failFast: true,
@@ -525,7 +525,7 @@ let _counter = 0
 export function newStepData(index = 0): StepData {
   _counter++
   return {
-    name: `Python腳本 ${_counter}`,
+    name: `Python腳本_${_counter}`,
     batch: '',
     workingDir: '',
     outputPath: '',
@@ -546,7 +546,7 @@ let _subagentCounter = 0
 export function newSubagentData(index = 0): SubagentData {
   _subagentCounter++
   return {
-    name: `Subagent ${_subagentCounter}`,
+    name: `Subagent_${_subagentCounter}`,
     taskDescription: '',
     workingDir: '',
     outputPath: '',
@@ -563,7 +563,7 @@ export function newSubagentData(index = 0): SubagentData {
 export function newSkillData(index = 0): SkillData {
   _skillCounter++
   return {
-    name: `AI技能 ${_skillCounter}`,
+    name: `AI技能_${_skillCounter}`,
     taskDescription: '',
     workingDir: '',
     outputPath: '',

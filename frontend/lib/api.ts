@@ -138,6 +138,23 @@ export async function fsCheckVenv(dir: string): Promise<{ has_venv: boolean; pyt
   return res.json()
 }
 
+// 開 OS 原生檔案對話框(本機部署、後端與使用者同一台)。mode: open/save/dir。
+// 回 { path }(取消或無法開啟 → path=null,呼叫端可 fallback 到內建瀏覽 modal)。
+export async function fsNativePick(opts: {
+  mode?: 'open' | 'save' | 'dir'
+  initial_dir?: string
+  default_name?: string
+  py_only?: boolean
+} = {}): Promise<{ path: string | null; error?: string }> {
+  const res = await fetch(`${BASE}/fs/native-pick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  })
+  if (!res.ok) return { path: null, error: `HTTP ${res.status}` }
+  return res.json()
+}
+
 // ── Claude Code Skills ──────────────────────────────────────
 export interface AvailableSkill {
   name: string

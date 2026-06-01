@@ -1144,7 +1144,15 @@ export default function PipelinePage() {
   }, [nodes, edges, setNodes, setEdges, pipelineName])
 
   // ── Update step data (works for both scriptStep and skillStep) ─────────────
+  // 步驟名稱不能有空白:`{{ steps.<名稱>.output }}` 點號語法遇空白會 Jinja 語法錯而崩。
+  // 在中央更新點即時把名稱空白轉底線 → 使用者手動改名打空白也會自動變底線、無法殘留。
   const updateStep = useCallback((id: string, patch: Partial<StepData> | Partial<SkillData> | Partial<ConditionData>) => {
+    const p = patch as { name?: unknown }
+    if (typeof p.name === 'string' && /\s/.test(p.name)) {
+      patch = { ...patch, name: p.name.replace(/\s+/g, '_') } as typeof patch
+      // 固定 id → 連打空白時只刷新同一則、不會疊一堆
+      toast.info('名稱的空白已自動改為底線（變數引用 {{ steps.名稱 }} 不允許空白）', { id: 'name-space-fix' })
+    }
     setNodes(ns => ns.map(n =>
       n.id === id ? ({ ...n, data: { ...n.data, ...patch } } as AppNode) : n
     ))
@@ -1152,6 +1160,11 @@ export default function PipelinePage() {
 
   // ── Update AI validation node data ─────────────────────────────────────
   const updateAiNode = useCallback((id: string, patch: Partial<AiValidationData>) => {
+    const p = patch as { name?: unknown }
+    if (typeof p.name === 'string' && /\s/.test(p.name)) {
+      patch = { ...patch, name: p.name.replace(/\s+/g, '_') }
+      toast.info('名稱的空白已自動改為底線（變數引用 {{ steps.名稱 }} 不允許空白）', { id: 'name-space-fix' })
+    }
     setNodes(ns => ns.map(n =>
       n.id === id ? { ...n, data: { ...n.data, ...patch } } : n
     ))

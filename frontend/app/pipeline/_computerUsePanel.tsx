@@ -131,6 +131,22 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     }
   }, [armed])
 
+  // 攔掉 F7 / F9 的瀏覽器預設行為:
+  //   F7 = Chrome/Edge「鍵盤瀏覽 Caret Browsing」確認框
+  //   F9 = 部分瀏覽器的閱讀模式 / reader view
+  // 這兩個都是我們的錄製熱鍵(F7 待命開錄、F9 結束),後端 OS 層級全域熱鍵在收、跟瀏覽器無關,
+  // 所以這裡 preventDefault 不影響錄製、只是不讓瀏覽器搶這兩個鍵。panel 開著就生效。
+  useEffect(() => {
+    const blockFnKeys = (e: KeyboardEvent) => {
+      if (e.key === 'F7' || e.key === 'F9' || e.keyCode === 118 || e.keyCode === 120) {
+        e.preventDefault()
+        e.stopPropagation()
+      }
+    }
+    window.addEventListener('keydown', blockFnKeys, true)
+    return () => window.removeEventListener('keydown', blockFnKeys, true)
+  }, [])
+
   const handleArmHotkey = async () => {
     if (armed || recording) return
     try {

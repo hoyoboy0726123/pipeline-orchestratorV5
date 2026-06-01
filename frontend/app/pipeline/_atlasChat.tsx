@@ -32,121 +32,71 @@ export interface ChatMsg {
 // 根據實際專案路徑組 AI 助手的初始訊息：範例使用真實可執行的腳本路徑，
 // 輸出用相對 `ai_output/<name>/` 慣例。使用者可直接把範例描述貼給 AI 產生 YAML。
 export function buildWelcomeMessage(env: EnvPaths): string {
-  const root = env.project_root
-  const financeDir = env.finance_example_dir  // 例如 ".../test-workflows/finance"
-  const intro = `你好！請告訴我你想自動化的工作流程，我會問你幾個關鍵問題、提一份步驟方案讓你點頭、再產生 Pipeline YAML 設定。
+  // 歡迎詞精簡化:節點介紹改成「📖 節點介紹」按鈕(中央彈窗)、範例改在 Hero 首頁(🆕 新話題)。
+  // 這個對話區主要用途 = 針對「當前綁定的工作流」做除錯 / 修改。
+  void env
+  return `你好!我是這個工作流的 AI 助手 🤖
 
-我會用到以下節點（依需要組合）：
-- **腳本節點**：跑你已寫好的 .py / .bat / shell 指令
-- **AI 技能節點**：用自然語言描述任務，LLM 自動寫 Python 跑（可掛 docx / pptx 等 Agent Skill 提升正確率）
-- **多代理節點**：探索式 / 試錯式任務（5 個角色：分析師 / 工程師 / 研究員 / 審稿人 / 規劃師），每次都重新推理、適合「不確定怎麼做、邊想邊改」的任務；日常固定邏輯請用 AI 技能節點（更省 token）
-- **人工確認節點**：暫停等你 Telegram 點頭再續跑（可自動把上一步輸出傳到手機）
-- **網頁爬蟲節點**：丟 URL → markdown，支援 SPA、登入、Cloudflare bypass
-- **影片下載節點**：YouTube / Vimeo / Bilibili 等
-- **Outlook 自動化節點**：寄信、批次讀信、下載附件、行事曆（10 個內建模板）
-- **視覺驗證節點**：用 VLM 看圖判斷產出符不符合預期
-- 桌面自動化節點：UI 操作（要在畫布錄製動作，AI 沒辦法幫你寫）`
-  const pathNote = `📁 **輸出路徑慣例**：所有產出檔會放在 \`ai_output/<工作流名稱>/\` 子資料夾（系統自動解析到 \`${root}\`）。`
+直接描述你想自動化的事,或把目前畫布上的步驟交給我**除錯 / 修改** — 我會問幾個關鍵問題、提一份方案讓你點頭,再幫你產生或更新 YAML。
 
-  // 範例 1：Python 腳本串接（用專案內建的 finance 範例腳本，若存在）
-  let ex1: string
-  if (env.has_finance_example && financeDir) {
-    ex1 = `**範例 1（Python 腳本串接・使用本專案內建的財務範例）**
-第一步：執行 \`python ${financeDir}\\stage1_generate_transactions.py\`，輸出到 \`ai_output/q1_finance/raw_transactions.xlsx\`
-第二步：執行 \`python ${financeDir}\\stage2_clean_data.py\`，讀取上一步的 Excel，輸出到 \`ai_output/q1_finance/cleaned_transactions.xlsx\`
-第三步：執行 \`python ${financeDir}\\stage3_analyze_finance.py\`，做財務彙總，輸出到 \`ai_output/q1_finance/financial_summary.xlsx\`
-第四步：執行 \`python ${financeDir}\\stage4_generate_report.py\`，產出 \`ai_output/q1_finance/Q1_financial_report.xlsx\``
-  } else {
-    ex1 = `**範例 1（Python 腳本串接）**
-第一步：執行 \`python 你的腳本.py\`，輸出到 \`ai_output/daily_report/raw.csv\`
-第二步：執行 \`python 分析腳本.py\`，讀取上一步的 csv，輸出到 \`ai_output/daily_report/result.xlsx\``
-  }
+· 想知道有哪些節點、各自適合什麼 → 點上方 **📖 節點介紹**
+· 想找完整範例 → 點 **🆕 新話題** 回首頁挑一張範例卡`
+}
 
-  // 範例 2：script + AI skill（純自然語言，讓使用者無腦可用）
-  let ex2: string
-  if (env.has_finance_example && financeDir) {
-    ex2 = `**範例 2（Python 腳本 + AI 技能）**
-第一步（Python 腳本）：執行 \`python ${financeDir}\\stage1_generate_transactions.py\`，產出 \`ai_output/demo_beautify/raw_transactions.xlsx\`
-第二步（AI 技能）：把上一步產生的 Excel 美化一下 — 表頭加粗、換底色、每欄寬度自動配合內容，另存為 \`ai_output/demo_beautify/pretty.xlsx\``
-  } else {
-    ex2 = `**範例 2（AI 技能）**
-把 \`ai_output/some_input/report.xlsx\`（或上一步產生的檔案）美化一下 — 表頭加粗、每欄寬度自動配合內容，儲存到 \`ai_output/excel_beautify/formatted_report.xlsx\``
-  }
+// ── 節點介紹(📖 按鈕 → 中央彈窗)─────────────────────────────────────────
+// 取代原本塞在歡迎詞裡的長清單。內容可隨節點演進在這裡集中維護。
+const NODE_GUIDE: { icon: string; name: string; tag: string; desc: string }[] = [
+  { icon: '🖥️', name: '腳本節點', tag: '跑你已寫好的程式',
+    desc: '已有 .py / .bat / shell 想直接執行,最快、最可控。未勾虛擬環境 → 用系統全域 Python;勾了 → 用該專案自帶的 venv。' },
+  { icon: '🤖', name: 'AI 技能節點', tag: '白話描述,AI 自動寫程式跑',
+    desc: '沒有現成腳本、邏輯固定可重複時用。可掛官方技能(Word / PPT / Excel / PDF、GUI→CLI 拆解)。第二次起走 Recipe 快取、幾乎零 token。' },
+  { icon: '🧠', name: '多代理節點', tag: '探索 / 試錯,32 種專業角色',
+    desc: '不確定怎麼做、要研究 / 深度分析 / debug 時用。每次重新推理、邊做邊根據中間結果調整。token 用量約是 AI 技能的 2-5 倍。' },
+  { icon: '✋', name: '人工確認節點', tag: '暫停,等你 Telegram 點頭',
+    desc: '寄信、刪改等不可逆動作前的把關。可把上一步的產出直接傳到你手機再決定要不要續跑。' },
+  { icon: '🔀', name: '條件節點', tag: '依結果分支(if / switch)',
+    desc: '依上一步的輸出值決定走哪條路;可做 if / 多分支 switch。在畫布拖線即分支。' },
+  { icon: '🌐', name: '網頁爬蟲節點', tag: 'URL → 乾淨內容',
+    desc: '抓網頁轉 markdown,支援 SPA、需登入、Cloudflare 防護的站。影片模式可下載 YouTube / Vimeo / Bilibili。' },
+  { icon: '📧', name: 'Outlook 自動化節點', tag: '收發信、附件、行事曆',
+    desc: '10 個內建模板:寄信、附件寄送、批次讀信、下載附件、行事曆等(需本機 Outlook)。' },
+  { icon: '👁️', name: '視覺驗證節點', tag: '用 VLM 看圖驗收',
+    desc: '產出後讓視覺模型看畫面、判斷符不符合預期。需要支援視覺輸入的模型(如 Llama 4 Scout / Gemini / GPT-4o)。' },
+  { icon: '🖱️', name: '桌面自動化節點', tag: '錄製滑鼠鍵盤、穩定回放',
+    desc: '操作沒有 API 的舊軟體 UI。在畫布錄製(F7 待命開錄 / F9 結束),以圖像錨點 + UIA 多層 fallback 穩定回放。' },
+]
 
-  // 範例 3：script + AI skill + human_confirm（在範例 2 基礎上加人工審核）
-  let ex3: string
-  if (env.has_finance_example && financeDir) {
-    ex3 = `**範例 3（三種節點組合・Python + AI + 人工確認）**
-第一步（Python 腳本）：執行 \`python ${financeDir}\\stage1_generate_transactions.py\` 產出 \`ai_output/demo_review/raw_transactions.xlsx\`
-第二步（AI 技能）：讀取上一步的 Excel，按「部門」加總 Amount，產出一份欄位為「Department, TotalAmount, TransactionCount」的摘要 Excel：\`ai_output/demo_review/summary.xlsx\`
-第三步（人工確認）：暫停並透過 Telegram 通知我檢查摘要表，確認後才完成`
-  } else {
-    ex3 = `**範例 3（Python + AI + 人工確認 組合）**
-第一步（Python 腳本）：執行你的腳本，產出 \`ai_output/demo_review/raw.xlsx\`
-第二步（AI 技能）：讀取上一步做簡易統計，輸出 \`ai_output/demo_review/summary.xlsx\`
-第三步（人工確認）：暫停並透過 Telegram 通知我檢查摘要表`
-  }
-
-  // 範例 4：web_crawler + skill + human_confirm + outlook_automation（V5 完整鏈）
-  const ex4 = `**範例 4（網頁爬蟲 + AI 摘要 + 人工把關 + Outlook 寄信）**
-第一步（網頁爬蟲）：抓 \`https://www.reddit.com/r/ASUS/\` 列表頁
-第二步（AI 技能）：抽前 10 篇連結各自展開抓內文，每篇 80 字內摘要，輸出 \`ai_output/reddit_asus/daily.md\`
-第三步（人工確認）：把摘要傳到 Telegram，我看過 OK 才繼續
-第四步（Outlook）：把 daily.md 當附件用 send_with_attachment 模板寄給 boss@x.com`
-
-  // 範例 5：skill + visual_validation（產出後 VLM 看圖驗證）
-  const ex5 = `**範例 5（AI 技能 + 視覺驗證）**
-第一步（AI 技能）：讀 \`ai_output/q1_finance/raw.xlsx\`，做透視表加長條圖，輸出到 \`ai_output/q1_finance/dashboard.xlsx\`
-第二步（視覺驗證）：檢查 dashboard.xlsx 的畫面 — 應該看到一張表頭加粗、欄寬對齊、含長條圖的儀表板`
-
-  // 範例 5 補上「需要 vision 模型」的提示，避免新使用者誤用
-  const ex5Note = '\n\n> ℹ️ 此範例會用「視覺驗證節點」、需 LLM 模型支援視覺輸入（如 Llama 4 Scout / Gemini 2.5 / GPT-4o）。沒設或不支援會友善提示。'
-
-  // 範例 6：啟動既有 Python 專案 + AI 驗證 + 人工確認（故意不寫專案路徑，逼 AI 助手反問）
-  const ex6 = `**範例 6（啟動既有 Python 專案 + AI 驗證 + 人工確認）**
-我有一個 Python 專案，想接到工作流自動化跑：
-1. 跑專案的 main.py、產出檔案到工作流目錄
-2. AI 驗證一下產出檔內容對不對
-3. 確認沒問題後 Telegram 通知我做最終放行`
-
-  const ex6Note = '\n\n> 📁 **記得把專案放在** `external_projects/<你的專案名>/`（本專案根目錄底下），AI 助手才能找到並改寫。\n> 若你描述時沒提到路徑，AI 助手會反問你。\n> 若 main.py 是 GUI / 含 `input()` 互動阻塞，AI 技能會自動先 read_file 看源碼、把互動點改成命令列參數版本再跑。'
-
-  // 用 HTML <details>/<summary> 包每個範例，瀏覽器原生摺疊；ReactMarkdown 開了
-  // rehypeRaw 才會 render 這些 HTML 標籤。預設收起，點擊展開、不佔螢幕。
-  // summary 用一行有 emoji 的標題，內容用 markdown body（rehype-raw 會繼續解析裡面的 markdown）
-  const wrap = (title: string, body: string) =>
-    `<details><summary><strong>${title}</strong></summary>\n\n${body}\n\n</details>`
-
-  // 範例 7：subagent — 探索式分析（沒固定流程、要邊想邊改）
-  const ex7 = `**範例 7（多代理 — 探索式分析）**
-任務：「我有 \`sales.xlsx\`，想看看 Q1 哪幾個品類賣最差、找出共通原因」這種「**不確定要看什麼指標、邊看邊找**」的場景。
-單一步驟：用多代理節點、角色挑「**資料分析師(data_analyst)**」、最多輪數設 6-8、任務描述寫清楚目標即可（不用拆步驟）。多代理會自己 read → run_python → 看結果 → 再 read… 直到產出 \`analysis.md\`。`
-  const ex7Note = '\n\n> 🧠 **何時用多代理 vs AI 技能**：每天跑、邏輯固定（讀 X 算 Y 寫 Z）→ 用 **AI 技能 + Recipe**（第二次起零 token）；結構不固定、邊想邊改、要試錯（探索/研究/debug）→ 用 **多代理**（每次重新推理、能根據中間結果調整、token 用量是 skill 的 2-5 倍）。'
-
-  // 範例 8:變數系統 — 動態日期 / 跨節點傳值(讓 workflow 可重用、配 cron 跑一輩子)
-  const ex8 = `**範例 8(動態啟動參數 + 跨節點傳值)**
-任務:「我想讓某個爬蟲每天自動跑、檔名帶日期、結果寄給老闆」、或「UIA 從 ERP 抓到的訂單號要餵給後面所有節點用」。
-
-兩種變數寫法:
-1. **啟動參數**:YAML 寫 \`{{ input.date }}\`、跑的時候帶值(\`/run daily date=today\` 或前端 Run 對話框填),一條 YAML 配 cron 跑一輩子
-2. **跨節點傳值**:UIA 抓欄位用 \`save_as: order_id\`、後面節點寫 \`{{ steps.uia_step.output.order_id }}\` 直接拿
-
-效益:不用每天進來改死值、同一條流程能服務多客戶、抓到的值不必繞剪貼簿。`
-  const ex8Note = '\n\n> 💡 **何時該用變數**:看到「每天 / 每週」「不同客戶」「上一步抓到的 X 餵給下一步」就用 \`{{ }}\`;一次性寫死腳本不用。\n> 📚 變數來源三種:\`{{ steps.X.output.Y }}\`(上游節點輸出)/ \`{{ input.X }}\`(啟動參數)/ \`{{ env.X }}\`(環境變數)。'
-
-  const examples = [
-    wrap('📋 範例 1：Python 腳本串接', ex1),
-    wrap('📋 範例 2：Python 腳本 + AI 技能', ex2),
-    wrap('📋 範例 3：Python + AI + 人工確認', ex3),
-    wrap('📋 範例 4：網頁爬蟲 + AI 摘要 + 人工把關 + Outlook 寄信', ex4),
-    wrap('📋 範例 5：AI 技能 + 視覺驗證', ex5 + ex5Note),
-    wrap('📋 範例 6：啟動既有 Python 專案 + AI 驗證 + 人工確認', ex6 + ex6Note),
-    wrap('📋 範例 7：多代理 — 探索式分析', ex7 + ex7Note),
-    wrap('📋 範例 8:動態啟動參數 + 跨節點傳值(變數系統)', ex8 + ex8Note),
-  ]
-  const examplesHeader = '\n\n📋 **範例參考**（點任一行展開查看細節，可直接抄走給我作為起點）：'
-
-  return [intro, pathNote, examplesHeader, ...examples].join('\n\n')
+function NodeGuideModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col"
+        onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-base font-bold text-gray-800">📖 節點介紹</h2>
+            <p className="text-xs text-gray-400 mt-0.5">這個工作流能用的積木 — 描述需求時 AI 會自動幫你挑、組合</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none px-2">×</button>
+        </div>
+        <div className="overflow-y-auto p-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          {NODE_GUIDE.map(n => (
+            <div key={n.name} className="rounded-xl border border-gray-100 bg-gray-50/60 p-3 hover:border-indigo-200 hover:bg-indigo-50/40 transition-colors">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">{n.icon}</span>
+                <span className="font-semibold text-sm text-gray-800">{n.name}</span>
+              </div>
+              <p className="text-[11px] font-medium text-indigo-500 mt-1">{n.tag}</p>
+              <p className="text-xs text-gray-500 leading-relaxed mt-1">{n.desc}</p>
+            </div>
+          ))}
+        </div>
+        <div className="px-5 py-3 border-t border-gray-100 text-center">
+          <p className="text-[11px] text-gray-400">不用記這些 — 直接用白話描述你的需求,AI 會幫你選對節點並串起來。</p>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ── LaTeX → 純文字 / Unicode 清洗 ───────────────────────────────────────────
@@ -210,6 +160,7 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   const setChatUIState = useWorkflowStore(s => s.setChatUIState)
 
   const [showChat, setShowChat] = useState(false)
+  const [showNodeGuide, setShowNodeGuide] = useState(false)
   const [messages, setMessages] = useState<ChatMsg[]>([
     { role: 'assistant', content: '你好！請告訴我你想自動化的工作流程，我會幫你產生 Pipeline YAML 設定。\n\n（正在載入專案路徑資訊…）' }
   ])
@@ -522,15 +473,25 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
                 <>📝 暫存模式（未選工作流；建立 / 選取後才會持久保存）</>
               )}
             </span>
-            <button
-              onClick={handleClearChat}
-              disabled={loading}
-              className="shrink-0 ml-2 px-1.5 py-0.5 rounded text-[11px] text-gray-500 hover:text-red-600 hover:bg-red-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              title="清空目前對話，開始新話題"
-            >
-              🗑️ 新話題
-            </button>
+            <div className="shrink-0 ml-2 flex items-center gap-1">
+              <button
+                onClick={() => setShowNodeGuide(true)}
+                className="px-1.5 py-0.5 rounded text-[11px] text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 transition-colors font-medium"
+                title="看有哪些節點、各自適合什麼"
+              >
+                📖 節點介紹
+              </button>
+              <button
+                onClick={handleClearChat}
+                disabled={loading}
+                className="px-1.5 py-0.5 rounded text-[11px] text-gray-500 hover:text-red-600 hover:bg-red-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title="清空目前對話，開始新話題"
+              >
+                🗑️ 新話題
+              </button>
+            </div>
           </div>
+          {showNodeGuide && <NodeGuideModal onClose={() => setShowNodeGuide(false)} />}
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-2.5 space-y-2.5">
             {messages.map((msg, i) => (
@@ -783,6 +744,13 @@ function ActionGlyph({ id, size = 28, palette: c }: { id: ActionId; size?: numbe
           <path d="M20 20 L26 26" stroke={c.fg} strokeWidth="2.4" strokeLinecap="round" />
         </svg>
       )
+    case 'outlook-todo':
+      return (
+        <svg {...props}>
+          <rect x="5" y="8" width="18" height="13" rx="1.5" fill="none" stroke={c.fg} strokeWidth="1.5" />
+          <path d="M5.5 9 L14 15.5 L22.5 9" fill="none" stroke={c.a1} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )
   }
 }
 
@@ -815,7 +783,7 @@ function AtlasMark({ size = 32 }: { size?: number }) {
 // ── 8 個 ACTIONS(對齊 V5 真實功能)─────────────────────────────────────
 type ActionId =
   | 'chain' | 'scrape-ai' | 'existing' | 'multiagent'
-  | 'research' | 'compete' | 'db-report' | 'monitor'
+  | 'research' | 'compete' | 'db-report' | 'monitor' | 'outlook-todo'
 
 interface AtlasAction {
   id: ActionId
@@ -832,11 +800,11 @@ interface AtlasAction {
 // 提供額外檔案。需要資料的 case(資料分析、多代理)由 AI 助手在第一步生假資料 demo。
 const ATLAS_ACTIONS: AtlasAction[] = [
   {
-    id: 'chain', title: 'Python 腳本串接', desc: '把幾個 .py 串成一條工作流', tag: 'Workflow',
+    id: 'chain', title: '啟動 Python 專案或腳本', desc: '跑既有專案、或把 .py 串成工作流', tag: 'Workflow',
     examples: [
-      'AI 生 3 個示範腳本(產資料 → 清洗 → 報表)串成一條 script 工作流',
-      '示範腳本串接 + 第 2 步後插 AI 健康判讀 + 條件分流',
-      '示範腳本串接 + 失敗 Telegram 通知',
+      '用內建財務範例:stage1 產交易 → stage2 清洗 → stage3 彙總 → stage4 產 Excel 報告(腳本已備、成功率高)',
+      '對既有 GUI/CLI 專案、AI 讀源碼用 ask_user 收選擇再組合參數跑',
+      '把 main_cli.py 包成可互動工作流、選報表類型 / 格式 / 期間',
     ],
   },
   {
@@ -848,11 +816,11 @@ const ATLAS_ACTIONS: AtlasAction[] = [
     ],
   },
   {
-    id: 'existing', title: '啟動既有 Python 專案', desc: 'AI 讀源碼、拆 CLI 參數、ask_user 互動', tag: 'Import',
+    id: 'outlook-todo', title: 'Outlook 待辦簡報', desc: '讀信 → 分類 → 判優先 → TG 通知', tag: 'Inbox',
     examples: [
-      '跑 V5 內建 interactive_demo 報表工具、AI 讀源碼判斷 CLI 參數',
-      '對既有 GUI/CLI 專案、AI 用 ask_user 收 user 選擇再組合參數跑',
-      '把 main_cli.py 包成可互動工作流、選報表類型 / 格式 / 期間',
+      '搜當日 Outlook 收件匣 → 依專案分類 → 四面向判前 3 優先 → human_confirm 發 TG',
+      '整理今天 Outlook 待辦清單、挑最急的事項推播 Telegram 給我',
+      '抓收件匣未回覆超過 3 天的信 → 整理成待辦清單 → 提醒我回覆',
     ],
   },
   {
@@ -897,7 +865,56 @@ const ATLAS_ACTIONS: AtlasAction[] = [
   },
 ]
 
-function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
+// Hero 範例卡 hover:滑鼠停在範例區上半 → 自動往上捲、下半 → 往下捲(免滾輪)。
+// 卡片本身固定大小不變、只在內部捲動。
+function AutoScrollExamples({ examples, onPick }: { examples: readonly string[]; onPick: (k: number) => void }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const dirRef = useRef(0)
+  const rafRef = useRef(0)
+  const tick = () => {
+    const el = ref.current
+    if (el && dirRef.current) el.scrollTop += dirRef.current * 2.5
+    rafRef.current = dirRef.current ? requestAnimationFrame(tick) : 0
+  }
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }, [])
+  return (
+    <div
+      ref={ref}
+      className="[&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:bg-black/15 [&::-webkit-scrollbar-thumb]:rounded-full"
+      style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}
+      onMouseMove={(e) => {
+        const el = ref.current
+        if (!el || el.scrollHeight <= el.clientHeight + 2) { dirRef.current = 0; return }
+        const rect = el.getBoundingClientRect()
+        const r = (e.clientY - rect.top) / rect.height
+        dirRef.current = r > 0.62 ? 1 : r < 0.38 ? -1 : 0
+        if (dirRef.current && !rafRef.current) rafRef.current = requestAnimationFrame(tick)
+      }}
+      onMouseLeave={() => { dirRef.current = 0 }}
+    >
+      {examples.map((ex, k) => (
+        <div
+          key={k}
+          onClick={(e) => { e.stopPropagation(); onPick(k) }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = ATLAS_PAL.bg }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+          style={{
+            fontSize: 11.5, lineHeight: 1.35, color: ATLAS_PAL.ink,
+            display: 'flex', gap: 6, padding: '4px 6px',
+            marginLeft: -6, marginRight: -6,
+            borderBottom: k === examples.length - 1 ? 'none' : `1px solid ${ATLAS_PAL.rule}`,
+            cursor: 'pointer', transition: 'background 120ms', flexShrink: 0,
+          }}
+        >
+          <span style={{ color: ATLAS_PAL.forest, fontFamily: FONT_MONO, fontSize: 10, flexShrink: 0 }}>+</span>
+          <span>{ex}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
   const setChatUIState = useWorkflowStore(s => s.setChatUIState)
   const setHasInteracted = useWorkflowStore(s => s.setHasInteracted)
   const activeId = useWorkflowStore(s => s.activeId)
@@ -960,7 +977,19 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
   // exampleIdx 可指定要用哪個 example(預設 0、給「點 card 整體」用)
   // 點「具體某行 example」時、handler 會傳對應 idx、不再永遠用第一個
   const onCardClick = (action: AtlasAction, exampleIdx: number = 0) => {
-    setHeroInput(action.examples[exampleIdx] ?? action.examples[0])
+    let text = action.examples[exampleIdx] ?? action.examples[0]
+    // 「啟動 Python 專案或腳本」的第一例 → 改用專案內建財務範例(腳本已存在、成功率高),
+    // 塞入含絕對路徑的完整 stage1~4 流程,讓 AI 直接用內建腳本而非自己生。
+    if (action.id === 'chain' && exampleIdx === 0
+        && envPaths?.has_finance_example && envPaths.finance_example_dir) {
+      const d = envPaths.finance_example_dir
+      text = '用專案內建的財務分析範例做一條 script 工作流:\n'
+        + `第一步:執行 python ${d}\\stage1_generate_transactions.py,輸出到 ai_output/q1_finance/raw_transactions.xlsx\n`
+        + `第二步:執行 python ${d}\\stage2_clean_data.py,讀上一步的 Excel,輸出到 ai_output/q1_finance/cleaned_transactions.xlsx\n`
+        + `第三步:執行 python ${d}\\stage3_analyze_finance.py,做財務彙總,輸出到 ai_output/q1_finance/financial_summary.xlsx\n`
+        + `第四步:執行 python ${d}\\stage4_generate_report.py,產出 ai_output/q1_finance/Q1_financial_report.xlsx`
+    }
+    setHeroInput(text)
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
@@ -1255,7 +1284,7 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
         {!hasStarted && (
           <div className="flex flex-col flex-1 min-h-0">
             {/* Hero header:breadcrumb + h1(h1 從 56 縮到 42、給 input/cards 留空間)*/}
-            <div className="shrink-0" style={{ marginBottom: 16, position: 'relative', zIndex: 1, maxWidth: 760 }}>
+            <div className="shrink-0" style={{ marginBottom: 16, position: 'relative', zIndex: 1 }}>
               <div style={{
                 display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10,
                 fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em', color: ATLAS_PAL.inkSoft,
@@ -1264,11 +1293,11 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                 home / start a workflow
               </div>
               <h1 style={{
-                fontFamily: FONT_DISPLAY, fontWeight: 500, fontSize: 42,
-                lineHeight: 1.05, letterSpacing: '-0.03em', margin: 0, color: ATLAS_PAL.ink,
+                fontFamily: FONT_DISPLAY, fontWeight: 500, fontSize: 38,
+                lineHeight: 1.1, letterSpacing: '-0.03em', margin: 0, color: ATLAS_PAL.ink,
+                whiteSpace: 'nowrap',
               }}>
-                選一個方向開始,
-                或<span style={{
+                選一個方向開始,或<span style={{
                   color: ATLAS_PAL.forest,
                   textDecoration: 'underline',
                   textUnderlineOffset: 6,
@@ -1327,13 +1356,15 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                       }}>{a.tag}</div>
                     </div>
 
-                    {/* Body — 兩層 absolute,cross-fade 切換 */}
+                    {/* Body — 卡片固定大小不變(不跳動);hover 時範例區在卡片「內部」捲動,
+                        滑鼠移到下方被遮的範例項會自動 scrollIntoView 捲上來,不撐大卡片。 */}
                     <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
                       {/* Default layer:title + desc */}
                       <div style={{
                         opacity: isHover ? 0 : 1,
-                        transition: 'opacity 180ms',
+                        transition: 'opacity 160ms',
                         position: 'absolute', inset: 0,
+                        pointerEvents: isHover ? 'none' : 'auto',
                       }}>
                         <div style={{
                           fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17,
@@ -1343,44 +1374,19 @@ function HeroMode({ envPaths: _envPaths, onYamlApply }: HeroModeProps) {
                           fontSize: 12.5, color: ATLAS_PAL.inkSoft, lineHeight: 1.45,
                         }}>{a.desc}</div>
                       </div>
-                      {/* Hover layer:title↗ + 3 examples */}
+                      {/* Hover layer:title↗(固定) + 可內部捲動的範例區 */}
                       <div style={{
                         opacity: isHover ? 1 : 0,
-                        transition: 'opacity 220ms 60ms',
+                        transition: 'opacity 200ms 40ms',
                         position: 'absolute', inset: 0,
-                        display: 'flex', flexDirection: 'column', gap: 6,
+                        display: 'flex', flexDirection: 'column', gap: 4,
+                        pointerEvents: isHover ? 'auto' : 'none',
                       }}>
                         <div style={{
                           fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 13.5,
-                          lineHeight: 1.1, marginBottom: 4,
+                          lineHeight: 1.1, marginBottom: 2, flexShrink: 0,
                         }}>{a.title} ↗</div>
-                        {a.examples.map((ex, k) => (
-                          <div
-                            key={k}
-                            onClick={(e) => {
-                              // 阻止 bubble 到外層卡片 button、不會永遠抓 examples[0]
-                              e.stopPropagation()
-                              onCardClick(a, k)
-                            }}
-                            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = ATLAS_PAL.bg }}
-                            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-                            style={{
-                              fontSize: 11.5, lineHeight: 1.35, color: ATLAS_PAL.ink,
-                              display: 'flex', gap: 6,
-                              padding: '4px 6px',
-                              marginLeft: -6, marginRight: -6,
-                              borderBottom: k === a.examples.length - 1 ? 'none' : `1px solid ${ATLAS_PAL.rule}`,
-                              cursor: 'pointer',
-                              transition: 'background 120ms',
-                            }}
-                          >
-                            <span style={{
-                              color: ATLAS_PAL.forest, fontFamily: FONT_MONO,
-                              fontSize: 10, flexShrink: 0,
-                            }}>+</span>
-                            <span>{ex}</span>
-                          </div>
-                        ))}
+                        <AutoScrollExamples examples={a.examples} onPick={(k) => onCardClick(a, k)} />
                       </div>
                     </div>
                   </button>
