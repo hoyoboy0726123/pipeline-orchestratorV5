@@ -949,6 +949,8 @@ async def _run_subagent_native(
     consecutive_no_tool = 0
     fake_done_count = 0
     iterations_done = 0
+    last_run_python_ok = True   # 假 done 守門:run_python/run_shell 失敗後擋 done(success=true)
+    last_run_shell_ok = True
 
     _RETRIABLE_KEYWORDS = (
         "503", "429", "unavailable", "rate limit", "rate_limit",
@@ -1135,6 +1137,21 @@ async def _run_subagent_native(
             tc_args = tc.get("args", {}) or {}
             tool_fn = name_to_tool.get(tc_name)
             log.info(f"[{step_name}] 🛠 tool={tc_name} args_keys={list(tc_args.keys())}")
+            # ── pip install 硬攔(subagent native、共用 helper):run_shell command + run_python code 都掃 ──
+            # (subagent 非 pipeline step、無 missing_dependency awaiting → 以 steering 要求 done(success=false)、
+            #  由使用者決定裝。共用 executor.detect_pip_install、避免與 skill loop drift。)
+            try:
+                from pipeline.executor import detect_pip_install as _dpi_sa
+            except Exception:
+                _dpi_sa = lambda n, a: []
+            _pip_sa = _dpi_sa(tc_name, tc_args)
+            if _pip_sa:
+                log.warning(f"[{step_name}] 🛑 攔 subagent pip install {_pip_sa}(run_shell/run_python 內)→ 要求 done(missing_packages)")
+                messages.append(ToolMessage(
+                    content=(f"[系統攔截] 不允許自行 pip install 裝套件 {_pip_sa}(run_shell 或 run_python code 內都不行)。"
+                             f"請改呼叫 done(success=false) 並在 summary 說明缺哪個套件、由使用者決定安裝。"),
+                    tool_call_id=tc_id))
+                continue
             try:
                 if tool_fn is None:
                     result = (
@@ -1146,6 +1163,24 @@ async def _run_subagent_native(
                     result = str(raw) if raw is not None else ""
             except Exception as e:
                 result = f"[執行失敗] {type(e).__name__}: {e}"
+
+            # ── ModuleNotFoundError 偵測(subagent native、共用 helper):缺套件 → steering 要求 done ──
+            if tc_name in ("run_python", "run_shell"):
+                try:
+                    from pipeline.executor import detect_missing_module as _dmm_sa
+                except Exception:
+                    _dmm_sa = lambda r: []
+                _miss_sa = _dmm_sa(result)
+                if _miss_sa:
+                    log.warning(f"[{step_name}] 🛑 subagent 偵測 ModuleNotFoundError: {_miss_sa}")
+                    result += (f"\n[系統] 偵測到缺套件 {_miss_sa}。不允許自行安裝、"
+                               f"請 done(success=false) 說明缺此套件、由使用者決定裝。")
+                # 追蹤 run 成敗(假 done 守門用):失敗 = 含 [exit code:] 或 [執行失敗]
+                _run_ok = ("[exit code:" not in result) and (not result.startswith("[執行失敗]"))
+                if tc_name == "run_python":
+                    last_run_python_ok = _run_ok
+                else:
+                    last_run_shell_ok = _run_ok
 
             tool_calls_made.append({
                 "name": tc_name,
@@ -1271,7 +1306,20 @@ async def _run_subagent_native(
                 or "(空 summary)"
             )
 
-            # 假 done 守門:success=true 但 output_path 檔不存在 → reject、注入 reminder
+            # 假 done 守門(A):success=true 但最近 run_python/run_shell 失敗 → reject
+            # (2026-06-01 補:subagent native 原缺;skill 早有。擋「run 失敗卻硬報成功」。)
+            if _success and not (last_run_python_ok and last_run_shell_ok) and fake_done_count < _FAKE_DONE_LIMIT:
+                fake_done_count += 1
+                _failed_t = "run_python" if not last_run_python_ok else "run_shell"
+                log.warning(f"[{step_name}] ⛔ done(success=true) 但最近 {_failed_t} 失敗、reject({fake_done_count}/{_FAKE_DONE_LIMIT})")
+                messages.append(ToolMessage(
+                    content=(f"[拒收] 你宣稱成功,但最近一次 {_failed_t} 執行失敗(看上面的 stderr 與 exit code)。"
+                             f"請先修正命令、確認真的跑成功,才能 done(success=true);"
+                             f"若修不動就 done(success=false) 說明卡點。"),
+                    tool_call_id=tc_id))
+                continue
+
+            # 假 done 守門(B):success=true 但 output_path 檔不存在 → reject、注入 reminder
             if (
                 _success and output_path
                 and Path(output_path).expanduser().exists() is False

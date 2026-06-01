@@ -274,10 +274,18 @@ def deliver_ask_user_answer(run_id: str, answer: str) -> bool:
 
 
 def get_pending_question(run_id: str) -> Optional[dict]:
-    """查詢某 run 目前是否正在等 ask_user 答案。"""
+    """查詢某 run 目前是否正在等 ask_user 答案。
+    回 {question, options, context}(不含 event);沒在等則回 None。
+    (2026-05-31 修:原本 pending 存在時 fall through 隱式回 None、害 GET /ask-user 永遠
+     pending=False、前端/API 查不到問題、自動化 resume 全卡死。)"""
     pending = _pending_questions.get(run_id)
     if not pending:
         return None
+    return {
+        "question": pending.get("question"),
+        "options": pending.get("options") or [],
+        "context": pending.get("context") or "",
+    }
 
 
 # ── Phase B: ask_mode 命令分類攔截（in-memory pending state）──
@@ -566,6 +574,36 @@ def _clean_env() -> dict:
     return env
 
 
+def _script_env() -> dict:
+    """script 節點專用環境(刻意與 V5 venv 脫鉤)。
+
+    設計決策(2026-06-01):script 節點未勾「使用虛擬環境」時,裸 `python` 走
+    **系統全域** Python,而非 V5 後端 venv —— 避免使用者腳本的依賴污染編排器自己的
+    執行環境。缺依賴就 loud fail(由使用者改用專案自帶 venv 解決)。
+    與 `_clean_env()`(skill/AI code 用、會導向 _SKILL_PYTHON)相反:這裡**防禦性移除**
+    V5 venv 的 bin 目錄與 active VIRTUAL_ENV 對 PATH 的影響,確保裸 `python` 不會落到 V5 venv。
+    """
+    env = os.environ.copy()
+    venv = env.pop("VIRTUAL_ENV", None)
+    env.pop("PYTHONHOME", None)
+    paths = env.get("PATH", "").split(os.pathsep)
+    drop = []
+    if venv:
+        drop.append(os.path.join(venv, "Scripts" if os.name == "nt" else "bin"))
+    skill_py = globals().get("_SKILL_PYTHON")
+    if skill_py:
+        d = os.path.dirname(skill_py)
+        if d:
+            drop.append(d)
+    if drop:
+        dropn = {os.path.normcase(os.path.normpath(p)) for p in drop}
+        paths = [p for p in paths if os.path.normcase(os.path.normpath(p)) not in dropn]
+    env["PATH"] = os.pathsep.join(paths)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 import re as _re
 
 
@@ -674,9 +712,10 @@ async def execute_step(
     Returns:
         ExecResult(exit_code, stdout, stderr)
     """
-    # 把指令開頭的 python / python3 / py 換成偵測到的可用 interpreter
-    # （避免 shell 解析到 PATH 上沒裝必要套件的那顆 python）
-    command = _rewrite_python_cmd(command)
+    # 設計決策(2026-06-01):script 節點**不**把裸 `python` 改寫成 V5 venv interpreter。
+    # 裸 `python` 走系統全域(見 _script_env);要用特定 venv 請在 batch 用該 venv 的
+    # 絕對路徑(UI「使用虛擬環境」勾選會自動填)。避免污染編排器自己的 venv。
+    # （skill / AI 生成 code 仍走 _SKILL_PYTHON,不受此影響。）
 
     # 多行 `python -c "..."` 在 Windows cmd 會被換行切斷 → 改寫成暫存 .py 執行
     command, _inline_tmp = _maybe_extract_multiline_python_c(command)
@@ -688,8 +727,8 @@ async def execute_step(
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
 
-    # 準備環境變數
-    env = _clean_env()
+    # 準備環境變數(script 節點專用:與 V5 venv 脫鉤、裸 python 走系統全域)
+    env = _script_env()
     cwd_arg: Optional[str] = None
     if working_dir:
         # 強制將工作目錄注入環境變數,供 stage 系列腳本主動讀取
@@ -895,6 +934,95 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
     finally:
         if tmp_path:
             Path(tmp_path).unlink(missing_ok=True)
+
+
+def _is_pip_install_cmd(cmd: str) -> bool:
+    """偵測 run_shell 命令是否在 pip install 套件(pip/pip3/python -m pip/uv pip + install)。
+    擋下後強制走 missing_dependency 使用者確認 —— skill 不准自己裝套件繞過確認。
+    只攔 install、不攔 pip list / pip show / pip --version 等查詢命令。"""
+    import re
+    if not cmd:
+        return False
+    return bool(re.search(
+        r'(^|[\s;&|(])(pip3?|python3?\s+-m\s+pip|uv\s+pip)\s+install\b',
+        cmd, re.IGNORECASE))
+
+
+# ── 共用 helper:native skill / subagent loop 都用,避免保護 drift ───────────────
+# (2026-06-01 重構:把「pip 安裝偵測 + 缺套件偵測」集中。涵蓋 run_shell command
+#  與 run_python code 內(subprocess/os.system/pip.main/['pip','install'])兩種繞法。)
+_PIP_IN_CODE_PATTERNS = [
+    r'\bpip3?\s+install\b',                          # os.system("pip install x") / !pip install
+    r'-m\s+pip\s+install\b',                         # python -m pip install
+    r'["\']pip3?["\']\s*,\s*["\']install["\']',      # subprocess([... 'pip','install' ...])
+    r'\bpip\.main\s*\(',                             # pip.main(['install',...])
+    r'\bensurepip\b',                                # ensurepip
+]
+_PKG_STOPWORDS = {
+    "pip", "pip3", "install", "python", "python3", "u", "upgrade", "user",
+    "q", "quiet", "m", "no", "cache", "dir", "r", "import", "subprocess",
+    "os", "system", "run", "check_call", "call", "popen", "main", "uv",
+}
+
+
+def _extract_pip_pkgs(text: str) -> list:
+    """從 pip install 命令 / code 片段抽套件名(去 flags / 版本 / 路徑)。
+    遇到不像套件名的 token(含 . ( 等 code 邊界)就停 —— 避免把 install 後整段 code 都當套件。"""
+    import re
+    if not text or "install" not in text:
+        return []
+    after = text.split("install", 1)[1]
+    out = []
+    for raw in re.split(r"[\s,]+", after):
+        tok = raw.strip().strip("'\"[](){};:")
+        if not tok:
+            continue
+        if tok.startswith("-"):   # flag(-q / -U / --no-cache-dir)→ 跳過、不中斷
+            continue
+        base = tok.split("==")[0].split(">")[0].split("<")[0].split("~")[0]
+        if (re.fullmatch(r"[A-Za-z][\w\-]*", base)
+                and base.lower() not in _PKG_STOPWORDS
+                and not base.endswith((".txt", ".cfg", ".toml", ".py"))):
+            if base not in out:
+                out.append(base)
+            # 原始 token 帶字串/命令結束標記(' " ) ;)→ run_python code 內的 pip、
+            # 套件清單到此為止(後面是程式碼、別把 result / print 等 identifier 當套件)
+            if any(c in raw for c in (")", "'", '"', ";")):
+                break
+        else:
+            break   # 遇到不像套件的 token(含 . ( 等 → code 邊界)→ 套件清單結束
+    return out[:5]
+
+
+def detect_pip_install(tc_name: str, tc_args) -> list:
+    """共用:偵測 run_shell command 或 run_python code 內的 pip install 企圖。
+    回偵測到的套件名 list(caller 應攔截、轉 missing_dependency / steering);空 list = 放行。
+    tc_args 接 dict 或 JSON 字串(native FC 兩種格式都處理)。"""
+    import re
+    if not isinstance(tc_args, dict):
+        try:
+            import json as _j
+            tc_args = _j.loads(tc_args) if (isinstance(tc_args, str) and tc_args.strip().startswith("{")) else {}
+        except Exception:
+            tc_args = {}
+    if tc_name == "run_shell":
+        cmd = str(tc_args.get("command") or tc_args.get("input") or "")
+        if _is_pip_install_cmd(cmd):
+            return _extract_pip_pkgs(cmd) or ["(未知套件)"]
+    elif tc_name == "run_python":
+        code = str(tc_args.get("code") or tc_args.get("input") or "")
+        if any(re.search(p, code, re.IGNORECASE) for p in _PIP_IN_CODE_PATTERNS):
+            return _extract_pip_pkgs(code) or ["(未知套件)"]
+    return []
+
+
+def detect_missing_module(result: str) -> list:
+    """共用:從 tool result 偵測 ModuleNotFoundError、回缺的套件名 list(或空)。"""
+    import re
+    if not result:
+        return []
+    m = re.search(r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]", result)
+    return [m.group(1).split(".")[0]] if m else []
 
 
 def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "",
@@ -1559,6 +1687,19 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
     # sandbox fallback 警告:設成 wsl_docker 但 sandbox 跑不起來時 LLM 不知情、
     # 繼續用 /mnt/d/ Linux 路徑撞 Windows host、燒 token 瘋狂 retry(2026-05-24 root cause)。
     # 在 host result 前綴明確告知 LLM 路徑與 shell 已切換。
+    # ── 硬攔 run_shell 的 pip install:skill 不准自己裝套件、強制走 missing_dependency 使用者確認 ──
+    # (2026-05-31 發現:gemma 會 run_shell pip install 繞過確認;executor 的 missing_module steering
+    #  只是軟提示、擋不住會自作主張的模型。這裡硬攔、回 steering 逼它改 done(missing_packages)。)
+    if tool_name == "run_shell" and _is_pip_install_cmd(tool_input):
+        if logger:
+            logger.warning(f"[run_shell] 攔截 pip install、要求改走 done(missing_packages)：{(tool_input or '')[:80]}")
+        return (
+            "[系統攔截] 不允許用 run_shell 直接 pip install 裝套件。\n"
+            "缺套件時請改呼叫 done(success=false, missing_packages=[\"套件名\"])、"
+            "系統會跳出『允許安裝』確認給使用者、同意後才裝到容器、並自動重跑這步。\n"
+            "(這是系統層級的安全規定:裝任何依賴都必須經使用者確認、不能由 skill 自行安裝。)"
+        )
+
     _sandbox_warn_prefix = ""
     if tool_name in ("run_python", "run_shell") and not force_host:
         _sandbox_meta: dict = {}
@@ -2698,6 +2839,9 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 tool_timeout=tool_timeout, ask_mode=ask_mode,
                 acc_usage=acc_usage, acc_tool_calls=acc_tool_calls,
                 all_stdout=all_stdout,
+                pipeline_id=pipeline_id, task_description=task_description,
+                input_paths=input_paths, no_save_recipe=no_save_recipe,
+                silent_recipe=silent_recipe, recipe_step_key=_rkey,
             ))
 
         for iteration in range(SKILL_MAX_ITERATIONS):
@@ -3170,6 +3314,37 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     # _decision == "allow" → 繼續執行
                     logger.info(f"[{step_name}] ✓ 用戶授權執行命令（{_cat}）")
 
+            # ── run_shell 的 pip install → 直接轉 missing_dependency 使用者確認(不執行) ──
+            # (2026-05-31:sandbox 跑外部腳本(main_CLI.py)撞缺套件時 stderr 常沒完整傳回、
+            #  ModuleNotFoundError regex 抓不到;但 skill 想自己裝時命令明擺著有套件名 → 從這抽最可靠。
+            #  抽到套件名就直接轉系統『允許安裝』確認,不靠 stderr 格式、也不靠 skill 乖乖 done(missing_packages)。)
+            if tool_name == "run_shell":
+                # tool_input 可能是純字串、或 native FC 的 JSON {"command":"..."} → 正規化成命令字串
+                # (2026-05-31:skill loop 這層的 tool_input 是 JSON、_is_pip_install_cmd 直接判會 False;
+                #  _execute_skill_tool 內部才解析成純字串、所以要在這先正規化。)
+                _cmd_norm = tool_input
+                if isinstance(_cmd_norm, str) and _cmd_norm.lstrip().startswith("{"):
+                    try:
+                        import json as _j_norm
+                        _parsed = _j_norm.loads(tool_input)
+                        _cmd_norm = _parsed.get("command") or _parsed.get("input") or tool_input
+                    except Exception:
+                        _cmd_norm = tool_input
+                if _is_pip_install_cmd(_cmd_norm):
+                    _after = _cmd_norm.split("install", 1)[1] if "install" in _cmd_norm else ""
+                    _pkgs = [p.split("==")[0].split(">")[0].split("<")[0].strip()
+                             for p in _after.split()
+                             if not p.startswith("-") and not p.endswith((".txt", ".cfg", ".toml"))]
+                    if _pkgs:
+                        logger.warning(f"[{step_name}] 🛑 攔 run_shell pip install {_pkgs} → 轉 missing_dependency 使用者確認")
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"偵測到 skill 嘗試自行安裝套件 {_pkgs}。已改走系統的『允許安裝』使用者確認流程。",
+                            pending_recipe=None,
+                            missing_packages=_pkgs,
+                        )
+
             tool_result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda tn=tool_name, ti=tool_input, lg=logger, fh=force_host, tt=tool_timeout: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id, logger=lg, force_host=fh, tool_timeout=tt)
             )
@@ -3187,6 +3362,26 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 else:
                     last_run_shell_ok = False
                     logger.info(f"[{step_name}] run_shell 失敗 → last_run_shell_ok=False(下次 done 會被守門)")
+                    # ── ModuleNotFoundError 早期攔截(同 run_python):run_shell 跑外部腳本(如 main_CLI.py)撞缺套件 ──
+                    # 自動抽套件名 → missing_packages → runner 走 missing_dependency 使用者確認。
+                    # (2026-05-31:原本只 run_python 有;cli-extractor 用 run_shell 跑 main_CLI.py 撞缺套件時
+                    #  沒攔到、靠模型自填 missing_packages 不可靠 → 走 failure。系統層級自動抽才 robust。)
+                    import re as _mnf_re2
+                    _m_shell = _mnf_re2.search(
+                        r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]", tool_result)
+                    if _m_shell:
+                        _pkg_shell = _m_shell.group(1).split(".")[0]
+                        logger.warning(
+                            f"[{step_name}] 🛑 run_shell 偵測 ModuleNotFoundError: '{_pkg_shell}' "
+                            f"→ 中止 agent loop、轉 runner 走 missing_dependency 確認")
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"ModuleNotFoundError: 缺少套件 '{_pkg_shell}'。"
+                                   f"系統將彈出安裝確認對話框（TG / 前端 modal）。",
+                            pending_recipe=None,
+                            missing_packages=[_pkg_shell],
+                        )
             # 追蹤 run_python 成敗：用 [exit code:] 在 tool_result 是否出現當判斷
             # （sandbox 跟 host 兩條路徑都用同個 marker，見 _skill_run_python / _try_sandbox_exec）
             if tool_name == "run_python":
@@ -3449,6 +3644,62 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 
 
 # ============================================================
+# Skill recipe 儲存(native + text loop 共用、避免 drift)
+# ============================================================
+def _save_skill_recipe(
+    *, pipeline_id, rkey, task_description, input_paths, output_path,
+    code, was_interactive, runtime, silent_recipe, no_save_recipe,
+    logger, step_name,
+):
+    """done(success=true) 後存 skill recipe。回傳 _pending_recipe(no_save_recipe 且已有舊 recipe 時、
+    需等使用者確認再寫)、否則 None。與 text loop 行為一致:
+    - 只在 pipeline_id 是真實 workflow 時存(ad-hoc YAML 的 pipeline_id 非 workflow → FK 約束會炸)
+    - silent_recipe:有舊的跳過、無則 seed;no_save_recipe:有舊的延遲、無則建;正常:直接存
+    """
+    if not (pipeline_id and code):
+        return None
+    try:
+        from db import get_workflow as _gw
+        if _gw(pipeline_id) is None:
+            return None  # 非真實 workflow → 跳過(本來也不會被前端 cache 重播)
+    except Exception:
+        return None
+    try:
+        import sys as _sys2
+        from pipeline.recipe import _sha1 as _recipe_sha1, _fingerprint_input as _recipe_fp
+        from db import get_recipe as _get_recipe, save_recipe as _db_save_recipe
+        _fp = {str(p): _recipe_fp(p) for p in (input_paths or [])}
+        task_hash = _recipe_sha1(task_description)
+        pyver = f"{_sys2.version_info.major}.{_sys2.version_info.minor}"
+        existing = _get_recipe(pipeline_id, rkey)
+
+        def _save():
+            _db_save_recipe(pipeline_id, rkey, task_hash, _fp, output_path, code,
+                            pyver, runtime, was_interactive=was_interactive)
+
+        if silent_recipe:
+            if existing:
+                logger.info(f"[{step_name}] silent_recipe:Recipe 已存在、跳過(不覆寫)")
+            else:
+                _save(); logger.info(f"[{step_name}] silent_recipe:首次建立 Recipe")
+        elif no_save_recipe:
+            if existing:
+                logger.info(f"[{step_name}] Recipe 已存在、延遲儲存等待確認")
+                return {
+                    "pipeline_id": pipeline_id, "step_name": rkey, "task_hash": task_hash,
+                    "input_fingerprints": _fp, "output_path": output_path, "code": code,
+                    "python_version": pyver, "runtime_sec": runtime,
+                    "was_interactive": was_interactive,
+                }
+            _save(); logger.info(f"[{step_name}] 首次建立 Recipe")
+        else:
+            _save(); logger.info(f"[{step_name}] ✅ Recipe 已儲存(native skill loop)")
+    except Exception as e:
+        logger.warning(f"[{step_name}] Recipe 儲存失敗:{e}")
+    return None
+
+
+# ============================================================
 # Phase A.2 — SKILL loop native function calling
 # ============================================================
 async def _execute_skill_native_loop(
@@ -3465,6 +3716,12 @@ async def _execute_skill_native_loop(
     acc_usage: dict,
     acc_tool_calls: list,
     all_stdout: list,
+    pipeline_id: Optional[str] = None,
+    task_description: str = "",
+    input_paths: Optional[list] = None,
+    no_save_recipe: bool = False,
+    silent_recipe: bool = False,
+    recipe_step_key: Optional[str] = None,
 ) -> ExecResult:
     """Phase A.2 — SKILL loop 用 LangChain bind_tools() native function calling 版本。
 
@@ -3521,7 +3778,9 @@ async def _execute_skill_native_loop(
 
     last_run_python_ok: Optional[bool] = None
     last_run_shell_ok: Optional[bool] = None
-    last_successful_code: Optional[str] = None  # 預留 recipe save 用、MVP 暫不寫進
+    last_successful_code: Optional[str] = None  # 最後一段成功 run_python code → 供 recipe 儲存
+    was_interactive = False                      # 過程用過 ask_user → recipe 標記(replay 時提醒可能要再問)
+    _recipe_start = _time.time()                 # 算 recipe runtime_sec 用
     consecutive_no_tool = 0
     prose_before_tool_violations = 0   # task #160:有 tool_calls 但 content 過長累計
     fake_done_count = 0
@@ -3781,7 +4040,30 @@ async def _execute_skill_native_loop(
             tc_name = tc.get("name", "")
             tc_id = tc.get("id") or ""
             tc_args = tc.get("args", {}) or {}
-            logger.info(f"[{step_name}] 🛠 tool={tc_name}, args_keys={list(tc_args.keys())}")
+            # native FC 的「意圖」在結構化 tool_call 裡(content 常為空)→ 必須印出實際參數,
+            # 否則 log 只剩 args_keys、看不到 LLM 到底要跑什麼指令 / 程式碼(改 native 前的可見度)。
+            _pv = (tc_args.get("command") or tc_args.get("code") or tc_args.get("question")
+                   or tc_args.get("path") or tc_args.get("query") or "")
+            _pv = str(_pv).strip().replace("\n", " ⏎ ")
+            if len(_pv) > 400:
+                _pv = _pv[:400] + f" …[共 {len(str(tc_args.get('code') or tc_args.get('command') or _pv))} 字]"
+            logger.info(f"[{step_name}] 🛠 tool={tc_name}" + (f" ｜ {_pv}" if _pv else f" (keys={list(tc_args.keys())})"))
+            # 完整參數 + 模型這輪的 prose/reasoning(若有)留 DEBUG、需要深查時看
+            logger.debug(f"[{step_name}] 🛠 {tc_name} full_args={tc_args}")
+
+            # ── native loop:pip install 企圖(run_shell command + run_python code)→ 轉 missing_dependency ──
+            # (共用 helper detect_pip_install:涵蓋 run_shell 的 pip 命令 + run_python code 內的
+            #  subprocess/os.system/pip.main/['pip','install'] 繞法。skill 是 pipeline step → 直接轉確認。)
+            _pip_pkgs = detect_pip_install(tc_name, tc_args)
+            if _pip_pkgs:
+                logger.warning(f"[{step_name}] 🛑 攔 native pip install {_pip_pkgs} → 轉 missing_dependency 使用者確認")
+                _real_pkgs = [p for p in _pip_pkgs if p != "(未知套件)"]
+                return ExecResult(
+                    exit_code=1,
+                    stdout="\n".join(all_stdout),
+                    stderr=f"偵測到嘗試自行安裝套件 {_pip_pkgs}。已改走系統的『允許安裝』使用者確認流程。",
+                    missing_packages=_real_pkgs or None,
+                )
 
             tool_fn = name_to_tool.get(tc_name)
             try:
@@ -3793,13 +4075,26 @@ async def _execute_skill_native_loop(
             except Exception as e:
                 result = f"[執行失敗] {type(e).__name__}: {e}"
 
-            # 追蹤 last_run_python_ok / last_run_shell_ok(守門用)
+            # 追蹤 last_run_python_ok / last_run_shell_ok(守門用)+ was_interactive(recipe 用)
             if tc_name == "run_python":
                 last_run_python_ok = "[exit code:" not in result
                 if last_run_python_ok:
                     last_successful_code = tc_args.get("code", "")
             elif tc_name == "run_shell":
                 last_run_shell_ok = "[exit code:" not in result
+            elif tc_name == "ask_user":
+                was_interactive = True  # 用過人工問答 → recipe 標記(replay 時提醒可能要再問)
+
+            # ── ModuleNotFoundError 早期攔截(共用 helper detect_missing_module)──
+            _miss = detect_missing_module(result)
+            if _miss:
+                logger.warning(f"[{step_name}] 🛑 native 偵測 ModuleNotFoundError: {_miss} → 轉 missing_dependency 使用者確認")
+                return ExecResult(
+                    exit_code=1,
+                    stdout="\n".join(all_stdout),
+                    stderr=f"ModuleNotFoundError: 缺少套件 {_miss}。系統將彈出安裝確認對話框（TG / 前端 modal）。",
+                    missing_packages=_miss,
+                )
 
             # ── 不收斂守門:相同失敗 input 重複偵測 ──
             _call_failed = ("[exit code:" in result) or result.startswith("[執行失敗]")
@@ -3891,10 +4186,21 @@ async def _execute_skill_native_loop(
                             f"[Skill 完成] 系統強制收尾:輸出檔 {Path(output_path).name} "
                             f"({_size:,} bytes)已 ready 且 {output_ready_no_done_count} 輪未動、LLM 未 done"
                         )
+                        _pending_fs = None
+                        if last_successful_code:
+                            _pending_fs = _save_skill_recipe(
+                                pipeline_id=pipeline_id, rkey=(recipe_step_key or step_name),
+                                task_description=task_description, input_paths=input_paths,
+                                output_path=output_path, code=last_successful_code,
+                                was_interactive=was_interactive, runtime=_time.time() - _recipe_start,
+                                silent_recipe=silent_recipe, no_save_recipe=no_save_recipe,
+                                logger=logger, step_name=step_name,
+                            )
                         return ExecResult(
                             exit_code=0,
                             stdout=_build_clean_success_stdout(all_stdout, "[Skill 完成]"),
                             stderr="",
+                            pending_recipe=_pending_fs,
                         )
                     if output_ready_no_done_count >= _OUTPUT_READY_REMINDER_AT:
                         messages.append(HumanMessage(content=(
@@ -3978,6 +4284,19 @@ async def _execute_skill_native_loop(
                 f"summary 前 80 字={_summary[:80]})"
             )
 
+            # 成功 → 存 recipe(下次同任務 + 同輸入指紋直接 replay、省 LLM token)
+            # native loop 原本省略了這段(MVP)→ native 成預設後 skill recipe 整個沒在存,這裡補回。
+            _pending = None
+            if _success and last_successful_code:
+                _pending = _save_skill_recipe(
+                    pipeline_id=pipeline_id, rkey=(recipe_step_key or step_name),
+                    task_description=task_description, input_paths=input_paths,
+                    output_path=output_path, code=last_successful_code,
+                    was_interactive=was_interactive, runtime=_time.time() - _recipe_start,
+                    silent_recipe=silent_recipe, no_save_recipe=no_save_recipe,
+                    logger=logger, step_name=step_name,
+                )
+
             _final_stdout = (
                 _build_clean_success_stdout(all_stdout, "[Skill 完成]")
                 if _success else "\n".join(all_stdout)
@@ -3988,6 +4307,7 @@ async def _execute_skill_native_loop(
                 stdout=_final_stdout,
                 stderr="" if _success else _summary,
                 agent_concluded_fail=(not _success),
+                pending_recipe=_pending,
             )
 
     # max_iter 用完未 done

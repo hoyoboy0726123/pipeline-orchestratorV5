@@ -867,6 +867,7 @@ Exit Code：{exit_code}
             HumanMessage(content=user_prompt),
         ]
 
+        _empty_streak = 0  # 連續空回應計數:gemma native-FC config 下文字協議常回 0 字 → 早退一般驗證、別空轉到逾時
         for iteration in range(SKILL_MAX_ITERATIONS):
             logger.info(f"[{step_name}] Skill agent 迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS}")
 
@@ -908,6 +909,16 @@ Exit Code：{exit_code}
                         return result
                 except (json.JSONDecodeError, IndexError):
                     pass
+                # 連續空回應 = 模型沒在配合(常見:gemma 在 native-FC config 下不吐 `<tool>` 文字)。
+                # 連 2 輪空 → 直接 raise、由 except 退回一般驗證,別空轉 15 輪 + 最後 180s 逾時(實測卡 3 分鐘)。
+                if len(reply.strip()) < 5:
+                    _empty_streak += 1
+                    if _empty_streak >= 2:
+                        raise RuntimeError(
+                            f"skill 驗證 agent 連續 {_empty_streak} 輪空回應(疑似模型文字協議不相容)、提早退回一般驗證"
+                        )
+                else:
+                    _empty_streak = 0
                 # 無法解析，加入提示讓 agent 繼續
                 messages.append(HumanMessage(content=reply))
                 messages.append(HumanMessage(content="請使用工具來驗證，或呼叫 done 工具回傳最終結論。"))
