@@ -1979,6 +1979,15 @@ async def _wait_for_ask_user(
         logger.warning(f"[{step_name}] ask_user 失敗：找不到 run {run_id}")
         return None
 
+    # gemma 常把範例路徑寫成 `C:\\Users\\X`(雙反斜線、像在寫程式字串字面值)、顯示給人看很怪。
+    # 問句 / context 純粹是給人讀的提示文字、不影響使用者實際輸入的答案 → 把 2+ 連續反斜線收斂成
+    # 單一(純顯示修正、log 與前端對話框一起乾淨)。
+    _bs = __import__("re")
+    if question:
+        question = _bs.sub(r"\\{2,}", lambda _m: "\\", question)
+    if context:
+        context = _bs.sub(r"\\{2,}", lambda _m: "\\", context)
+
     event = asyncio.Event()
     _pending_questions[run_id] = {
         "question": question,
