@@ -2870,13 +2870,13 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             logger.info(f"[ask_user] 使用者答案已送達：{hint[:100]}")
             return f"✅ 答案已送出"
         elif decision == "abort":
-            # 先中止 skill agent 的等待（讓它收到 None），再把 pipeline 標為 aborted
-            deliver_ask_user_answer(run_id, "")  # 空字串讓 agent 繼續但不拿到答案
-            run.status = "aborted"
-            run.ended_at = datetime.now().isoformat()
-            store.save(run)
-            logger.info("[ask_user] 使用者選擇中止")
-            await _notify_final(run, config)
+            # ⚠️ 修正:ask_user 等待時 skill agent 仍是「活著的 asyncio task、卡在
+            # _wait_for_ask_user 的 await」。舊版只 deliver 空答案 → agent 拿到 "" 會
+            # 繼續迴圈(再問一次),根本沒停;只改 store.status 也不會中斷正在跑的 task。
+            # 正解:走跟右上角停止鈕同一套 force_abort —— kill 子進程 + cancel task
+            # (CancelledError 會在 _wait_for_ask_user 的 await 拋出、agent 真的中斷)+ 標 aborted。
+            logger.info("[ask_user] 使用者選擇中止 → force_abort(取消執行中的 task)")
+            await force_abort(run_id)
             return f"🛑 Pipeline 已中止"
         else:
             return f"⚠️ ask_user 只接受 answer 或 abort，收到 {decision}"
