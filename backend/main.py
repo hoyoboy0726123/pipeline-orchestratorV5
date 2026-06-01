@@ -4176,12 +4176,25 @@ example 文字本身已聲明要 demo):
    - skill 節點會自動讀源碼、找互動點、改寫成 CLI 參數版本再跑（一樣優先用偵測到的 venv python）
    - 若使用者明確說「不要改原檔」→ skill `readonly: true` 並生成 `main_cli.py` 副本；否則預設 in-place 改寫
    - 純 CLI（已能 `python main.py --arg` 直接跑）→ 用 **script 節點**即可，不必走 skill
-   - **既有 CLI 但要「互動問參數再跑」（例:選報表類型 / 格式 / 期間）→ 用單一 skill 節點**：在同一個 skill 節點內 `ask_user` 收齊所有參數、再由 skill 自己組指令跑那支 CLI（skill 同時有 ask_user 與 run_shell / run_python，一個節點就能問+跑）。
+   - **既有 CLI 但要「互動問參數再跑」（例:選報表類型 / 格式 / 期間）→ 用單一 skill 節點(`skill_mode: true`,但❌不要掛 `skill: python-cli-extractor`)**：在同一個 skill 節點內 `ask_user` 收齊所有參數、再由 skill 自己組指令**直接呼叫原檔**那支 CLI（skill 同時有 ask_user 與 run_shell / run_python，一個節點就能問+跑）。
+     - ⚠️ **判斷關鍵**:`read_project_file` 看到源碼已有 `argparse` / `add_subparsers` / `click` / `sys.argv` 解析 → **這個專案本來就是 CLI、沒東西可「拆解」或「抽取」**。直接 `python <入口檔> <子命令> <參數>` 跑原檔即可,**不要寫「拆解 argparse 結構 / 拆出 CLI 介面」這種 batch、不要生 `main_CLI.py` 包裝**(那是 GUI 專案才需要、見下面第 7 點)。
+     ```yaml
+     - name: 互動執行分析
+       skill_mode: true            # 注意:不掛 skill: python-cli-extractor
+       batch: |
+         讀 C:/path/to/proj/cli.py 了解 argparse 子命令與參數。
+         用 ask_user 問我要跑哪個子命令(filter/stats/search)與其參數,
+         再用 run_shell 直接執行原檔:python C:/path/to/proj/cli.py <子命令> <參數> --out <output.path>。
+       output:
+         path: result.txt
+     ```
      - ❌ **絕對不要**用多個 `requirement_gatherer`（或任何收集型 subagent）節點來收參數、再用 `{{ steps.X.output.欄位 }}` 餵給下游 script。`requirement_gatherer` 的工具只有 `ask_user` / `read_file` / `done`、**沒有寫檔或執行工具**，無法把使用者的答案持久化成下游 script 引用得到的值 → 步驟必定以「工具權限不足」失敗。
      - 收集型 subagent 只適合「輸出一份規格 / 需求文件(.md)」、不適合「產出要被機器精確引用的結構化參數」。
 
-7. **掛 `python-cli-extractor` skill = 單一節點自包含、絕對不要拆多步**（重要、常見錯誤）：
-   這個 skill 是「一條龍」：它自己會 **分析專案 → 拆出 main_CLI.py → `ask_user` 問你要跑哪個功能 → 直接跑選中的**。所以**只要一個 skill 節點**就完成全部：
+7. **掛 `python-cli-extractor` skill — ⚠️僅限「GUI / 只有 `input()` / 沒有命令列介面」的專案**（重要、常見錯誤）：
+   - 🚫 **先判斷再決定掛不掛**:`read_project_file` 已看到 `argparse` / `add_subparsers` / `click`(專案**本來就是 CLI**)→ **不要掛這個 skill**!改用上面第 5 點的「單一 skill 節點(不掛 cli-extractor)直接呼叫原檔」。掛了只會多此一舉去生 `main_CLI.py` 包裝一個本來就能跑的 CLI。
+   - ✅ **只有**當專案是 tkinter / PyQt GUI、或只靠 `input()` 互動、**完全沒有 argparse/命令列介面**時,才掛 `python-cli-extractor`(它負責把 GUI/input 抽成 CLI)。
+   這個 skill 是「一條龍」：它自己會 **分析 GUI 專案 → 拆出 main_CLI.py → `ask_user` 問你要跑哪個功能 → 直接跑選中的**。所以**只要一個 skill 節點**就完成全部：
    ```yaml
    - name: 啟動我的GUI專案
      skill_mode: true
