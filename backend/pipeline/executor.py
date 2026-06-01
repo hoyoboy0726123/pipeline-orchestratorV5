@@ -4096,6 +4096,19 @@ async def _execute_skill_native_loop(
                     last_successful_code = tc_args.get("code", "")
             elif tc_name == "run_shell":
                 last_run_shell_ok = "[exit code:" not in result
+                if last_run_shell_ok:
+                    # cli-extractor / 既有 CLI 這種「靠 run_shell 跑 main_CLI.py <args>」的 skill:
+                    # 把成功的 run_shell 指令(已含使用者選擇)包成 subprocess、記成 recipe 可重播的 code。
+                    # 因為 last_successful_code 取「最近一次成功動作」,真正執行(帶參數那條)通常是 done 前
+                    # 最後一個成功 run_shell → recipe 就會是它(而非早期寫 main_CLI.py 的 run_python /
+                    # --help 探查)。replay = 重跑上次的指令 = 重跑上次的選擇(快速模式),省 LLM + 不再問。
+                    _cmd = str(tc_args.get("command", "") or "")
+                    if _cmd:
+                        last_successful_code = (
+                            "import subprocess, sys\n"
+                            f"_p = subprocess.run({_cmd!r}, shell=True)\n"
+                            "sys.exit(_p.returncode)"
+                        )
             elif tc_name == "ask_user":
                 was_interactive = True  # 用過人工問答 → recipe 標記(replay 時提醒可能要再問)
 
