@@ -109,11 +109,12 @@
 
 ---
 
-## 🔬 validator skill 驗證 agent 遷移 native FC(2026-06-01 半修、待完整修)
+## 🔬 agentic 迴圈 native FC 遷移(2026-06-01 完成 validator + Outlook)
 
-- [~] **skill 驗證 agent 文字協議不相容 gemma** — `validator.py` 的 agentic skill 驗證仍走文字協議(`invoke_with_streaming` 無 bind_tools + `_parse_tool_calls` 解析 `<tool>` 文字)。gemma 在 native-FC config 下不吐 `<tool>` 文字 → content 0 字 → 空轉 15 輪 + 180s 逾時才退一般驗證(實測卡 3 分鐘)。
-  - **已半修(2026-06-01)**:連 2 輪空回應 → raise → 立刻退一般驗證(消除卡頓)。
-  - **待完整修**:把驗證 agent 改成 native FC(`llm.bind_tools` + 讀 `response.tool_calls`),跟 skill / subagent loop 一致。屆時 gemma 能正常驗證、不必每次都退一般驗證。風險:動驗證路徑、需 E2E 驗。
+- [x] **skill 驗證 agent → native FC**(2026-06-01 完成、E2E 過):`validator.validate_step_with_skill` 改 `bind_tools` + `response.tool_calls`(5 工具 run_python/run_shell/read_file/view_image/done、done 直接讀 args 拿 verdict、view_image 多模態)。E2E:skill 產 JSON → 驗證 agent 2 輪 read_file→done ok 約 7s(舊版卡 3 分鐘)。
+- [x] **Outlook agent → native FC**(2026-06-01 完成、E2E 過真實 Outlook):`executor.execute_step_with_outlook` 改 bind_tools(run_python/done/ask_user、保留 AST 白名單 + host 執行 + 守門)。E2E:讀收件匣總數 2 輪 22s、真讀 32500 封。**坑**:ask_user 的 `options:Optional[list]` → Gemini function declaration 400 INVALID_ARGUMENT → 拿掉 options(對齊 sandbox_tools gemma-safe schema:只 question+context、傳 [] 給 _wait_for_ask_user)。
+- [ ] **(低優先)兩個休眠 text-fallback loop**:`executor.py:2901`(skill text fallback)、`subagent_runner.py:521`(subagent text fallback)仍走 `<tool>` 文字協議,但只在 `SUBAGENT_LOOP_MODE=text`(非預設)才跑、是 native bind_tools 失敗時的安全網。gemma 預設走 native、不觸發。要嘛遷移、要嘛確認 native 夠穩後移除。
+- 一次性 LLM 呼叫(`validate_step` 一般驗證、`visual_validator`)**不需要** native FC(無工具迴圈、gemma 正常吐 JSON/text)。
 
 ---
 
