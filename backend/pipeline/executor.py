@@ -3731,6 +3731,7 @@ async def _execute_skill_native_loop(
     """
     from langchain_core.messages import AIMessage, ToolMessage, HumanMessage as _HM
     from pipeline.sandbox_tools import build_subagent_tools
+    import time as _time  # recipe runtime 計算用(native loop 區域、與 text loop 對齊)
 
     # SKILL 預設工具集(白名單 = 完整集、跟既有 text loop dispatch 對齊)
     # view_image 暫不含(multimodal 回傳 LangChain 處理較複雜、A.2 MVP 不做、LLM 改用 run_python 自己讀 base64)
