@@ -1860,6 +1860,87 @@ async def fs_browse(path: str = ""):
     return {"path": str(target), "parent": parent, "items": items}
 
 
+# ── 原生 OS 檔案對話框(本機部署用)─────────────────────────────────────
+# 後端與使用者同一台(本機 app)時,開 OS 原生對話框(Windows = 檔案總管、
+# Mac = Finder),使用者熟悉。用 subprocess 跑 tkinter(獨立 main thread、
+# 不卡 FastAPI event loop);tkinter 不可用 / headless / 遠端 → 回 path=null,
+# 前端自動 fallback 到內建瀏覽 modal。
+class NativePickRequest(BaseModel):
+    mode: str = "open"            # open(選檔) | save(另存新檔) | dir(選資料夾)
+    initial_dir: Optional[str] = None
+    default_name: Optional[str] = None
+    py_only: bool = False         # open 模式預設 .py 優先
+
+
+_NATIVE_PICK_SCRIPT = r'''
+import sys, json
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except Exception as e:
+    print(json.dumps({"path": None, "error": "tkinter unavailable: %s" % e})); sys.exit(0)
+args = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+mode = args.get("mode", "open")
+kw = {}
+if args.get("initial_dir"):
+    kw["initialdir"] = args["initial_dir"]
+root = tk.Tk()
+root.withdraw()
+try:
+    root.attributes("-topmost", True)
+    root.lift()
+    root.update()
+except Exception:
+    pass
+if mode == "dir":
+    p = filedialog.askdirectory(**kw)
+elif mode == "save":
+    if args.get("default_name"):
+        kw["initialfile"] = args["default_name"]
+    p = filedialog.asksaveasfilename(**kw)
+else:
+    if args.get("py_only"):
+        kw["filetypes"] = [("Python", "*.py"), ("All files", "*.*")]
+    else:
+        kw["filetypes"] = [("All files", "*.*"), ("Python", "*.py")]
+    p = filedialog.askopenfilename(**kw)
+try:
+    root.destroy()
+except Exception:
+    pass
+print(json.dumps({"path": p or None}))
+'''
+
+
+@app.post("/fs/native-pick")
+async def fs_native_pick(req: NativePickRequest):
+    import sys as _sys
+    import json as _json
+    payload = _json.dumps({
+        "mode": req.mode,
+        "initial_dir": req.initial_dir,
+        "default_name": req.default_name,
+        "py_only": req.py_only,
+    })
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _sys.executable, "-c", _NATIVE_PICK_SCRIPT, payload,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=300)
+    except asyncio.TimeoutError:
+        return {"path": None, "error": "timeout(使用者未在 5 分鐘內選擇)"}
+    except Exception as e:
+        return {"path": None, "error": f"無法開啟原生對話框:{e}"}
+    txt = (out or b"").decode("utf-8", "replace").strip()
+    if not txt:
+        return {"path": None}
+    try:
+        return _json.loads(txt.splitlines()[-1])
+    except Exception:
+        return {"path": txt or None}
+
+
 @app.get("/fs/check-venv")
 async def fs_check_venv(dir: str):
     """檢測腳本目錄下是否有可用的 Python 虛擬環境。
@@ -1968,6 +2049,51 @@ class PipelineDecisionRequest(BaseModel):
     hint: Optional[str] = None  # 補充指示（retry_with_hint 時使用）
 
 
+# ── YAML 容錯:雙引號包 Windows 路徑自動轉正 ───────────────────────────
+# 背景:LLM(尤其免費模型)常把 Windows 絕對路徑寫成 `path: "C:\Users\..."`,
+# 雙引號內 \U \x \n 等被 YAML 當 escape sequence → ScannerError 整份解析失敗。
+# Prompt 已明確禁止(見 system prompt 「Windows 絕對路徑」段)但模型照犯,
+# 故在 server 端做最後防線:僅在初次解析失敗時,把「雙引號內含反斜線」的純量
+# 轉成單引號再重試(單引號 YAML 不解析 escape)。對本來就正常的 YAML 零影響。
+_WIN_DQUOTE_RE = __import__("re").compile(r'(?m)([:\-]\s+)"([^"\n]*\\[^"\n]*)"(\s*(?:#[^\n]*)?)$')
+
+
+def _sanitize_windows_paths_in_yaml(text: str) -> str:
+    def _fix(m):
+        prefix, val, tail = m.group(1), m.group(2), m.group(3)
+        if "'" in val:  # 含單引號才需特殊處理;Windows 路徑通常沒有 → 保守跳過
+            return m.group(0)
+        return f"{prefix}'{val}'{tail}"
+    return _WIN_DQUOTE_RE.sub(_fix, text)
+
+
+def _lenient_yaml_load(text: str):
+    """寬鬆解析:先正常 load,失敗則嘗試修雙引號 Windows 路徑後重試。"""
+    import yaml
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError:
+        fixed = _sanitize_windows_paths_in_yaml(text)
+        if fixed != text:
+            return yaml.safe_load(fixed)  # 若仍失敗,讓例外往上拋給呼叫端處理
+        raise
+
+
+# ── 使用者訊息裡的 Windows 路徑:反斜線 → 正斜線正規化 ────────────────
+# 背景:使用者貼 `C:\Users\...\text_tool_gui\app.py` 給 AI 助手,LLM 讀進去再 echo
+# 時會把 `\t`(text)、`\U`(Users)、`\n` 等當逃脫字元吃掉(實測 gemma 把
+# text_tool_gui 變成 _tool_gui)。改成 `C:/Users/.../app.py` 後:Windows 與 Python
+# (subprocess / argparse / pathlib)都接受正斜線,且 `/` 無逃脫語意 → 模型再 echo
+# 也壞不了。只動「看起來像 Windows 路徑」的 token(drive-letter 或 UNC 開頭)。
+_WINPATH_TOKEN = __import__("re").compile(r'(?:[A-Za-z]:|\\\\)[\\/][^\s"\'<>|]*')
+
+
+def _normalize_win_paths(text: str) -> str:
+    if not text or "\\" not in text:
+        return text
+    return _WINPATH_TOKEN.sub(lambda m: m.group(0).replace("\\", "/"), text)
+
+
 @app.post("/pipeline/run")
 async def start_pipeline(req: PipelineRunRequest):
     import uuid, yaml
@@ -1979,7 +2105,7 @@ async def start_pipeline(req: PipelineRunRequest):
         import logging as _logging
         _log = _logging.getLogger("pipeline")
         _log.debug(f"收到 YAML（{len(req.yaml_content)} 字元）:\n{req.yaml_content}")
-        data = yaml.safe_load(req.yaml_content)
+        data = _lenient_yaml_load(req.yaml_content)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = req.validate
         config = PipelineConfig(**config_dict)
@@ -2038,7 +2164,7 @@ async def api_pipeline_dryrun(req: DryRunRequest):
 
     # 1) 解析 YAML
     try:
-        data = _yaml.safe_load(req.yaml_content)
+        data = _lenient_yaml_load(req.yaml_content)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = config_dict.get("validate", True)
         config = PipelineConfig(**config_dict)
@@ -2229,7 +2355,7 @@ async def api_workflow_variables(wf_id: str):
         }
 
     try:
-        data = _yaml.safe_load(yaml_str)
+        data = _lenient_yaml_load(yaml_str)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = config_dict.get("validate", True)
         config = PipelineConfig(**config_dict)
@@ -2549,7 +2675,7 @@ async def create_pipeline_schedule(req: PipelineScheduleRequest):
     from scheduler.manager import add_pipeline_task
     from dataclasses import asdict
     try:
-        data = yaml.safe_load(req.yaml_content)
+        data = _lenient_yaml_load(req.yaml_content)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = req.validate
         PipelineConfig(**{k: v for k, v in config_dict.items() if not k.startswith("_")})
@@ -4024,13 +4150,53 @@ example 文字本身已聲明要 demo):
 當使用者描述含「我有 Python 專案 / GUI / main.py / 既有專案 / 啟動我的程式」這類用語時：
 
 1. **沒給專案路徑 → 必須先反問**：「你的 Python 專案放在哪個資料夾？」
-   - **同時主動告知標準位置**：「建議放在本專案根目錄底下的 `external_projects/<你的專案名>/`，AI 技能才能讀寫該專案內容並修改。」
+   - **同時主動告知標準位置**：「建議放在本專案根目錄底下的 `external_projects/<你的專案名>/`，AI 才讀寫得到。」
+   - ⚠️ **路徑在 `pipeline-orchestratorV5` 專案根目錄之外時(例:`C:/Users/.../Downloads/...`、桌面、其他磁碟)→ 規劃時就先提醒、別等跑到一半才發現**：skill 在 sandbox 容器裡只掛得到專案根目錄底下的檔,專案外的路徑容器看不到 → 一定卡 ask_user / 失敗。請在 Plan / 回覆**第一時間**告訴使用者:「這個路徑在本工具專案外、沙盒看不到,請先把整個專案資料夾複製到 `external_projects/<你的專案名>/` 再給我路徑」,等使用者搬好、給新路徑後才開始,**不要先送 YAML 開跑**。
    - 確認路徑後再進 Plan、不要先猜路徑跳到 Emit
-2. **GUI / 含 `input()` 互動 → 用 skill 節點而非 script 節點**：
-   - script 節點直接 subprocess 跑 GUI 會被 input() 阻塞（直到 timeout），體驗很差
-   - skill 節點會自動 read_file 源碼、找出互動點、改寫成 CLI 參數版本再跑
-   - Plan 中要明說「AI 技能會先讀 main.py、把 GUI / input() 改成 CLI 版本」
-3. **若使用者明確說「不要改原檔」**：skill 走 `readonly: true` 並且生成 `main_cli.py` 副本；否則預設會直接 in-place 改寫 main.py（並 git diff 可追溯）。
+
+2. **拿到路徑 → 第一步一定先呼叫 `inspect_project(path)` 探查**（別憑空猜入口或依賴）。回傳 JSON 重點：
+   - `venv`：`has_venv=true` → **記住 `python_path`**，組 batch 時把它當 python 前綴 → 確保依賴齊全、不會 ModuleNotFoundError
+   - `entry_candidates`：入口檔候選；`dependency_files`：依賴檔；`top_level_tree`：目錄結構
+
+3. **再用 `read_project_file(入口檔 / README)` 讀源碼判斷怎麼跑**：
+   - 看有沒有 `argparse`（哪些 CLI 參數、預設值）、有沒有 `input()`（互動點）、輸出檔寫到哪
+   - 讀懂才知道要 `ask_user` 問哪些選擇、batch 怎麼組。**不要沒讀就亂猜參數**
+
+4. **venv 映射規則（對齊手動節點的「使用虛擬環境」勾選、最重要）**：
+   - `has_venv=true` → batch 的 python 用**絕對路徑前綴**：`"<python_path>" "<入口檔絕對路徑>" <參數>`
+   - `has_venv=false` → 用 `python`(= **系統全域 Python**,script 節點不會用本工具自己的環境、不污染它),**並在 Plan / 回覆主動提醒**:「此專案沒有虛擬環境,會用系統全域 Python 跑;若它有特殊依賴、全域沒裝 → 會直接失敗。建議先在專案目錄建 venv 裝好依賴,我再用該 venv 的絕對路徑跑。」
+   - ⚠️⚠️ **Windows 路徑在 YAML / batch / 任何地方一律用正斜線 `/`、不要用反斜線 `\\`**（最重要、第一守則）：
+     - ✅ 強烈建議:`C:/Users/me/proj/main.py`、`path: C:/Users/me/proj/out.json`
+     - 原因:反斜線 `\\t`(`\\text...`)、`\\U`(`\\Users`)、`\\n` 會在**兩個地方**出事 —— (1) 你產生文字時自己把 `\\t` 當逃脫吃掉(`\\text_tool_gui` → `_tool_gui`,路徑就壞了)、(2) YAML 純量解析時 `\\U` 被當 unicode escape 直接報錯。**改用 `/` 兩個問題都不存在**(Windows 的 python / subprocess / argparse / pathlib 全部接受正斜線)。
+     - 使用者就算貼給你反斜線路徑,**你回覆與寫 YAML 時都要轉成正斜線 `/`**、不要再改回反斜線。
+   - 萬一真的要用反斜線:**絕不要用雙引號包**(雙引號會觸發 escape):✅ 單引號 `path: 'C:\\Users\\me\\out.json'` 或裸值;❌ 雙引號 `path: "C:\\Users\\..."`(會炸)。
+
+5. **GUI / 含 `input()` 互動 → 用 skill 節點而非 script 節點**：
+   - script 節點直接 subprocess 跑 GUI 會被 input() 阻塞（直到 timeout）
+   - skill 節點會自動讀源碼、找互動點、改寫成 CLI 參數版本再跑（一樣優先用偵測到的 venv python）
+   - 若使用者明確說「不要改原檔」→ skill `readonly: true` 並生成 `main_cli.py` 副本；否則預設 in-place 改寫
+   - 純 CLI（已能 `python main.py --arg` 直接跑）→ 用 **script 節點**即可，不必走 skill
+   - **既有 CLI 但要「互動問參數再跑」（例:選報表類型 / 格式 / 期間）→ 用單一 skill 節點**：在同一個 skill 節點內 `ask_user` 收齊所有參數、再由 skill 自己組指令跑那支 CLI（skill 同時有 ask_user 與 run_shell / run_python，一個節點就能問+跑）。
+     - ❌ **絕對不要**用多個 `requirement_gatherer`（或任何收集型 subagent）節點來收參數、再用 `{{ steps.X.output.欄位 }}` 餵給下游 script。`requirement_gatherer` 的工具只有 `ask_user` / `read_file` / `done`、**沒有寫檔或執行工具**，無法把使用者的答案持久化成下游 script 引用得到的值 → 步驟必定以「工具權限不足」失敗。
+     - 收集型 subagent 只適合「輸出一份規格 / 需求文件(.md)」、不適合「產出要被機器精確引用的結構化參數」。
+
+7. **掛 `python-cli-extractor` skill = 單一節點自包含、絕對不要拆多步**（重要、常見錯誤）：
+   這個 skill 是「一條龍」：它自己會 **分析專案 → 拆出 main_CLI.py → `ask_user` 問你要跑哪個功能 → 直接跑選中的**。所以**只要一個 skill 節點**就完成全部：
+   ```yaml
+   - name: 啟動我的GUI專案
+     skill_mode: true
+     skill: python-cli-extractor
+     batch: 分析 C:\專案絕對路徑 這個 GUI 專案、拆成 CLI、用 ask_user 讓我選一個功能來跑
+   ```
+   - ❌ **不要**拆成「skill 分析 + human_confirm 選功能 + script 跑」三步 —— 選功能是 skill **內部的 ask_user** 在做、不是另開 `human_confirm` 節點；skill 自己會執行選中的功能、不需要你再加 script 節點去跑 main_CLI.py。
+   - ❌ **不要**用 `{{ steps.X.output.stdout }}` 去接「使用者選的功能」再餵給下游 —— skill 內部已經把選擇執行掉了，下游接不到也不需要。
+   - 若後面真的還要把這個專案的輸出接到「另一個專案」→ 那是下一個 skill / script 節點的事，用 `{{ steps.啟動我的GUI專案.output.path }}` 接 skill 產出的結果檔。
+
+6. **多個既有專案接續執行（A 的輸出 → B 接著處理）**：
+   - 每個專案各一個 script 節點、依序用邊連起來
+   - 小專案常把輸出檔寫在**自己資料夾的根目錄**（不是 ai_output）。所以 A 步驟要宣告 `output.path` 指向**該檔的絕對路徑**（例 `external_projects/proj_a/result.json`）
+   - B 步驟 batch 直接引用上一步的絕對路徑：用變數 `{{ steps.<A步驟名>.output.path }}` 當輸入參數傳給 B 的程式（例 `"<B的venv python>" "<B入口絕對路徑>" --input "{{ steps.proj_a.output.path }}"`）
+   - 這樣 B 就精確接到 A 寫在 A 自己資料夾裡的輸出檔，不靠猜路徑
 
 # 互動原則（記在心裡）
 
@@ -4741,7 +4907,10 @@ async def _chat_agent_loop(
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
         cls = HumanMessage if m["role"] == "user" else AIMessage
-        lc_messages.append(cls(content=m["content"]))
+        _c = m["content"]
+        if m["role"] == "user":
+            _c = _normalize_win_paths(_c)
+        lc_messages.append(cls(content=_c))
 
     # ── Agent loop：最多 _CHAT_MAX_TOOL_ITERATIONS 輪 ─────────────
     # 用 ainvoke (async) 讓 event loop 不被 LLM call 阻塞、
@@ -4863,7 +5032,7 @@ async def _chat_agent_loop(
             try:
                 import yaml as _yaml
                 from pipeline.models import PipelineConfig
-                parsed = _yaml.safe_load(yaml_content) or {}
+                parsed = _lenient_yaml_load(yaml_content) or {}
                 raw_cfg = parsed.get("pipeline", parsed)
                 PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
 
@@ -4970,7 +5139,10 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
         cls = HumanMessage if m["role"] == "user" else AIMessage
-        lc_messages.append(cls(content=m["content"]))
+        _c = m["content"]
+        if m["role"] == "user":
+            _c = _normalize_win_paths(_c)
+        lc_messages.append(cls(content=_c))
 
     full_content_parts: list[str] = []  # 累積整輪 chat 看到的純文字 content
 
@@ -5086,7 +5258,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
             try:
                 import yaml as _yaml
                 from pipeline.models import PipelineConfig
-                parsed = _yaml.safe_load(yaml_content) or {}
+                parsed = _lenient_yaml_load(yaml_content) or {}
                 raw_cfg = parsed.get("pipeline", parsed)
                 PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
 
