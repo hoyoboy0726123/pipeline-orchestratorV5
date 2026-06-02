@@ -349,6 +349,21 @@ def _inject_research_integrity(system_prompt: str) -> str:
     return _block + system_prompt
 
 
+def _inject_run_python_stateless(system_prompt: str) -> str:
+    """每次 run_python 都是全新獨立程序、前一次的變數 / import / DataFrame 都不留存。
+    gemma 常把它當有狀態 REPL:第一次算好 stats、第二次寫報告時變數已消失 → NameError
+    或寫出空值 / 0%(實測:客戶回饋分析情緒分佈全 0%、Series([], ))。"""
+    _block = (
+        "【⚙️ run_python 是「無狀態」的 — 每次呼叫都是全新獨立程序(最高優先、極常踩)】\n"
+        "  每次 run_python 互相獨立:**上一次的變數、import、讀進來的 DataFrame 全都不會留到下一次**。\n"
+        "  ❌ 別「第一次 run_python 算 stats、第二次 run_python 寫報告」—— 第二次那些變數是 undefined、"
+        "會 NameError 或寫出空值 / 0%。\n"
+        "  ✅ **在同一段 run_python 內一次做完**:讀檔 → 計算 → 寫出最終檔。真的要分多步,"
+        "就把中間結果**寫成檔**、下一段 run_python 再用 read_file / pd.read_* 讀回來(靠檔案傳遞、不靠變數)。\n\n"
+    )
+    return _block + system_prompt
+
+
 def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
     """若 settings.skill_sandbox_mode='wsl_docker'、追加沙盒環境提示（共用 skill 的格式）。"""
     try:
@@ -460,7 +475,7 @@ async def run_subagent(
 
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
 
-    system_prompt = _inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))
+    system_prompt = _inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
 
     tool_timeout = _compute_tool_timeout(timeout)
@@ -909,7 +924,7 @@ async def _run_subagent_native(
         f"max_iter={max_iter}, tools={sorted(allowed_tools)})"
     )
 
-    system_prompt = _inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))
+    system_prompt = _inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
     tool_timeout = _compute_tool_timeout(timeout)
 
