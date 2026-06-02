@@ -656,6 +656,7 @@ summarizer:
   tools:
     - read_file
     - run_python
+    - web_search
     - done
   system_prompt: |
     你是摘要師、在 V5 sandbox 內工作。
@@ -1245,6 +1246,7 @@ report_writer:
   tools:
     - read_file
     - run_python
+    - web_search
     - done
   system_prompt: |
     你是 report_writer(報告撰寫師)、在 V5 sandbox 內工作。
