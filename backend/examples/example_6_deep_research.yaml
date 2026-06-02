@@ -1,0 +1,59 @@
+# 範例工作流:深度研究 → 接地報告(web_search 多面向收料 → 撰寫深度報告)
+# ───────────────────────────────────────────────────────────────
+# 示範重點:可信賴的「深度研究」工作流 —— 資訊漏斗 + 接地(grounding):
+#   1) researcher 用 web_search 多面向收料、逐面向寫進研究筆記、只記實際查到的 + 附來源
+#   2) report_writer 讀研究筆記、寫成結構化深度報告 —— 只用既有資料、資料不足就標明、不腦補
+#
+#   ★ 關鍵設計(見 docs/外部資料與研究工作流設計準則.md):
+#     - 收料步驟填 output.expect 當「資料充足度閘」→ 抓太少 / 全空會 fail、不讓下游無料硬寫
+#     - 兩個 subagent 都已被系統注入「只用既有資料、禁腦補、禁杜撰來源連結」誠信鐵律
+#     - 料不夠時 agent 會自己再 web_search 補(而非生假資料)
+#
+# ⚠️ 此範例需要在「設定 → 網路搜尋」啟用 web_search(Tavily)並填 API key,否則收料步驟會因
+#    無法取得資料而停下(這正是「沒料就停、不腦補」的預期行為)。主題可自行改成你要研究的題目。
+# ───────────────────────────────────────────────────────────────
+name: 深度研究 → 接地報告 (範例)
+validate: true
+steps:
+  # 1) 多面向收料 —— 充足度 expect 閘把關「真的有抓到足量資料」
+  - name: 深度研究收料
+    subagent: true
+    subagent_role: researcher
+    batch: |
+      深度研究主題:「2026 AI 伺服器市場」。
+      用 web_search 從多個面向各搜一次(市場規模/CAGR、競爭格局與主要廠商、關鍵技術趨勢、需求驅動),
+      每搜完一次就把該面向的關鍵發現(具體數據、廠商、技術名、來源 URL)append 進研究筆記檔。
+      只記「實際查到」的內容、一定附來源連結;某面向查不到就在筆記明確標示「資料不足」。
+    output:
+      path: research_notes.md
+      expect: "確實收集到多筆 2026 AI 伺服器市場的真實數據與趨勢(含廠商名、技術關鍵字、可驗證來源連結),非空、足以支撐深度報告;搜不到的面向有明確標示資料不足"
+    timeout: 900
+
+  # 2) 撰寫深度報告 —— 只根據研究筆記、接地不腦補(report_writer 已掛 web_search 可自行補料)
+  - name: 撰寫深度報告
+    subagent: true
+    subagent_role: report_writer
+    batch: |
+      讀 {{ steps.深度研究收料.output.path }},寫成一份結構化的 markdown 深度研究報告
+      (執行摘要 → 市場規模與增長 → 競爭格局 → 技術趨勢 → 結論)。
+      鐵律:**只根據研究筆記裡實際查到的資料寫**;數據要附來源;不同來源數字不一致時並陳並說明差異,
+      不要假裝單一精確值;資料不足的段落明確標示「缺乏數據」,禁止杜撰數據或來源連結。
+      若某面向筆記資料明顯不足、你可以自己再 web_search 補幾筆(附來源),再寫。
+    output:
+      path: ai_server_market_report.md
+      description: "2026 AI 伺服器市場深度研究報告(接地、引用真實來源、標明不確定)"
+    timeout: 900
+
+  # 3) 轉成 Word —— 內容與排版分離:report_writer 出 markdown、這步用 python-docx 套版轉檔
+  #    (用 python-docx 而非 docx-js,免費模型也產得出有效 .docx;見設計準則文件)
+  - name: 轉成Word報告
+    skill_mode: true
+    batch: |
+      用 run_python + python-docx(from docx import Document)把上一步的 markdown 報告
+      {{ steps.撰寫深度報告.output.path }} 轉成排版整齊的 Word(.docx):
+      # 一級標題用 Heading 1、## 用 Heading 2、內文分段、markdown 表格轉成 docx 表格、粗體保留。
+      不要用 docx-js / node。存到 output.path,確認檔案產生後 done。
+    output:
+      path: ai_server_market_report.docx
+      description: "深度研究報告的 Word 版(python-docx 產出)"
+    timeout: 600
