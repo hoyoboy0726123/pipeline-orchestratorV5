@@ -3157,7 +3157,13 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 ```
 
 **進階設定**（依需要才加）：
-- `skill: <name>` — 掛載已安裝的 Agent Skill（如 `skill: pptx` / `skill: docx`），把 SKILL.md 注入 prompt 提升正確率
+- `skill: <name>` — 掛載已安裝的 Agent Skill（如 `skill: pptx`），把 SKILL.md 注入 prompt 提升正確率
+  - ⚠️ **產 Word / .docx → 預設用 `python-docx`(沙盒已裝),不要掛 `skill: docx`**(重要、實測踩過):
+    docx 技能走 docx-js(Node、API 嚴格),免費模型(gemma)常寫壞、重送相同壞 code 死循環、最後
+    **產不出檔**(Hero 卡5 深度研究跑完沒生 Word 就是這原因)。改用一般 `skill_mode` 節點
+    `run_python` + python-docx(`from docx import Document`)穩很多。**內容多的報告**:先讓
+    report_writer 產 markdown,再用 python-docx 把 md 套版轉成 .docx(內容與排版分離、最不靠
+    模型硬撐 docx API)。簡報 .pptx 則相反 —— `pptxgenjs` / `skill: pptx` 可靠、照用。
 - `readonly: true` — 只讀不寫，適合做深度資料驗證
 - `ask_mode: true` — LLM 遇不確定時主動問使用者
 

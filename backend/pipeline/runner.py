@@ -2179,6 +2179,31 @@ async def _run_pipeline_inner(
             except Exception as _e:
                 logger.debug(f"[{step.name}] 預算 snapshot diff 失敗(略過):{_e}")
 
+            # ── 通用完成守門:步驟宣告了 output.path、exit_code=0(看似完成),卻沒產出任何檔
+            #    → 判 failed。抓「LLM 假完成 / docx 等格式產出失敗 / 寫錯路徑」這種「狀態完成
+            #    但沒交付承諾檔」(Hero 卡5-1 深度研究跑完卻沒生 Word 就是這種)。
+            #    排除:不產檔的節點(human_confirm/condition)、web_crawler(有自己的驗證 + 可能輸出
+            #    資料夾、_eff_output_path 對多 URL 會是 None)。_eff_output_path 已涵蓋「宣告檔存在
+            #    為檔」+「偵測到新檔」,為 None 代表兩者皆無;再補查宣告路徑是不是非空資料夾。
+            _missing_promised_output = False
+            if (
+                exec_result.exit_code == 0
+                and step.output and step.output.path
+                and not getattr(step, "human_confirm", False)
+                and not getattr(step, "condition", False)
+                and not getattr(step, "web_crawler", False)
+                and not _eff_output_path
+            ):
+                try:
+                    _decl = _resolve_path(step.output.path)
+                    _decl_ok = _decl.exists() and (
+                        (_decl.is_file() and _decl.stat().st_size > 0)
+                        or (_decl.is_dir() and any(_decl.iterdir()))
+                    )
+                except Exception:
+                    _decl_ok = False
+                _missing_promised_output = not _decl_ok
+
             # exit_code -429 = LLM 配額用盡（executor 標記），直接走 rate_limited 路徑、不再叫 validator（會再 429 一次）
             if exec_result.exit_code == -429:
                 val = ValidationResult(
@@ -2354,6 +2379,19 @@ async def _run_pipeline_inner(
                     suggestion="" if status == "ok" else "請查看 log 取得詳細錯誤",
                 )
                 logger.info(f"[{step.name}] 驗證（僅 exit code）：{val.status}")
+
+            # 通用完成守門優先:宣告了 output.path 卻沒產出任何檔 → 覆寫成 failed
+            # (放最後覆寫,確保不被上面任何「看似 ok」的分支放行)
+            if _missing_promised_output and val.status == "ok":
+                logger.warning(
+                    f"[{step.name}] ⚠ 完成守門:宣告 output.path={step.output.path} 但實際沒產出任何檔 → 判 failed"
+                )
+                val = ValidationResult(
+                    status="failed",
+                    reason=f"步驟宣稱完成、但宣告的產出檔不存在:{step.output.path}",
+                    suggestion="這步沒有真的產出承諾的輸出檔(可能 LLM 假完成 / 寫檔失敗 / "
+                               "docx 等嚴格格式產出失敗)。請查 log 確認該步是否真的寫檔。",
+                )
 
             # ── 算這步真正寫到 workflow dir 的主要檔案 ─────────────────
             # 上面 validate 前已經算過 _eff_output_path、這邊直接重用、不要重複呼 snapshot diff
