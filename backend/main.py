@@ -3292,6 +3292,15 @@ exit_code 仍是 0。若不驗證就往下,下游 skill / report_writer 會**用
 🚫 **絕對不要**自己編 `https://example-store-a.com/...`、`https://store1.com` 這種佔位 / 範例網址 ——
 那些網址不存在、爬蟲必定失敗、白跑很久還零產出(實測卡 18 分鐘)。寧可停下來問、也不要編假 URL 硬跑。
 
+### ⚠️ 爬蟲鐵律 C：沒明確 URL 的「研究 / 比較 / 收料」→ 用 web_search,**不要用 web_crawler**(最重要的路由判斷)
+**判斷準則(AI 規劃時自己決定)**:
+- **任務是「研究某主題 / 比較 N 個產品 / 收集某領域資料」、使用者沒給特定 URL** → 用 `subagent`(researcher / comparator,工具含 `web_search`)去搜,**不要開 web_crawler**。
+  理由:web_crawler 要「明確 URL」才有意義;沒 URL 時 AI 只能猜,猜的 URL 常 404 / 反爬餵錯頁(實測:競品比較猜 rog.asus.com/laptops 404、gsmarena 餵錯機型)。**web_search 由 Tavily 決定權威來源、回真實全文,穩定得多。**
+  例:「ASUS vs MSI vs Lenovo 筆電比較」「iPhone vs S vs Pixel 規格比較」「研究 X 市場」→ **comparator / researcher + web_search**,0 個 web_crawler。
+- **任務本質是「盯著特定頁面、比對它的變化」**(比價 / 價格監控 / data_differ / 網頁變化偵測 / 抓某特定文章) → **才用 web_crawler + 明確 URL**;因為這要的就是「同一個固定頁面、反覆抓、比對前後差異」,web_search 每次回不同來源、無法 diff。
+  此時**沒 URL 一定要反問使用者要 URL**(見鐵律 B),或使用者已指定官方/穩定頁面才跑。
+- 一句話:**「要嘛給我明確 URL 讓我盯著爬,要嘛我用 web_search 自己找」——不確定來源就走 web_search,絕不猜 URL 硬爬。**
+
 ## 4.5 解析爬蟲內容節點（skill: scraped-content-parser）
 
 **核心**：爬蟲節點輸出的是**原始 HTML / markdown**。若使用者要的是「**結構化資料**」

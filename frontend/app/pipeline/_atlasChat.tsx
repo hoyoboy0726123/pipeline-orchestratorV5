@@ -823,11 +823,31 @@ interface AtlasAction {
 // 提供額外檔案。需要資料的 case(資料分析、多代理)由 AI 助手在第一步生假資料 demo。
 const ATLAS_ACTIONS: AtlasAction[] = [
   {
-    id: 'chain', title: '啟動 Python 專案或腳本', desc: '跑既有專案、或把 .py 串成工作流', tag: 'Workflow',
+    id: 'chain', title: '啟動 Python 專案 / 腳本', desc: '跑你現成的專案、或把 .py 串成工作流', tag: 'Workflow',
     examples: [
-      '用內建財務範例:stage1 產交易 → stage2 清洗 → stage3 彙總 → stage4 產 Excel 報告(腳本已備、成功率高)',
-      '對既有 GUI/CLI 專案、AI 讀源碼用 ask_user 收選擇再組合參數跑',
-      '把 main_cli.py 包成可互動工作流、選報表類型 / 格式 / 期間',
+      '用內建財務範例:stage1 產交易 → 清洗 → 彙總 → 產 Excel 報告(腳本已備、必跑通)',
+      '我有既有 GUI / CLI 專案(給資料夾路徑)→ AI 讀源碼、ask_user 收參數再跑',
+    ],
+  },
+  {
+    id: 'db-report', title: '資料分析 → 視覺化', desc: 'pandas 分析 + 圖表 / 儀表板', tag: 'Insight',
+    examples: [
+      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → pandas 分析 → markdown 報告 + 趨勢圖',
+      '我有自己的 csv / xlsx → 整合成含原生圖表的 Excel 儀表板',
+    ],
+  },
+  {
+    id: 'compete', title: '文件自動化（Word / PPT / Excel）', desc: '資料 → 套版正式文件', tag: 'Docs',
+    examples: [
+      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → 彙整成 PPT 簡報',
+      '提供我既有的資料 / 重點 → 用 python-docx 套版生正式 Word 報告',
+    ],
+  },
+  {
+    id: 'outlook-todo', title: 'Outlook 郵件自動化', desc: '讀信 → 分類 → 判優先 → TG 通知', tag: 'Inbox',
+    examples: [
+      '搜當日 Outlook 收件匣 → 依專案分類 → 四面向判前 3 優先 → human_confirm 發 TG',
+      '抓收件匣未回覆超過 3 天的信 → 整理成待辦清單 → 提醒我回覆',
     ],
   },
   {
@@ -835,55 +855,27 @@ const ATLAS_ACTIONS: AtlasAction[] = [
     examples: [
       '每天抓 Reddit r/ASUS 熱門 → AI 摘要 → Telegram 確認 → Outlook 寄信',
       '抓 Hacker News top 10 → 中文翻譯 + 重點 → Outlook 草稿',
-      '抓 PTT 股版前 10 篇 → 重點整理 → Telegram 推送',
     ],
   },
   {
-    id: 'outlook-todo', title: 'Outlook 待辦簡報', desc: '讀信 → 分類 → 判優先 → TG 通知', tag: 'Inbox',
+    id: 'multiagent', title: '多代理協作', desc: '多角色分工:分析 / 研究 / 審查 / 撰寫', tag: 'Agent',
     examples: [
-      '搜當日 Outlook 收件匣 → 依專案分類 → 四面向判前 3 優先 → human_confirm 發 TG',
-      '整理今天 Outlook 待辦清單、挑最急的事項推播 Telegram 給我',
-      '抓收件匣未回覆超過 3 天的信 → 整理成待辦清單 → 提醒我回覆',
+      '用內建客戶回饋 test-workflows/demo_data/customer_feedback.csv → 多代理:分析師找模式 + 研究員歸納主題 + 寫手產洞察報告',
+      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → data_analyst 探索式分析',
     ],
   },
   {
-    id: 'multiagent', title: '多代理探索分析', desc: '不確定怎麼做、讓 AI 邊想邊改', tag: 'Agent',
+    id: 'monitor', title: '條件分流工作流', desc: '依結果走不同路（if / switch）', tag: 'Branch',
     examples: [
-      'AI 先生假 sales.xlsx(100 筆) → data_analyst 探索式分析',
-      'AI 生假 PR 描述 → critic 審查 + 改善建議',
-      '指定研究主題 → researcher 收料 + report_writer 寫成報告',
+      '用內建銷售資料:某月營收達標 → 產獎勵報告;未達標 → 發改善警示(condition 分流)',
+      '我的流程「若 X 成立就做 A、否則做 B」→ 幫我接成條件分流工作流',
     ],
   },
   {
-    id: 'research', title: '深度研究 → Word 報告', desc: '收料 → 分析 → 深報告 → 產出 Word', tag: 'Research',
+    id: 'research', title: '網路研究 → 報告', desc: '收料 → 分析 → 深度報告(建議搭強模型)', tag: 'Research',
     examples: [
-      '深度研究「2026 AI 伺服器市場」:researcher 拆面向收料 → data_analyst 抽數據 → report_writer 寫上萬字深度報告 → docx 技能輸出正式 Word 檔',
-      '查「最新 LLM benchmark 排名」→ trend_analyst 趨勢分析',
-      '彙整 2026 H1 NVIDIA 技術發表 → 中文研究報告',
-    ],
-  },
-  {
-    id: 'compete', title: '競品深度分析', desc: '多家對比、矩陣表 + 強弱', tag: 'Compete',
-    examples: [
-      'ASUS vs MSI vs Lenovo 電競筆電矩陣比較',
-      '抓 3 家定價頁面 → data_differ → 變動 Telegram 通知',
-      'iPhone 16 vs Galaxy S25 vs Pixel 9 → 規格 + 口碑 + 價格矩陣',
-    ],
-  },
-  {
-    id: 'db-report', title: '資料分析 → AI 報表', desc: 'pandas + AI 寫洞察', tag: 'Insight',
-    examples: [
-      'AI 先生 6 個月假銷售 csv → pandas 分析 → 中文 markdown 報告',
-      'AI 生假客戶回饋 20 筆 → 自動分類 → 主題摘要報告',
-      'AI 生假股價時序 12 個月 → 趨勢圖 + 洞察',
-    ],
-  },
-  {
-    id: 'monitor', title: '網頁變化偵測', desc: '定時抓網頁、變動就通知', tag: 'Watch',
-    examples: [
-      '監控 PChome ASUS 筆電專區價格變動、變動就 Telegram 通知',
-      'ASUS 官方公告頁(asus.com/news/)有新文章 → 自動寄信',
-      'PTT 看板出現關鍵字「ROG」就推播提醒',
+      '深度研究某主題 → researcher 收料 → report_writer 寫報告(沒網址→web_search;建議搭 Claude / GPT)',
+      'ASUS vs MSI vs Lenovo 筆電比較(web_search 收料、不爬蟲)',
     ],
   },
 ]
