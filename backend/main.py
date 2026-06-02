@@ -3459,6 +3459,19 @@ step 3: subagent report_writer / summarizer
                               (日報 markdown / 推播 / 摘要報告)
 ```
 
+### 🛡️ 研究 / 收料類「資料真實性」鐵律(重要、卡5 深度研究踩過)
+**資訊漏斗原則**:收料步驟(web_search / researcher / web_crawler)抓回的**原始資料量最大、越往後越精要;後段分析只能「蒸餾」既有資料、不能無中生有**。一旦收料抓太少,下游 report_writer / trend_analyst 為了把報告寫滿,會**自己編數據、排名、甚至杜撰來源連結**(實測:LLM benchmark 排名整張 Elo 表造假、附假 URL)。規劃時兩道防線一起上:
+1. **收料步驟填 `output.expect` 當「資料充足度閘」**:描述「怎樣才算收集到足量真實資料」,系統會 AI 驗證、抓回太少 / 全空就 fail、不讓下游在無料下硬寫。
+   ```yaml
+   - name: 收集benchmark資料
+     subagent: true
+     subagent_role: researcher
+     output:
+       expect: "確實收集到多筆有來源連結的真實資料、非空、足以支撐後續分析;若搜尋無結果則明確標示資料不足"
+   ```
+   ⚠️ **別用死的字數 / 筆數門檻**(主題冷熱差很多、會誤殺),用 expect 文字描述讓 AI 判「夠不夠」。
+2. **報告步驟(report_writer / trend_analyst 等)**:這些角色已被系統注入「只能用既有資料、禁腦補、禁杜撰來源」鐵律;你規劃時 batch 也再明寫「**只根據上一步抓回的資料寫,資料不足就說資料不足、不要用通用知識填滿**」。
+
 **為什麼不能直接用 summarizer 一步走?**
 - `summarizer` 的設計是「**單一**長文 → TL;DR + bullet + 引用」(像讀一篇研究報告抓 abstract)
 - Reddit / 論壇 / 商品列表是「**多筆**同構結構」、每筆要逐項抽欄位

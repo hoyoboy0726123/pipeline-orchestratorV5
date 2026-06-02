@@ -328,6 +328,23 @@ def _inject_upstream_schema_hint(system_prompt: str) -> str:
     return _block + system_prompt
 
 
+def _inject_research_integrity(system_prompt: str) -> str:
+    """誠信鐵律 — 不准腦補。研究 / 分析 / 撰寫類 subagent(researcher / report_writer /
+    trend_analyst / data_analyst / summarizer / critic …)若上游抓回的料不足,會「為了把報告
+    寫滿」自己編數據、排名、統計、甚至**杜撰來源連結**(實測:卡5-2 整張 benchmark Elo 表是編的、
+    附假 URL)。資訊漏斗原則:抓回的原始資料量最大、越往後越精要、後段只能「蒸餾」不能「新增」。"""
+    _block = (
+        "【誠信鐵律 — 只能用既有資料、嚴禁腦補(最高優先)】\n"
+        "  1. 你只能根據「**上游實際提供 / 你實際用工具(web_search/read_file/爬蟲)抓回**」的資料寫,"
+        "**不可自行編造**數據、統計、排名、規格、價格、日期或任何事實。\n"
+        "  2. ❌ **嚴禁杜撰來源連結** — 不可寫出你沒有真的讀過的 URL 當引用;引用一律來自實際抓回的內容。\n"
+        "  3. 報告中每個具體數字 / 事實 / 排名,都要對得回上游實際資料;對不回去的就**不要寫**。\n"
+        "  4. 若抓回的資料**不足以支撐結論**:明確寫「**資料不足 / 無法取得 / 無法佐證**」、或回報需要更多來源,"
+        "**絕不可用你的通用知識把空缺填滿、假裝報告完整**。寧可短而真,不要長而假。\n\n"
+    )
+    return _block + system_prompt
+
+
 def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
     """若 settings.skill_sandbox_mode='wsl_docker'、追加沙盒環境提示（共用 skill 的格式）。"""
     try:
@@ -439,7 +456,7 @@ async def run_subagent(
 
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
 
-    system_prompt = _inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))
+    system_prompt = _inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
 
     tool_timeout = _compute_tool_timeout(timeout)
@@ -888,7 +905,7 @@ async def _run_subagent_native(
         f"max_iter={max_iter}, tools={sorted(allowed_tools)})"
     )
 
-    system_prompt = _inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))
+    system_prompt = _inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
     tool_timeout = _compute_tool_timeout(timeout)
 
