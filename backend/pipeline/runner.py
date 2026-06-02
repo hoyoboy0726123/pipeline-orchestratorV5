@@ -613,6 +613,45 @@ def _diff_snapshot_pick_main(before: dict, workflow_name: str):
     return candidates[0]
 
 
+def _crawl_looks_failed(output_path, logger):
+    """掃爬蟲輸出檔(crawler 寫的 .md 帶 frontmatter status_code / word_count / 子頁數)。
+    回失敗原因字串(明顯抓失敗)或 None(看起來 OK)。**保守**:只在明確壞掉時回原因、
+    避免誤殺正常爬蟲。給 web_crawler 沒填 expect 時的確定性把關用。"""
+    from pathlib import Path as _P
+    import re as _re
+    try:
+        p = _P(output_path) if output_path else None
+        if not p or not p.exists():
+            return None  # 沒檔由其他邏輯處理、這裡不擅自判失敗
+        texts = []
+        if p.is_dir():
+            for f in list(p.rglob("*.md"))[:30]:
+                try:
+                    texts.append(f.read_text(encoding="utf-8", errors="replace"))
+                except Exception:
+                    pass
+        else:
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+        blob = "\n".join(texts)
+        if not blob.strip():
+            return "爬蟲輸出為空"
+        # 子頁全失敗(多 URL 列表頁爬蟲會印「子頁數: N/M 成功」)
+        m = _re.search(r"子頁數[:：]\s*0\s*/\s*\d+", blob)
+        if m:
+            return "所有子頁抓取失敗(0 成功)"
+        # 所有抓取的 status_code 都是 4xx/5xx → 全失敗(部分成功就放行)
+        codes = _re.findall(r"status_code[:：]\s*(\d{3})", blob)
+        if codes and all(c[0] in ("4", "5") for c in codes):
+            return f"所有抓取都失敗(status_code={', '.join(sorted(set(codes)))})"
+        return None
+    except Exception as e:
+        try:
+            logger.warning(f"爬蟲輸出檢查失敗(略過、不擋):{e}")
+        except Exception:
+            pass
+        return None
+
+
 def _latest_workflow_output_file(workflow_name: str):
     """掃 ai_output/<workflow_name>/ 拿最新一個非雜訊檔（圖檔 / log / preview / 內部 db 檔過濾掉）。
     給「skill 節點 / 沒明確 output.path」這種「實際有產檔但 step 沒記錄」的場景兜底。
@@ -2200,14 +2239,43 @@ async def _run_pipeline_inner(
                     ),
                     suggestion=exec_result.stderr if _status == "failed" else "",
                 )
-            # web_crawler 節點：成敗已由 crawler tier 結果決定，不需 LLM 驗證
+            # web_crawler 節點:
+            #  「抓到頁面」≠「抓到真實目標資料」。爬蟲可能成功 fetch 一個 404 頁 / 反爬錯頁 /
+            #  空 SPA,exit_code 仍=0。所以:
+            #   (a) 有填 expect(AI 驗證節點/規則要求)→ 跑 AI 內容驗證、讀爬蟲輸出判斷是否
+            #       真的抓到目標資料(非 404/空頁/錯頁)→ 不真就 fail、別讓下游用 LLM 知識硬補。
+            #   (b) 沒填 expect → 至少掃輸出的 status_code / 子頁數,擋掉「全 404 / 全空」的假成功。
             elif step.web_crawler:
-                _status = "ok" if exec_result.exit_code == 0 else "failed"
-                val = ValidationResult(
-                    status=_status,
-                    reason=exec_result.stdout.replace("[爬蟲完成] ", "") or "網頁爬取",
-                    suggestion=exec_result.stderr if _status == "failed" else "",
-                )
+                if config.validate and has_expect:
+                    logger.info(f"[{step.name}] 🔍 爬蟲節點有 AI 驗證需求 → 驗證抓回的內容是否真實目標資料")
+                    val = await validate_step(
+                        step_name=step.name,
+                        command=step.batch,
+                        exit_code=exec_result.exit_code,
+                        stdout=exec_result.stdout,
+                        stderr=exec_result.stderr,
+                        output_path=_eff_output_path,
+                        output_expect=step.output.get_expect() if step.output else None,
+                        logger=logger,
+                        llm_role=getattr(step, "llm_role", "primary"),
+                        step_start_time=step_started_at,
+                    )
+                else:
+                    _crawl_fail = _crawl_looks_failed(_eff_output_path, logger)
+                    if exec_result.exit_code == 0 and _crawl_fail:
+                        val = ValidationResult(
+                            status="failed",
+                            reason=f"爬蟲表面成功、但內容無效:{_crawl_fail}",
+                            suggestion="目標 URL 可能錯誤 / 404 / 被反爬 / SPA 動態渲染抓不到。"
+                                       "請確認 URL 正確、或改用其他來源。",
+                        )
+                    else:
+                        _status = "ok" if exec_result.exit_code == 0 else "failed"
+                        val = ValidationResult(
+                            status=_status,
+                            reason=exec_result.stdout.replace("[爬蟲完成] ", "") or "網頁爬取",
+                            suggestion=exec_result.stderr if _status == "failed" else "",
+                        )
             # computer_use 節點：成敗已由 action 執行結果決定，不需 LLM 驗證
             elif step.computer_use:
                 _status = "ok" if exec_result.exit_code == 0 else "failed"
