@@ -837,10 +837,10 @@ const ATLAS_ACTIONS: AtlasAction[] = [
     ],
   },
   {
-    id: 'compete', title: '文件自動化（Word / PPT / Excel）', desc: '資料 → 套版正式文件', tag: 'Docs',
+    id: 'compete', title: '自然語言造工具（可重複用）', desc: '一句話 → AI 寫程式跑通 → 第二次起 0 成本 replay', tag: 'Skill',
     examples: [
-      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → 彙整成 PPT 簡報',
-      '提供我既有的資料 / 重點 → 用 python-docx 套版生正式 Word 報告',
+      '把內建範例 test-workflows/demo_data/sales.csv 依地區拆成多個檔 → AI 一句話寫好跑通(下次同檔 recipe 免費 replay、不再叫 LLM)',
+      '描述一件重複雜事(合併多個 csv / 批次改檔名 / 抽 PDF 表格 / 用資料生 PPT)→ AI 寫好跑通,成為你的專屬工具',
     ],
   },
   {
