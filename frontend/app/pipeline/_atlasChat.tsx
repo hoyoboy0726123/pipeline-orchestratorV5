@@ -832,7 +832,7 @@ const ATLAS_ACTIONS: AtlasAction[] = [
   {
     id: 'db-report', title: '資料分析 → 視覺化', desc: 'pandas 分析 + 圖表 / 儀表板', tag: 'Insight',
     examples: [
-      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → pandas 分析 → markdown 報告 + 趨勢圖',
+      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → pandas 分析 → 趨勢圖 + python-docx 產出 Word 報告',
       '我有自己的 csv / xlsx → 整合成含原生圖表的 Excel 儀表板',
     ],
   },
@@ -846,36 +846,36 @@ const ATLAS_ACTIONS: AtlasAction[] = [
   {
     id: 'outlook-todo', title: 'Outlook 郵件自動化', desc: '讀信 → 分類 → 判優先 → TG 通知', tag: 'Inbox',
     examples: [
-      '搜當日 Outlook 收件匣 → 依專案分類 → 四面向判前 3 優先 → human_confirm 發 TG',
-      '抓收件匣未回覆超過 3 天的信 → 整理成待辦清單 → 提醒我回覆',
+      '搜當日 Outlook 收件匣 → 依專案分類 → 四面向判前 3 優先 → 產 Word 待辦表 → human_confirm 發 TG',
+      '抓收件匣未回覆超過 3 天的信 → 整理成 Word 待辦清單 → 提醒我回覆',
     ],
   },
   {
     id: 'scrape-ai', title: '爬蟲 + AI + Outlook', desc: '抓 → 摘要 → 確認 → 寄信', tag: 'Pipeline',
     examples: [
-      '每天抓 Reddit r/ASUS 熱門 → AI 摘要 → Telegram 確認 → Outlook 寄信',
-      '抓 Hacker News top 10 → 中文翻譯 + 重點 → Outlook 草稿',
+      '每天抓 Reddit r/ASUS 熱門 → AI 摘要 → 產 Word 報告 → Telegram 確認 → Outlook 夾 Word 寄信',
+      '抓 Hacker News top 10 → 中文翻譯 + 重點 → 產 Word → Outlook 夾 Word 草稿',
     ],
   },
   {
     id: 'multiagent', title: '多代理協作', desc: '多角色分工:分析 / 研究 / 審查 / 撰寫', tag: 'Agent',
     examples: [
-      '用內建客戶回饋 test-workflows/demo_data/customer_feedback.csv → 多代理:分析師找模式 + 研究員歸納主題 + 寫手產洞察報告',
-      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → data_analyst 探索式分析',
+      '用內建客戶回饋 test-workflows/demo_data/customer_feedback.csv → 多代理:分析師找模式 + 研究員歸納主題 + 寫手產洞察報告 → 轉成 Word',
+      '用內建範例銷售資料 test-workflows/demo_data/sales.csv → data_analyst 探索式分析 → 轉成 Word 報告',
     ],
   },
   {
     id: 'monitor', title: '條件分流工作流', desc: '依結果走不同路（if / switch）', tag: 'Branch',
     examples: [
-      '用內建銷售資料:某月營收達標 → 產獎勵報告;未達標 → 發改善警示(condition 分流)',
+      '用內建銷售資料:某月營收達標 → 產獎勵 Word 報告;未達標 → 產改善 Word 警示(condition 分流)',
       '我的流程「若 X 成立就做 A、否則做 B」→ 幫我接成條件分流工作流',
     ],
   },
   {
     id: 'research', title: '網路研究 → 報告', desc: '收料 → 分析 → 深度報告(建議搭強模型)', tag: 'Research',
     examples: [
-      '深度研究某主題 → researcher 收料 → report_writer 寫報告(沒網址→web_search;建議搭 Claude / GPT)',
-      'ASUS vs MSI vs Lenovo 筆電比較(web_search 收料、不爬蟲)',
+      '深度研究某主題 → researcher 收料 → report_writer 寫報告 → docx 產 Word(沒網址→web_search;建議搭 Claude / GPT)',
+      'ASUS vs MSI vs Lenovo 筆電比較(web_search 收料、不爬蟲)→ Word 比較報告',
     ],
   },
 ]
