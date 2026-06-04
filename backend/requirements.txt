@@ -41,7 +41,7 @@ uiautomation; sys_platform == "win32"
 # host 只負責 Tier 2 fallback：呼叫 FlareSolverr（httpx）+ HTML 轉 markdown
 httpx
 trafilatura
-html2text
+markdownify
 
 # computer_use 節點 OCR 比對用 — RapidOCR(PaddleOCR 模型轉 ONNX 版)
 # 之前用 Windows.Media.Ocr 在 <150% scaling 對複雜中文(檔/總/盤/畫等)漏字,

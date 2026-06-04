@@ -8,7 +8,7 @@
       Tier 1 = Crawl4AI（容器內）→ 95% 網站
       Tier 2 = FlareSolverr（獨立 container、port 8191）→ +4% Cloudflare 站
     Tier 2 由 host 直接打 HTTP（FlareSolverr 內部用 Puppeteer 解 CF challenge），
-    拿到 HTML 後 host 用 html2text 轉 markdown。
+    拿到 HTML 後 host 用 markdownify 轉 markdown。
   - **輸出格式**：Markdown + YAML frontmatter（適合 LLM 餵入）
     單頁直接寫到 output.path；多頁時 output.path 是資料夾，pages/*.md + index.json
 
@@ -1715,7 +1715,7 @@ async def _run_flaresolverr(
     logger: logging.Logger,
     step_name: str,
 ) -> CrawlResult:
-    """打 FlareSolverr 的 /v1 endpoint 拿 HTML，用 html2text 轉 markdown。"""
+    """打 FlareSolverr 的 /v1 endpoint 拿 HTML，用 markdownify 轉 markdown。"""
     try:
         import httpx  # host venv 已有
     except ImportError:
@@ -1837,7 +1837,7 @@ def _extract_last_json_line(s: str) -> Optional[dict]:
 
 def _html_to_markdown(html: str) -> str:
     """Tier 2 的 HTML → Markdown 轉換。host 端跑、不依賴沙盒。
-    優先 trafilatura（語意保留好）、退 html2text、再退純文字。"""
+    優先 trafilatura（語意保留好）、退 markdownify、再退純文字。"""
     if not html:
         return ""
     try:
@@ -1849,12 +1849,10 @@ def _html_to_markdown(html: str) -> str:
     except ImportError:
         pass
     try:
-        import html2text
-        h = html2text.HTML2Text()
-        h.body_width = 0      # 不要強制換行
-        h.ignore_images = False
-        h.ignore_links = False
-        return h.handle(html)
+        from markdownify import markdownify as _markdownify
+        # markdownify（MIT 授權）取代 html2text（GPL）；同樣保留連結與圖片，
+        # heading_style=ATX 產生「# 標題」（對下游 LLM 較友善、不換行）
+        return _markdownify(html, heading_style="ATX")
     except ImportError:
         pass
     # 最差只剩去 HTML tag

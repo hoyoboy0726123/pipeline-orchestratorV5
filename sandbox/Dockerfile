@@ -64,9 +64,9 @@ RUN pip install --no-cache-dir newspaper3k cloudscraper feedparser lxml_html_cle
 # ── Tier 5b：通用網頁爬蟲（V5 新增 web_crawler 節點用）─────────────
 # Crawl4AI = LLM-optimized 爬蟲：Playwright + Chromium + stealth + markdown 直出
 # trafilatura：Tier 2（FlareSolverr）回 HTML 後做 markdown 轉換用的高品質 extractor
-# html2text：trafilatura 失敗時的最終 fallback；輕量、保結構
+# markdownify：trafilatura 失敗時的最終 fallback；輕量、保結構、MIT 授權
 # 這層大概 200MB Python 套件 + 後面 chromium browser 約 250MB
-RUN pip install --no-cache-dir crawl4ai trafilatura html2text
+RUN pip install --no-cache-dir crawl4ai trafilatura markdownify
 
 # Playwright Chromium browser（headless），含必要 system libs（libnss / libatk / fonts 等）
 # `--with-deps` 會自動 apt-get install 缺的 .so，免我們在 Dockerfile 自己列一堆 lib*

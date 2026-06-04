@@ -219,10 +219,10 @@ try:
 except Exception as e:
     print(f'  ⚠ crawl4ai 未安裝（{e.__class__.__name__}）— setup_sandbox.bat --rebuild')
 try:
-    import trafilatura, html2text
-    print('  ✓ trafilatura + html2text')
+    import trafilatura, markdownify
+    print('  ✓ trafilatura + markdownify')
 except Exception as e:
-    print(f'  ⚠ trafilatura / html2text 缺：{e}')
+    print(f'  ⚠ trafilatura / markdownify 缺：{e}')
 # 用 Playwright 自己 API 拿 chromium binary 路徑（最可靠；版本不同子目錄名稱會變）
 try:
     from playwright.sync_api import sync_playwright

@@ -49,7 +49,7 @@ LLM 處理網頁內容的最佳格式 = **Markdown + YAML frontmatter**
 | **Jina Reader** | Markdown | LLM 餵入（API） |
 | **Trafilatura** | 純文字 / XML / Markdown | 學術文本研究 |
 | **MarkItDown**（MS） | Markdown | 檔案轉換、不爬蟲 |
-| **html2text** | Markdown | 簡單轉換 |
+| **markdownify** | Markdown | 簡單轉換(MIT 授權) |
 | **Mozilla Readability** | 清理後 HTML | 閱讀模式 |
 
 ### 推薦的最終格式
