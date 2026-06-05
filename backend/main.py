@@ -4670,6 +4670,16 @@ def _workflow_state_block(workflow_id: str) -> str:
             lines.append(yaml_text)
             lines.append("```")
         lines.append("")
+        lines.append(
+            f"⚠️ **以上這條(id={workflow_id})才是你「現在所在」的工作流（即使對話歷史是從別條複製過來的）。**"
+            "對話歷史裡若出現其他工作流名稱或 id（很可能是這條被「另存為新工作流」/改名之前的舊資訊），"
+            "一律以這個當前 id 為準、不要被舊記憶誤導成在操作別條。"
+        )
+        lines.append(
+            f"**當使用者要「執行 / 跑這條 / 再跑一次」時**：呼叫 start_workflow 請帶當前 **id「{workflow_id}」**，"
+            "不要用工作流名稱——名稱可能與其他工作流重複，用名稱會撈到多條或撈錯。"
+        )
+        lines.append("")
         lines.append("**若使用者要求是修改 / 增量調整**（如「再加一步」、「把第 2 步改成…」），"
                      "在既有基礎上改動後回覆完整新 YAML；不是打掉重練。")
         lines.append("**若使用者要求跟現有工作流無關**（另開新題目），照常從零規劃即可。")
