@@ -1,8 +1,10 @@
+# 需要 Python 3.10+(程式用到 X | Y union 型別註解、list[str] 等)
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
 python-dotenv==1.0.1
 pyyaml==6.0.2
+pyperclip>=1.8  # computer_use 節點貼上非 ASCII(中文)文字時用
 jinja2>=3.1.0
 langchain-core
 langchain-groq

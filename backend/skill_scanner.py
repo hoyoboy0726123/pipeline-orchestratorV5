@@ -28,6 +28,35 @@ def get_skills_root() -> Path:
         pass
     return _DEFAULT_SKILLS_ROOT
 
+
+def seed_default_skills() -> int:
+    """首次啟動把 repo 內建的 default_skills/ 複製到使用者 skill 目錄(若該 skill 尚不存在)。
+
+    用途:讓別人 clone 後不必手動裝,就能跑用到內建 skill 的範例(如 scraped-content-parser)。
+    已存在的 skill **不覆蓋**(尊重使用者自己改過的版本)。回傳本次複製了幾個。
+    注意:docx / pptx 等 Anthropic 官方 skill 不在 repo 內、不由此處理(README 另有說明)。
+    """
+    import shutil
+    try:
+        src_root = Path(__file__).parent.parent / "default_skills"
+        if not src_root.is_dir():
+            return 0
+        dst_root = get_skills_root()
+        dst_root.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for skill_dir in sorted(src_root.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            dst = dst_root / skill_dir.name
+            if dst.exists():
+                continue
+            shutil.copytree(skill_dir, dst)
+            copied += 1
+        return copied
+    except Exception:
+        return 0
+
+
 # Python 內建模組（不需要 pip install）— 動態用 sys.stdlib_module_names 取得，
 # 相容 Python 3.10+；失敗時 fallback 到寫死清單
 try:

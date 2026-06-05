@@ -1,6 +1,7 @@
 """
 Pipeline Orchestrator — 獨立後端
-啟動：uvicorn main:app --host 0.0.0.0 --port 8002
+啟動：uvicorn main:app --host 0.0.0.0 --port 8004
+（前端 next.config.mjs 與一鍵腳本 launch_full_project.bat / start.sh 都指向 8004,請保持一致）
 """
 # Windows console 預設 cp1252/cp950 無法印 emoji / 中文 → 啟動時強制 UTF-8
 # 不靠 PYTHONIOENCODING env var，避免使用者沒設或 .bat 傳遞失效
@@ -106,6 +107,15 @@ async def startup():
     # 全新安裝時 seed 預設範例工作流(已 seed 過會自動略過)
     from seed_examples import seed_example_workflows
     seed_example_workflows()
+    # 全新安裝時把內建 skill(default_skills/)複製到使用者 skill 目錄(已存在不覆蓋)
+    # → clone 後不必手動裝就能跑用到內建 skill 的範例(如 scraped-content-parser)
+    try:
+        from skill_scanner import seed_default_skills
+        _ns = seed_default_skills()
+        if _ns:
+            print(f"✅ 已植入 {_ns} 個內建 skill 到使用者 skill 目錄")
+    except Exception as _e:
+        print(f"⚠ 內建 skill 植入略過:{_e}")
     # 自動安裝 skill_packages.txt 中缺少的套件
     from skill_pkg_manager import auto_install_packages
     auto_install_packages()

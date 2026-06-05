@@ -23,6 +23,11 @@ out/
 *.sqlite
 *.log
 nohup.out
+# 開發時手動啟動 uvicorn 的 stdout/stderr 捕捉檔(含本機路徑,勿入庫)
+_uv.out
+_uv.out*
+backend/_uv.out*
+backend/_uvicorn_startup.log*
 
 # Runtime pipeline output (產出檔、錄製資料、log、DB 都在這裡)
 ai_output/
