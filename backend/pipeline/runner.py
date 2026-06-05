@@ -108,6 +108,8 @@ def _decision_keyboard(run_id: str, has_prev: bool = True) -> InlineKeyboardMark
     if has_prev:
         skip_row.append(InlineKeyboardButton("↩ 重做上一步", callback_data=f"pipe_redo_prev:{run_id}"))
     rows.append(skip_row)
+    # 讓 AI 試修(對齊 web 失敗卡片的「讓 AI 試修」)— 手動觸發一次自我修復、不看開關、受硬上限
+    rows.append([InlineKeyboardButton("🔧 讓 AI 試修", callback_data=f"pipe_self_heal_now:{run_id}")])
     rows.extend([
         [
             InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"),
