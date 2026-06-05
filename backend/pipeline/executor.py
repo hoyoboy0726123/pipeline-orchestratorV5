@@ -2180,6 +2180,30 @@ def _read_file_sample(path: str, max_chars: int = 700) -> str:
         return ""
 
 
+import re as _re_runts
+_RUN_TS_RE = _re_runts.compile(r"run_\d{8}_\d{6}")
+
+
+def _rebase_recipe_run_dir(code: str, output_path: Optional[str]) -> tuple[str, int]:
+    """B′:快取 recipe 的程式碼裡寫死了「錄製當時」的 run_<時間戳> 子夾路徑,
+    但每次執行的 run 夾時間戳不同。重播前把碼內所有 run_<舊ts> 換成「本次」的 run_<ts>。
+
+    本次 run_<ts> 從 output_path 取(output_path 一定是 .../run_<ts>/... 的形式),
+    比用 working_dir.basename 穩 —— 當 output.path 帶子目錄時(如 sub/report.md),
+    working_dir 會是 .../run_<ts>/sub、basename='sub' 不是 run_ts,但 output_path 仍含 run_ts。
+
+    回傳 (改寫後的碼, 替換處數)。下列情況回 (原碼, 0):
+      - output_path 為空 / 不含 run_<ts>(例:output.path 是絕對路徑、本就不在 run 夾)
+      - 快取碼裡根本沒有 run_<ts>(例:LLM 自己寫死了不含時間戳的固定路徑)→ 無從替換
+    """
+    if not code or not output_path:
+        return code, 0
+    m = _RUN_TS_RE.search(str(output_path))
+    if not m:
+        return code, 0
+    return _RUN_TS_RE.subn(m.group(0), code)
+
+
 async def execute_step_with_skill(
     task_description: str,
     timeout: int,
@@ -2299,13 +2323,19 @@ async def execute_step_with_skill(
                 # 改走 _try_sandbox_exec 先判斷沙盒可用性，可用就用沙盒（原本錄製就是在沙盒）；
                 # 沙盒不可用才退 host（這時 LLM 重學會學到 host 路徑、新 recipe 自洽）
                 def _replay_recipe():
+                    # B′ per-run 夾相容:快取碼寫死了錄製當時的 run_<ts> 子夾,重播前換成本次的
+                    # run_<ts>(從 output_path 取),否則快取碼寫到舊夾、本次夾空 → output_path
+                    # 不存在 → recipe 被誤判失敗、退回 LLM、0 成本失效。詳見 _rebase_recipe_run_dir。
+                    code_to_run, _n = _rebase_recipe_run_dir(cached["code"], output_path)
+                    if _n:
+                        logger.info(f"[{step_name}] 🔁 Recipe 重播:快取碼內 {_n} 處舊 run 夾 → 本次 run 夾")
                     sandbox_out = _try_sandbox_exec(
-                        "run_python", cached["code"], working_dir, run_id, logger,
+                        "run_python", code_to_run, working_dir, run_id, logger,
                         tool_timeout=tool_timeout,
                     )
                     if sandbox_out is not None:
                         return sandbox_out
-                    return _skill_run_python(cached["code"], cwd=working_dir, run_id=run_id,
+                    return _skill_run_python(code_to_run, cwd=working_dir, run_id=run_id,
                                               tool_timeout=tool_timeout)
                 tool_result = await loop.run_in_executor(None, _replay_recipe)
                 runtime = _time.time() - t0
