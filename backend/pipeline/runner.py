@@ -498,6 +498,28 @@ def _workflow_output_dir(workflow_name: str):
     return OUTPUT_BASE_PATH / workflow_name
 
 
+def _run_output_name(run) -> str:
+    """本次「執行」的實體輸出目錄名 = <顯示名>/run_<時間戳>。
+
+    為什麼存在:每次 run 的產物落進各自的 run_<ts>/ 子夾,彼此隔離 ——
+      1. 重跑不覆蓋上一輪、也不會去動「使用者正開著的舊檔」(零鎖檔風險)
+      2. 檔案總管進到工作流那層,就看到一排 run_時間戳/、各次清楚分隔
+    顯示名(run.pipeline_name)保持乾淨、不帶 run_ts;只有實體目錄名帶。
+
+    時間戳由 run.started_at 衍生(建立時設、persist 進 DB):
+      - resume 同一個 run → 載回同一個 started_at → 落「同一個」run 夾(不會每次 resume 開新夾)
+      - TG 按鈕回呼在 run 之後觸發、config 重建時不帶 run-scoping → 也能靠這函式從 run 自推同一夾
+    started_at 解析失敗時退用 run_id 前綴(仍穩定、唯一)。
+    """
+    base = (getattr(run, "pipeline_name", "") or "").strip()
+    try:
+        ts = datetime.fromisoformat(run.started_at).strftime("%Y%m%d_%H%M%S")
+    except Exception:
+        ts = (getattr(run, "run_id", "") or "run")[:8]
+    sub = f"run_{ts}"
+    return f"{base}/{sub}" if base else sub
+
+
 # 副檔名猜測:batch 含哪個關鍵字 → 推測該副檔名(沒填 step.output.path 時用)
 _EXT_KEYWORDS: list[tuple[str, str]] = [
     (".pptx", "pptx"), (".pptx", "投影片"), (".pptx", "簡報"), (".pptx", "PPT"), (".pptx", "ppt"),
@@ -978,13 +1000,15 @@ def _find_prev_output_file(run, config) -> Optional[str]:
                         # 相容舊 YAML 寫法:ai_output/xxx 視為相對 OUTPUT_BASE_PATH 的父
                         p = _OUT_BASE.parent / p
                     else:
-                        p = _OUT_BASE / run.pipeline_name / p
+                        # 用 _run_output_name(run) 自推 run_<ts>/ 子夾,不靠 config.name ——
+                        # TG 按鈕回呼重建 config 時不帶 run-scoping,靠 run 物件才找得到本次產物
+                        p = _OUT_BASE / _run_output_name(run) / p
                 if p.exists() and p.is_file():
                     return str(p)
             idx -= 1
 
-        # 策略 2:預設目錄最新檔
-        wf_dir = _OUT_BASE / run.pipeline_name
+        # 策略 2:預設目錄最新檔(同樣自推 run 夾)
+        wf_dir = _OUT_BASE / _run_output_name(run)
         if not wf_dir.exists() or not wf_dir.is_dir():
             return None
         # 過濾規則：
@@ -1400,6 +1424,14 @@ async def _run_pipeline_inner(
                 run.pipeline_name = _wf_name
         except Exception as _e:
             logger.warning(f"查工作流名稱失敗、沿用 YAML name「{config.name}」:{_e}")
+
+    # ── per-run 輸出子資料夾 ─────────────────────────────────────────
+    # 把本次執行的所有產物路由到 ai_output/<工作流>/run_<時間戳>/(見 _run_output_name)。
+    # 顯示名 run.pipeline_name 保持乾淨;只有實體輸出目錄名 config.name 帶 run_ts。
+    # config.name 在此之後才被用到(_resolve_path / default_wd / 快照 / _send_step_output_to_tg
+    # / _step_export 等),所以單點覆寫即全覆蓋。logger 已在覆寫前建立、不受影響。
+    config.name = _run_output_name(run)
+    logger.info(f"本次執行輸出目錄:ai_output/{config.name}/")
     store.save(run)
 
     # ── Step loop ────────────────────────────────────────────
@@ -1766,7 +1798,7 @@ async def _run_pipeline_inner(
                 # 逐螢幕送（雙螢幕 → 2 張，方便 TG 上直接看到上一步結果不用再按按鈕）
                 if step.screenshot:
                     try:
-                        ss_paths = take_screenshots(run.pipeline_name, step.name)
+                        ss_paths = take_screenshots(config.name, step.name)
                         if ss_paths:
                             await _tg_send_photos(
                                 run.telegram_chat_id,

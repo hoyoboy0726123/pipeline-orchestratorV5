@@ -685,6 +685,16 @@ def _resolve_workflow_output_dir(workflow_name: str):
 
     if not target.exists() or not target.is_dir():
         return None, f"輸出資料夾不存在: {target}"
+    # per-run 子資料夾:新版每次執行的產物落在 <工作流>/run_<時間戳>/。
+    # 若本層底下有 run_*/ 子夾 → 挑「最近修改」那個當作要找檔的目錄(= 最新一次執行)。
+    # 舊版工作流把檔案直接放本層的、沒有 run_*/ → 維持回傳本層(向後相容)。
+    try:
+        run_dirs = [d for d in target.iterdir() if d.is_dir() and d.name.startswith("run_")]
+        if run_dirs:
+            latest = max(run_dirs, key=lambda d: d.stat().st_mtime)
+            return latest, ""
+    except OSError:
+        pass
     return target, ""
 
 

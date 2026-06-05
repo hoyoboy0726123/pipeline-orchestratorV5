@@ -1697,13 +1697,16 @@ async def _poll_loop():
                     try:
                         from pipeline.store import get_store
                         from pipeline.models import PipelineConfig
-                        from pipeline.runner import _send_step_output_to_tg
+                        from pipeline.runner import _send_step_output_to_tg, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
                             await cb.answer("❌ 找不到此 run")
                             continue
                         config = PipelineConfig.from_dict(run.config_dict)
+                        # 回呼重建 config 不帶 run-scoping → 補上,讓 actual_output_path 缺席時的
+                        # fallback 也指向本次執行的 run_<ts>/ 子夾(送檔本身優先用 actual_output_path)
+                        config.name = _run_output_name(run)
                         # 跳過連續 human_confirm 找上一個可執行步驟（跟 auto-send 邏輯一致）
                         idx = run.current_step - 1
                         while idx >= 0 and config.steps[idx].human_confirm:
@@ -1743,13 +1746,14 @@ async def _poll_loop():
                     try:
                         from pipeline.store import get_store
                         from pipeline.models import PipelineConfig
-                        from pipeline.runner import _resolve_step_output_for_tg
+                        from pipeline.runner import _resolve_step_output_for_tg, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
                             await cb.answer("❌ 找不到此 run")
                             continue
                         config = PipelineConfig.from_dict(run.config_dict)
+                        config.name = _run_output_name(run)  # 回呼補 run-scoping(見 prev_output)
                         # 列「可能有輸出」的步驟：
                         #   - 明確設 output.path（任何節點類型）
                         #   - 節點類型有 default rule（outlook / web_crawler）
@@ -1821,13 +1825,14 @@ async def _poll_loop():
                     try:
                         from pipeline.store import get_store
                         from pipeline.models import PipelineConfig
-                        from pipeline.runner import _send_step_output_to_tg
+                        from pipeline.runner import _send_step_output_to_tg, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
                             await cb.answer("❌ 找不到此 run")
                             continue
                         config = PipelineConfig.from_dict(run.config_dict)
+                        config.name = _run_output_name(run)  # 回呼補 run-scoping(見 prev_output)
                         if target_idx < 0 or target_idx >= len(config.steps):
                             await cb.answer("❌ 步驟索引超出範圍")
                             continue
