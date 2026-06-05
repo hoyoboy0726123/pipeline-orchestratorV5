@@ -41,7 +41,7 @@ import SubagentConfigPanel          from './_subagentPanel'
 import ConditionPanel               from './_conditionPanel'
 import HoverScrollRow               from './_hoverScrollRow'
 import Sidebar                from './_sidebar'
-import AtlasChat              from './_atlasChat'
+import AtlasChat, { NodeGuideModal } from './_atlasChat'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
   type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData, type SubagentData,
@@ -423,6 +423,7 @@ export default function PipelinePage() {
   }, [cancelHoverClear])
   const [pipelineName, setPipelineName] = useState('my-pipeline')
   const [showYaml, setShowYaml]   = useState(false)
+  const [showNodeGuide, setShowNodeGuide] = useState(false)
   const [showDryRun, setShowDryRun] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
   const [showRunDialog, setShowRunDialog] = useState(false)
@@ -1794,6 +1795,15 @@ export default function PipelinePage() {
           👁️ 預覽指令
         </button>
 
+        {/* 節點介紹 — 看有哪些節點、各自適合什麼(中央彈窗)*/}
+        <button
+          onClick={() => setShowNodeGuide(true)}
+          title="看有哪些節點、各自適合什麼"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+        >
+          📖 節點介紹
+        </button>
+
         {/* YAML */}
         <button
           onClick={() => setShowYaml(!showYaml)}
@@ -2363,6 +2373,9 @@ export default function PipelinePage() {
             }
           />
         ) : null}
+
+        {/* 節點介紹 中央彈窗(按鈕在上方工具列、YAML 左側)*/}
+        {showNodeGuide && <NodeGuideModal onClose={() => setShowNodeGuide(false)} />}
 
         {/* YAML panel */}
         {showYaml && (

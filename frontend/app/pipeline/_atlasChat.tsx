@@ -8,7 +8,7 @@ import { useWorkflowStore } from './_store'
 import {
   pipelineChatStream,
   getEnvPaths, type EnvPaths,
-  getWorkflowChat, appendWorkflowChat, clearWorkflowChat,
+  getWorkflowChat, appendWorkflowChat,
 } from '@/lib/api'
 
 // ── AI Chat Message Type ─────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ export function buildWelcomeMessage(env: EnvPaths): string {
 直接描述你想自動化的事,或把目前畫布上的步驟交給我**除錯 / 修改** — 我會問幾個關鍵問題、提一份方案讓你點頭,再幫你產生或更新 YAML。
 
 · 想知道有哪些節點、各自適合什麼 → 點上方 **📖 節點介紹**
-· 想找完整範例 → 點 **🆕 新話題** 回首頁挑一張範例卡`
+· 想開新題目 / 找完整範例 → 點 **➕ 新工作流** 回首頁挑一張範例卡(不影響目前對話)`
 }
 
 // ── 節點介紹(📖 按鈕 → 中央彈窗)─────────────────────────────────────────
@@ -66,7 +66,7 @@ const NODE_GUIDE: { icon: string; name: string; tag: string; desc: string }[] = 
     desc: '操作沒有 API 的舊軟體 UI。在畫布錄製(F7 待命開錄 / F9 結束),以圖像錨點 + UIA 多層 fallback 穩定回放。' },
 ]
 
-function NodeGuideModal({ onClose }: { onClose: () => void }) {
+export function NodeGuideModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
       onClick={onClose}>
@@ -160,7 +160,6 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   const setChatUIState = useWorkflowStore(s => s.setChatUIState)
 
   const [showChat, setShowChat] = useState(false)
-  const [showNodeGuide, setShowNodeGuide] = useState(false)
   const [messages, setMessages] = useState<ChatMsg[]>([
     { role: 'assistant', content: '你好！請告訴我你想自動化的工作流程，我會幫你產生 Pipeline YAML 設定。\n\n（正在載入專案路徑資訊…）' }
   ])
@@ -405,28 +404,12 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   // 額外行為(User 反饋):新對話 = 跟 Hero 連動、開啟 Hero overlay。
   // 因為「新對話」跟 Hero 本質是同一個入口(全新空白對話的開始)、
   // 點下去應該回到那個視覺最強的 Hero 介面、提供範例卡片 / CTA 給使用者選下一步。
-  const handleClearChat = async () => {
+  // 「➕ 新工作流」= 開啟 Hero 全新工作流設計入口(範例卡片 / CTA)。
+  // 設計邏輯:新工作流 = 全新空白起點,Hero 本來就是非破壞性 overlay(不繼承
+  // 也不 persist 對話)。當前工作流的對話綁定 workflow_id、不需清空 —— 從左側
+  // 清單切回該工作流即在。故這裡只切到 hero state,不清空、不解綁、不彈確認框。
+  const handleNewWorkflow = () => {
     if (loading) return
-    if (!confirm(
-      '開啟新對話?\n\n' +
-      '• 畫布與 YAML 不變\n' +
-      '• Sidebar 的對話會清空、且暫時與當前工作流解綁\n' +
-      '• 會彈出 Hero 對話視窗(類似首頁、有範例卡片)\n' +
-      '• 想回到原工作流的討論:從左邊清單切換工作流即可重新綁定'
-    )) return
-    const welcome: ChatMsg = {
-      role: 'assistant',
-      content: envPaths ? buildWelcomeMessage(envPaths)
-        : '你好！請告訴我你想自動化的工作流程，我會幫你產生 Pipeline YAML 設定。',
-    }
-    setMessages([welcome])
-    setChatUnbound(true)
-    if (activeId) {
-      try { await clearWorkflowChat(activeId) } catch { toast.error('清空失敗') }
-    } else {
-      try { localStorage.removeItem(SCRATCH_LS_KEY) } catch {/* ignore */}
-    }
-    // 跟 Hero 連動 — 切到 hero state、Hero overlay 自動出現
     setChatUIState('hero')
   }
 
@@ -464,52 +447,54 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
           : 'border-t border-gray-100 flex flex-col'
       }
     >
-      {/* Toggle button */}
+      {/* Toggle button — 放大強調,讓使用者一眼看到左下角可開 AI 助手求助 */}
       <button
         onClick={() => setShowChat(!showChat)}
-        className={`flex items-center gap-2 px-4 py-3 text-sm transition-colors ${
-          showChat ? 'text-indigo-600 bg-indigo-50' : 'text-gray-600 hover:text-indigo-600 hover:bg-gray-50'
+        title="點開 AI 助手,用白話描述就能建立 / 修改工作流"
+        className={`w-full flex items-center gap-2.5 px-4 py-3 transition-colors ${
+          showChat
+            ? 'text-indigo-700 bg-indigo-50'
+            : 'text-indigo-700 bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100'
         }`}
       >
-        <Bot className="w-4 h-4 shrink-0" />
-        <span className="font-medium flex-1 text-left">AI 助手</span>
-        {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" />}
-        {!loading && (showChat ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />)}
+        <span className={`flex items-center justify-center w-8 h-8 rounded-lg shrink-0 ${showChat ? 'bg-indigo-100 text-indigo-600' : 'bg-indigo-600 text-white shadow-sm'}`}>
+          <Bot className="w-5 h-5" />
+        </span>
+        <span className="flex-1 text-left min-w-0">
+          <span className="block text-[15px] font-bold leading-tight">AI 助手</span>
+          {!showChat && <span className="block text-[11px] text-indigo-500/90 leading-tight">需要幫忙?點我用 AI 建立 / 修改工作流</span>}
+        </span>
+        {loading && <Loader2 className="w-4 h-4 animate-spin text-indigo-500 shrink-0" />}
+        {!loading && (showChat ? <ChevronDown className="w-4 h-4 shrink-0" /> : <ChevronUp className="w-4 h-4 shrink-0" />)}
       </button>
 
       {/* Chat panel */}
       {showChat && (
         <div className="flex flex-col flex-1 min-h-0 border-t border-gray-100">
           {/* Sub-toolbar：顯示目前綁定的工作流 + 新話題按鈕 */}
-          <div className="flex items-center justify-between px-2.5 py-1.5 bg-gray-50/50 border-b border-gray-100 text-[11px] text-gray-500">
-            <span className="truncate">
+          <div className="flex flex-col gap-1 px-2.5 py-1.5 bg-gray-50/50 border-b border-gray-100 text-[11px] text-gray-500">
+            {/* 第一行：綁定指示獨立整行、長工作流名換行不截斷 */}
+            <div className="min-w-0 break-words leading-snug">
               {chatUnbound ? (
                 <>🆕 新話題（未綁工作流；切換 / 重選工作流即重新綁定）</>
               ) : activeId ? (
-                <>💾 對話綁定工作流：<span className="text-gray-700 font-medium">{workflows.find(w => w.id === activeId)?.name || activeId}</span></>
+                <span className="text-[13px] text-gray-600">💾 對話綁定工作流：<span className="text-[14px] font-bold text-blue-700 break-all">{workflows.find(w => w.id === activeId)?.name || activeId}</span></span>
               ) : (
                 <>📝 暫存模式（未選工作流；建立 / 選取後才會持久保存）</>
               )}
-            </span>
-            <div className="shrink-0 ml-2 flex items-center gap-1">
+            </div>
+            {/* 第二行：操作按鈕靠右(節點介紹已移到上方工具列、YAML 左側)*/}
+            <div className="flex items-center justify-end gap-1">
               <button
-                onClick={() => setShowNodeGuide(true)}
-                className="px-1.5 py-0.5 rounded text-[11px] text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 transition-colors font-medium"
-                title="看有哪些節點、各自適合什麼"
-              >
-                📖 節點介紹
-              </button>
-              <button
-                onClick={handleClearChat}
+                onClick={handleNewWorkflow}
                 disabled={loading}
-                className="px-1.5 py-0.5 rounded text-[11px] text-gray-500 hover:text-red-600 hover:bg-red-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                title="清空目前對話，開始新話題"
+                className="px-1.5 py-0.5 rounded text-[11px] text-blue-600 hover:text-blue-700 hover:bg-blue-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors font-medium"
+                title="開啟全新工作流設計(範例卡片/CTA);不會清空目前對話,切回左側工作流即在"
               >
-                🗑️ 新話題
+                ➕ 新工作流
               </button>
             </div>
           </div>
-          {showNodeGuide && <NodeGuideModal onClose={() => setShowNodeGuide(false)} />}
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-2.5 space-y-2.5">
             {messages.map((msg, i) => (
@@ -633,7 +618,14 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
             <textarea
               value={input}
               onChange={e => setInput(e.target.value)}
-              placeholder="描述你的工作流…（Enter 換行）"
+              onKeyDown={e => {
+                // Shift+Enter 送出;Enter 純換行(輸入框小、避免誤送)
+                if (e.key === 'Enter' && e.shiftKey) {
+                  e.preventDefault()
+                  if (input.trim() && !loading) handleSend()
+                }
+              }}
+              placeholder="描述你的工作流…(Shift+Enter 送出 · Enter 換行)"
               disabled={loading}
               rows={2}
               className="flex-1 border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 transition-colors disabled:bg-gray-50 resize-none"
@@ -813,7 +805,7 @@ interface AtlasAction {
   title: string
   desc: string
   tag: string
-  examples: [string, string, string]
+  examples: string[]
 }
 
 // 卡片內容對齊 V5 真實節點集合(網頁爬蟲 / AI 技能 / 多代理 / 人工確認 / Outlook
