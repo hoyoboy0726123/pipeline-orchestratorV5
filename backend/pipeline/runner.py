@@ -342,6 +342,30 @@ async def _tg_send(chat_id: int, text: str, reply_markup=None):
         logger.error(f"[Telegram] ❌ 發送失敗：{e}")
 
 
+async def _tg_send_long(chat_id: int, text: str, reply_markup=None):
+    """發長訊息:超過 TG 單則上限(4096)就在換行處分段送、不截斷(自我修復報告等用)。
+    只有最後一段帶 reply_markup。呼叫端負責 HTML escape(因為用 parse_mode=HTML)。"""
+    CHUNK = 3500  # 留 HTML tag / 前綴餘裕
+    if len(text) <= CHUNK:
+        await _tg_send(chat_id, text, reply_markup)
+        return
+    parts: list[str] = []
+    rest = text
+    while rest:
+        if len(rest) <= CHUNK:
+            parts.append(rest)
+            break
+        cut = rest.rfind("\n", 0, CHUNK)
+        if cut < CHUNK // 2:   # 找不到合適換行就硬切
+            cut = CHUNK
+        parts.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n")
+    total = len(parts)
+    for i, p in enumerate(parts):
+        prefix = "" if i == 0 else f"<i>(續 {i + 1}/{total})</i>\n"
+        await _tg_send(chat_id, prefix + p, reply_markup if i == total - 1 else None)
+
+
 # 送 TG photo 的壓縮參數：一律壓縮（不看原檔大小），讓每張 traffic 一致、傳輸時間接近
 # → 避免「大的壓了變小、小的沒壓還是大」的不對稱上傳時間造成誤判 timeout + 重複訊息
 # 長寬上限：1920（TG 本來就會壓到 ~1280 顯示，1920 已經足夠清楚，肉眼看不出差）
@@ -1170,7 +1194,8 @@ async def _notify_failure(run: PipelineRun, val: ValidationResult, step_name: st
         text += f"💡 建議：{val.suggestion}\n"
     text += "\n請選擇處理方式："
     has_prev = run.current_step > 0
-    await _tg_send(run.telegram_chat_id, text, _decision_keyboard(run.run_id, has_prev=has_prev))
+    # 失敗原因 / AI 建議可能很長 → 分段送、不截斷(鍵盤放最後一段)
+    await _tg_send_long(run.telegram_chat_id, text, _decision_keyboard(run.run_id, has_prev=has_prev))
 
 
 async def _notify_final(run: PipelineRun, config: PipelineConfig):
@@ -2981,9 +3006,13 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
         logger.info(
             "自我修復套用新 YAML、從步驟 " + str(restart_idx + 1) + " 重跑。診斷:" + reply[:150]
         )
-        await _notify_self_heal(
-            run, "✅ AI 已修復、從步驟 " + str(restart_idx + 1) + " 重跑。\n修了什麼:" + reply[:300]
+        import html as _html_heal
+        _heal_msg = (
+            f"🔧 <b>{_html_heal.escape(run.pipeline_name)}</b>\n"
+            f"✅ AI 已修復、從步驟 {restart_idx + 1} 重跑。\n\n"
+            f"修了什麼:\n{_html_heal.escape(reply)}"
         )
+        await _tg_send_long(run.telegram_chat_id, _heal_msg)
 
         async def _delayed_heal_start():
             await asyncio.sleep(0.3)
