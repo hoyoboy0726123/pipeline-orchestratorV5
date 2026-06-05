@@ -1866,6 +1866,52 @@ async def _poll_loop():
                         pass
                     continue
 
+                # ── 自我修復成功 → 把修好的 YAML 存回工作流（pipe_heal_writeback）──
+                # 對齊 web 完成卡片的「存回工作流」,讓遠端使用者也能拍板。邏輯同
+                # main.py 的 /heal-writeback endpoint:把 run.config_dict(已含修好的 YAML)寫回。
+                if action == "heal_writeback":
+                    try:
+                        from pipeline.store import get_store
+                        from db import update_workflow
+                        import yaml as _yaml
+                        run = get_store().load(run_id)
+                        if not run or not run.workflow_id:
+                            await cb.answer("❌ 找不到 run 或無關聯工作流")
+                            continue
+                        clean = {k: v for k, v in (run.config_dict or {}).items() if not k.startswith("_")}
+                        yaml_str = _yaml.safe_dump(clean, allow_unicode=True, sort_keys=False)
+                        patch = {"yaml": yaml_str}
+                        try:
+                            from yaml_to_canvas import yaml_to_canvas
+                            _cv = yaml_to_canvas(yaml_str)
+                            if _cv:
+                                patch["canvas"] = _cv
+                        except Exception:
+                            pass
+                        wf = update_workflow(run.workflow_id, patch)
+                        await cb.answer("✅ 已存回")
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id,
+                            text=f"💾 已把修好的版本存回工作流「{(wf or {}).get('name', '')}」,下次跑同工作流不會再踩同樣的錯。",
+                        )
+                    except Exception as e:
+                        logger.error(f"heal_writeback failed: {e}")
+                        try: await cb.answer(f"❌ {str(e)[:150]}")
+                        except Exception: pass
+                    continue
+
+                # ── 自我修復成功但選擇不存回（pipe_heal_dismiss）──
+                if action == "heal_dismiss":
+                    try:
+                        await cb.answer("好的")
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id,
+                            text="👌 這次的修正只用於本次執行,工作流存檔維持原樣。",
+                        )
+                    except Exception:
+                        pass
+                    continue
+
                 # ── 遠端遙控：從 TG 啟動工作流 ──
                 if action in ("start_wf", "force_start_wf"):
                     # 必須通過授權檢查

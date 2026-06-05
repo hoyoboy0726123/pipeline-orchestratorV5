@@ -1213,6 +1213,26 @@ async def _notify_final(run: PipelineRun, config: PipelineConfig):
     )
     await _tg_send(run.telegram_chat_id, text)
 
+    # 自我修復成功 → 把「要不要存回工作流」的決策也推到 TG(對齊 web 完成卡片,
+    # 讓人在遠端時也能決定;不存則修正只用於本次執行)。callback 由 telegram_handler 接。
+    if run.status == "completed" and getattr(run, "self_heal_count", 0) > 0 and run.workflow_id:
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            _kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("💾 存回工作流", callback_data=f"pipe_heal_writeback:{run.run_id}"),
+                InlineKeyboardButton("不用，這次就好", callback_data=f"pipe_heal_dismiss:{run.run_id}"),
+            ]])
+            await _tg_send(
+                run.telegram_chat_id,
+                f"🔧 <b>{run.pipeline_name}</b> 剛剛是 AI 自動修復後跑成功的。\n\n"
+                f"要把 AI 修好的版本<b>存回這個工作流</b>嗎?\n"
+                f"• 存回 → 下次跑同工作流不會再踩同樣的錯\n"
+                f"• 不用 → 這次的修正只用於本次執行",
+                _kb,
+            )
+        except Exception as _e:
+            logging.getLogger("pipeline").warning(f"[Telegram] 自我修復存回提示發送失敗(忽略):{_e}")
+
 
 # ── Deterministic validation (fast recipe mode) ──────────────────────────────
 
