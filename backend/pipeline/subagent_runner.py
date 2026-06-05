@@ -387,6 +387,7 @@ def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
 本 step 的 run_python / run_shell **在 Linux Docker 容器內執行**:
 - OS = Linux:沒有 win32com / pywin32 / PowerShell;用純 Python / Linux 工具
 - Windows 路徑要轉:`C:\\X\\...` → `/mnt/c/X/...`、`D:\\X\\...` → `/mnt/d/X/...`
+- ⚠️ **程式碼裡寫死的路徑系統會自動轉;但「從資料讀出來的路徑」不會**(Excel 儲存格 / CSV / JSON 值裡的 `C:\\...` 或 `C:/...`)。拿這種路徑去 `open()` / `os.path.exists()` / `add_picture()` 前,**先自己正規化成 `/mnt/c/...`**(反斜線也換成 `/`),否則檔案會被判定不存在、圖片/附件等功能會默默失效。建議寫個小 helper:把開頭 `[A-Za-z]:[\\/]` 的路徑轉 `/mnt/<碟符小寫>/...` 再用。
 - 專案根目錄:`{v5_root_wsl}`(任務裡的相對路徑以這個為基準)
 
 【⛔ 兩個 mount 不要混淆 — 寫產物搞錯位置 = step 找不到產物 fail】
