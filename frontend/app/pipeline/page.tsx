@@ -59,6 +59,7 @@ import {
   getPipelineRuns,
   getRecipeStatus, type RecipeStatus,
   deleteComputerUseAssets,
+  openOutputFolder,
 } from '@/lib/api'
 import type { PipelineRun } from '@/lib/types'
 import { computeCostUsd, formatCostUsd } from '@/lib/cost'
@@ -1767,6 +1768,22 @@ export default function PipelinePage() {
 
         {RunStatusIcon && <span>{RunStatusIcon}</span>}
         <div className="flex-1" />
+
+        {/* 輸出資料夾 — 在本機檔案總管開啟此工作流的輸出資料夾 */}
+        <button
+          onClick={async () => {
+            try {
+              const r = await openOutputFolder(pipelineName)
+              if (!r.existed) alert('此工作流尚無輸出,已開啟 ai_output 根目錄。')
+            } catch (e) {
+              alert('開啟輸出資料夾失敗:' + (e as Error).message)
+            }
+          }}
+          title="在檔案總管開啟此工作流的輸出資料夾,方便查看產出結果"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+        >
+          📂 輸出資料夾
+        </button>
 
         {/* 預覽指令 (dry-run) — 不執行、只渲染每個 step 變數展開後的指令文字 */}
         <button

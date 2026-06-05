@@ -138,6 +138,17 @@ export async function fsCheckVenv(dir: string): Promise<{ has_venv: boolean; pyt
   return res.json()
 }
 
+// 在本機檔案總管開啟某工作流的輸出資料夾(OUTPUT_BASE_PATH/<工作流名稱>/)。
+// 後端與使用者同機才有意義;找不到該資料夾 → 後端退回開 ai_output 根並回 existed=false。
+export async function openOutputFolder(name: string): Promise<{ opened: string; existed: boolean }> {
+  const res = await fetch(`${BASE}/fs/open-output?name=${encodeURIComponent(name)}`)
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({} as { detail?: string }))
+    throw new Error(e.detail || '開啟輸出資料夾失敗')
+  }
+  return res.json()
+}
+
 // 開 OS 原生檔案對話框(本機部署、後端與使用者同一台)。mode: open/save/dir。
 // 回 { path }(取消或無法開啟 → path=null,呼叫端可 fallback 到內建瀏覽 modal)。
 export async function fsNativePick(opts: {

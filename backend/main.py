@@ -1967,6 +1967,38 @@ async def fs_check_venv(dir: str):
     return {"has_venv": False, "python_path": None, "venv_dir_name": None}
 
 
+# ── 開啟輸出資料夾(本機部署用)───────────────────────────────────────
+@app.get("/fs/open-output")
+async def fs_open_output(name: str = ""):
+    """在本機檔案總管開啟某工作流的輸出資料夾(OUTPUT_BASE_PATH/<工作流名稱>/)。
+    後端與使用者同機(本機 app)才有意義。找不到該資料夾 → 退回開 OUTPUT_BASE_PATH 根。"""
+    import sys as _sys
+    import subprocess as _sp
+    from config import OUTPUT_BASE_PATH
+    base = Path(OUTPUT_BASE_PATH).resolve()
+    target = base
+    existed = False
+    if name:
+        cand = (base / name).resolve()
+        try:
+            cand.relative_to(base)   # 防路徑穿越:必須在 OUTPUT_BASE_PATH 底下
+        except ValueError:
+            raise HTTPException(status_code=400, detail="非法的工作流名稱")
+        if cand.is_dir():
+            target = cand
+            existed = True
+    try:
+        if _sys.platform.startswith("win"):
+            os.startfile(str(target))            # type: ignore[attr-defined]
+        elif _sys.platform == "darwin":
+            _sp.Popen(["open", str(target)])
+        else:
+            _sp.Popen(["xdg-open", str(target)])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"開啟資料夾失敗:{e}")
+    return {"opened": str(target), "existed": existed}
+
+
 # ── Log Analysis ──────────────────────────────────────────────
 # 常見 module → pip 套件名稱對映（module 名與 pip 名不同的情況）
 _MODULE_TO_PIP = {
