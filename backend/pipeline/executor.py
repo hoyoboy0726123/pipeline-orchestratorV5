@@ -1274,7 +1274,10 @@ def _skill_export_var(input_str: str, cwd: Optional[str] = None) -> str:
         return "[錯誤] export_var 的 name 不能為空"
     value = d.get("value")
     try:
-        base = Path(cwd) if cwd else Path(".")
+        # skill 在 WSL 沙盒跑時 cwd 是 /mnt/c/... → host(Windows)上 Path("/mnt/c/..") 會解成
+        # 磁碟根的 \mnt\c\.. bogus 路徑、寫入 FileNotFoundError(其它工具都有做這轉換、唯獨這裡漏了)。
+        # 轉成 Windows 路徑後才寫,runner 才讀得到 _step_export.json → 變數才進得了 step_vars。
+        base = Path(_wsl_to_windows_path(cwd)) if cwd else Path(".")
         export_f = base / "_step_export.json"
         existing: dict = {}
         if export_f.is_file():
@@ -3904,9 +3907,21 @@ async def _execute_skill_native_loop(
     from pipeline.sandbox_tools import build_subagent_tools
     import time as _time  # recipe runtime 計算用(native loop 區域、與 text loop 對齊)
 
-    # SKILL 預設工具集(白名單 = 完整集、跟既有 text loop dispatch 對齊)
-    # view_image 暫不含(multimodal 回傳 LangChain 處理較複雜、A.2 MVP 不做、LLM 改用 run_python 自己讀 base64)
-    allowed_tools = {"run_python", "run_shell", "read_file", "web_search", "ask_user", "done"}
+    # SKILL 完整工具集 = 跟 _execute_skill_tool dispatch + system prompt 教的工具對齊。
+    # (含 write_file/edit_file/grep/glob/view_image —— 這些 prompt 有教、dispatch 接得住,
+    #  之前 native 遷移漏註冊導致一呼叫就被擋,屬與 export_var 同類的 native FC 副作用。)
+    # view_image 由 native loop 特判 tc_name 走多模態注入(見下方 view_image 處理)。
+    allowed_tools = {"run_python", "run_shell", "read_file", "write_file", "edit_file",
+                     "grep", "glob", "view_image", "ask_user", "export_var", "done"}
+    # web_search 與 system prompt 的「條件揭露」對齊:沒開 / 沒 tavily key 就不註冊,
+    # 避免 native 模式下工具 schema 仍餵給 LLM、被呼叫卻無效(gate 失效)。
+    try:
+        from settings import get_settings as _gs_ws
+        _ws_cfg = _gs_ws()
+        if _ws_cfg.get("web_search_enabled", True) and _ws_cfg.get("tavily_api_key"):
+            allowed_tools.add("web_search")
+    except Exception:
+        allowed_tools.add("web_search")  # 取不到設定 → 保守保留(維持舊行為)
     web_counter = {"count": 0}
 
     tools = build_subagent_tools(
@@ -4250,6 +4265,30 @@ async def _execute_skill_native_loop(
                     _out_mtime_before = Path(output_path).stat().st_mtime
                 except Exception:
                     _out_mtime_before = None
+
+            # view_image 特判:走多模態注入(讀圖→base64→image_url),不走泛用 dispatch
+            # (泛用 dispatch 只會回 "__VIEW_IMAGE__" sentinel、對 LLM 無意義)。
+            if tc_name == "view_image":
+                _vi_path = tc_args.get("path", "") if isinstance(tc_args, dict) else str(tc_args)
+                _vi = await asyncio.get_event_loop().run_in_executor(None, _skill_view_image, _vi_path)
+                _vi_text = _vi.get("text", "") if isinstance(_vi, dict) else str(_vi)
+                logger.info(f"[{step_name}] view_image:{_vi_text}")
+                all_stdout.append(f"[view_image] {_vi_text}")
+                acc_tool_calls.append({
+                    "name": "view_image",
+                    "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                    "result_preview": _vi_text[:300],
+                })
+                # 先回 ToolMessage 滿足 tool_call 配對,再 append 帶圖的 HumanMessage(視覺模型才看得到圖)
+                messages.append(ToolMessage(content=f"[view_image] {_vi_text}", tool_call_id=tc_id))
+                if isinstance(_vi, dict) and _vi.get("image_b64"):
+                    messages.append(_HM(content=[
+                        {"type": "text", "text": f"[view_image 圖片]\n{_vi_text}\n請觀察圖片內容後再決定下一步。"},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{_vi.get('image_mime', 'image/png')};base64,{_vi['image_b64']}"
+                        }},
+                    ]))
+                continue
 
             tool_fn = name_to_tool.get(tc_name)
             try:

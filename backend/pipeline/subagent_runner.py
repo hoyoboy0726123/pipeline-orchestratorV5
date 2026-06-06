@@ -47,7 +47,7 @@ BUILTIN_ROLE_IDS = {"data_analyst", "coder", "researcher", "critic", "planner"}
 SELECTABLE_TOOLS = ["run_python", "run_shell", "read_file", "web_search", "view_image", "ask_user"]
 
 # Subagent 一律允許的工具（即使 role 沒列、也讓 LLM 用 done 終止）
-_ALWAYS_ALLOWED = {"done"}
+_ALWAYS_ALLOWED = {"done", "export_var"}
 
 # 已知工具集（供防禦解析驗證 tool_name 是否乾淨）
 _KNOWN_TOOLS = {"run_python", "run_shell", "read_file", "web_search", "view_image", "done", "ask_user"}
