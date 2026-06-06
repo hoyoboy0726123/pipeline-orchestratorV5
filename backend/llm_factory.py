@@ -136,7 +136,7 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         thinking = cfg.get("ollama_thinking", "off")
-        num_ctx = cfg.get("ollama_num_ctx", 16384)
+        num_ctx = cfg.get("ollama_num_ctx", 32768)
         kwargs = {
             "model": model,
             "base_url": cfg.get("ollama_base_url") or "http://localhost:11434",

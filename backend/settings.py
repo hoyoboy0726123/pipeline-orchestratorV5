@@ -16,7 +16,7 @@ _DEFAULT = {
     "model": GROQ_MODEL_MAIN,      # e.g. "meta-llama/llama-4-scout-17b-16e-instruct" or "qwen3:8b"
     "ollama_base_url": "http://localhost:11434",
     "ollama_thinking": "off",      # "auto" | "on" | "off" — 預設關閉，避免 thinking 模式 rambling 卡住
-    "ollama_num_ctx": 16384,       # Ollama context window tokens（僅 Ollama）
+    "ollama_num_ctx": 32768,       # Ollama context window tokens（僅 Ollama）；本應用 system prompt 約 17~22k，低於 32768 會截斷
     "gemini_thinking": "off",      # "off" | "auto" | "low" | "medium" | "high"
     "anthropic_thinking": "off",   # "off" | "on" — Claude Opus 4 系列 extended thinking
     # ── 副模型(節點可在 panel 選 llm_role: secondary 切到這個)──
