@@ -4508,7 +4508,118 @@ _OUTLOOK_TEMPLATES_FOR_PROMPT = [
 ]
 
 
-def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
+# ── 漸進揭露(progressive disclosure):核心常駐 + 節點專屬大段依意圖注入 ──────────
+# 把底稿按 h1/h2 標題切塊;「節點專屬」的大段(subagent 全套、既有專案、爬蟲、condition…)
+# 只在對話提到該節點意圖時才保留,其餘剝掉。核心(對話流程/安全/路徑/變數/節點清單)永遠留。
+# 目的:核心從 ~32k token 降到 ~13-15k、弱模型注意力不被稀釋。
+# 安全:意圖偵測偏寬鬆(寧可多留);convo_text 空 → 原樣返回(向後相容、不影響舊呼叫)。
+#
+# (node_key, [標題關鍵字 — 塊標題命中即歸此節點], [意圖關鍵字 — 對話命中才保留該節點段])
+_INJECTABLE_NODE_GROUPS = [
+    ("python_project",
+     ["啟動既有 Python 專案"],
+     ["專案", "project", "main.py", "venv", "gui", "streamlit", "flask", "fastapi",
+      "django", "既有的程式", "我的程式", "我的專案", "跑我的", "接進", "轉成 cli", "cli 化"]),
+    ("crawler",
+     ["網頁爬蟲節點", "解析爬蟲內容", "影片爬蟲", "RSS / Atom"],
+     ["爬", "抓網", "網頁", "網站", "論壇", "比價", "reddit", "momo", "蝦皮", "商品頁",
+      "留言", "評論", "貼文", "http", "feed", "rss", "訂閱", "影片", "youtube", "ptt", "dcard",
+      "web_crawler", "wc_url", "scraped-content-parser"]),
+    ("condition",
+     ["條件節點", "分支控制流"],
+     ["判斷", "如果", "條件", "分支", "否則", "大於", "小於", "超過", "低於", "達標",
+      "switch", "符合就", "才寄", "才做", "視情況", "依結果", "依...決定",
+      "condition:", "expression", "on_true", "on_false"]),
+    ("subagent",
+     ["多輪代理節點", "subagent"],
+     ["子代理", "多代理", "多輪", "研究", "評估", "競品", "探索", "彙整", "深度",
+      "盤點", "調查", "逐一", "分別處理", "撰寫報告", "分析報告", "agent"]),
+    ("human_confirm",
+     ["人工確認節點"],
+     ["確認", "審批", "人工", "等我", "通知我", "核可", "批准", "我看過", "讓我先看",
+      "human_confirm"]),
+    ("outlook",
+     ["Outlook 自動化節點"],
+     ["outlook", "郵件", "寄信", "收件", "email", "信箱", "寄給", "附件寄", "待辦信"]),
+    ("visual",
+     ["視覺驗證節點"],
+     ["視覺驗證", "截圖驗證", "看起來對", "版面", "排版對", "畫面對不對",
+      "visual_validation"]),
+    ("computer_use",
+     ["桌面自動化節點", "computer_use"],
+     ["點按", "按鈕", "操作軟體", "桌面自動", "自動點", "滑鼠", "鍵盤", "uia", "點視窗"]),
+]
+
+
+def _split_prompt_blocks(text: str) -> list:
+    """按行首 h1/h2(`# ` / `## `)切塊;h3 留在所屬 h2 內。回傳 [(title_line|None, block_text)]。"""
+    import re as _re
+    blocks, cur_title, cur = [], None, []
+    for ln in text.split("\n"):
+        if _re.match(r"^#{1,2}\s", ln):
+            if cur:
+                blocks.append((cur_title, "\n".join(cur)))
+            cur_title, cur = ln, [ln]
+        else:
+            cur.append(ln)
+    if cur:
+        blocks.append((cur_title, "\n".join(cur)))
+    return blocks
+
+
+def _detect_needed_nodes(convo_text: str) -> set:
+    t = (convo_text or "").lower()
+    needed = set()
+    for key, _titles, intents in _INJECTABLE_NODE_GROUPS:
+        if any(kw.lower() in t for kw in intents):
+            needed.add(key)
+    return needed
+
+
+def _classify_block(title_line) -> "Optional[str]":
+    """此塊歸屬的 node_key;None = 核心(永遠保留)。"""
+    if not title_line:
+        return None
+    for key, titles, _intents in _INJECTABLE_NODE_GROUPS:
+        if any(tm in title_line for tm in titles):
+            return key
+    return None
+
+
+def _apply_progressive_disclosure(base: str, convo_text: str) -> str:
+    """核心常駐 + 命中意圖的節點段保留,其餘剝掉。convo_text 空 → 原樣返回(相容)。"""
+    if not convo_text:
+        return base
+    needed = _detect_needed_nodes(convo_text)
+    kept = []
+    for title, body in _split_prompt_blocks(base):
+        node = _classify_block(title)
+        if node is None or node in needed:
+            kept.append(body)
+    return "\n".join(kept)
+
+
+def _convo_text_for_disclosure(req) -> str:
+    """漸進揭露的意圖偵測來源:近幾則對話 + (編輯既有工作流時)該工作流 YAML。
+    把 YAML 納入 → 編輯含 condition/subagent/crawler… 的工作流時也會帶回對應節點段。"""
+    try:
+        msgs = getattr(req, "messages", None) or []
+        parts = [str(m.get("content", "")) for m in msgs[-8:] if isinstance(m, dict)]
+        wid = getattr(req, "workflow_id", None)
+        if wid:
+            try:
+                import db as _db
+                wf = _db.get_workflow(wid)
+                if wf and wf.get("yaml"):
+                    parts.append(wf["yaml"])
+            except Exception:
+                pass
+        return "\n".join(parts)
+    except Exception:
+        return ""  # 出錯 → 空字串 → 全留(安全 fallback)
+
+
+def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = "") -> str:
     """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills + Outlook 模板清單。
 
     channel:
@@ -4535,6 +4646,8 @@ def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
             base,
             flags=_re.DOTALL,
         )
+    # ── 漸進揭露:核心常駐、節點專屬大段依對話意圖注入(convo_text 空則全留)──
+    base = _apply_progressive_disclosure(base, convo_text)
     parts = [base]
     # ── Agent Skills 清單 ──────────────────────────────────────────────
     try:
@@ -5014,7 +5127,8 @@ async def _chat_agent_loop(
     # TG 通道才放 dispatch_subagent_async / check_subagent_status 兩個 ad-hoc 子代理工具
     # + 帶 in-flight digest 教學區塊。
     _channel = "telegram" if on_tool_event is not None else "desktop"
-    system_prompt = _build_pipeline_system_prompt(channel=_channel)
+    _convo_for_disclosure = _convo_text_for_disclosure(req)
+    system_prompt = _build_pipeline_system_prompt(channel=_channel, convo_text=_convo_for_disclosure)
     if req.workflow_id:
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
@@ -5255,7 +5369,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
 
     # SSE stream 端點(/pipeline/chat/stream)是給桌面 chat 用、永遠 desktop 通道。
     # TG handler 不走 stream、直接 await _chat_agent_loop。
-    system_prompt = _build_pipeline_system_prompt(channel="desktop")
+    system_prompt = _build_pipeline_system_prompt(channel="desktop", convo_text=_convo_text_for_disclosure(req))
     if req.workflow_id:
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
