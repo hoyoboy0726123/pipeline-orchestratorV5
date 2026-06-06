@@ -1889,10 +1889,28 @@ async def _poll_loop():
                         except Exception:
                             pass
                         wf = update_workflow(run.workflow_id, patch)
+                        # 與 main.py /heal-writeback 一致:寫回 YAML 同時落地延遲 recipe，
+                        # workflow batch 與 recipe task_hash 才一致，下次跑 0 成本命中。
+                        recipes_saved = 0
+                        if run.pending_recipes:
+                            from db import save_recipe as _db_save_recipe
+                            for r in run.pending_recipes:
+                                try:
+                                    _db_save_recipe(
+                                        r["pipeline_id"], r["step_name"], r["task_hash"],
+                                        r["input_fingerprints"], r["output_path"], r["code"],
+                                        r["python_version"], r["runtime_sec"],
+                                    )
+                                    recipes_saved += 1
+                                except Exception:
+                                    pass
+                            run.pending_recipes = []
+                            get_store().save(run)
                         await cb.answer("✅ 已存回")
+                        _recipe_note = f"\n📦 同時存下 {recipes_saved} 筆 recipe,下次跑可 0 成本重播。" if recipes_saved else ""
                         await _bot_instance.send_message(
                             chat_id=cb.message.chat_id,
-                            text=f"💾 已把修好的版本存回工作流「{(wf or {}).get('name', '')}」,下次跑同工作流不會再踩同樣的錯。",
+                            text=f"💾 已把修好的版本存回工作流「{(wf or {}).get('name', '')}」,下次跑同工作流不會再踩同樣的錯。{_recipe_note}",
                         )
                     except Exception as e:
                         logger.error(f"heal_writeback failed: {e}")

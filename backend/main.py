@@ -2599,7 +2599,26 @@ async def heal_writeback(run_id: str):
     wf = update_workflow(run.workflow_id, patch)
     if not wf:
         raise HTTPException(status_code=404, detail="找不到要回寫的工作流")
-    return {"ok": True, "workflow_id": run.workflow_id, "name": wf.get("name", "")}
+    # 寫回 YAML 的同時，把修復後產生的延遲 recipe 一併落地：
+    # workflow 的 batch 此刻才變成修好的版本(task_hash X'),recipe 也存 X' 兩者才一致，
+    # 下次跑同工作流才能 0 成本命中。不寫回就不存(避免存了卻永遠對不上的孤兒 recipe)。
+    recipes_saved = 0
+    if run.pending_recipes:
+        from db import save_recipe as _db_save_recipe
+        for r in run.pending_recipes:
+            try:
+                _db_save_recipe(
+                    r["pipeline_id"], r["step_name"], r["task_hash"],
+                    r["input_fingerprints"], r["output_path"], r["code"],
+                    r["python_version"], r["runtime_sec"],
+                )
+                recipes_saved += 1
+            except Exception:
+                pass
+        run.pending_recipes = []
+        get_store().save(run)
+    return {"ok": True, "workflow_id": run.workflow_id, "name": wf.get("name", ""),
+            "recipes_saved": recipes_saved}
 
 
 @app.delete("/pipeline/runs/{run_id}")

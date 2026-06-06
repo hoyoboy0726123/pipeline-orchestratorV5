@@ -2901,6 +2901,23 @@ async def _enter_self_heal(run, val, step, step_num, exec_result, logger) -> Non
     ))
 
 
+def _strip_heal_yaml(text: str) -> str:
+    """自我修復「修了什麼」顯示用:砍掉 LLM reply 裡的 YAML_READY 標記與 ```yaml``` 區塊。
+    YAML 已由系統另行解析套用(new_yaml),不需在給人看的訊息裡重複列出整包展開欄位
+    (cu_mode / wc_* / outlook_* 等預設值),否則使用者只會看到一大坨雜訊。"""
+    import re as _re
+    if not text:
+        return text
+    # 砍掉 YAML_READY 標記(含)之後的所有內容 —— 說明都在標記之前
+    m = _re.search(r"\n?\s*YAML_READY\b", text)
+    if m:
+        text = text[:m.start()]
+    # 保險:沒有 YAML_READY 但有 ```yaml fenced block 時也一併移除
+    text = _re.sub(r"```ya?ml\b.*?```", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+    text = _re.sub(r"```\s*```", "", text)  # 殘留空 fence
+    return text.strip()
+
+
 async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index,
                                      fail_reason, fail_suggestion, stderr_tail):
     """背景:讀 log → AI 改 YAML → 套用 → 從失敗步重跑。失敗則 fallback 人工。"""
@@ -2982,10 +2999,11 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
             if k.startswith("_") and k not in new_dict:
                 new_dict[k] = v
 
+        clean_reply = _strip_heal_yaml(reply)  # 去掉整包 YAML、只留診斷說明
         import hashlib as _hl
         run.self_heal_history = list(prior) + [{
             "attempt": run.self_heal_count,
-            "diagnosis": reply[:600],
+            "diagnosis": clean_reply[:600],
             "old_yaml_hash": _hl.md5(current_yaml.encode("utf-8", "replace")).hexdigest()[:12],
         }]
         run.config_dict = new_dict
@@ -3004,13 +3022,13 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
         run.status = "running"
         store_.save(run)
         logger.info(
-            "自我修復套用新 YAML、從步驟 " + str(restart_idx + 1) + " 重跑。診斷:" + reply[:150]
+            "自我修復套用新 YAML、從步驟 " + str(restart_idx + 1) + " 重跑。診斷:" + clean_reply[:150]
         )
         import html as _html_heal
         _heal_msg = (
             f"🔧 <b>{_html_heal.escape(run.pipeline_name)}</b>\n"
             f"✅ AI 已修復、從步驟 {restart_idx + 1} 重跑。\n\n"
-            f"修了什麼:\n{_html_heal.escape(reply)}"
+            f"修了什麼:\n{_html_heal.escape(clean_reply)}"
         )
         await _tg_send_long(run.telegram_chat_id, _heal_msg)
 
