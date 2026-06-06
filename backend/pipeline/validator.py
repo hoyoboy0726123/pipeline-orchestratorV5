@@ -571,6 +571,37 @@ def _office_texts(p: Path) -> list[str]:
     return texts
 
 
+_OOXML_EXTS = {'.docx', '.xlsx', '.pptx'}
+
+
+def office_format_mismatch(path: Optional[str]) -> Optional[str]:
+    """Office 副檔名(.docx/.xlsx/.pptx)但檔案開頭不是 ZIP magic(PK)→ 回傳問題描述字串;
+    正常 / 非 Office 副檔名 / 檔案不存在 → None。
+
+    最常見的假檔:把 markdown / 純文字直接存成 .docx(開頭是 '# ' 之類)。真正的 OOXML 是 zip、
+    開頭一定是 b'PK'。這個檢查決定性、模型無關,skill 與 subagent 都適用。"""
+    if not path:
+        return None
+    try:
+        p = _resolve_user_path(path)
+    except Exception:
+        return None
+    if p.suffix.lower() not in _OOXML_EXTS or not (p.exists() and not p.is_dir()):
+        return None
+    try:
+        with open(p, "rb") as f:
+            head = f.read(4)
+    except Exception:
+        return None
+    if head[:2] != b"PK":
+        preview = head.decode("latin-1", "replace").strip()
+        return (
+            f"輸出檔 {p.name} 副檔名是 Office 格式,但檔案開頭不是 ZIP(PK)、而是「{preview}」——"
+            f"這不是真正的 {p.suffix.lower()} 檔(很可能是 markdown / 純文字被直接改副檔名存成它)。"
+        )
+    return None
+
+
 def _deterministic_precheck(
     step_name: str, command: str, output_path: Optional[str],
     output_expect: Optional[str], logger: logging.Logger,
@@ -579,6 +610,18 @@ def _deterministic_precheck(
     直接判 failed、None 代表通過、交給後續 LLM 驗證。"""
     if not output_path:
         return None
+    # 0) Office 副檔名但實際不是 OOXML(開頭非 PK)→ 假檔(常見:markdown 存成 .docx)
+    _fake = office_format_mismatch(output_path)
+    if _fake:
+        logger.warning(f"[{step_name}] 確定性檢查:{_fake} → 判 failed")
+        return ValidationResult(
+            status="failed",
+            reason=_fake,
+            suggestion=(
+                "請用對應函式庫實際產生 Office 檔:Word 用 python-docx(Document().save())、"
+                "Excel 用 openpyxl、PPT 用 python-pptx —— 不要把 markdown / 純文字直接改副檔名存成 Office 檔。"
+            ),
+        )
     # 1) 殘留 {{}} 佔位標籤 → 沒填完
     leftover = _scan_leftover_placeholders(output_path)
     if leftover:

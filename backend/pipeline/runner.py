@@ -1301,6 +1301,18 @@ def _deterministic_validate(step, exec_result, logger, workflow_name: str = "") 
                 reason=f"輸出檔案 {step.output.path} 為空檔案（0 bytes）",
                 suggestion="Recipe 產生了空檔案，建議改用完整模式",
             )
+        # M6: Office 假檔(副檔名 .docx/.xlsx/.pptx 但內容非 ZIP)→ 判失敗,與 _deterministic_precheck 對齊。
+        try:
+            from .validator import office_format_mismatch as _ofm_r
+            _ofb_r = _ofm_r(str(p))
+        except Exception:
+            _ofb_r = None
+        if _ofb_r:
+            return ValidationResult(
+                status="failed",
+                reason=_ofb_r,
+                suggestion="Recipe 快取的程式碼產出了假 Office 檔、建議改用完整模式重學。",
+            )
         # CSV: 檢查有 header
         if p.suffix.lower() == ".csv":
             try:
@@ -1609,10 +1621,24 @@ async def _run_pipeline_inner(
                 run.step_results[run.current_step] = step_result
             else:
                 run.step_results.append(step_result)
-            run.status = "failed"
-            run.ended_at = datetime.now().isoformat()
+            # 變數展開失敗的根因幾乎都在「上游 step 沒 export 該變數 / 變數名拼錯 / 漏帶 input_params」——
+            # 跟 condition 求值失敗同一類、是 self_heal 改 YAML 能修的。
+            # 先嘗試自我修復;不可修才轉人工,不要直接 failed 終局(連人工決策都不給)。
+            _var_val = ValidationResult(
+                status="failed",
+                reason=f"變數展開失敗:{_var_exc}",
+                suggestion="檢查 {{ }} 內變數是否拼錯、上游是否用 export_var 匯出該變數、或啟動 workflow 時是否漏帶 input_params",
+            )
+            if _should_self_heal(run, step, _var_val, None):
+                await _enter_self_heal(run, _var_val, step, run.current_step + 1, None, logger)
+                unregister_task(run.run_id)
+                return run.run_id
+            run.status = "awaiting_human"
+            run.awaiting_type = "failure"
+            run.awaiting_message = f"變數展開失敗:{_var_exc}"
+            run.awaiting_suggestion = _var_val.suggestion
             store.save(run)
-            await _notify_final(run, config)
+            await _notify_failure(run, _var_val, step.name)
             unregister_task(run.run_id)
             return run.run_id
 
@@ -1688,20 +1714,23 @@ async def _run_pipeline_inner(
                     run.step_results[run.current_step] = step_result
                 else:
                     run.step_results.append(step_result)
-                # 走 awaiting_human=failure(讓人工 / 自我修復能改表達式重跑),不直接判 failed —
-                # condition 求值失敗多半是表達式語法錯(如 .contains)、是 self_heal 改 YAML 能修的
+                # condition 求值失敗多半是「上游 skill 沒 export 變數 / 表達式語法錯」——
+                # 是 self_heal 改 YAML(重寫上游步驟或表達式)能修的 → 先嘗試自我修復、再 fallback 人工。
+                _cond_val = ValidationResult(
+                    status="failed",
+                    reason=f"condition 求值失敗:{_ce}",
+                    suggestion=_cond_sugg,
+                )
+                if _should_self_heal(run, step, _cond_val, None):
+                    await _enter_self_heal(run, _cond_val, step, run.current_step + 1, None, logger)
+                    unregister_task(run.run_id)
+                    return run.run_id
                 run.status = "awaiting_human"
                 run.awaiting_type = "failure"
                 run.awaiting_message = f"condition 求值失敗:{_ce}"
                 run.awaiting_suggestion = _cond_sugg
                 store.save(run)
-                await _notify_failure(
-                    run,
-                    ValidationResult(status="failed",
-                                     reason=f"condition 求值失敗:{_ce}",
-                                     suggestion=_cond_sugg),
-                    step.name,
-                )
+                await _notify_failure(run, _cond_val, step.name)
                 unregister_task(run.run_id)
                 return run.run_id
 
@@ -1729,10 +1758,23 @@ async def _run_pipeline_inner(
                 step_result.validation_status = "failed"
                 step_result.validation_reason = f"跳轉目標 '{target_name}' 不存在於 workflow"
                 step_result.stderr_tail = step_result.validation_reason
-                run.status = "failed"
-                run.ended_at = datetime.now().isoformat()
+                # 跳轉目標不存在 = 純 YAML 拼字錯(on_true/on_false/cases 指到不存在的 step),
+                # 是 self_heal 改 YAML 最好修的一類 → 先試自我修復,不可修才轉人工。
+                _jt_val = ValidationResult(
+                    status="failed",
+                    reason=f"condition 跳轉目標 '{target_name}' 不存在於 workflow(YAML 拼字錯或漏建該 step)",
+                    suggestion="把 on_true/on_false/cases/default 的目標名改成實際存在的 step name,或補上缺的 step。",
+                )
+                if _should_self_heal(run, step, _jt_val, None):
+                    await _enter_self_heal(run, _jt_val, step, run.current_step + 1, None, logger)
+                    unregister_task(run.run_id)
+                    return run.run_id
+                run.status = "awaiting_human"
+                run.awaiting_type = "failure"
+                run.awaiting_message = _jt_val.reason
+                run.awaiting_suggestion = _jt_val.suggestion
                 store.save(run)
-                await _notify_final(run, config)
+                await _notify_failure(run, _jt_val, step.name)
                 unregister_task(run.run_id)
                 return run.run_id
             else:
@@ -2159,6 +2201,41 @@ async def _run_pipeline_inner(
                             f"hallucinated_done:LLM 主動 done(success=true) 但 output 檔 {_resolved_out} 不存在。"
                             f"請改進 role 系統提示要求 done 前先 Path(output).exists() 自驗。"
                         )
+                    else:
+                        # subagent 跳過 validator → 在這補兩道決定性檢查(skill 走 validator 都有、subagent 沒對齊):
+                        # (1) 新鮮度:檔案 mtime 早於本步開始 = 上一輪殘檔冒充本輪產出(重跑 / 自我修復重訪會踩)
+                        _stale = False
+                        try:
+                            _started_ts = datetime.fromisoformat(step_started_at).timestamp()
+                            if Path(_resolved_out).stat().st_mtime < _started_ts - 2:  # 2s 容錯時鐘粒度
+                                _stale = True
+                        except Exception:
+                            pass
+                        if _stale:
+                            _hallucinated = True
+                            logger.error(f"[{step.name}] ⛔ Subagent output 是舊檔(mtime 早於本步開始):{_resolved_out}")
+                            sub_result.success = False
+                            sub_result.error = (
+                                f"stale_output:output 檔 {_resolved_out} 修改時間早於本步開始、"
+                                f"是上一輪殘留舊檔、本輪沒真的寫檔。請用 run_python 實際重新產出。"
+                            )
+                        else:
+                            # (2) 假 Office 檔:副檔名 .docx/.xlsx/.pptx 但內容不是 ZIP(常見:研究型 role
+                            #     把 markdown 直接存成 .docx)。抓到就 override 失敗、走自我修復 / 人工。
+                            try:
+                                from .validator import office_format_mismatch as _ofm
+                                _fmt_bad = _ofm(_resolved_out)
+                            except Exception:
+                                _fmt_bad = None
+                            if _fmt_bad:
+                                _hallucinated = True
+                                logger.error(f"[{step.name}] ⛔ Subagent output 假 Office 檔:{_fmt_bad}")
+                                sub_result.success = False
+                                sub_result.error = (
+                                    f"fake_office_file:{_fmt_bad} "
+                                    f"請用 python-docx(Document().save())/ openpyxl / python-pptx 實際產生 Office 檔,"
+                                    f"不要把 markdown / 純文字改副檔名存成它。"
+                                )
 
                 exec_result = _ExecResult(
                     exit_code=0 if sub_result.success else 1,
@@ -2293,6 +2370,19 @@ async def _run_pipeline_inner(
             # outlook_automation 節點：agent 自己回 done(success) 就決定成敗了，不需 LLM 驗證
             elif step.outlook_automation:
                 _status = "ok" if exec_result.exit_code == 0 else "failed"
+                # H4: outlook 也補一道「假 Office 檔」決定性檢查(與 subagent 同類洞)。
+                # outlook 模板會引導 LLM 用 python-docx 寫 .docx 附件,但 LLM 可能把 markdown
+                # 直接存成 .docx → 只看 exit/done 會漏。僅在有設 output.path 時檢查、保守不誤判。
+                _ofb = None
+                if _status == "ok" and step.output and step.output.path:
+                    try:
+                        from .validator import office_format_mismatch as _ofm_o
+                        _ofb = _ofm_o(str(_resolve_path(step.output.path)))
+                    except Exception:
+                        _ofb = None
+                    if _ofb:
+                        _status = "failed"
+                        logger.error(f"[{step.name}] ⛔ Outlook output 假 Office 檔:{_ofb}")
                 # 從 stdout 抽 [Outlook 完成] 那行給使用者看
                 _summary = ""
                 for _ln in (exec_result.stdout or "").splitlines():
@@ -2301,8 +2391,8 @@ async def _run_pipeline_inner(
                         break
                 val = ValidationResult(
                     status=_status,
-                    reason=_summary or ("Outlook 任務成功" if _status == "ok" else (exec_result.stderr or "Outlook 任務失敗")),
-                    suggestion=exec_result.stderr if _status == "failed" else "",
+                    reason=(_ofb if _ofb else (_summary or ("Outlook 任務成功" if _status == "ok" else (exec_result.stderr or "Outlook 任務失敗")))),
+                    suggestion=("請用 python-docx(Document().save())/ openpyxl / python-pptx 實際產生 Office 檔、不要把純文字改副檔名。" if _ofb else (exec_result.stderr if _status == "failed" else "")),
                 )
             # visual_validation 節點：節點自己就是 VLM 判斷，不需要再跑一次 LLM 驗證
             elif step.visual_validation:
@@ -2483,7 +2573,11 @@ async def _run_pipeline_inner(
             # runner 讀進該步的 step_vars(→ {{ steps.<name>.output.<key> }})後刪檔、
             # 避免洩漏到下一步。
             try:
-                _export_f = _workflow_output_dir(config.name) / "_step_export.json"
+                # 讀「這步的 working_dir」下的 _step_export.json —— 必須跟 export_var 寫入的位置
+                # 一致。export_var 寫到 cwd=working_dir(=wd);而 wd 在有 output.path 時是
+                # output.path.parent(母夾),不是 _workflow_output_dir(config.name)(可能含 per-run
+                # run_<ts> 子夾)。用 _workflow_output_dir 會讀錯夾、永遠 is_file=False、變數丟失。
+                _export_f = Path(wd) / "_step_export.json"
                 if _export_f.is_file():
                     import json as _json
                     _exported = _json.loads(_export_f.read_text(encoding="utf-8"))
@@ -2773,9 +2867,11 @@ _SELF_HEAL_SYSTEM_HINT = (
 
 def _step_is_healable(step) -> bool:
     """只修 AI 靠改 YAML 能救的節點。human_confirm(人為)/ computer_use / visual_validation /
-    outlook(環境相關、改 YAML 沒用)/ condition(分支邏輯、極少是失敗源)不修。"""
+    outlook(環境相關、改 YAML 沒用)不修。
+    condition 例外:它只會因「求值錯(上游沒 export 變數 / 表達式語法錯)」而失敗,
+    而那正是重寫整份 YAML(改上游 step 或表達式)能修的 → 允許自我修復。"""
     for attr in ("human_confirm", "computer_use", "visual_validation",
-                 "outlook_automation", "condition"):
+                 "outlook_automation"):
         if getattr(step, attr, False):
             return False
     return True
@@ -2793,14 +2889,22 @@ def _is_stuck_failure(val, exec_result) -> bool:
     """卡死 / 不收斂型失敗(步驟跑很久才失敗:subagent 撞 max_iter、timeout、連續無 tool)。
     這類重跑會再卡一次、改 YAML 也救不了根本問題 → 不修、直接轉人工,避免把時間放大數倍
     (實測 H3 coder 撞 max_iter、self_heal 重跑 → 卡 50 分鐘)。對齊 [[non-convergence-guard]]。"""
+    # framework 產生的精確「卡死」訊號(這些 token 是程式產生的、不會出現在使用者程式 stderr)
     blob = (
         (getattr(val, "reason", "") or "") + " "
         + (getattr(exec_result, "error", "") or "") + " "
         + (getattr(exec_result, "stderr", "") or "")
     ).lower()
-    for kw in ("reached_max_iter", "max_iter", "timeout", "timed out", "逾時",
-               "不收斂", "非收斂", "consecutive_no_tool"):
+    for kw in ("reached_max_iter", "consecutive_no_tool", "prose_before_tool",
+               "不收斂", "非收斂"):
         if kw in blob:
+            return True
+    # 「timeout / 逾時」太通用 —— 使用者程式自己處理 timeout(requests timeout 等)的 stderr
+    #  會誤判成卡死、害可修的失敗被擋在 self-heal 外。故只在 framework 的驗證判語(val.reason)
+    #  出現才算,不掃使用者程式 stderr。
+    _reason = (getattr(val, "reason", "") or "").lower()
+    for kw in ("timeout", "timed out", "逾時"):
+        if kw in _reason:
             return True
     return False
 
@@ -2827,8 +2931,11 @@ def _ai_gave_up(reply: str) -> bool:
     if not reply:
         return False
     low = reply.replace(" ", "")
+    # 只認「明確宣告放棄」的措辭。原本含 需要使用者 / 需要授權 / 外部服務 等通用詞,
+    # 會把「我移除了對外部服務的依賴」這類正面敘述誤判成認輸、害有效修復被丟掉 → 移除。
+    # _SELF_HEAL_SYSTEM_HINT 規則 4 已要求 AI 放棄時明說「無法自動修復」,以此為契約。
     for kw in ("無法自動修復", "無法修復", "不是改YAML", "非YAML能修", "無法靠YAML",
-               "需要使用者", "需要授權", "外部服務", "cannotfix", "cannotbefixed"):
+               "cannotfix", "cannotbefixed"):
         if kw.replace(" ", "") in low:
             return True
     return False
@@ -2836,18 +2943,21 @@ def _ai_gave_up(reply: str) -> bool:
 
 def _yaml_near_identical(a: str, b: str) -> bool:
     """新舊 YAML 是否「沒有實質修改」→ 視為不收斂。
-    比 steps 的語義內容(name/batch/各節點旗標),不用字串相似度 —— 字串 ratio 對小工作流
-    太鈍(改一個關鍵字如 prnt→print 的 ratio 仍 >0.985 會被誤判沒改)。只要任何 step 的
-    name/batch 變了就算有實質改動、放行。"""
+    比 steps 的**完整正規化內容**(每個 step 整個 dict 排序 key 後序列化)—— 只要任一欄位變了
+    (含 expression/switch/cases/on_true/on_false/condition、wc_url/wc_*、outlook_params、
+    output.path/expect、retry/timeout 等節點專屬欄位)就算有實質改動、放行。
+    (舊版只比 name/batch/skill_mode/subagent_role/max_iter 5 欄,AI 只改其它欄位會被誤判沒改、
+     害修對了卻被當不收斂轉人工 —— 對 condition 只改 expression / 跳轉目標的場景特別致命。)"""
     import yaml as _y
+    import json as _j
 
     def _sig(s):
         try:
             d = _y.safe_load(s) or {}
+            d = d.get("pipeline", d) if isinstance(d, dict) else d
             steps = d.get("steps", []) if isinstance(d, dict) else []
             return [
-                (st.get("name"), st.get("batch"), st.get("skill_mode"),
-                 st.get("subagent_role"), st.get("subagent_max_iter"))
+                _j.dumps(st, sort_keys=True, ensure_ascii=False)
                 for st in steps if isinstance(st, dict)
             ]
         except Exception:
@@ -3010,10 +3120,37 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
 
         # 重定位失敗步(名稱對得到 → 回該步;對不到 → 從 0 重跑整條)
         restart_idx = 0
+        _failed_is_condition = False
         for i, st in enumerate(new_dict.get("steps", [])):
             if isinstance(st, dict) and st.get("name") == failed_step_name:
                 restart_idx = i
+                _failed_is_condition = bool(st.get("condition"))
                 break
+        # 「下游失敗、根因在上游」通用處理:找出 AI 這次實際改動的最早一個 step,
+        # 從那裡重跑 —— 否則若 AI 修的是上游(web_crawler→skill、subagent→skill、skill→skill、
+        # 或上游沒 export 變數),只從失敗步重跑、上游不會重跑 → 改了也白改、必然再失敗。
+        try:
+            import json as _json3
+            import yaml as _y2
+            _old = _y2.safe_load(current_yaml) or {}
+            _old_steps = (_old.get("pipeline", _old) if isinstance(_old, dict) else {}).get("steps", []) or []
+            _new_steps = new_dict.get("steps", []) or []
+            _earliest_changed = None
+            for i in range(min(len(_old_steps), len(_new_steps))):
+                _a = _json3.dumps(_old_steps[i], sort_keys=True, ensure_ascii=False)
+                _b = _json3.dumps(_new_steps[i], sort_keys=True, ensure_ascii=False)
+                if _a != _b:
+                    _earliest_changed = i
+                    break
+            if _earliest_changed is None and len(_old_steps) != len(_new_steps):
+                _earliest_changed = min(len(_old_steps), len(_new_steps))  # 新增/刪除 step → 從分歧點起
+            if _earliest_changed is not None:
+                restart_idx = min(restart_idx, _earliest_changed)
+        except Exception as _rc_e:
+            logger.warning(f"自我修復:算最早改動步失敗(退回原 restart_idx):{_rc_e}")
+        # condition 失敗根因恆在上游 → 保底從頭重跑(即使 AI 只動了 condition 自己的表達式)
+        if _failed_is_condition:
+            restart_idx = 0
         run.current_step = restart_idx
         run.step_results = [sr for i, sr in enumerate(run.step_results) if i < restart_idx]
         run.awaiting_type = ""
