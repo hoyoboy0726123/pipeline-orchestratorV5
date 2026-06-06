@@ -243,6 +243,11 @@ async def validate_step(
     - 圖片檔案以視覺方式驗證
     - 是否符合 expect 描述的期望
     """
+    # 確定性前置檢查:範本填充殘留 {{}}、或「要圖卻沒圖」→ 直接 failed(免叫 LLM)
+    _pre = _deterministic_precheck(step_name, command, output_path, output_expect, logger)
+    if _pre is not None:
+        return _pre
+
     # 收集輸出檔案資訊
     file_info = _check_output_file(output_path, step_start_time=step_start_time)
     file_content = _read_file_content(output_path)
@@ -448,6 +453,172 @@ def _check_output_file(path: Optional[str], step_start_time: Optional[str] = Non
                 f"可能是先前 run 的舊產物、本次未實際更新 — 應判 failed**"
             )
     return f"✅ 檔案存在，大小：{size:,} bytes{_stale_note}"
+
+
+# ── 確定性前置檢查：範本填充殘留佔位標籤 ────────────────────────────────────────
+# 與模型 / expect 無關的硬規則。輸出檔(pptx/docx/xlsx)若還留著 {{...}} 佔位標籤，
+# 代表「範本填充」根本沒填完，必判 failed → 觸發 self-heal。這比「拜託 LLM 在
+# prompt / expect 記得檢查」可靠得多（弱模型常忽略，且 expect 太寬鬆會放行空填充）。
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*[^{}\n]{1,40}?\s*\}\}")
+_TEMPLATE_FILL_EXTS = {'.pptx', '.docx', '.xlsx'}
+
+
+def _scan_leftover_placeholders(path: Optional[str]) -> list[str]:
+    """掃描範本填充類輸出檔是否殘留 {{...}} 佔位標籤。回傳去重後的標籤清單(最多 8 個)。
+    讀不出檔 / 非範本類副檔名 → 回空 list(不擋、交給後續 LLM 驗證)。"""
+    if not path:
+        return []
+    try:
+        p = _resolve_user_path(path)
+    except Exception:
+        return []
+    if not p.exists() or p.is_dir() or p.suffix.lower() not in _TEMPLATE_FILL_EXTS:
+        return []
+    texts = _office_texts(p)
+    found: list[str] = []
+    seen: set[str] = set()
+    for t in texts:
+        if not t:
+            continue
+        for m in _PLACEHOLDER_RE.findall(t):
+            mm = m.strip()
+            if mm not in seen:
+                seen.add(mm)
+                found.append(mm)
+    return found[:8]
+
+
+def _leftover_placeholder_result(found: list[str]) -> "ValidationResult":
+    return ValidationResult(
+        status="failed",
+        reason="輸出檔仍殘留未填入的佔位標籤(範本填充未完成):" + "、".join(found),
+        suggestion=(
+            "這些 {{...}} 佔位標籤沒有被實際資料取代。請逐一替換每個標籤("
+            "文字標籤換成對應的值;圖片佔位如 {{圖}} 要用 add_picture 在該位置插入圖片後、"
+            "再把原本的標籤文字清空)。不可留任何 {{}} 殘留。"
+        ),
+    )
+
+
+# 任務是否「預期要有圖片」(看 batch 指令 + expect 描述)。命中才會強制要求輸出有圖。
+_IMAGE_INTENT_RE = re.compile(
+    r"圖片|插圖|貼圖|配圖|照片|相片|圖表|截圖|logo|image|picture|photo|chart|\{\{\s*圖",
+    re.IGNORECASE,
+)
+
+
+def _expects_images(command: Optional[str], output_expect: Optional[str]) -> bool:
+    return bool(_IMAGE_INTENT_RE.search((command or "") + "\n" + (output_expect or "")))
+
+
+def _count_pictures(p: Path) -> int:
+    """數 office 檔內實際插入的圖片數。讀不出 → 回 -1(未知、不擋)。"""
+    ext = p.suffix.lower()
+    try:
+        if ext == '.pptx':
+            from pptx import Presentation
+            n = 0
+            for s in Presentation(str(p)).slides:
+                for sh in s.shapes:
+                    if sh.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
+                        n += 1
+            return n
+        if ext == '.docx':
+            from docx import Document
+            return len(Document(str(p)).inline_shapes)
+    except Exception:
+        return -1
+    return -1
+
+
+# 「圖片路徑被當成文字填進去」的偵測:輸出檔的可見文字裡出現圖片副檔名字串
+# = 模型把路徑填成文字、而非真的插入圖片。與 batch 寫不寫「圖」無關。
+_IMAGE_PATH_TEXT_RE = re.compile(r"[^\s\"']+\.(?:png|jpe?g|gif|webp|bmp)\b", re.IGNORECASE)
+
+
+def _office_texts(p: Path) -> list[str]:
+    """抽 pptx/docx/xlsx 的所有可見文字(供殘留標籤 / 圖片路徑文字掃描共用)。讀不出回 []。"""
+    ext = p.suffix.lower()
+    texts: list[str] = []
+    try:
+        if ext == '.pptx':
+            from pptx import Presentation
+            for s in Presentation(str(p)).slides:
+                for sh in s.shapes:
+                    if sh.has_text_frame:
+                        texts.append(sh.text_frame.text)
+                    if getattr(sh, "has_table", False):
+                        for row in sh.table.rows:
+                            for cell in row.cells:
+                                texts.append(cell.text)
+        elif ext == '.docx':
+            from docx import Document
+            doc = Document(str(p))
+            texts.extend(par.text for par in doc.paragraphs)
+            for t in doc.tables:
+                for row in t.rows:
+                    for cell in row.cells:
+                        texts.append(cell.text)
+        elif ext == '.xlsx':
+            import openpyxl
+            wb = openpyxl.load_workbook(str(p), read_only=True, data_only=False)
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    texts.extend(c for c in row if isinstance(c, str))
+            wb.close()
+    except Exception:
+        return []
+    return texts
+
+
+def _deterministic_precheck(
+    step_name: str, command: str, output_path: Optional[str],
+    output_expect: Optional[str], logger: logging.Logger,
+) -> "Optional[ValidationResult]":
+    """範本填充類任務的硬規則前置檢查(與模型 / expect 無關)。回傳 ValidationResult 代表
+    直接判 failed、None 代表通過、交給後續 LLM 驗證。"""
+    if not output_path:
+        return None
+    # 1) 殘留 {{}} 佔位標籤 → 沒填完
+    leftover = _scan_leftover_placeholders(output_path)
+    if leftover:
+        logger.warning(f"[{step_name}] 確定性檢查:輸出檔殘留佔位標籤 {leftover} → 判 failed")
+        return _leftover_placeholder_result(leftover)
+    try:
+        p = _resolve_user_path(output_path)
+    except Exception:
+        return None
+    if not (p.exists() and not p.is_dir() and p.suffix.lower() in {'.pptx', '.docx'}):
+        return None
+
+    # 2) 圖片路徑被當成文字填進去(輸出檔可見文字出現 *.png/*.jpg…)→ 沒真的插圖。
+    #    與 batch 寫不寫「圖」無關,是最明確的「貼圖失敗」訊號。
+    for _t in _office_texts(p):
+        m = _IMAGE_PATH_TEXT_RE.search(_t or "")
+        if m:
+            logger.warning(f"[{step_name}] 確定性檢查:輸出檔把圖片路徑當文字填了({m.group(0)}) → 判 failed")
+            return ValidationResult(
+                status="failed",
+                reason=f"輸出檔把圖片路徑當成文字填進去了(發現「{m.group(0)}」),沒有真的插入圖片。",
+                suggestion=(
+                    "不要把圖片路徑當文字填。請取得該位置的 left/top/width/height,用 "
+                    "slide.shapes.add_picture(圖片路徑, ...)(PPT)插入實際圖片,再清掉原本的文字。"
+                ),
+            )
+
+    # 3) 任務(batch / expect)明說要圖,但輸出檔一張實際圖片都沒有 → 沒把圖貼進去
+    if _expects_images(command, output_expect) and _count_pictures(p) == 0:
+        logger.warning(f"[{step_name}] 確定性檢查:任務要圖但輸出檔 0 張圖片 → 判 failed")
+        return ValidationResult(
+            status="failed",
+            reason="任務要求插入圖片,但輸出檔裡一張實際圖片都沒有。",
+            suggestion=(
+                "請真的把圖片插進去:取得放圖位置的 left/top/width/height,用 "
+                "slide.shapes.add_picture(圖片路徑, ...)(PPT)或 doc 對應 API 插入實際圖片。"
+                "每個該有圖的位置都要有圖。"
+            ),
+        )
+    return None
 
 
 # ── Skill 模式：ReAct Agent 驗證 ──────────────────────────────────────────────
@@ -770,6 +941,11 @@ async def validate_step_with_skill(
     - read_file(path): 讀取檔案內容
     - done(json): 結束驗證並回傳結果
     """
+    # 確定性前置檢查:範本填充殘留 {{}}、或「要圖卻沒圖」→ 直接 failed(免跑 agent 迴圈)
+    _pre = _deterministic_precheck(step_name, command, output_path, output_expect, logger)
+    if _pre is not None:
+        return _pre
+
     stdout_tail = stdout[-1500:] if len(stdout) > 1500 else stdout
     stderr_tail = stderr[-500:] if len(stderr) > 500 else stderr
 
