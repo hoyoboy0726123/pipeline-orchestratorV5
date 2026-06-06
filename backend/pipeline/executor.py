@@ -2204,6 +2204,121 @@ def _rebase_recipe_run_dir(code: str, output_path: Optional[str]) -> tuple[str, 
     return _RUN_TS_RE.subn(m.group(0), code)
 
 
+# ── 自動探查輸入檔結構 → 餵給 code-gen，杜絕模型腦補欄位/標籤(grounding、模型無關)──
+# batch 裡引用到的「已存在」資料檔(輸出檔還沒生成、會自動跳過),在 skill 生 code 前
+# 把真實 schema(Excel 欄位 / CSV 表頭 / PPT/Word 佔位標籤 / JSON keys)攤給模型看,
+# 連弱模型(Gemma)也不會把欄位腦補成「產品/價格」「姓名/照片」。輕量:最多探 3 檔、
+# 大檔跳過、read_only 只讀表頭+前幾列。
+_INPUT_PEEK_RE = re.compile(r"[^\s\"'`\n,;()\[\]<>]+\.(?:xlsx|xls|csv|json|pptx|docx)", re.IGNORECASE)
+_INPUT_PEEK_MAX_FILES = 3
+_INPUT_PEEK_MAX_BYTES = 30 * 1024 * 1024  # 單檔 > 30MB 跳過(避免拖慢)
+_TAG_RE = re.compile(r"\{\{[^{}\n]{1,40}?\}\}")
+
+
+def _summarize_input_file(p: "Path") -> str:
+    ext = p.suffix.lower()
+    nm = p.name
+    try:
+        if ext in (".xlsx", ".xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+            parts = []
+            for sn in wb.sheetnames[:3]:
+                ws = wb[sn]
+                rows = list(ws.iter_rows(max_row=4, values_only=True))
+                if not rows:
+                    parts.append(f"  工作表「{sn}」: (空)"); continue
+                hdr = [str(c) if c is not None else "" for c in rows[0]]
+                samp = ["、".join(str(c) if c is not None else "" for c in r) for r in rows[1:4]]
+                parts.append(f"  工作表「{sn}」欄位: {', '.join(hdr)}" +
+                             (("\n    前幾列: " + " | ".join(samp)) if samp else ""))
+            wb.close()
+            return f"Excel {nm}:\n" + "\n".join(parts)
+        if ext == ".csv":
+            import csv as _csv
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                rows = []
+                for i, r in enumerate(_csv.reader(fh)):
+                    rows.append(r)
+                    if i >= 3:
+                        break
+            if not rows:
+                return f"CSV {nm}: (空)"
+            return (f"CSV {nm} 欄位: {', '.join(rows[0])}" +
+                    (("\n  前幾列: " + " | ".join("、".join(r) for r in rows[1:4])) if len(rows) > 1 else ""))
+        if ext == ".json":
+            import json as _json
+            d = _json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(d, dict):
+                return f"JSON {nm} keys: {', '.join(list(d.keys())[:20])}"
+            if isinstance(d, list) and d and isinstance(d[0], dict):
+                return f"JSON {nm}(陣列、每筆 keys): {', '.join(list(d[0].keys())[:20])}"
+            return f"JSON {nm}: {type(d).__name__}"
+        if ext == ".pptx":
+            from pptx import Presentation
+            prs = Presentation(str(p))
+            slides = list(prs.slides)
+            tags = set()
+            for s in slides:
+                for sh in s.shapes:
+                    if sh.has_text_frame:
+                        tags.update(_TAG_RE.findall(sh.text_frame.text))
+            return (f"PPT {nm}: {len(slides)} 頁、"
+                    f"佔位標籤: {', '.join(sorted(tags)) if tags else '(無 {{}} 標籤)'}")
+        if ext == ".docx":
+            from docx import Document
+            doc = Document(str(p))
+            tags = set()
+            for par in doc.paragraphs:
+                tags.update(_TAG_RE.findall(par.text))
+            return f"Word {nm}: 佔位標籤: {', '.join(sorted(tags)) if tags else '(無 {{}} 標籤)'}"
+    except Exception as e:
+        return f"{nm}: (讀取結構失敗、{e.__class__.__name__})"
+    return ""
+
+
+def _peek_input_files(task_description: str, logger) -> str:
+    seen: set = set()
+    summaries: list = []
+    for raw in _INPUT_PEEK_RE.findall(task_description or ""):
+        cand = raw.strip()
+        wm = re.match(r"^/mnt/([a-z])/(.*)$", cand)  # 沙盒 linux 路徑 → Windows
+        if wm:
+            cand = f"{wm.group(1).upper()}:\\" + wm.group(2).replace("/", "\\")
+        try:
+            p = Path(cand).expanduser()
+        except Exception:
+            continue
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not (p.exists() and p.is_file()):
+                continue  # 不存在 = 多半是「待產出的輸出檔」→ 跳過
+            if p.stat().st_size > _INPUT_PEEK_MAX_BYTES:
+                continue
+        except Exception:
+            continue
+        s = _summarize_input_file(p)
+        if s:
+            summaries.append(s)
+        if len(summaries) >= _INPUT_PEEK_MAX_FILES:
+            break
+    if not summaries:
+        return ""
+    blob = "\n".join(summaries)
+    if len(blob) > 1800:
+        blob = blob[:1800] + "…(截斷)"
+    try:
+        logger.info(f"[input-peek] 已注入 {len(summaries)} 個輸入檔的實際結構")
+    except Exception:
+        pass
+    return ("\n\n【📂 輸入檔的實際結構(以下是程式實際讀到的、是真的)】\n" + blob +
+            "\n→ 請**完全依照上面的真實欄位 / 標籤名稱**填寫,絕對不可自行假設或改寫"
+            "(例:不可把欄位腦補成「產品/價格/規格」或「姓名/職稱/照片」等常見模板)。")
+
+
 async def execute_step_with_skill(
     task_description: str,
     timeout: int,
@@ -2774,9 +2889,12 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
     else:
         logger.debug(f"[{step_name}] 初次執行（無失敗歷史）")
 
+    # ── 自動探查 batch 引用到的輸入檔結構、餵真實 schema 給模型(防腦補欄位/標籤)──
+    input_peek_hint = _peek_input_files(task_description, logger)
+
     user_prompt = f"""請完成以下任務：
 
-{task_description}{output_hint}{wd_hint}{prev_hint}{failures_hint}
+{task_description}{output_hint}{wd_hint}{prev_hint}{input_peek_hint}{failures_hint}
 
 請直接使用 <tool>run_python</tool> 執行完整程式碼，不要用 markdown 展示。"""
 
