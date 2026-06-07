@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from 'react'
 import {
   Plus, Workflow, Loader2, Pencil, Check, Trash2, Settings, BookOpen,
-  Download, Upload, Square,
+  Download, Upload, Square, Sparkles,
 } from 'lucide-react'
 import Link from 'next/link'
 import { toast } from 'sonner'
@@ -204,6 +204,7 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
   const {
     workflows, activeId,
     createWorkflow, updateWorkflow, removeWorkflow, setActive,
+    setChatUIState,
   } = useWorkflowStore()
 
   // ── 拖曳調寬 ─────────────────────────────────────────────────────
@@ -490,9 +491,18 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
             setTimeout(() => nameInputRef.current?.select(), 50)
           }}
           className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-indigo-600 text-white rounded-xl text-xs font-medium hover:bg-indigo-700 transition-colors shadow-sm"
+          title="手動新增一個新工作流(空白畫布、自己拉節點)"
         >
           <Plus className="w-3.5 h-3.5" />
           新增
+        </button>
+        <button
+          onClick={() => setChatUIState('hero')}
+          className="flex items-center justify-center gap-1.5 px-3 py-2 border border-violet-200 text-violet-700 bg-violet-50 rounded-xl text-xs font-medium hover:bg-violet-100 transition-colors"
+          title="讓 AI 助手幫你新增一個新工作流(乾淨對話、與目前工作流完全脫鉤)"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          新對話
         </button>
         <button
           onClick={() => importRef.current?.click()}

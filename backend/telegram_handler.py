@@ -371,11 +371,27 @@ async def _cmd_menu(chat_id: int) -> None:
 async def _cmd_status(chat_id: int) -> None:
     """列出執行中的 run。"""
     from pipeline.store import get_store
+    from datetime import datetime
     runs = get_store().list_recent(limit=20)
-    active = [r for r in runs if r.status in ("running", "awaiting_human")]
+
+    # 只顯示「真正活著」的 run:
+    #   - running:一律顯示
+    #   - awaiting_human:只顯示近 2 小時內開始的(等你決策)。
+    # 排除「之前失敗/自我修復卡住而被遺棄」的舊 run —— 它們的背景任務早已結束、
+    # 卻仍停在 awaiting_human,會永遠霸佔 /status 變成雜訊(使用者反饋)。
+    def _is_recent(r, hours: float = 2.0) -> bool:
+        try:
+            return (datetime.now() - datetime.fromisoformat(r.started_at)).total_seconds() < hours * 3600
+        except Exception:
+            return True  # 解析不出時間 → 保守保留
+    active = [
+        r for r in runs
+        if r.status == "running" or (r.status == "awaiting_human" and _is_recent(r))
+    ]
     if not active:
         await _bot_instance.send_message(
-            chat_id=chat_id, text="🟢 目前沒有執行中的 run。",
+            chat_id=chat_id,
+            text="🟢 目前沒有執行中的 run。\n(等待你決策的暫停步驟會直接用通知+按鈕推給你、不列在這。)",
         )
         return
     lines = ["📊 <b>執行中的 Run</b>", ""]
@@ -1594,7 +1610,7 @@ async def _poll_loop():
                     logger.info(f"Telegram: 截圖 for run {run_id}")
                     try:
                         from pipeline.store import get_store
-                        from pipeline.runner import take_screenshots, _tg_send_photos
+                        from pipeline.runner import take_screenshots, _tg_send_photos, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
@@ -1604,7 +1620,9 @@ async def _poll_loop():
                         step_idx = run.current_step
                         step_name = steps[step_idx]["name"] if step_idx < len(steps) else "unknown"
                         await cb.answer("📸 正在截圖…")
-                        ss_paths = take_screenshots(run.pipeline_name, step_name)
+                        # 用 run-scoped 名(<顯示名>/run_<ts>)→ 截圖落進該次 run 的資料夾、跟其他產物同夾;
+                        # take_screenshots 回傳實際路徑、_tg_send_photos 用回傳值直接傳、不影響 TG 傳送。
+                        ss_paths = take_screenshots(_run_output_name(run), step_name)
                         if ss_paths:
                             await _tg_send_photos(
                                 cb.message.chat_id,

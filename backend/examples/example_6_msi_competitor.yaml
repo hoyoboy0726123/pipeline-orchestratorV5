@@ -1,0 +1,110 @@
+# 範例工作流:每日 AI 競品情報收集
+# ───────────────────────────────────────────────────────────────
+# 示範重點:把 pitch 裡的旗艦 DEMO 做成可載入範例 ——
+#   網頁爬蟲 → 解析競品清單 → AI 競品變動分析 → condition 分流
+#   →(有變動)產 Word 簡報 → 人工確認 → Outlook 寄出 ;(無變動)記錄後結束。
+# 情境:每天自動抓競品(MSI 筆電商店)頁面,解析出機型與價格,AI 判斷與
+#   昨日相比有無重大變動;有變動才產出 Word 簡報、經主管覆核後用 Outlook 寄出。
+#
+# 流程亮點:
+#   - 「08:00 自動執行」是用上方『排程』按鈕設 cron(每天 08:00)觸發這條 ——
+#     排程不寫在 YAML 裡;這份 YAML 是被排程啟動的「工作流本體」。
+#   - condition 是轉折點:把競品分析歸成「有變動 / 無變動」,只有有變動才寄信,
+#     不打擾主管。
+#   - 寄信前一定先 human_confirm:關鍵對外動作由主管按一下才放行(不放生 AI)。
+#
+# ⚠️ 此範例需要:
+#   - 已設定 LLM(skill 節點要用)
+#   - 可連網(爬蟲節點要抓 MSI 商店)
+#   - 要真的寄信:需在設定頁配好 Outlook(沒配也能跑到人工確認、只是不寄)
+# ───────────────────────────────────────────────────────────────
+name: 每日 AI 競品情報收集 (範例)
+validate: false
+steps:
+  # 1) 網頁爬蟲:抓 MSI 台灣商店的筆電列表頁
+  - name: 抓取競品頁面
+    web_crawler: true
+    wc_url: "https://tw-store.msi.com/collections/notebook"
+    wc_js_render: true
+    timeout: 600
+
+  # 2) scraped-content-parser 技能:把爬回的原始內容解析成結構化機型清單
+  - name: 解析競品清單
+    skill_mode: true
+    skill: scraped-content-parser
+    batch: |
+      解析上一步爬蟲抓回的 MSI 筆電商店列表內容,抽出每一款筆電的「機型名稱」
+      與「價格」,輸出結構化 JSON 至 competitors.json。
+      ⚠️ competitors.json 必須是「純 JSON 陣列」、不要 markdown 圍欄、不要說明文字,
+      每筆兩個欄位:機型(字串)、價格(字串)。
+    output:
+      path: competitors.json
+    timeout: 600
+
+  # 3) AI 技能:競品變動分析 —— 把清單歸成「有變動 / 無變動」一個類別(condition 前置)
+  - name: 競品變動分析
+    skill_mode: true
+    batch: |
+      讀取 competitors.json(競品機型與價格清單),寫一段中文的競品變動分析,
+      並判斷與「昨日」相比是否有值得注意的變動(新機型上架、價格明顯調整等;
+      若無歷史資料可比,就依清單是否含促銷/新品字樣合理判斷)。
+      把結果存成 analysis.json。
+      ⚠️ 硬性格式要求(下一步的 condition 要直接讀):
+      - analysis.json 必須是「扁平純 JSON 物件」、不要 markdown 圍欄、不要多餘文字。
+      - 欄位:摘要(字串,一段話)、變動(字串)。
+      - 「變動」的值只能是這兩個之一、一字不差:有變動 / 無變動。
+    output:
+      path: analysis.json
+    timeout: 600
+
+  # 4) 條件節點(IF):有變動 → 產報告寄信;無變動 → 記錄後結束
+  - name: 判斷是否有變動
+    condition: true
+    expression: "{{ steps.競品變動分析.output.變動 == '有變動' }}"
+    on_true: 產出競品Word簡報
+    on_false: 記錄無重大變動
+
+  # 5) 有變動分支:AI 技能產出 Word 競品簡報 → next 跳到人工確認
+  - name: 產出競品Word簡報
+    skill_mode: true
+    skill: docx
+    batch: |
+      讀取 analysis.json 的「摘要」與 competitors.json 的機型清單,排版成一份正式的
+      Word 競品情報簡報,輸出至 競品情報.docx。
+      文件標題為「每日競品情報 — MSI 筆電」,標題下方加上產出日期;
+      內文包含:整體變動摘要、競品機型與價格表。
+    output:
+      path: 競品情報.docx
+    next: 通知主管覆核
+    timeout: 600
+
+  # 6) 人工確認:寄信前暫停、發 Telegram 給主管,確認後才寄
+  - name: 通知主管覆核
+    human_confirm: true
+    message: |
+      偵測到競品有重大變動,已產出「競品情報.docx」。
+      請主管確認內容無誤後,再放行寄送給團隊。
+    notify_telegram: true
+    send_prev_output: true
+    next: 寄送競品報告
+
+  # 7) Outlook 寄出:把 Word 簡報當附件寄給團隊
+  - name: 寄送競品報告
+    outlook_automation: true
+    outlook_template: send_with_attachment
+    outlook_params:
+      to: "team@example.com"
+      subject: "【每日競品情報】MSI 筆電競品變動"
+      body: "您好,附件為今日競品情報簡報(偵測到重大變動),請查收。"
+      attachment_path: "{{ steps.產出競品Word簡報.output.path }}"
+    next: end
+
+  # 8) 無變動分支:記錄一筆「今日無重大變動」後結束(不打擾主管、不寄信)
+  - name: 記錄無重大變動
+    skill_mode: true
+    batch: |
+      讀取 analysis.json 的「摘要」,寫一個純文字檔 no_change.txt,
+      內容一行:今日競品無重大變動,摘要:<這裡放 analysis.json 的摘要>。
+    output:
+      path: no_change.txt
+    timeout: 300

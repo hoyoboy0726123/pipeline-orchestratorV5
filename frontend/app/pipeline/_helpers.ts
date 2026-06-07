@@ -625,7 +625,9 @@ function buildFlowGraph(steps: StepData[]): { out: number[][]; edges: { i: numbe
         targets.push(i + 1)
       }
     }
-    for (const j of targets) { out[i].push(j); edges.push({ i, j }) }
+    // 同一目標去重:default 與某 case 指向同一節點時只連一條(避免畫面重複箭頭)
+    const seen = new Set<number>()
+    for (const j of targets) { if (seen.has(j)) continue; seen.add(j); out[i].push(j); edges.push({ i, j }) }
   })
   return { out, edges }
 }
@@ -996,7 +998,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
 
   // 孤立節點不加入（邊驅動執行）
 
-  return ordered.map((n, i) => {
+  const result = ordered.map((n, i) => {
     const aiData = aiDataByPredecessor.get(n.id)
 
     if (n.type === 'computerUse') {
@@ -1227,6 +1229,25 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       errorMsg: d.errorMsg,
     } as StepData
   })
+
+  // ── 依「邊 + 最終陣列順序」重算每步的 next,確保 YAML round-trip 不掉拍 ──
+  // 排序是 [最長路徑]+[分支節點],可能把「終點節點」排在分支節點前面。若不顯式標 next,
+  // 重新匯入時終點會「順序 fallthrough」掉到後面的分支節點 → 多一條錯誤箭頭(merge 工作流必踩)。
+  // 規則(condition 走 cases/onTrue/onFalse、不動):
+  //   - 0 出邊(終點):不是陣列最後一個 → next: end;是最後一個 → 留空。
+  //   - 1 出邊:目標剛好是陣列下一個 → 線性留空;否則顯式 next: <目標步驟名>。
+  const nameById = new Map(execNodes.map(n => [n.id, ((n.data as { name?: string }).name) || n.id]))
+  result.forEach((step, i) => {
+    const node = ordered[i]
+    if (node.type === 'condition') return
+    const outs = adjMulti.get(node.id) || []
+    if (outs.length === 0) {
+      step.next = (i < result.length - 1) ? 'end' : ''
+    } else if (outs.length === 1) {
+      step.next = (outs[0] === ordered[i + 1]?.id) ? '' : (nameById.get(outs[0]) || '')
+    }
+  })
+  return result
 }
 
 // ── Steps → YAML string ───────────────────────────────────────────────────────
@@ -1802,6 +1823,21 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
 }
 
 function buildStep(partial: Partial<StepData>, index: number): StepData {
+  // 防呆:弱 LLM 常把「桌面自動化步驟」漏寫 `computer_use: true`、只留一個名字
+  //（如「RPA操作」「自動化點擊」）→ 解析後會變成空白 script 節點、不是 computer_use。
+  // 若某步「完全沒有任何類型欄位、也沒有 batch」且名字明顯是桌面自動化/RPA 意圖,
+  // 就補正成空白 computer_use 節點(actions 留給使用者在畫布錄製)。
+  // 對齊 system prompt「桌面自動化節點」與「啟動既有專案第 0 點」的設計。
+  const _hasAnyType = !!(
+    (partial.batch && partial.batch.trim())
+    || partial.skillMode || partial.humanConfirm || partial.visualValidation
+    || partial.webCrawler || partial.outlookAutomation || partial.subagent
+    || partial.condition || partial.computerUse
+  )
+  if (!_hasAnyType && partial.name
+      && /RPA|computer[\s_-]?use|點擊|點按|滑鼠|鍵盤|錄製|桌面自動化|UI\s?自動化|自動化操作|自動化點擊|操作工具|操作視窗|視窗操作/i.test(partial.name)) {
+    partial.computerUse = true
+  }
   // Outlook 節點的編碼器把 outlookFreeText 寫進 batch:，這裡把它還原回 freeText、
   // 避免畫布上 freeText 欄空白而 batch 帶著一段使用者不會用到的描述
   if (partial.outlookAutomation && partial.batch && !partial.outlookFreeText) {

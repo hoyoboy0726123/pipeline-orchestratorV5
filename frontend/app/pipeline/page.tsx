@@ -361,6 +361,13 @@ function YamlPanel({ yaml, onImport, onClose }: { yaml: string; onImport: (y: st
           <span className="font-semibold text-sm text-gray-300 font-mono">YAML</span>
         </div>
         <div className="flex gap-2">
+          <button onClick={async () => {
+              try { await navigator.clipboard.writeText(draft); toast.success('已複製 YAML') }
+              catch { toast.error('複製失敗，請手動選取') }
+            }}
+            className="px-3 py-1 text-xs border border-gray-600 text-gray-300 rounded-lg hover:bg-gray-800 transition-colors font-mono">
+            複製
+          </button>
           <button onClick={() => { onImport(draft); toast.success('已從 YAML 更新流程') }}
             className="px-3 py-1 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-mono">
             套用
@@ -2432,6 +2439,15 @@ export default function PipelinePage() {
                 className={`text-xs px-2 py-0.5 rounded transition-colors ${showTrace ? 'bg-indigo-700 text-white hover:bg-indigo-600' : 'border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
                 title={showTrace ? '切回 Log 視圖（時序文字流）' : '切到 Trace 視圖（每步驟 tool 呼叫與 token 用量）'}
               >{showTrace ? '📜 Log' : '📊 Trace'}</button>
+              <button
+                onClick={async () => {
+                  if (!logLines.length) { toast.info('目前沒有 log 可複製'); return }
+                  try { await navigator.clipboard.writeText(logLines.join('\n')); toast.success(`已複製 ${logLines.length} 行 log`) }
+                  catch { toast.error('複製失敗，請手動選取') }
+                }}
+                className="text-xs text-gray-500 hover:text-gray-300 px-2"
+                title="複製完整 log 內容到剪貼簿"
+              >複製</button>
               <button onClick={() => setLogLines([])} className="text-xs text-gray-500 hover:text-gray-300 px-2">清除</button>
               <button onClick={() => setShowLog(false)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-3.5 h-3.5" />

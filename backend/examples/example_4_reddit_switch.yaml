@@ -43,8 +43,9 @@ steps:
       讀取 posts.json,為每一篇貼文判斷使用者對 ASUS 產品的整體情緒,
       輸出 JSON 陣列至 sentiment.json,每篇含三個欄位:
       - title(貼文標題)
-      - sentiment(只能是 positive / negative / neutral 三者之一)
-      - summary(一句話中文摘要)
+      - sentiment(只能是 positive / negative / neutral 三者之一,小寫)
+      - summary(一句話中文摘要,要根據貼文「實際內容/抱怨/稱讚」來寫,不要只覆述標題)
+      ⚠️ sentiment.json 必須是「純 JSON 陣列」,不要 markdown 圍欄(```)、不要任何說明文字。
     output:
       path: sentiment.json
     timeout: 600
@@ -59,6 +60,11 @@ steps:
       再判定整體口碑:正面明顯比負面多 → 好評居多;負面明顯比正面多 → 負評居多;
       兩邊差不多 → 評價分歧。
       把這四個結果存成 verdict.json,欄位名稱用:正面、負面、中立、口碑。
+      ⚠️ 硬性格式要求(下一步的 Switch 要直接讀這個檔、格式錯就分流不了):
+      - verdict.json 必須是「扁平的純 JSON 物件」,不要 markdown 圍欄(```)、不要任何說明文字。
+      - 「正面 / 負面 / 中立」必須是整數。
+      - 「口碑」的值只能是這三個字串之一、一字不差(不要多字少字、不要加標點):
+        好評居多 / 負評居多 / 評價分歧。
     output:
       path: verdict.json
     timeout: 600
@@ -69,6 +75,8 @@ steps:
     condition: true
     switch: "{{ steps.評定整體口碑.output.口碑 }}"
     cases: {"好評居多": 產生好評報告, "負評居多": 產生負評警示, "評價分歧": 產生分歧分析}
+    # 保險:萬一「口碑」值對不到上面三個 case(模型偶爾寫歪),預設走分歧分析、不會卡死
+    default: 產生分歧分析
     timeout: 30
 
   # ── 三條分支:每條 = 產生報告 → 各自接一個 Word 步驟 → 結束 ──

@@ -4652,7 +4652,34 @@ create_meeting(*, subject, start, end, location="", body="",
 2. 整理結果如果指定了 output_path，**一定要把結果存到那個路徑**（xlsx / md / json 等格式由情境決定）
 3. 出錯後不要直接 done(success=true)！先用 run_python 修錯、確認 stdout 沒有 traceback 才 done
 4. 永遠不要寫 fake stdout（不要在 <input> 後面寫『Successfully sent.』『DataFrame: ...』之類字串）— 真實結果系統會回給你
-5. 如果使用者描述太模糊、缺關鍵資訊（例如要寄給誰、日期區間），用 ask_user 問；不要瞎猜亂寄信"""
+5. 如果使用者描述太模糊、缺關鍵資訊（例如要寄給誰、日期區間），用 ask_user 問；不要瞎猜亂寄信
+
+## 進階：建立資料夾 / 收件規則（wrapper 沒有、用原始 win32com COM）
+
+- **新增資料夾**（可重複跑、已存在就沿用、不要報錯）：
+  ```python
+  import win32com.client as w
+  ns = w.Dispatch("Outlook.Application").GetNamespace("MAPI")
+  inbox = ns.GetDefaultFolder(6)  # olFolderInbox
+  name = "我的資料夾"
+  existing = {inbox.Folders.Item(i + 1).Name for i in range(inbox.Folders.Count)}
+  folder = inbox.Folders[name] if name in existing else inbox.Folders.Add(name)
+  ```
+- **建立收件規則（自動分流「未來」的信）** — ⚠️ 規則 API **需要 Exchange 在線**：
+  ```python
+  try:
+      rules = ns.DefaultStore.GetRules()      # 離線 / 未連 Exchange 會丟例外
+  except Exception as e:
+      # ↓ 不要假裝成功！老實回報需要上線
+      raise RuntimeError(f"Outlook 離線或未連 Exchange、無法建規則：{e}")
+  r = rules.Create("規則名稱", 0)              # 0 = olRuleReceive（收件時觸發）
+  c = r.Conditions.SenderAddress; c.Enabled = True; c.Address = ["someone@example.com"]
+  a = r.Actions.MoveToFolder;     a.Enabled = True; a.Folder = folder   # 上面建/取到的資料夾物件
+  rules.Save()
+  ```
+- **建完規則務必「重新讀回」驗證**：再 `ns.DefaultStore.GetRules()`、確認找得到該規則名才算成功；找不到 → `done(success=false)`。**別憑「沒丟例外」就說成功。**
+
+6. ⚠️ **離線 / 連不上 Exchange 的硬規則（最重要、防假成功）**：凡是需要「伺服器端生效」的操作（建/改收件規則、伺服器端搬大量信、寄信）一旦遇到「離線工作 / 必須連線 Microsoft Exchange」這類 COM 例外 → **立刻 `done(success=false)` 說明「Outlook 目前離線、此操作需先連上 Exchange」**，**絕對不要回報成功**。建資料夾通常本機就能成功、不受此限。"""
 
 
 def _build_outlook_prompt(

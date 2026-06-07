@@ -8,7 +8,7 @@ import { useWorkflowStore } from './_store'
 import {
   pipelineChatStream,
   getEnvPaths, type EnvPaths,
-  getWorkflowChat, appendWorkflowChat,
+  getWorkflowChat, appendWorkflowChat, clearWorkflowChat,
 } from '@/lib/api'
 
 // ── AI Chat Message Type ─────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ export function buildWelcomeMessage(env: EnvPaths): string {
 直接描述你想自動化的事,或把目前畫布上的步驟交給我**除錯 / 修改** — 我會問幾個關鍵問題、提一份方案讓你點頭,再幫你產生或更新 YAML。
 
 · 想知道有哪些節點、各自適合什麼 → 點上方 **📖 節點介紹**
-· 想開新題目 / 找完整範例 → 點 **➕ 新工作流** 回首頁挑一張範例卡(不影響目前對話)`
+· 想開新題目 / 找完整範例 → 點左上角 **✨ 新對話** 回首頁挑一張範例卡(全新、與目前工作流脫鉤)`
 }
 
 // ── 節點介紹(📖 按鈕 → 中央彈窗)─────────────────────────────────────────
@@ -156,8 +156,6 @@ export interface AtlasChatProps {
 export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatProps) {
   // 從 zustand store 拿目前綁定工作流的資訊(顯示「對話綁定:xxx」用)
   const { workflows, activeId } = useWorkflowStore()
-  // 用於「新對話」按鈕觸發 Hero overlay 重新出現(跟 Hero 連動、是同一入口)
-  const setChatUIState = useWorkflowStore(s => s.setChatUIState)
 
   const [showChat, setShowChat] = useState(false)
   const [messages, setMessages] = useState<ChatMsg[]>([
@@ -397,21 +395,30 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
     }
   }
 
-  // 清空對話 → 退回到只有 welcome 的狀態
-  // 同時把對話「暫時解綁」當前工作流：下次發訊息 AI 不帶 yaml/canvas 上下文，
-  // 等於從零開始;想討論其他工作流可直接從左邊清單切過去(切了就重新綁定)。
-  //
-  // 額外行為(User 反饋):新對話 = 跟 Hero 連動、開啟 Hero overlay。
-  // 因為「新對話」跟 Hero 本質是同一個入口(全新空白對話的開始)、
-  // 點下去應該回到那個視覺最強的 Hero 介面、提供範例卡片 / CTA 給使用者選下一步。
-  // 「➕ 新工作流」= 開啟 Hero 全新工作流設計入口(範例卡片 / CTA)。
-  // 設計邏輯:新工作流 = 全新空白起點,Hero 本來就是非破壞性 overlay(不繼承
-  // 也不 persist 對話)。當前工作流的對話綁定 workflow_id、不需清空 —— 從左側
-  // 清單切回該工作流即在。故這裡只切到 hero state,不清空、不解綁、不彈確認框。
-  const handleNewWorkflow = () => {
+  // 清除「這個工作流」的對話紀錄 —— 只洗掉聊天歷史,仍綁定當前工作流。
+  // 跟左上角「新對話」(完全脫鉤、開新題目)不同:這裡保留 activeId 綁定,AI 下一輪仍會
+  // 透過 _workflow_state_block 拿到當前工作流的 canvas/YAML、只是不再看到先前的對話。
+  // 用途:聊天歷史被污染 / 太長 / 想重新開始討論「同一條工作流」時。
+  const handleClearChat = async () => {
     if (loading) return
-    setChatUIState('hero')
+    if (!confirm('清除這個工作流的對話紀錄?\n(不影響工作流本身;AI 仍記得當前工作流、只會忘記先前聊過的內容)')) return
+    const welcome: ChatMsg = {
+      role: 'assistant',
+      content: envPaths ? buildWelcomeMessage(envPaths)
+        : '你好!請告訴我你想自動化的工作流程,我會幫你產生 Pipeline YAML 設定。',
+    }
+    setMessages([welcome])
+    if (activeId) {
+      try { await clearWorkflowChat(activeId) } catch {/* ignore — UI 已清、DB 清失敗不擋 */}
+    } else {
+      try { localStorage.removeItem(SCRATCH_LS_KEY) } catch {/* ignore */}
+    }
+    toast.success('已清除對話(仍綁定當前工作流)')
   }
+
+  // 「新對話 / 開 Hero」入口已移到左上角側欄工具列(_sidebar.tsx,「新增」與「匯入」之間)。
+  // 側欄按鈕直接呼叫 store 的 setChatUIState('hero');page.tsx 僅在 chatUIState==='hero'
+  // 時掛載 <HeroMode>、離開即卸載 → 每次進 Hero 的 heroMessages 都是全新 []、保證乾淨狀態。
 
   // ── Hero 畫面(Phase 3)──────────────────────────────────────────────────
   // 首頁中央大畫面、玻璃感(可透出 canvas)、4 個範例卡片(送第一則後收起)、
@@ -450,7 +457,7 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
       {/* Toggle button — 放大強調,讓使用者一眼看到左下角可開 AI 助手求助 */}
       <button
         onClick={() => setShowChat(!showChat)}
-        title="點開 AI 助手,用白話描述就能建立 / 修改工作流"
+        title="點開 AI 助手,綁定目前工作流、用白話描述就能修改 / 診斷它(新增請用左上角「新對話」)"
         className={`w-full flex items-center gap-2.5 px-4 py-3 transition-colors ${
           showChat
             ? 'text-indigo-700 bg-indigo-50'
@@ -462,7 +469,7 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
         </span>
         <span className="flex-1 text-left min-w-0">
           <span className="block text-[15px] font-bold leading-tight">AI 助手</span>
-          {!showChat && <span className="block text-[11px] text-indigo-500/90 leading-tight">需要幫忙?點我用 AI 建立 / 修改工作流</span>}
+          {!showChat && <span className="block text-[11px] text-indigo-500/90 leading-tight">需要幫忙?點我用 AI 修改 / 診斷你的工作流</span>}
         </span>
         {loading && <Loader2 className="w-4 h-4 animate-spin text-indigo-500 shrink-0" />}
         {!loading && (showChat ? <ChevronDown className="w-4 h-4 shrink-0" /> : <ChevronUp className="w-4 h-4 shrink-0" />)}
@@ -473,27 +480,30 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
         <div className="flex flex-col flex-1 min-h-0 border-t border-gray-100">
           {/* Sub-toolbar：顯示目前綁定的工作流 + 新話題按鈕 */}
           <div className="flex flex-col gap-1 px-2.5 py-1.5 bg-gray-50/50 border-b border-gray-100 text-[11px] text-gray-500">
-            {/* 第一行：綁定指示獨立整行、長工作流名換行不截斷 */}
-            <div className="min-w-0 break-words leading-snug">
-              {chatUnbound ? (
-                <>🆕 新話題（未綁工作流；切換 / 重選工作流即重新綁定）</>
-              ) : activeId ? (
-                <span className="text-[13px] text-gray-600">💾 對話綁定工作流：<span className="text-[14px] font-bold text-blue-700 break-all">{workflows.find(w => w.id === activeId)?.name || activeId}</span></span>
-              ) : (
-                <>📝 暫存模式（未選工作流；建立 / 選取後才會持久保存）</>
-              )}
-            </div>
-            {/* 第二行：操作按鈕靠右(節點介紹已移到上方工具列、YAML 左側)*/}
-            <div className="flex items-center justify-end gap-1">
+            {/* 第一行：綁定指示(左、長名換行不截斷)+ 清除對話鈕(右、同一行)*/}
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 break-words leading-snug flex-1">
+                {chatUnbound ? (
+                  <>🆕 新話題（未綁工作流；切換 / 重選工作流即重新綁定）</>
+                ) : activeId ? (
+                  <span className="flex flex-col gap-0.5">
+                    <span className="text-[13px] text-gray-600">💾 對話綁定工作流</span>
+                    <span className="text-[14px] font-bold text-blue-700 break-all">{workflows.find(w => w.id === activeId)?.name || activeId}</span>
+                  </span>
+                ) : (
+                  <>📝 暫存模式（未選工作流；建立 / 選取後才會持久保存）</>
+                )}
+              </div>
               <button
-                onClick={handleNewWorkflow}
+                onClick={handleClearChat}
                 disabled={loading}
-                className="px-1.5 py-0.5 rounded text-[11px] text-blue-600 hover:text-blue-700 hover:bg-blue-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors font-medium"
-                title="開啟全新工作流設計(範例卡片/CTA);不會清空目前對話,切回左側工作流即在"
+                title="清除這個工作流的對話紀錄(只洗掉聊天歷史;AI 仍記得當前工作流、可繼續討論)"
+                className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] text-gray-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
-                ➕ 新工作流
+                🗑 清除對話
               </button>
             </div>
+            {/* 「新對話」入口已移到左上角側欄工具列(「新增」與「匯入」之間)、此處不再放按鈕 */}
           </div>
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-2.5 space-y-2.5">
@@ -925,7 +935,7 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
   const setChatUIState = useWorkflowStore(s => s.setChatUIState)
   const setHasInteracted = useWorkflowStore(s => s.setHasInteracted)
   const activeId = useWorkflowStore(s => s.activeId)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)   // Hero 首次輸入框(已改 textarea,支援 Shift+Enter 換行)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
   // 出場淡入(opacity 0 → 1,300ms)— 用 mounted flag + CSS transition
@@ -999,6 +1009,19 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
     setHeroInput(text)
     setTimeout(() => inputRef.current?.focus(), 0)
   }
+
+  // Hero 輸入框 auto-grow:隨內容自動長高、最多 6 行(≈120px)、超過則框內捲動。
+  // 兩個輸入框(歡迎大框 inputRef / 對話續打 textareaRef)共用 heroInput、同一時間只掛載一個。
+  // 涵蓋:打字、點範例卡填入(setHeroInput)、送出後清空(setHeroInput('') → 縮回單行)。
+  useEffect(() => {
+    const MAX_H = 120  // ≈ 6 行
+    for (const t of [inputRef.current, textareaRef.current]) {
+      if (!t) continue
+      t.style.height = 'auto'
+      t.style.height = Math.min(t.scrollHeight, MAX_H) + 'px'
+      t.style.overflowY = t.scrollHeight > MAX_H ? 'auto' : 'hidden'
+    }
+  }, [heroInput])
 
   // Hero-local handleSend:走 pipelineChatStream、但完全不 persist(不寫 localStorage、
   // 不呼 appendWorkflowChat)。訊息只活在這個 HeroMode component 的 state 裡、
@@ -1419,24 +1442,21 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
               {/* Input row(brutalist:純黑邊框、無圓角)*/}
               <div style={{
                 background: ATLAS_PAL.bgCard, border: `1px solid ${ATLAS_PAL.ink}`,
-                display: 'flex', alignItems: 'center', padding: '14px 16px', gap: 14,
+                display: 'flex', alignItems: 'flex-start', padding: '14px 16px', gap: 14,
               }}>
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: ATLAS_PAL.forest }}>{'>'}</span>
-                <input
+                <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: ATLAS_PAL.forest, paddingTop: 3 }}>{'>'}</span>
+                <textarea
                   ref={inputRef}
                   value={heroInput}
                   onChange={e => setHeroInput(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      onSubmit()
-                    }
-                  }}
+                  onKeyDown={onKeyDown}
                   disabled={heroLoading}
-                  placeholder="每天早上 9 點抓 Reddit 熱門 → AI 摘要 → Telegram 通知"
+                  rows={1}
+                  placeholder="每天早上 9 點抓 Reddit 熱門 → AI 摘要 → Telegram 通知(Enter 送出 / Shift+Enter 換行)"
                   style={{
                     flex: 1, border: 'none', outline: 'none', background: 'transparent',
-                    fontFamily: FONT_MONO, fontSize: 13.5, color: ATLAS_PAL.ink,
+                    fontFamily: FONT_MONO, fontSize: 13.5, color: ATLAS_PAL.ink, resize: 'none',
+                    lineHeight: 1.45,
                   }}
                 />
                 <button

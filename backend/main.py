@@ -1732,6 +1732,9 @@ async def api_export_workflow(wf_id: str):
                 "python_version": r["python_version"],
                 "success_count": r["success_count"],
                 "avg_runtime_sec": r["avg_runtime_sec"],
+                # was_interactive:此 recipe 是否由 ask_user 互動產生(如 python-cli-extractor
+                # 第一次選模式/參數)。轉移 / 還原時要保留、否則 ask_user 型 recipe 的互動屬性丟失。
+                "was_interactive": r.get("was_interactive", False),
             }
             safe_name = r["step_name"].replace("/", "_").replace("\\", "_")
             zf.writestr(f"recipes/{safe_name}.json", json.dumps(recipe_data, ensure_ascii=False, indent=2))
@@ -1751,7 +1754,7 @@ async def api_export_workflow(wf_id: str):
 async def api_import_workflow(file: UploadFile = File(...)):
     import io
     import zipfile
-    from db import create_workflow, save_recipe
+    from db import create_workflow, save_recipe, update_workflow
 
     content = await file.read()
     try:
@@ -1780,6 +1783,13 @@ async def api_import_workflow(file: UploadFile = File(...)):
         canvas=wf_data.get("canvas"),
         validate=wf_data.get("validate", False),
     )
+    # create_workflow 一律把 yaml 初始化成 ""(yaml 由 canvas 重生)。但匯出包有存原始
+    # yaml、且 AI 助手 _workflow_state_block / 部分 server 端會直接讀 stored yaml,
+    # 故還原時把它寫回 —— 不然匯入後到第一次在前端存檔前,stored yaml 都是空的。
+    _imported_yaml = (wf_data.get("yaml") or "").strip()
+    if _imported_yaml:
+        update_workflow(wf["id"], {"yaml": _imported_yaml})
+        wf["yaml"] = _imported_yaml
 
     # 匯入 recipes
     recipe_count = 0
@@ -1796,6 +1806,7 @@ async def api_import_workflow(file: UploadFile = File(...)):
                     code=r.get("code", ""),
                     python_version=r.get("python_version", ""),
                     runtime_sec=r.get("avg_runtime_sec", 0),
+                    was_interactive=r.get("was_interactive", False),
                 )
                 recipe_count += 1
             except Exception:
@@ -1997,6 +2008,15 @@ async def fs_open_output(name: str = ""):
         if cand.is_dir():
             target = cand
             existed = True
+            # per-run 子夾:產物實際落在 <name>/run_<ts>/。若母夾底下有 run_<ts>/ 子夾,
+            # 直接開「最新一次」那夾,而非停在母夾(否則使用者只看到一排 run_ 夾、還要自己點進去)。
+            # 與 chat_tools._resolve_workflow_output_dir 的「挑最新 run」邏輯對齊。
+            try:
+                _run_dirs = [d for d in cand.iterdir() if d.is_dir() and d.name.startswith("run_")]
+                if _run_dirs:
+                    target = max(_run_dirs, key=lambda d: d.stat().st_mtime)
+            except Exception:
+                pass
     try:
         if _sys.platform.startswith("win"):
             os.startfile(str(target))            # type: ignore[attr-defined]
@@ -3433,6 +3453,23 @@ exit_code 仍是 0。若不驗證就往下,下游 skill / report_writer 會**用
 
 可用模板由系統動態列出（見下方注入區），優先選最貼近使用者意圖的模板。**沒有合適模板**就改成「`outlook_template:` 留空 + `batch:` 填自由需求」走 LLM 路徑。
 
+### 🚨 大量信件「撈 → 分析 / 報告 / 待辦」→ 標準三步、中間必加「解析分組節點」(最常踩、別硬上)
+**使用者說**:「把今天 / 這週的信整理成工作報告」「列出待辦 / 緊急事項」「彙整收件匣做摘要」「分析這批信」這類
+**「撈一批信 → 產出報告 / 待辦 / 摘要」**的需求時 —— 一個收件匣一天可能 **200~300 封**,其中一大半是同型號 / 同流水號的**系統通知信**(ECN 簽核、Bug Daily、設備歸還 Overdue、daily report…)。
+
+🚫 **絕對不要**只用「outlook 撈信 → report_writer 寫報告」兩步硬上。把幾百筆原始信丟給 LLM、又要它同時「分類 + 合併同類 + 分級 + 寫報告」**超出弱模型能力**,結果一定是「逐封抄主旨的流水帳 + 系統通知信混進緊急區」(實測 6/5 共 284 封就這樣壞)。
+
+✅ **標準拆法(看到上述訊號就反射用、務必三步)**:
+```
+step 1  outlook_automation  撈當天/區間信 → 結構化 JSON(含內文)
+step 2  skill_mode(pandas)  「預分組 / 去重 / 過濾系統信」→ 幾十個帶件數的桶
+        (用正規表示式洗掉 流水號/型號/版本/日期 算 family_key → groupby 算 count、
+         分類 system_notice vs action、標 is_overdue/is_important,輸出 grouped.json)
+step 3  subagent report_writer  讀「已分組摘要」只做分級 + 寫人話(一桶一條、帶件數)
+```
+**關鍵理由**:把「分組 / 去重 / 過濾」交給**確定性的 pandas 程式**先做掉(可被 recipe 快取、穩定),
+LLM 只需面對「幾十個已分好組的桶」—— 弱模型也做得好。**內建「每日工作報告 (Outlook)」範例就是這個三步骨架**,規劃同類需求時直接照抄。
+
 ## 6.5 AI 驗證(`output.expect` — 上一個 step 的驗證描述)
 **使用者說**:「自動審核輸出」「跑完幫我檢查對不對」「驗證內容符不符合預期」「AI 驗證」
 **重要**:畫布上**看得到獨立的「AI 驗證節點」**(紫色盾牌 icon),但**它編譯成 YAML 時會併進前一個** step 的 `output.expect`、**不是獨立 YAML 步驟**。
@@ -4111,12 +4148,21 @@ TG 對話**沒有按鈕**、必須走 /save 命令流程。流程跟 web 端略�
 **TG 通道最高優先級違規**:回「已套用 / 已寫入 / 改好了」**但**這個 turn 沒 emit YAML_READY block。這代表你口頭說好、實際使用者下 /save 撈不到 YAML、什麼都不會發生。**永遠在 yes 後 emit YAML_READY + 提示 /save**。
 <!--TG_ONLY_END-->
 
-## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML
-**使用者說**：「自動點按鈕」「UI 自動化」「錄製操作」「滑鼠點擊」
-**你的回應**：
-> 桌面自動化節點需要先在畫布拉一個 computer_use 節點，按錄製鈕錄下你要操作的動作（滑鼠/鍵盤/截圖比對），AI 助手沒辦法幫你寫 actions 序列。錄完後再來討論前後步驟。
+## ⚠️ 桌面自動化節點（computer_use / RPA / 滑鼠鍵盤操作）— 永遠給「空白節點」，actions 由使用者錄製
+**使用者說**：「自動點按鈕」「UI 自動化」「RPA」「錄製操作」「滑鼠 / 鍵盤點擊」「操作某個 app / 視窗」
 
-actions 序列是錄製產生的，不是 LLM 該寫的。
+你**永遠不寫 actions 序列**（那是使用者在畫布按錄製鈕產生的、不是 LLM 該寫的）。但分兩種情況：
+
+**A. 整條工作流就只是桌面自動化** → 不寫 YAML，直接回：
+> 桌面自動化要先在畫布拉一個 computer_use 節點、按錄製鈕錄下動作（滑鼠 / 鍵盤 / 截圖比對），我沒辦法幫你寫 actions 序列。錄完再來討論前後步驟。
+
+**B. 桌面自動化只是「多步流程中的一步」**（例：先用 script 啟動既有專案 → 再接 computer_use 操作 → 最後人工確認）→ **務必在流程的正確位置輸出一個「空白」computer_use 節點**：
+```yaml
+- name: 操作工具          # ⚠ 一定要帶 computer_use: true
+  computer_use: true      #   不准用 batch、不准省略、不准退化成 script 節點
+```
+**最常見的錯誤（絕對禁止）**：使用者描述「啟動專案後接一個 computer use / RPA 操作」，你嘴上說懂、實際卻把那步寫成 script(batch) 或只給一個沒有 `computer_use: true` 的空名字 → 那會變成空白 script 節點、不是桌面自動化節點。**桌面自動化那步一定要帶 `computer_use: true`**。
+輸出後提醒：「『操作工具』這步請在畫布上點該節點、按錄製鈕錄下你的操作（我只先幫你把節點放到對的位置）。」
 
 ---
 
@@ -4278,6 +4324,25 @@ example 文字本身已聲明要 demo):
 
 當使用者描述含「我有 Python 專案 / GUI / main.py / 既有專案 / 啟動我的程式」這類用語時：
 
+0. **⚠️ 決定性前置判斷 — 後面有沒有接 computer_use / RPA？（優先於下面所有規則、先判這條）**
+   只要使用者要「開啟 / 啟動一個 GUI 程式」**而且後面接 computer_use / RPA / 手動點擊操作**（或說「保持開著我自己點」「啟動後我自己設定 RPA」「開起來給我操作」）：
+   - → **用 `script` 節點 + `background: true` 直接啟動原始 GUI**（視窗開著、不阻塞下一步），**絕對不要**掛 `python-cli-extractor`、也不要走「改寫成 CLI / headless」那套。
+   - **理由**：`python-cli-extractor` 的目的就是「把 GUI 拆成沒有視窗的 CLI 來跑」——那會讓**要被 RPA 點的視窗根本不存在**，跟使用者目的直接衝突。使用者既然說後面要 RPA，就代表他要的是「真正的 GUI 視窗開著」。**接了 RPA = 訊號夠明確、不必再反問要不要轉 CLI**。
+   - **正確 YAML**：
+     ```yaml
+     - name: 啟動工具
+       batch: '"<venv_python 或 python>" "<入口檔絕對路徑>"'
+       background: true          # 不等視窗關、啟動後直接進下一步
+       ready_after_seconds: 3    # 給 GUI 幾秒開起來、RPA 才點得到
+     - name: RPA操作              # 空白 computer_use 節點、actions 由使用者自己錄
+       computer_use: true
+     - name: 人工確認
+       human_confirm: true
+       message: "請確認操作結果是否符合預期"
+     ```
+   - 使用者就算說「我有 GUI 專案 / main.py」，**只要接了 RPA，就走這條**、不要被下面第 5 / 7 點的「GUI → skill / cli-extractor」帶偏。
+   - 🚫 **反例（本規則出現前 AI 反覆犯的錯，務必避免）**：使用者三番兩次明說「開 GUI 後我自己接 RPA 點擊、不要轉 CLI、用 script 就好」，AI 仍堅持掛 `python-cli-extractor` 轉 CLI —— 視窗沒了、RPA 無從點起、且違背使用者直接指示。
+
 1. **沒給專案路徑 → 必須先反問**：「你的 Python 專案放在哪個資料夾？」
    - **同時主動告知標準位置**：「建議放在本專案根目錄底下的 `external_projects/<你的專案名>/`，AI 才讀寫得到。」
    - ⚠️ **路徑在 `pipeline-orchestratorV5` 專案根目錄之外時(例:`C:/Users/.../Downloads/...`、桌面、其他磁碟)→ 規劃時就先提醒、別等跑到一半才發現**：skill 在 sandbox 容器裡只掛得到專案根目錄底下的檔,專案外的路徑容器看不到 → 一定卡 ask_user / 失敗。請在 Plan / 回覆**第一時間**告訴使用者:「這個路徑在本工具專案外、沙盒看不到,請先把整個專案資料夾複製到 `external_projects/<你的專案名>/` 再給我路徑」,等使用者搬好、給新路徑後才開始,**不要先送 YAML 開跑**。
@@ -4351,7 +4416,7 @@ example 文字本身已聲明要 demo):
 - 一次只問 1-2 個最關鍵的問題
 - 反問超過 3 輪還沒釐清 → 給草稿讓使用者改，比一直問好
 - 增量需求（「再加一步人工確認」）→ 在現有 YAML 上修改，不打掉重練
-- 提到 computer_use → 直接告訴他要錄製、不寫 YAML
+- 提到 computer_use:整條就是桌面自動化 → 叫他錄製、不寫 YAML;若只是多步流程中的一步 → 在對的位置輸出「空白 `computer_use: true` 節點」(別寫成 script、別省略)、actions 留給使用者錄
 
 # Discovery → Plan 的判定（很重要 — 先前過度反問）
 
@@ -4477,13 +4542,16 @@ LLM agent 對「邊角案例清單」「禁止 X 禁止 Y 禁止 Z」這類**防
 # 跟前端 _outlookPanel.tsx 的清單同步維護（前端是 UI 顯示用，這裡是 LLM prompt 注入用）。
 # 新增模板時兩邊都要加；只在前端加 → AI 助手不會推薦；只在這裡加 → UI 看不到。
 _OUTLOOK_TEMPLATES_FOR_PROMPT = [
-    ("daily_todo", "整理符合條件信件 → 待辦清單",
-     "掃指定資料夾的信，按條件過濾，整理成 markdown / xlsx 待辦清單。"
-     "⭐ 想整理「某時間範圍 / 某資料夾的所有信」(不限特定關鍵字)就用這個 — 例『整理今天/某日的信』『當日工作清單』。",
+    ("daily_todo", "整理符合條件信件 → 待辦清單 / 結構化清單",
+     "掃指定資料夾的信，按條件過濾，整理成 markdown / xlsx / json 清單。"
+     "⭐ 想整理「某時間範圍 / 某資料夾的所有信」(不限特定關鍵字)就用這個 — 例『整理今天/某日的信』『當日工作清單』。"
+     "⭐ **若下游 subagent 還要用『信件原始內文』(翻譯 / 分析 / 逐封分檔)→ 用這個、且 output_format: json** —— "
+     "json 會保留每封的結構化欄位(寄件人/主旨/收件時間/內文等)交給下游;**不要用 search_summary 取原文**(那會先摘要、拿不到全文)。",
      "folder, subject, sender, since, until, unread_only, output_format"),
-    ("search_summary", "指定關鍵字撈相關信件 → 摘要報告",
+    ("search_summary", "指定關鍵字撈相關信件 → LLM 摘要報告",
      "用 LLM 摘要符合條件的信件群、產出報告。"
-     "⚠️ **必須有明確關鍵字 / 主題**(keywords)才用;若只是『整理某時段全部信、沒特定關鍵字』→ 改用 daily_todo,用這個會撈 0 封。",
+     "⚠️ **必須有明確關鍵字 / 主題**(keywords)才用;若只是『整理某時段全部信、沒特定關鍵字』→ 改用 daily_todo,用這個會撈 0 封。"
+     "⚠️ **它輸出的是『摘要』、不是原始內文** —— 若下游還要拿『每封信原文』再處理(翻譯 / 分檔 / 二次分析)→ 不要用這個,改用 daily_todo + output_format: json。",
      "keywords, search_in, folder, since, until, detail_level, output_format"),
     ("unanswered", "未回覆超過 N 天的信",
      "找出收件匣中我還沒回過、且收件超過指定天數的信",

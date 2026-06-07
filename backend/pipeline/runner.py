@@ -2719,17 +2719,18 @@ async def _run_pipeline_inner(
                 # 收集延遲儲存的 recipe
                 if hasattr(exec_result, 'pending_recipe') and exec_result.pending_recipe:
                     run.pending_recipes.append(exec_result.pending_recipe)
-                # 收集此步驟的輸出資訊供後續步驟參考
-                # 優先：明確 output.path > snapshot 算出來的 actual_output_path
-                # 後者讓沒設 output.path 的 skill 步驟也能被後續 outlook send_with_attachment 自動抓到正確檔
+                # 收集此步驟的輸出資訊供後續步驟參考(供 outlook send_with_attachment 的
+                # 「上一步輸出」fallback、以及部分隱式參照用)。
+                # ⚠️ 優先用 actual_out(snapshot diff 算出的「檔案實際所在」絕對路徑)——
+                #    它含 per-run 的 run_<ts>/ 子夾、是檔案真正落地的位置。
+                #    _resolve_path(step.output.path) 只接到 ai_output/<wf>/、**沒有 run_<ts>/**,
+                #    會指到一個不存在的舊位置 → 下游 outlook 抓附件抓不到(已知 bug)。
+                #    只有在 snapshot 沒抓到實際檔時、才退回用設定的 output.path 解析。
                 _eff_path = ""
-                if step.output and step.output.path:
-                    # 一律存絕對路徑進 completed_outputs，下一步的 LLM agent 拿到
-                    # 純檔名也找不到、必須給它絕對路徑（_resolve_path 把純檔名接到
-                    # workflow dir、ai_output/... 接專案根、絕對路徑直接用）
-                    _eff_path = str(_resolve_path(step.output.path))
-                elif actual_out:  # 上面 snapshot diff 算出來的（已是絕對）
+                if actual_out:
                     _eff_path = actual_out
+                elif step.output and step.output.path:
+                    _eff_path = str(_resolve_path(step.output.path))
                 if _eff_path:
                     out_info = {"path": _eff_path, "schema": ""}
                     try:
@@ -3082,13 +3083,21 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
                                   else "AI 未產出修正 YAML")
             logger.warning("自我修復未產出可用 YAML → 轉人工:" + str(reason)[:200])
             _fallback("AI 自我修復未解決(" + str(reason)[:200] + ")。原失敗:" + (fail_reason or ""))
-            await _notify_self_heal(run, "⚠️ AI 自我修復未能解決、轉交人工決策。")
+            # 轉人工:用帶決策鍵盤的失敗通知(重試/補指示/讓AI再試/中止…),而非純文字
+            # — 否則 TG 只看到「轉交人工決策」卻沒有任何可點的按鈕、使用者無法在手機上處置。
+            await _notify_failure(run, ValidationResult(
+                status="failed",
+                reason="🔧 AI 自我修復未能解決、轉交人工決策。\n" + str(reason)[:300],
+                suggestion=fail_suggestion or ""), failed_step_name)
             return
 
         if _yaml_near_identical(new_yaml, current_yaml):
             logger.warning("自我修復新舊 YAML 幾乎相同(疑似不收斂)→ 轉人工")
             _fallback("AI 自我修復未產生實質變更(疑似不收斂)。原失敗:" + (fail_reason or ""))
-            await _notify_self_heal(run, "⚠️ AI 修復沒有實質變更、轉交人工決策。")
+            await _notify_failure(run, ValidationResult(
+                status="failed",
+                reason="🔧 AI 修復沒有實質變更(疑似不收斂)、轉交人工決策。\n原失敗:" + (fail_reason or "")[:300],
+                suggestion=fail_suggestion or ""), failed_step_name)
             return
 
         try:
@@ -3101,7 +3110,10 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
         except Exception as _e:
             logger.warning("自我修復 YAML 不合 schema → 轉人工:" + str(_e)[:200])
             _fallback("AI 修復的 YAML 不合格式:" + str(_e)[:200] + "。原失敗:" + (fail_reason or ""))
-            await _notify_self_heal(run, "⚠️ AI 修復的 YAML 格式錯誤、轉人工。")
+            await _notify_failure(run, ValidationResult(
+                status="failed",
+                reason="🔧 AI 修復產生的 YAML 格式錯誤、轉交人工決策。\n" + str(_e)[:300],
+                suggestion=fail_suggestion or ""), failed_step_name)
             return
 
         # 保留內部旗標(_workflow_id 等),新 YAML 不會帶 → 從舊 config_dict 補回
