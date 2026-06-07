@@ -1002,7 +1002,11 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
 
   // Hero-local handleSend:走 pipelineChatStream、但完全不 persist(不寫 localStorage、
   // 不呼 appendWorkflowChat)。訊息只活在這個 HeroMode component 的 state 裡、
-  // reload 就消失。workflow_id 仍綁 activeId(讓 AI 看得到當前 yaml/canvas 上下文)。
+  // reload 就消失。
+  // ⚠️ workflow_id 一律不帶(送 null)—— Hero 是「全新對話 / 永遠建新工作流」入口,
+  // 必須跟當前畫布工作流「完全脫鉤」:不帶歷史、也不帶 workflow_id。
+  // 否則後端 _workflow_state_block 會把當前(如 PPT)工作流整份 YAML 灌進 system prompt、
+  // 害 AI 把無關的新需求當成「對該工作流的增量編輯」(記憶汙染 bug 的真正來源)。
   const heroHandleSend = async () => {
     const text = heroInput.trim()
     if (!text || heroLoading) return
@@ -1026,7 +1030,7 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
     try {
       await pipelineChatStream(
         newMsgs.map(m => ({ role: m.role, content: m.content })),
-        activeId ?? null,
+        null,   // Hero = 全新對話、與當前畫布工作流完全脫鉤(不帶 workflow_id)
         (ev) => {
           if (ev.type === 'token') {
             accumulated += ev.text
