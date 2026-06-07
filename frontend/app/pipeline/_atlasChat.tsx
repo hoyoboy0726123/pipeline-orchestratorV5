@@ -827,7 +827,7 @@ const ATLAS_ACTIONS: AtlasAction[] = [
   {
     id: 'chain', title: '啟動 Python 專案 / 腳本', desc: '跑你現成的專案、或把 .py 串成工作流', tag: 'Workflow',
     examples: [
-      '用內建財務範例:stage1 產交易 → 清洗 → 彙總 → 產 Excel 報告(腳本已備、必跑通)',
+      '用內建財務範例 test-workflows/finance/:依序跑 stage1_generate_transactions.py → stage2_clean_data.py → stage3_analyze_finance.py → stage4_generate_report.py 產 Excel 報告(腳本已備、用完整路徑串成工作流)',
       '我有既有 GUI / CLI 專案(給資料夾路徑)→ AI 讀源碼、ask_user 收參數再跑',
     ],
   },
