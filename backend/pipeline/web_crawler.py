@@ -46,6 +46,43 @@ log = logging.getLogger(__name__)
 
 # ── 常數 ───────────────────────────────────────────────────────────
 FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
+# Windows + WSL2 docker:backend 跑在 Windows host、FlareSolverr 容器在 WSL 裡。
+# host 連 docker-published port 走 localhost 常不穩(localhost→::1 / 轉發間歇掉),
+# 但走 WSL IP 直連穩定。故候選 URL 順序:env 覆寫 > WSL IP > localhost > 127.0.0.1。
+# 實測:同一刻 localhost POST /v1 連不上、WSL-IP POST /v1 = ok。
+_FLARE_IP_CACHE = {"ip": "", "ts": 0.0}
+
+
+def _wsl_host_ip() -> str:
+    """取 WSL2 的 IP(`wsl hostname -I` 第一個);快取 5 分鐘。非 Windows / 無 wsl → ""。"""
+    import sys as _sys
+    if not _sys.platform.startswith("win"):
+        return ""
+    now = time.time()
+    if _FLARE_IP_CACHE["ip"] and now - _FLARE_IP_CACHE["ts"] < 300:
+        return _FLARE_IP_CACHE["ip"]
+    try:
+        out = subprocess.run(["wsl", "hostname", "-I"], capture_output=True,
+                             text=True, timeout=8)
+        ip = (out.stdout or "").strip().split()[0] if (out.stdout or "").strip() else ""
+    except Exception:
+        ip = ""
+    _FLARE_IP_CACHE["ip"], _FLARE_IP_CACHE["ts"] = ip, now
+    return ip
+
+
+def _flaresolverr_candidates() -> list[str]:
+    """回傳要嘗試的 FlareSolverr /v1 URL 候選(依可靠度排序)。"""
+    env = os.environ.get("FLARESOLVERR_URL")
+    if env:
+        return [env]
+    cands: list[str] = []
+    ip = _wsl_host_ip()
+    if ip:
+        cands.append(f"http://{ip}:8191/v1")
+    cands.append("http://localhost:8191/v1")
+    cands.append("http://127.0.0.1:8191/v1")
+    return cands
 DEFAULT_TIMEOUT_SEC = 180
 # Cloudflare 偵測訊號（回應裡出現任一即視為被擋）
 _CF_MARKERS = (
@@ -164,6 +201,28 @@ def _lookup_host_registry(url: str) -> Optional[dict]:
         if any(m.lower() in host for m in entry.get("match", [])):
             return entry
     return None
+
+
+# 失敗 / 需登入時給使用者的友善、可操作 cookie 指引(一條龍步驟)。
+_COOKIE_HELP = (
+    "👉 要抓需登入的站,請設 cookie:① 用瀏覽器登入該網站 → "
+    "② 裝 Chrome 擴充「Cookie-Editor」匯出(或 DevTools→Network→複製 Cookie: 那行)→ "
+    "③ 貼到本爬蟲節點面板「進階設定 → 登入 Cookies」欄(建議填 ${VAR} 把真值放 backend/.env、不明文存)。"
+    "面板裡有完整圖文教學「教學:怎麼從瀏覽器抓 cookies?」。"
+)
+
+# 登入牆 / 攔截頁訊號(thin 時用來判斷「是不是因為要登入才拿不到」)。
+_LOGIN_WALL_MARKERS = (
+    "請先登入", "請登入", "會員登入", "登入後", "歡迎登录", "请登录", "請登錄",
+    "sign in to", "please log in", "please sign in", "log in to continue",
+    "select your country", "您被攔截", "access denied", "verify you are human",
+)
+
+
+def _looks_like_login_wall(result: "CrawlResult") -> bool:
+    """thin 結果是不是「登入 / 國家選擇 / 攔截頁」(→ 需 cookie 才看得到真內容)。"""
+    blob = ((result.title or "") + " " + (result.markdown or "")[:1500]).lower()
+    return any(m.lower() in blob for m in _LOGIN_WALL_MARKERS)
 
 
 def url_to_filename(url: str, ext: str = ".md") -> str:
@@ -550,13 +609,26 @@ async def crawl_single_url(
     # 把「為什麼難爬 + 該怎麼辦(多半是貼 cookie / 換來源)」附進訊息,
     # 讓使用者 / output.expect 驗證看到具體原因、不是一句籠統失敗。純訊息、不改流程。
     _reg_final = _lookup_host_registry(url)
-    if _reg_final and _reg_final.get("known_hard") and (not result.ok or _looks_thin(result)):
-        _hint = _reg_final.get("note") or "此站已知難爬(自家反爬 / 重 SPA)。"
-        if _reg_final.get("needs_cookie"):
-            _hint += "（此站通常需登入 cookie:進階設定貼上 cookie 再試,或改用其他來源 / web_search。）"
-        logger.warning(f"[{step_name}] ⚠ 已知難爬站:{_hint}")
-        if not result.ok:
-            result.error = (result.error or "抓取結果過薄").rstrip("。") + "。\n" + _hint
+    _thin_or_fail = (not result.ok) or _looks_thin(result)
+    _login_wall = _looks_like_login_wall(result)
+    _needs_cookie = bool(_reg_final and _reg_final.get("needs_cookie")) or _login_wall
+    if _thin_or_fail and ((_reg_final and _reg_final.get("known_hard")) or _login_wall):
+        _parts = []
+        if _reg_final and _reg_final.get("note"):
+            _parts.append(_reg_final["note"])
+        elif _login_wall:
+            _parts.append("這個頁面看起來需要先登入才看得到完整內容(回到登入 / 國家選擇 / 攔截頁)。")
+        else:
+            _parts.append("此站已知難爬(自家反爬 / 重 SPA)、匿名常只拿到殼。")
+        if _needs_cookie:
+            _parts.append(_COOKIE_HELP)
+        _hint = " ".join(_parts)
+        logger.warning(f"[{step_name}] ⚠ {_hint}")
+        # 即使 Tier1 回 200 但其實是登入牆(ok=True 但 thin + login marker)→ 視為失敗,
+        # 否則會把「登入頁」當成功內容往下傳。需 cookie 才看得到 → 明確 fail + 友善指引。
+        if (not result.ok) or (_login_wall and _looks_thin(result)):
+            result.ok = False
+            result.error = (result.error or "只拿到登入 / 攔截頁、沒有目標內容").rstrip("。") + "。\n" + _hint
 
     if not result.ok:
         result.duration_ms = int((time.time() - t0) * 1000)
@@ -1819,19 +1891,38 @@ async def _run_flaresolverr(
     if cookies:
         body["cookies"] = cookies
 
-    try:
-        with httpx.Client(timeout=timeout + 10) as client:
-            resp = client.post(FLARESOLVERR_URL, json=body)
-        if resp.status_code != 200:
-            return _err(url, f"FlareSolverr 回 {resp.status_code}：{resp.text[:400]}",
-                        tier="flaresolverr")
-        data = resp.json()
-    except httpx.ConnectError:
-        return _err(url,
-                    f"FlareSolverr 連不上（{FLARESOLVERR_URL}）；確認 sandbox setup 已起這個 container",
-                    tier="flaresolverr")
-    except Exception as e:
-        return _err(url, f"FlareSolverr 呼叫失敗：{e}", tier="flaresolverr")
+    # 依序試候選 URL(WSL IP > localhost > 127.0.0.1):Windows host 連 WSL docker port
+    # 走 localhost 常不穩、WSL IP 直連穩。連不上(ConnectError)就換下一個。
+    candidates = _flaresolverr_candidates()
+    data = None
+    last_err = ""
+    for cand in candidates:
+        try:
+            with httpx.Client(timeout=timeout + 10) as client:
+                resp = client.post(cand, json=body)
+            if resp.status_code != 200:
+                last_err = f"FlareSolverr 回 {resp.status_code}：{resp.text[:300]}"
+                continue
+            data = resp.json()
+            if cand != candidates[0]:
+                logger.info(f"[{step_name}] FlareSolverr 改用 {cand} 成功(localhost 不通)")
+            break
+        except httpx.ConnectError:
+            last_err = f"連不上 {cand}"
+            continue
+        except Exception as e:
+            last_err = f"{cand} 呼叫失敗：{e}"
+            continue
+    if data is None:
+        # WSL IP 若快取過期(WSL 重啟換 IP)→ 清快取讓下次重抓
+        _FLARE_IP_CACHE["ip"] = ""
+        return _err(
+            url,
+            f"FlareSolverr 連不上(試過 {candidates};最後錯誤:{last_err})。"
+            f"確認 sandbox/docker-compose.yml 的 flaresolverr 容器有起來"
+            f"(sandbox 內跑 `docker compose up -d flaresolverr`)。",
+            tier="flaresolverr",
+        )
 
     if data.get("status") != "ok":
         return _err(url, f"FlareSolverr 回非 ok：{data.get('message') or data}",
