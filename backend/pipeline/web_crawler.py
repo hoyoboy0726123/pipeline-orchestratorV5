@@ -99,6 +99,68 @@ _THIN_MARKDOWN_BYTES = 2000
 _THIN_MEDIUM_BYTES = 5000
 _THIN_MEDIUM_LINKS = 3
 
+# ── Per-host 能力註冊表 ──────────────────────────────────────────────
+# 把「我們特別認識的站」的爬取提示集中一處。**沒列在這裡的站 → 全走通用路徑、
+# 行為完全不變**(零副作用)。命中的站只會多兩件事、都只可能變好、不會變差:
+#   1. SPA 智慧重試時、用本站專屬 wait_selector(例電商等「價格元素」render)取代通用 selector
+#      —— 只在「第一輪結果太瘦、本來就要重試」時生效,不影響第一輪、不會新增 timeout。
+#   2. 抓到殼 / 失敗且本站標 known_hard 時、把「為什麼難爬 + 該怎麼辦」誠實附進錯誤訊息
+#      —— 讓使用者/驗證看到「momo 需登入 cookie」而不是一句籠統失敗。
+#
+# 電商商品頁常見「價格靠 JS 後載」、通用 SPA selector(/p/、/comments/)等不到價格元素,
+# 補一組價格錨點讓重試等得到真內容。
+_SHOP_PRICE_SELECTOR = (
+    '[itemprop="price"], meta[itemprop="price"], '
+    '[class*="price"], [class*="Price"], [class*="amount"], '
+    '[data-price], .prdPrice, .priceArea, .price-now, .o-prdPrice__price'
+)
+
+# 每筆欄位都可選:
+#   match         : hostname 子字串清單(任一命中即套用)
+#   wait_selector : 本站「內容真的 render 出來」的 selector(餵 SPA 重試)
+#   known_hard    : True = 已知難爬(自家反爬 / 重 SPA),抓到殼時主動誠實警告
+#   needs_cookie  : True = 通常要登入 cookie 才有完整內容
+#   note          : 警告訊息附的人話說明(known_hard 時用)
+HOST_REGISTRY: list[dict] = [
+    # ── 台灣電商(自家反爬 + 重 SPA;有商品 URL pattern 但內容常只拿到殼)──
+    {"match": ["momoshop.com.tw", "momo.com.tw"], "wait_selector": _SHOP_PRICE_SELECTOR,
+     "known_hard": True, "needs_cookie": False,
+     "note": "momo 是重 SPA、價格靠 JS 後載、又有自家反爬;匿名常只拿到導覽殼。"
+             "建議改用官方 App / 搜尋頁 API,或在進階設定貼登入 cookie。"},
+    {"match": ["shopee.tw", "shopee.com"], "wait_selector": _SHOP_PRICE_SELECTOR,
+     "known_hard": True, "needs_cookie": True,
+     "note": "蝦皮自家反爬強、且多數內容要登入;沒 cookie 幾乎抓不到商品內容。"},
+    {"match": ["24h.pchome.com.tw", "pchome.com.tw", "ecshweb.pchome.com.tw"],
+     "wait_selector": _SHOP_PRICE_SELECTOR, "known_hard": False, "needs_cookie": False,
+     "note": "PChome 商品頁價格靠 JS 後載,等價格元素 render 即可。"},
+    {"match": ["ruten.com.tw"], "wait_selector": _SHOP_PRICE_SELECTOR,
+     "known_hard": True, "needs_cookie": False, "note": "露天有反爬、商品頁多為 SPA。"},
+    # ── 中國電商(強反爬、普遍需登入)──
+    {"match": ["taobao.com", "tmall.com"], "known_hard": True, "needs_cookie": True,
+     "note": "淘寶/天貓自家反爬極強、需登入 cookie;匿名抓不到。"},
+    {"match": ["jd.com"], "known_hard": True, "needs_cookie": True,
+     "note": "京東自家反爬、商品頁需登入 cookie 才完整。"},
+    # ── 國際電商(相對好爬、補價格錨點即可)──
+    {"match": ["amazon."], "wait_selector": '#corePrice_feature_div, .a-price, #priceblock_ourprice, [class*="price"]',
+     "known_hard": False, "needs_cookie": False, "note": "Amazon 商品頁等價格元素 render。"},
+    # ── 重 SPA 社群(子頁 pattern 已涵蓋、這裡補 render 等待 + needs_cookie 提示)──
+    {"match": ["shopee"], "known_hard": True, "needs_cookie": True},  # shopee 其他 TLD 兜底
+]
+
+
+def _lookup_host_registry(url: str) -> Optional[dict]:
+    """回傳該 URL host 命中的 registry entry(第一個 match);沒命中 → None(走通用路徑)。"""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+    for entry in HOST_REGISTRY:
+        if any(m.lower() in host for m in entry.get("match", [])):
+            return entry
+    return None
+
 
 def url_to_filename(url: str, ext: str = ".md") -> str:
     """把 URL 轉成可預測、不撞名的檔名。
@@ -430,16 +492,20 @@ async def crawl_single_url(
             and result.tier == "crawl4ai"):
         md_len = len(result.markdown or "")
         link_n = len((result.extra or {}).get("links_internal") or [])
+        # 本站若在 registry 有專屬 wait_selector(例電商價格錨點)→ 重試用它、否則用通用
+        _reg = _lookup_host_registry(url)
+        _retry_selector = (_reg or {}).get("wait_selector") or _SPA_FALLBACK_WAIT_SELECTOR
         logger.warning(
             f"[{step_name}] 第一輪結果偏瘦（{md_len} bytes / {link_n} 內部連結），"
             f"很可能是 SPA 沒 hydrate 完 → 啟用 SPA 智慧重試（自動加 wait_for + 滾動）"
+            + (f"、套用 {_reg['match'][0]} 專屬 selector" if _reg and _reg.get("wait_selector") else "")
         )
         retry = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: _run_crawl4ai_in_sandbox(
                 url=url, output_path=output_path,
                 js_render=True,                                 # SPA 必開
-                wait_for_selector=_SPA_FALLBACK_WAIT_SELECTOR,
+                wait_for_selector=_retry_selector,
                 cookies=_parse_cookies(cookies),
                 interactions=[],                                # 走智慧滾動、不再用寫死序列
                 download_assets=download_assets,
@@ -464,6 +530,19 @@ async def crawl_single_url(
                 logger.info(f"[{step_name}] SPA 重試結果沒比較好（保留原本）")
         else:
             logger.warning(f"[{step_name}] SPA 重試失敗（保留原本）：{retry.error}")
+
+    # ── known_hard 站誠實告知 ─────────────────────────────────────
+    # 本站在 registry 標 known_hard、而最終結果失敗或仍偏瘦(只拿到殼)→
+    # 把「為什麼難爬 + 該怎麼辦(多半是貼 cookie / 換來源)」附進訊息,
+    # 讓使用者 / output.expect 驗證看到具體原因、不是一句籠統失敗。純訊息、不改流程。
+    _reg_final = _lookup_host_registry(url)
+    if _reg_final and _reg_final.get("known_hard") and (not result.ok or _looks_thin(result)):
+        _hint = _reg_final.get("note") or "此站已知難爬(自家反爬 / 重 SPA)。"
+        if _reg_final.get("needs_cookie"):
+            _hint += "（此站通常需登入 cookie:進階設定貼上 cookie 再試,或改用其他來源 / web_search。）"
+        logger.warning(f"[{step_name}] ⚠ 已知難爬站:{_hint}")
+        if not result.ok:
+            result.error = (result.error or "抓取結果過薄").rstrip("。") + "。\n" + _hint
 
     if not result.ok:
         result.duration_ms = int((time.time() - t0) * 1000)
