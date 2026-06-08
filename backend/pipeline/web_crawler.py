@@ -143,6 +143,10 @@ HOST_REGISTRY: list[dict] = [
     # ── 國際電商(相對好爬、補價格錨點即可)──
     {"match": ["amazon."], "wait_selector": '#corePrice_feature_div, .a-price, #priceblock_ourprice, [class*="price"]',
      "known_hard": False, "needs_cookie": False, "note": "Amazon 商品頁等價格元素 render。"},
+    # BestBuy:非美國 IP / headless 常被導到「Select your Country」國家選擇頁、拿不到商品。
+    {"match": ["bestbuy.com"], "known_hard": True, "needs_cookie": False,
+     "note": "BestBuy 會依地區 / 偵測 headless 導到國家選擇頁;非美國 IP 匿名常拿到空殼。"
+             "需美國出口 IP / cookie,或改用其他來源。"},
     # ── 重 SPA 社群(子頁 pattern 已涵蓋、這裡補 render 等待 + needs_cookie 提示)──
     {"match": ["shopee"], "known_hard": True, "needs_cookie": True},  # shopee 其他 TLD 兜底
 ]
@@ -446,8 +450,16 @@ async def crawl_single_url(
     )
     is_upstream_error = (not result.ok) and result.status_code not in (0, None)
     is_thin = md_len < 200 and result.ok  # 只在「成功但內容薄」時算反爬空殼
+    # crawl4ai 自己偵測到反爬 / captcha(Amazon 等)→ 訊息含這些字。
+    # 這類 status=0 + ok=False 之前被當「內部錯誤」跳過 fallback,但其實該讓
+    # Tier 2 FlareSolverr(真瀏覽器 Puppeteer)試一次 — 它常能過 headless 過不了的反爬。
+    _errlow = (result.error or "").lower()
+    is_antibot = (not result.ok) and any(
+        k in _errlow for k in ("anti-bot", "antibot", "bot protection",
+                                "captcha", "blocked by", "access denied", "verify you are human")
+    )
 
-    needs_fallback = cloudflare_fallback and (is_cf_signal or is_upstream_error or is_thin)
+    needs_fallback = cloudflare_fallback and (is_cf_signal or is_upstream_error or is_thin or is_antibot)
 
     # 跳過 fallback 但有失敗跡象 → 紀錄為 Crawl4AI 內部問題,讓 user 知道不是 CF
     if cloudflare_fallback and not needs_fallback and not result.ok:
@@ -459,6 +471,8 @@ async def crawl_single_url(
     if needs_fallback:
         if is_cf_signal:
             reason = "結果像被 Cloudflare 擋"
+        elif is_antibot:
+            reason = "Crawl4AI 偵測到反爬 / captcha"
         elif is_upstream_error:
             reason = f"上游回非 2xx（status={result.status_code}）"
         else:
@@ -585,6 +599,7 @@ _AUTO_CHILD_LINK_PATTERNS = [
     r'/dp/[A-Z0-9]{10}',                # Amazon (/dp/ASIN)
     r'/gp/product/[A-Z0-9]{10}',        # Amazon (/gp/product/ASIN)
     r'/itm/\d+',                        # eBay
+    r'/\d{6,}\.p(?:\?|$|/)',            # BestBuy:/site/<slug>/<skuId>.p?skuId=…(實測格式)
     r'/ip/[\w-]+/\d+',                  # Walmart
     r'item\.htm\?.*\bid=\d+',           # 淘寶 / 天貓
     r'item\.jd\.com/\d+\.html',         # 京東 JD
