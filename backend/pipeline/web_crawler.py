@@ -566,7 +566,7 @@ _AUTO_CHILD_LINK_PATTERNS = [
     r'/comments/[a-z0-9]+/[\w-]+',     # Reddit
     r'/p/\d+',                          # Dcard
     r'/post/[a-z0-9-]+',                # Tumblr / wordpress.com / Threads
-    r'/posts/\d+',                      # ProductHunt
+    r'/posts/[\w-]+',                   # ProductHunt / Indie Hackers(slug、非純數字)
     r'/article/[\w-]+',                 # 新聞站常見
     r'/articles/[\w-]+',
     r'/status/\d+',                     # Twitter / X
@@ -581,7 +581,7 @@ _AUTO_CHILD_LINK_PATTERNS = [
     r'-i\.\d+\.\d+',                    # 蝦皮 Shopee (name-i.shopid.itemid)
     r'GoodsDetail\.jsp\?i_code=\d+',    # momo 購物網
     r'/prod/[A-Z0-9]+',                 # PChome 24h
-    r'/item/\d{10,}',                   # 露天拍賣 Ruten (/item/長數字/)
+    r'/item/(?:show\?)?\d{8,}',         # 露天拍賣 Ruten:/item/show?<id> 或 /item/<id>(實測確認)
     r'/dp/[A-Z0-9]{10}',                # Amazon (/dp/ASIN)
     r'/gp/product/[A-Z0-9]{10}',        # Amazon (/gp/product/ASIN)
     r'/itm/\d+',                        # eBay
