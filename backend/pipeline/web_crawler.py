@@ -518,10 +518,23 @@ async def crawl_single_url(
                                 "captcha", "blocked by", "access denied", "verify you are human")
     )
 
-    needs_fallback = cloudflare_fallback and (is_cf_signal or is_upstream_error or is_thin or is_antibot)
+    # 快速失敗優化:known_hard + 需 cookie 的站、使用者又沒給 cookie →
+    # FlareSolverr(無 session)和 SPA 重試(內容鎖在登入後)都救不了,
+    # 不要白等(蝦皮實測省 ~110s)。直接跳過兩段重試、走後面的 cookie 指引失敗。
+    _reg_hard = _lookup_host_registry(url)
+    _no_cookie_hardwall = bool(_reg_hard and _reg_hard.get("needs_cookie")) and not _parse_cookies(cookies)
+
+    needs_fallback = (cloudflare_fallback and not _no_cookie_hardwall
+                      and (is_cf_signal or is_upstream_error or is_thin or is_antibot))
+
+    if _no_cookie_hardwall and (not result.ok or is_thin):
+        logger.info(
+            f"[{step_name}] 此站需登入 cookie、但沒提供 → 跳過 FlareSolverr / SPA 重試"
+            f"(都救不了)、直接給 cookie 設定指引"
+        )
 
     # 跳過 fallback 但有失敗跡象 → 紀錄為 Crawl4AI 內部問題,讓 user 知道不是 CF
-    if cloudflare_fallback and not needs_fallback and not result.ok:
+    if cloudflare_fallback and not needs_fallback and not result.ok and not _no_cookie_hardwall:
         logger.info(
             f"[{step_name}] Tier 1 抓取失敗（status={result.status_code}, ok={result.ok}）"
             f" — 判定為 Crawl4AI 內部錯誤而非 Cloudflare,不 fallback FlareSolverr"
@@ -562,7 +575,7 @@ async def crawl_single_url(
     #   3. 不是被 CF 擋（CF fallback 已處理）
     user_set_overrides = bool(wait_for_selector) or bool(interactions)
     if (result.ok and not user_set_overrides and _looks_thin(result)
-            and result.tier == "crawl4ai"):
+            and result.tier == "crawl4ai" and not _no_cookie_hardwall):
         md_len = len(result.markdown or "")
         link_n = len((result.extra or {}).get("links_internal") or [])
         # 本站若在 registry 有專屬 wait_selector(例電商價格錨點)→ 重試用它、否則用通用
@@ -624,11 +637,12 @@ async def crawl_single_url(
             _parts.append(_COOKIE_HELP)
         _hint = " ".join(_parts)
         logger.warning(f"[{step_name}] ⚠ {_hint}")
-        # 即使 Tier1 回 200 但其實是登入牆(ok=True 但 thin + login marker)→ 視為失敗,
-        # 否則會把「登入頁」當成功內容往下傳。需 cookie 才看得到 → 明確 fail + 友善指引。
-        if (not result.ok) or (_login_wall and _looks_thin(result)):
+        # 即使 Tier1 回 200 但其實是殼(登入牆 / known_hard 需 cookie + thin)→ 視為失敗,
+        # 否則會把「登入頁 / 空殼」當成功內容往下傳。需 cookie 才看得到 → 明確 fail + 友善指引。
+        _shell_needs_cookie = _needs_cookie and _looks_thin(result)
+        if (not result.ok) or (_login_wall and _looks_thin(result)) or _shell_needs_cookie:
             result.ok = False
-            result.error = (result.error or "只拿到登入 / 攔截頁、沒有目標內容").rstrip("。") + "。\n" + _hint
+            result.error = (result.error or "只拿到登入 / 攔截頁 / 空殼、沒有目標內容").rstrip("。") + "。\n" + _hint
 
     if not result.ok:
         result.duration_ms = int((time.time() - t0) * 1000)
