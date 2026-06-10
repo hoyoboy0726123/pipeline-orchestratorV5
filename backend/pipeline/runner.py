@@ -3024,7 +3024,8 @@ def _strip_heal_yaml(text: str) -> str:
     if m:
         text = text[:m.start()]
     # 保險:沒有 YAML_READY 但有 ```yaml fenced block 時也一併移除
-    text = _re.sub(r"```ya?ml\b.*?```", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+    # 閉合圍欄要求單獨成行(\n```),否則 YAML 內文若有行內 ``` 會提前收尾、殘留半截 YAML
+    text = _re.sub(r"```ya?ml\b[\s\S]*?\n[ \t]*```[ \t]*(?:\n|$)", "", text, flags=_re.IGNORECASE)
     text = _re.sub(r"```\s*```", "", text)  # 殘留空 fence
     return text.strip()
 
