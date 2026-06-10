@@ -25,7 +25,7 @@ for arg in "${@:2}"; do
 done
 if [[ -z "$PROJECT_DIR" ]]; then
     echo "用法：$0 <project_dir_in_wsl> [--rebuild]"
-    echo "範例：$0 /mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV5"
+    echo "範例：$0 /mnt/c/Users/<you>/pipeline-orchestratorV5"
     echo "改了 Dockerfile / requirements.txt 要重裝：$0 ... --rebuild"
     exit 1
 fi

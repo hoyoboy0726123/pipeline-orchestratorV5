@@ -2978,7 +2978,7 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 **例外**：使用者明確說「沿用原本的收件人」「跟之前一樣寄給 X」時、才照原 YAML 填。否則預設反問。
 
 **處理方式 2 選 1**：
-1. **反問**：「我看到原 YAML 是寄給 `wilson_bai@asus.com`，要繼續寄給他、還是換別人？」（推薦）
+1. **反問**：「我看到原 YAML 是寄給 `wilson@example.com`，要繼續寄給他、還是換別人？」（推薦）
 2. **佔位符**：在 YAML 裡寫 `to: "<請填收件人 email>"` 並提醒使用者：「YAML 裡的 `to` 我留空、請套用後到 Outlook 節點 panel 填上你的收件人」
 
 # 對話流程（很重要 — 不要跳階段直接吐 YAML）
@@ -3096,7 +3096,7 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 
 產 YAML 前先逐項檢查、缺東西不要 emit、退回 Discovery 再問:
 
-1. **使用者明確給的資訊（email、人名、檔案路徑、URL、數字、日期）必須字面寫進 YAML**，不可用 placeholder（不要 `boss@x.com`、要用使用者真的給的 `wilson_bai@asus.com`）
+1. **使用者明確給的資訊（email、人名、檔案路徑、URL、數字、日期）必須字面寫進 YAML**，不可用 placeholder（不要 `boss@x.com`、要用使用者真的給的 `wilson@example.com`）
 2. **每個節點的必要欄位都要齊全**（看下方表）：
 
 | 節點 | 必要欄位 | 易漏項 |
