@@ -5380,7 +5380,9 @@ async def _chat_agent_loop(
     if has_yaml:
         # LLM 可能 emit 多份 yaml block(diff snippet 在前、完整版在後)。
         # 之前 re.search 只抓第一個、撞到 snippet 會 validation fail。改 findall 取最後一個。
-        _yaml_blocks = re.findall(r"```yaml\n([\s\S]+?)```", content)
+        # 閉合圍欄必須「單獨成行」(\n```):否則 YAML 內文若出現行內 ``` (例 batch 寫
+        # 『不要 markdown 圍欄(```)』) 會被非貪婪 +? 誤判成結束、把 YAML 從中間切斷。
+        _yaml_blocks = re.findall(r"```yaml\s*\n([\s\S]*?)\n[ \t]*```[ \t]*(?:\n|$)", content)
         if _yaml_blocks:
             yaml_content = _yaml_blocks[-1].strip()
             # ── 語法驗證：試跑 PipelineConfig.from_dict 檢查 schema ──
@@ -5607,7 +5609,9 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
 
     if has_yaml:
         # 同 pipeline_chat:LLM 可能 emit 多份 yaml block、取最後一個
-        _yaml_blocks = re.findall(r"```yaml\n([\s\S]+?)```", content)
+        # 閉合圍欄必須「單獨成行」(\n```):否則 YAML 內文若出現行內 ``` (例 batch 寫
+        # 『不要 markdown 圍欄(```)』) 會被非貪婪 +? 誤判成結束、把 YAML 從中間切斷。
+        _yaml_blocks = re.findall(r"```yaml\s*\n([\s\S]*?)\n[ \t]*```[ \t]*(?:\n|$)", content)
         if _yaml_blocks:
             yaml_content = _yaml_blocks[-1].strip()
             try:
