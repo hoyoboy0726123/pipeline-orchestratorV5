@@ -78,4 +78,4 @@ pipeline:
     - name: 寄送分析報告
       outlook_automation: true
       outlook_template: send_with_attachment
-      outlook_params: {"to":"YOUR_EMAIL@asus.com","subject":"NB 輿情分析報告","body":"附件為 PTT 筆電板自動分析結果。","attachments":["ai_output/NB 輿情分析/report.pptx"]}
+      outlook_params: {"to":"YOUR_EMAIL@example.com","subject":"NB 輿情分析報告","body":"附件為 PTT 筆電板自動分析結果。","attachments":["ai_output/NB 輿情分析/report.pptx"]}

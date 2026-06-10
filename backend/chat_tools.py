@@ -166,27 +166,54 @@ def get_run_log(run_id: str, max_chars: int = 12000) -> str:
     return text
 
 
+def _validate_subagent_roles_in_yaml(yaml_content: str) -> Optional[str]:
+    """掃 YAML 內所有 subagent step、檢查 subagent_role 都存在於可用清單。
+
+    回 None = 沒問題;回 string = 錯誤訊息(列未知 role + 可選 role + 提示)。
+
+    為什麼擋在 save/create_workflow_yaml 寫入前:
+    - AI 助手有時直接寫 subagent_role: boss 但根本沒先 create_subagent_role 建過
+    - 雖然 step 執行時會 fail、但那是 workflow 跑到該步才爆、使用者已浪費 token
+    - 寫入時就擋下、AI 收到錯誤訊息會回去先建 role 再重寫 yaml
+    """
+    try:
+        import yaml as _yaml
+        parsed = _yaml.safe_load(yaml_content) or {}
+        steps = parsed.get("steps") or parsed.get("pipeline", {}).get("steps") or []
+        used_roles: set[str] = set()
+        for s in steps:
+            if not isinstance(s, dict):
+                continue
+            if s.get("subagent") is True or s.get("subagent_role"):
+                rid = (s.get("subagent_role") or "").strip()
+                if rid:
+                    used_roles.add(rid)
+        if not used_roles:
+            return None
+        from pipeline.subagent_runner import load_roles
+        available = set(load_roles().keys())
+        unknown = sorted(used_roles - available)
+        if unknown:
+            return (
+                f"YAML 含未存在的 subagent_role: {unknown}。\n"
+                f"可用 role (內建 + 自訂):{sorted(available)}。\n"
+                f"請**先**呼叫 create_subagent_role 工具(走兩步 confirm 協議)把這些 role 建好、"
+                f"再重新呼叫本工具寫入 YAML。"
+            )
+        return None
+    except Exception:
+        # YAML 解析失敗會在後續 PipelineConfig 驗證階段擋下、這裡不重複報
+        return None
+
+
 @tool
 def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> str:
-    """把 YAML 套用到指定工作流（覆蓋原 YAML + 重建畫布節點）。
-
-    ⚠️ 這是 destructive 寫操作、**必須走兩步協議**：
-
-    **步驟 1 (confirm=False、預覽)**：
-    - 你先呼叫本工具但 confirm 不設 / 設 False → 本工具只回預覽資訊（目標、變動量、不寫入）
-    - 接著用純文字向使用者明確確認：「我準備把 YAML 套到 X、原 N 節點 → 新 M 節點，要套用嗎？」
-    - **不要假設使用者已同意** — 即使他之前說過「修一下」「改成這樣」、寫前還是要再確認一次
-
-    **步驟 2 (confirm=True、實寫)**：
-    - 使用者**明確**同意（回「yes」「OK」「套用」「好」等）後才呼叫本工具設 confirm=True
-    - 使用者語意若模糊（「再看看」「好像」）→ 不要設 True、繼續確認
+    """覆蓋既有 workflow YAML(重建畫布)、走兩步協議。
 
     Args:
-        query: 目標 workflow name（模糊比對）或 id（完整或前綴）。
-        yaml_content: 完整 YAML 字串（含 name/steps 等）。
-        confirm: False=預覽 / True=實寫。預設 False。
-
-    回傳：預覽資訊 或 寫入結果 / 錯誤訊息。
+        query: workflow name(模糊)或 id 前綴
+        yaml_content: 完整 YAML
+        confirm: False 預覽、True 真寫(等使用者明確同意才設 True)
     """
     wf, err = _resolve_workflow(query)
     if not wf:
@@ -212,6 +239,11 @@ def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> 
         PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
     except Exception as e:
         return f"YAML schema 驗證失敗、不寫入：{type(e).__name__}: {str(e)[:200]}"
+
+    # subagent_role 存在性預驗(寫入前擋下、防 AI 漏建 role 直接寫 workflow)
+    _role_err = _validate_subagent_roles_in_yaml(yaml_content)
+    if _role_err:
+        return f"⛔ subagent_role 驗證失敗、不寫入:\n{_role_err}"
 
     new_nodes = len(new_canvas.get("nodes") or [])
     old_yaml = wf.get("yaml") or ""
@@ -246,29 +278,14 @@ def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> 
 
 @tool
 def create_workflow_yaml(name: str, yaml_content: str, confirm: bool = False) -> str:
-    """**建立**全新的工作流(已有名稱 = 拒絕)、把 YAML 寫進去 + 重建畫布。
+    """**建立**新工作流(撞名拒絕、防誤覆蓋)、走兩步協議。
 
-    跟 `save_workflow_yaml` 的差別:
-    - `save_workflow_yaml`:更新**已存在**工作流(query 找名/id)、會覆蓋原 YAML
-    - `create_workflow_yaml`:建**新的**工作流(若同名已存在會拒絕)、避免誤覆蓋
-
-    使用時機:
-    - 使用者明確說「建一個新工作流叫 X」「再開一個工作流叫 X」
-    - 對話脈絡中沒有現成工作流可套(例:剛規劃好新流程)
-
-    ⚠️ 也是 destructive 寫操作、**必須走兩步協議**:
-    步驟 1 (confirm=False、預覽):
-      - 檢查 name 是否已被佔用、yaml 是否合法
-      - 用純文字向使用者確認:「我要建一個新工作流叫 X、N 個節點、要建嗎?」
-    步驟 2 (confirm=True、實建):
-      - 使用者明確同意後才設 True
+    與 save_workflow_yaml 差別:save_=更新既有覆蓋、create_=新建撞名失敗。
 
     Args:
-        name: 新工作流名稱(同名已存在會拒絕、請改用 save_workflow_yaml 更新)
-        yaml_content: 完整 YAML 字串(含 name/steps 等)
-        confirm: False=預覽 / True=實建
-
-    回傳:預覽資訊 / 寫入結果 / 錯誤訊息
+        name: 新 workflow 名(撞名拒絕、要更新請用 save_workflow_yaml)
+        yaml_content: 完整 YAML
+        confirm: False 預覽、True 真建
     """
     name = (name or "").strip()
     if not name:
@@ -304,6 +321,11 @@ def create_workflow_yaml(name: str, yaml_content: str, confirm: bool = False) ->
     except Exception as e:
         return f"YAML schema 驗證失敗、不建:{type(e).__name__}: {str(e)[:200]}"
 
+    # subagent_role 存在性預驗(建立前擋下、防 AI 漏建 role 直接建 workflow)
+    _role_err = _validate_subagent_roles_in_yaml(yaml_content)
+    if _role_err:
+        return f"⛔ subagent_role 驗證失敗、不建:\n{_role_err}"
+
     new_nodes = len(new_canvas.get("nodes") or [])
     if not confirm:
         return (
@@ -328,6 +350,93 @@ def create_workflow_yaml(name: str, yaml_content: str, confirm: bool = False) ->
         )
     except Exception as e:
         return f"建立失敗:{type(e).__name__}: {str(e)[:200]}"
+
+
+@tool
+def create_subagent_role(
+    role_id: str,
+    label: str,
+    description: str,
+    tools: list[str],
+    system_prompt: str,
+    confirm: bool = False,
+) -> str:
+    """新增自訂 subagent role(寫到 custom_subagent_roles.yaml)、走兩步協議。
+
+    Args:
+        role_id: 英文 snake_case、不可撞內建(data_analyst/coder/researcher/critic/planner)
+        label: 中文顯示名(畫布顯示)
+        description: 一句話用途(UI 提示)
+        tools: 從 run_python/run_shell/read_file/web_search/view_image/ask_user 挑(done 自動加)
+        system_prompt: role 第一條 system message。寫**純語意**敘述職能+工作流、**不要寫 `<tool>` 文字格式範例**(native FC 自動處理、教 `<tool>` 反會讓 LLM 退回文字模式失敗)
+        confirm: False 預覽、True 真寫
+    """
+    from pipeline.subagent_runner import (
+        BUILTIN_ROLE_IDS, SELECTABLE_TOOLS, load_custom_roles, save_custom_roles,
+    )
+    import re as _re
+
+    role_id = (role_id or "").strip()
+    label = (label or "").strip()
+    description = (description or "").strip()
+    system_prompt = system_prompt or ""
+
+    # 1. 欄位驗證
+    if not _re.match(r"^[a-z][a-z0-9_]{1,39}$", role_id):
+        return "role_id 必須英文 snake_case (小寫開頭、長 2-40、只能含 a-z 0-9 _)、不能空"
+    if role_id in BUILTIN_ROLE_IDS:
+        return f"role_id '{role_id}' 是內建角色名、不可使用。內建有:{sorted(BUILTIN_ROLE_IDS)}"
+    if not label:
+        return "label(中文顯示名)不能空"
+    if not description:
+        return "description(一句話用途)不能空"
+    if not isinstance(tools, list):
+        return "tools 必須是 list (例 ['run_python', 'read_file'])"
+    _bad = [t for t in tools if t not in SELECTABLE_TOOLS]
+    if _bad:
+        return f"tools 含未知工具 {_bad};可選:{SELECTABLE_TOOLS}(done 會自動加)"
+    if len(system_prompt.strip()) < 30:
+        return "system_prompt 太短(至少 30 字)、要寫清楚角色職能 + 工作流 + 最高優先級違規規則"
+
+    # 2. 撞名檢查
+    existing = load_custom_roles()
+    if role_id in existing:
+        return (
+            f"自訂角色 '{role_id}' 已存在。\n"
+            f"要編輯請告訴使用者去設定頁的『Subagent 角色管理』、或刪除舊的再呼本工具。"
+        )
+
+    # 3. confirm=False → preview
+    _tools_with_done = list(tools)
+    if "done" not in _tools_with_done:
+        _tools_with_done.append("done")
+    if not confirm:
+        return (
+            f"[PREVIEW 不寫] 將新增自訂角色:\n"
+            f"  role_id: {role_id}\n"
+            f"  label: {label}\n"
+            f"  description: {description}\n"
+            f"  tools: {_tools_with_done}\n"
+            f"  system_prompt: ({len(system_prompt)} 字、開頭 100 字: {system_prompt[:100]!r})\n"
+            f"\n⚠️ 請取得使用者明確同意(『yes』『建』『OK』等)後、再次呼叫本工具並設 confirm=True。"
+        )
+
+    # 4. confirm=True → 真寫
+    try:
+        existing[role_id] = {
+            "label": label,
+            "description": description,
+            "tools": _tools_with_done,
+            "system_prompt": system_prompt,
+        }
+        save_custom_roles(existing)
+        return (
+            f"✅ 已新增自訂角色 '{role_id}' ({label})\n"
+            f"tools: {_tools_with_done}\n"
+            f"請告訴使用者:角色已可用、現在 workflow YAML 可以寫 subagent_role: {role_id}"
+        )
+    except Exception as e:
+        return f"寫入失敗:{type(e).__name__}: {str(e)[:200]}"
 
 
 @tool
@@ -440,27 +549,12 @@ def list_schedules() -> str:
 
 @tool
 async def schedule_workflow(query: str, schedule_expr: str, confirm: bool = False) -> str:
-    """為指定工作流建立 cron 排程(每天/每週固定時間自動執行)。
-
-    使用時機:
-    - 使用者要求「每天早上 9 點跑 X」「每週一 18:00 跑 Y」「每小時跑一次 Z」
-    - 規劃完工作流後、user 提到「定時自動跑」
-
-    ⚠️ 寫操作、**必須走兩步協議**:
-    步驟 1 (confirm=False、預覽):確認 workflow 存在 + cron 表達式有效、用文字向使用者確認
-    步驟 2 (confirm=True、實建):明確同意後才設 True
+    """為 workflow 建 cron 排程、走兩步協議。
 
     Args:
-        query: 目標 workflow name(模糊)或 id(前綴)
-        schedule_expr: cron 表達式(分 時 日 月 週、5 個欄位)。常見:
-                       "0 9 * * *"   = 每天早上 9 點
-                       "0 9 * * 1-5" = 週一至週五早上 9 點
-                       "0 */2 * * *" = 每 2 小時整點
-                       "30 18 * * 1" = 每週一 18:30
-                       "0 0 1 * *"   = 每月 1 日午夜
-        confirm: False=預覽 / True=實建
-
-    回傳:預覽資訊 / 排程建立結果 / 錯誤訊息
+        query: workflow name(模糊)或 id 前綴
+        schedule_expr: cron 5 欄表達式(分 時 日 月 週、例 "0 9 * * 1-5" = 週一至五 9 點)
+        confirm: False 預覽、True 真建
     """
     wf, err = _resolve_workflow(query)
     if not wf:
@@ -591,35 +685,27 @@ def _resolve_workflow_output_dir(workflow_name: str):
 
     if not target.exists() or not target.is_dir():
         return None, f"輸出資料夾不存在: {target}"
+    # per-run 子資料夾:新版每次執行的產物落在 <工作流>/run_<時間戳>/。
+    # 若本層底下有 run_*/ 子夾 → 挑「最近修改」那個當作要找檔的目錄(= 最新一次執行)。
+    # 舊版工作流把檔案直接放本層的、沒有 run_*/ → 維持回傳本層(向後相容)。
+    try:
+        run_dirs = [d for d in target.iterdir() if d.is_dir() and d.name.startswith("run_")]
+        if run_dirs:
+            latest = max(run_dirs, key=lambda d: d.stat().st_mtime)
+            return latest, ""
+    except OSError:
+        pass
     return target, ""
 
 
 @tool
 def send_file_to_tg(workflow_query: str, filename: str = "", confirm: bool = False) -> str:
-    """從某 workflow 的輸出資料夾抓檔送到使用者 Telegram。
-
-    使用時機：
-    - 使用者要求「把報告傳給我」「把 report.md 傳到 TG」「傳 X 工作流的最新檔案」
-    - 你建議使用者下載某產出後、主動 offer 送過去
-
-    ⚠️ 這是會送資料到使用者 TG 的寫操作、**必須走兩步協議**：
-
-    **步驟 1 (confirm=False、預覽)**：
-    - filename 空 → 列出 workflow 輸出資料夾裡的所有檔案讓使用者選
-    - filename 給了 → 預覽要送哪個檔(大小、路徑)
-    - 接著用純文字向使用者確認:「要把 X 傳到 TG 嗎?」
-
-    **步驟 2 (confirm=True、實送)**：
-    - 使用者明確同意後才設 confirm=True
-
-    安全：檔案存取限定在 `<OUTPUT_BASE_PATH>/<workflow_name>/` 內、不能讀任意路徑。
+    """從 workflow 輸出資料夾抓檔傳 TG、走兩步協議。50MB cap、限定 OUTPUT_BASE_PATH 內。
 
     Args:
-        workflow_query: 目標 workflow name(模糊)或 id(前綴)。
-        filename: 檔名(完整、含副檔名;空字串 = 列出所有檔案讓使用者選)。
-        confirm: False=預覽 / True=實送。預設 False。
-
-    回傳:預覽 / 送檔結果 / 錯誤訊息。
+        workflow_query: workflow name(模糊)或 id 前綴
+        filename: 完整檔名;空 → 列所有檔讓使用者選
+        confirm: False 預覽、True 真送
     """
     # 1. 找 workflow
     wf, err = _resolve_workflow(workflow_query)
@@ -852,17 +938,22 @@ def send_file_to_tg(workflow_query: str, filename: str = "", confirm: bool = Fal
         return f"檔案 {size_kb:,.1f} KB 超過 TG 50 MB 上限、無法送"
 
     try:
-        from pipeline.runner import _get_tg_token, _get_tg_chat_id
+        from pipeline.runner import _get_tg_token, _get_tg_chat_id, _prepare_tg_file_with_bom
         from telegram import Bot
-        import asyncio
+        import asyncio, os as _os, logging as _logging
         token = _get_tg_token()
         chat_id = _get_tg_chat_id()
         if not token or not chat_id:
             return "Telegram 未設定 (token / chat_id 缺)、無法送"
 
+        # 文字檔(.md / .txt / .csv …)送 TG 前注入 UTF-8 BOM、避免 iOS TG 解成 Big5 亂碼
+        _send_path, _temp_to_cleanup = _prepare_tg_file_with_bom(
+            str(target), _logging.getLogger("chat_tools"), target.name,
+        )
+
         async def _do_send():
             async with Bot(token=token) as bot:
-                with open(target, "rb") as f:
+                with open(_send_path, "rb") as f:
                     await bot.send_document(
                         chat_id=chat_id,
                         document=f,
@@ -885,6 +976,13 @@ def send_file_to_tg(workflow_query: str, filename: str = "", confirm: bool = Fal
                 loop.run_until_complete(_do_send())
         except RuntimeError:
             asyncio.run(_do_send())
+
+        # cleanup BOM-injected temp(若有)
+        if _temp_to_cleanup:
+            try:
+                _os.unlink(_temp_to_cleanup)
+            except Exception:
+                pass
 
         return (
             f"✅ 已送 {target.name} 到 Telegram (chat_id={chat_id})\n"
@@ -930,7 +1028,16 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
     q = (query or "").strip()
     if not q:
         return "[web_search 錯誤] query 不可為空"
-    n = max(1, min(int(max_results or 5), 5))
+    # 完整內容模式:caller 沒明確要 full、就看設定頁的「完整內容模式」開關
+    # (修:原本只讀 caller 參數、UI 開了也沒用 — 對齊 _skill_web_search 的設定讀取)
+    if not full_content:
+        full_content = bool(s.get("web_search_full_content_default", False))
+    n = max(1, min(int(max_results or 5), 8))
+
+    # 搜尋深度:讀 settings.web_search_deep_default(預設 True、advanced 模式)
+    # Atlas 定位深度研究、預設 ON;帳單失控時設定頁關掉。
+    _deep = bool(s.get("web_search_deep_default", True))
+    _depth = "advanced" if _deep else "basic"
 
     import requests as _requests
     try:
@@ -940,11 +1047,11 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
                 "api_key": key,
                 "query": q,
                 "max_results": n,
-                "search_depth": "basic",
+                "search_depth": _depth,
                 "include_answer": True,
                 "include_raw_content": bool(full_content),
             },
-            timeout=45 if full_content else 20,
+            timeout=60 if (full_content or _deep) else 20,
         )
         if resp.status_code == 401:
             return "[web_search 錯誤] Tavily API key 無效(401)、請更新"
@@ -974,7 +1081,7 @@ def web_search(query: str, max_results: int = 5, full_content: bool = False) -> 
         if full_content:
             raw = (r.get("raw_content") or r.get("content") or "").strip()
             if raw:
-                lines.append(f"    {raw[:2500]}{'...' if len(raw) > 2500 else ''}")
+                lines.append(f"    {raw[:6000]}{'...' if len(raw) > 6000 else ''}")
     return "\n".join(lines)
 
 
@@ -1017,38 +1124,16 @@ async def dispatch_subagent_async(
     max_iter: int = 8,
     follow_up: Optional[list[dict]] = None,
 ) -> str:
-    """派子代理進沙盒 (WSL Docker 內 pipeline-sandbox-v5) 非同步執行 ad-hoc 編碼 /
-    分析任務。立即 return task_id、不等子代理完成、對話可繼續。
+    """派子代理進沙盒非同步跑 ad-hoc 任務(寫 code / debug / 分析)、立即回 task_id。
 
     Args:
-        role: 子代理角色。data_analyst(處理 csv/xlsx 產 md/xlsx/png)、
-              coder(寫 / debug Python script)、researcher(收料產摘要)、
-              critic(純唯讀挑問題)、planner(拆任務)
-        task: 自然語言任務描述、給子代理當 prompt
-        working_dir: 工作 / 輸出資料夾、相對路徑會解到 ai_output/<dir>。
-                     留空 → 自動推 ai_output/chat-adhoc/<timestamp>_<id>/
-        max_iter: 子代理最多輪數(預設 8、簡單任務 6-8、複雜 10-15)。
-                  寫 .py + 跑 + done 至少 3 輪、但 LLM 會繞 read_file / 試錯、
-                  通常實際 5-7 輪、給 8 算 safe baseline。降到 5 以下高機率 max_iter 失敗
-        follow_up: (chain 模式)第一階段成功後 backend 自動派下一個、不必使用者手動 trigger。
-                  格式:list[dict] 例如:
-                      [
-                          {"role": "critic", "task": "審查上一階段產物、列 3 個問題"},
-                          {"role": "coder", "task": "根據意見修正", "max_iter": 10},
-                      ]
-                  特性:共用 working_dir、上一階段 summary 自動 prepend 進下個 task、
-                       任一階段失敗就停。每階段完都 push TG。
+        role: data_analyst / coder / researcher / critic / planner
+        task: 自然語言任務描述
+        working_dir: 工作目錄,留空 → 自動 ai_output/chat-adhoc/<ts>_<id>/
+        max_iter: 最大輪數,預設 8、複雜 10-15、勿低於 5
+        follow_up: chain 模式、list[{role, task, max_iter}]、共用 working_dir
 
-    Returns:
-        task_id 字串 + 預估時間 + 後續查詢提示。
-
-    使用情境（不限定簡單任務、複雜任務也可派）：
-        - 使用者 chat 中要寫程式 / 跑測試 / 做資料分析、且不指定要用畫布 / 工作流
-        - 不限任務大小：寫整個小應用、debug 多檔程式、跑研究式分析都 OK
-        - 派出 vs 建 workflow 的決策遵守 system prompt「派子代理 vs 建 workflow」段落:
-          使用者沒明說「自動化 / 排程 / 重複跑」時、應該先反問用戶要 A 還 B
-
-    後續：用 check_subagent_status(task_id) 查狀態 / 拿結果。
+    後續:check_subagent_status(task_id) 查;細則見 system prompt「派子代理 vs 建 workflow」。
     """
     import asyncio
     import time as _time
@@ -1541,7 +1626,28 @@ def check_subagent_status(task_id: str = "") -> str:
         out.append(f"tokens: input={tu.get('input_tokens', 0)} output={tu.get('output_tokens', 0)} total={tu.get('total_tokens', 0)} model={tu.get('model', '')!r}")
     if r.get("error"):
         out.append(f"error: {r['error'][:300]}")
-    out.append(f"\nsummary:\n{r.get('summary', '(空)')}")
+    _summary = r.get('summary', '(空)')
+    out.append(f"\nsummary:\n{_summary}")
+
+    # ⛔ Hallucination 偵測:子代理 summary 宣稱「已送到 TG」但沒走 V5 統一傳檔工具
+    #   → 真實案例:coder 子代理自己 import requests 呼 TG Bot API、寫 summary 「ok=true、message_id=X」
+    #     但實際可能沒真送或送錯 chat_id、使用者沒收到。AI 助手字面採信轉述 user 就誤導。
+    #   解法:server 這層偵測 + AI 助手讀到自動加 disclaimer。
+    _SEND_CLAIMS = (
+        "已送", "已傳", "已寄", "已發送", "已成功傳送", "成功傳送", "傳送成功",
+        "API ok", "ok=true", "ok: true", "ok\":true", "ok\": true",
+        "message_id", "messageid", "sendDocument", "send_document 成功",
+    )
+    _has_send_claim = any(k.lower() in _summary.lower() for k in _SEND_CLAIMS)
+    _used_v5_tool = "send_subagent_file_to_tg" in tools or "send_file_to_tg" in tools
+    if _has_send_claim and not _used_v5_tool:
+        out.append(
+            "\n⚠️ HALLUCINATION 警示:子代理 summary 宣稱『已傳送/API ok/message_id』、"
+            "但 tools used 不含 send_subagent_file_to_tg(V5 統一傳檔工具)。\n"
+            "  子代理可能自己 import requests 呼 TG Bot API、結果未經系統驗證、實際是否到達未知。\n"
+            "  AI 助手轉述使用者時請加 disclaimer『子代理自報、實際請確認』、"
+            "或改用 send_subagent_file_to_tg 工具重傳一次保證到達。"
+        )
     return "\n".join(out)
 
 
@@ -1660,17 +1766,22 @@ def send_subagent_file_to_tg(task_id: str, filename: str = "", confirm: bool = F
         return f"❌ {size_kb:,.1f} KB 超過 TG 50 MB 上限"
 
     try:
-        from pipeline.runner import _get_tg_token, _get_tg_chat_id
+        from pipeline.runner import _get_tg_token, _get_tg_chat_id, _prepare_tg_file_with_bom
         from telegram import Bot
-        import asyncio as _asyncio
+        import asyncio as _asyncio, os as _os, logging as _logging
         token = _get_tg_token()
         chat_id = _get_tg_chat_id()
         if not token or not chat_id:
             return "❌ Telegram 未設定(token / chat_id 缺)、無法送"
 
+        # 文字檔送 TG 前注入 UTF-8 BOM、避免 iOS TG 解成 Big5 亂碼
+        _send_path, _temp_to_cleanup = _prepare_tg_file_with_bom(
+            str(target), _logging.getLogger("chat_tools"), target.name,
+        )
+
         async def _do_send():
             async with Bot(token=token) as bot:
-                with open(target, "rb") as f:
+                with open(_send_path, "rb") as f:
                     await bot.send_document(
                         chat_id=chat_id,
                         document=f,
@@ -1690,6 +1801,13 @@ def send_subagent_file_to_tg(task_id: str, filename: str = "", confirm: bool = F
                 loop.run_until_complete(_do_send())
         except RuntimeError:
             _asyncio.run(_do_send())
+
+        # cleanup BOM-injected temp(若有)
+        if _temp_to_cleanup:
+            try:
+                _os.unlink(_temp_to_cleanup)
+            except Exception:
+                pass
 
         return f"✅ 已送出 {target.name} ({size_kb:,.1f} KB) 到 Telegram"
     except Exception as e:
@@ -1916,11 +2034,265 @@ def list_workflow_variables(query: str) -> str:
     }, ensure_ascii=False, indent=2)
 
 
+# ── 長期記憶工具(階段1:facts 語意記憶)──────────────────────────
+# 只在 settings.memory_enabled=True 時被掛載(main.py _active_tools filter)。
+# 寫操作(remember/forget)走 two-step confirm;recall/list/state 是讀、不必 confirm。
+
+@tool
+def remember_fact(key: str, value: str, category: str = "fact", confirm: bool = False) -> str:
+    """把一個關於使用者的事實 / 偏好記進長期記憶、跨對話永久保留(讓助手越用越懂使用者)。
+
+    什麼時候用:使用者明確說「記一下 / 記住 / 以後都這樣」,或表達了穩定偏好
+    (例「報告我都要正式 Word」「不要爬 PChome」「我做硬體競品研究」)。
+    ⚠️ 一次性需求不要記。敏感資料(密碼 / API key)會被系統拒記。
+
+    Args:
+        key: 短鍵、英數底線(例 'report_format' / 'domain' / 'avoid_sites')
+        value: 內容(例 '正式 Word' / '硬體競品研究')
+        category: workflow_pref(工作流偏好)/ domain(領域)/ past_decision(過去取捨)
+                  / vocabulary(慣用詞)/ preference / fact
+        confirm: False=預覽、True=真寫(取得使用者同意後才設 True)
+    """
+    import memory as _mem
+    key = (key or "").strip()
+    value = (value or "").strip()
+    if not key or not value:
+        return "key 與 value 都不可空"
+    hit = _mem.is_sensitive(value)
+    if hit:
+        return f"⛔ 拒記:這看起來像敏感資料(密碼 / 金鑰),不收進記憶。"
+    if not confirm:
+        prev = _mem.recall_fact(key)
+        prev_line = f"\n（會覆蓋舊值：{prev['value']}）" if prev.get("found") else ""
+        return (f"📝 預覽:要記住「{key} = {value}」(分類 {category}){prev_line}\n"
+                f"⚠️ 取得使用者同意(『好』『記』『OK』)後,再次呼叫本工具並設 confirm=True。")
+    r = _mem.remember_fact(key, value, category=category, source="user_told", confidence=1.0)
+    if not r.get("ok"):
+        return f"記憶失敗:{r.get('error')}"
+    return f"✅ 已記住:{key} = {value}(分類 {category})。之後跨對話都記得。"
+
+
+@tool
+def recall_fact(key: str) -> str:
+    """從長期記憶查一個 key 的值。找不到會說明。"""
+    import memory as _mem
+    r = _mem.recall_fact((key or "").strip())
+    if not r.get("found"):
+        return f"記憶裡沒有 '{key}'。"
+    src = "(推測)" if r.get("source") == "inferred" else ""
+    return f"{key} = {r['value']}{src}(分類 {r.get('category')})"
+
+
+@tool
+def list_facts(category: str = "", limit: int = 20) -> str:
+    """列出記得的事實 / 偏好。可選 category 過濾。"""
+    import memory as _mem
+    cat = (category or "").strip() or None
+    rows = _mem.list_facts(category=cat, limit=int(limit))
+    if not rows:
+        return "目前沒有任何記憶。"
+    lines = []
+    for r in rows:
+        src = "(推測)" if r.get("source") == "inferred" else ""
+        lines.append(f"- [{r.get('category')}] {r['key']} = {r['value']}{src}")
+    return f"目前記得 {len(rows)} 筆:\n" + "\n".join(lines)
+
+
+@tool
+def forget_fact(key: str, confirm: bool = False) -> str:
+    """從長期記憶刪掉一個 key(使用者說「忘掉 / 別記 X」時用)。走 two-step。"""
+    import memory as _mem
+    key = (key or "").strip()
+    if not confirm:
+        prev = _mem.recall_fact(key)
+        if not prev.get("found"):
+            return f"記憶裡本來就沒有 '{key}'、不必刪。"
+        return (f"🗑️ 預覽:要刪掉記憶「{key} = {prev['value']}」\n"
+                f"⚠️ 取得使用者同意後,再次呼叫本工具並設 confirm=True。")
+    r = _mem.forget_fact(key)
+    return f"✅ 已刪掉記憶 '{key}'。" if r.get("deleted") else f"記憶裡沒有 '{key}'。"
+
+
+@tool
+def recall_episode(query: str, max_results: int = 5) -> str:
+    """查過去對話的摘要 —— 使用者問「上次 / 之前聊的那個…」「我們之前討論的 X 結論是?」
+    這類「過去發生的事」(不是單點偏好)時用。語意檢索、用不同詞也找得到。"""
+    import memory as _mem
+    eps = _mem.recall_episode((query or "").strip(), max_results=int(max_results))
+    if not eps:
+        return "過去對話摘要裡找不到相關的。可請使用者多給點線索。"
+    lines = [f"- {e['summary']}" for e in eps]
+    return "找到這些過去對話的摘要(可據此回答使用者):\n" + "\n".join(lines)
+
+
+@tool
+def memory_state() -> str:
+    """看記憶現況:記了幾筆事實、幾段對話摘要、最近幾筆是什麼。"""
+    import memory as _mem
+    nf = _mem.count_facts()
+    ne = _mem.count_episodes()
+    if nf == 0 and ne == 0:
+        return "長期記憶目前是空的(還沒記任何事實、也沒對話摘要)。"
+    top = _mem.list_facts(limit=5)
+    lines = [f"- [{r.get('category')}] {r['key']} = {r['value']}" for r in top]
+    body = f"長期記憶:{nf} 筆事實偏好、{ne} 段對話摘要。"
+    if lines:
+        body += "\n最近 5 筆偏好:\n" + "\n".join(lines)
+    return body
+
+
+# ── 既有專案探查工具(啟動既有 Python 專案 / GUI / CLI 用) ──────────────────────
+# 敏感檔名 pattern(對齊 CLAUDE.md deny-list):這些檔一律不列出、不讀內容。
+_SENSITIVE_GLOBS = (
+    ".env", ".env.*", "*.key", "*.pem", "*.p12", "*.pfx",
+    "id_rsa*", "id_ed25519*", "*.gpg", "credentials*", "*credentials*",
+    "*secret*", "*token*", ".npmrc",
+)
+
+
+def _is_sensitive_filename(name: str) -> bool:
+    import fnmatch
+    low = (name or "").lower()
+    return any(fnmatch.fnmatch(low, p) for p in _SENSITIVE_GLOBS)
+
+
+def _detect_proj_venv(proj: Path) -> dict:
+    """偵測專案目錄下的虛擬環境(venv / .venv,Win Scripts / Unix bin)。
+    與 main.py 的 /fs/check-venv 同邏輯:venv 先(Windows 慣例)、誰先找到用誰。"""
+    import os
+    is_win = (os.name == "nt")
+    sub = "Scripts" if is_win else "bin"
+    py = "python.exe" if is_win else "python"
+    for vdir in ("venv", ".venv"):
+        vpy = proj / vdir / sub / py
+        if vpy.exists():
+            return {"has_venv": True, "python_path": str(vpy.resolve()), "venv_dir_name": vdir}
+    return {"has_venv": False, "python_path": None, "venv_dir_name": None}
+
+
+@tool
+def inspect_project(path: str) -> str:
+    """探查使用者既有的 Python 專案資料夾,為「啟動既有專案」工作流收集規劃所需資訊。
+
+    什麼時候用:使用者說「我有 Python 專案 / 啟動我的程式 / 跑 main.py」並給了資料夾路徑後,
+    **第一步就呼叫本工具**,別憑空猜入口或依賴。回傳 JSON:
+    - venv:虛擬環境偵測。has_venv=true 時 python_path 就是該專案的 python,
+      **組 batch 時把它當 python 前綴**(例 `"<python_path>" main.py --arg`)、確保依賴齊全、不會 ModuleNotFoundError。
+    - entry_candidates:入口候選(main.py / app.py / run.py / cli.py / manage.py …)
+    - dependency_files:依賴檔(requirements.txt / pyproject.toml / Pipfile …)
+    - top_level_tree:頂層目錄樹(限 2 層;.env / *.key / *secret* / *token* 等敏感檔一律不列)
+
+    拿到結果後的 SOP:用 read_project_file 讀入口檔判斷怎麼跑(argparse / input() / CLI 參數)→
+    ask_user 跟使用者確認入口與參數 → 組 script 節點 batch。
+    無 venv → 用 `python` 跑、並在規劃時提醒「此專案無虛擬環境、依賴可能缺、建議先建 venv」。
+
+    Args:
+        path: 專案資料夾的絕對路徑(例 C:\\Users\\me\\external_projects\\my_tool)
+    """
+    import os
+    p = (path or "").strip().strip('"').strip("'")
+    if not p:
+        return "請提供專案資料夾路徑(絕對路徑)。"
+    proj = Path(p).expanduser()
+    if not proj.exists():
+        return (f"路徑不存在:{proj}\n請確認專案已放好(建議放本專案 external_projects/<你的專案>/ 底下)、"
+                f"再給我正確的絕對路徑。")
+    if proj.is_file():
+        proj = proj.parent
+    venv = _detect_proj_venv(proj)
+    entry_names = ("main.py", "app.py", "run.py", "cli.py", "__main__.py",
+                   "manage.py", "start.py", "server.py", "gui.py", "bot.py")
+    dep_names = ("requirements.txt", "pyproject.toml", "Pipfile", "Pipfile.lock",
+                 "environment.yml", "setup.py", "setup.cfg", "poetry.lock")
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv",
+                 ".idea", ".vscode", ".mypy_cache", ".pytest_cache", "dist", "build", ".ruff_cache"}
+    entries, deps, readmes, tree = [], [], [], []
+    try:
+        for child in sorted(proj.iterdir(), key=lambda c: (c.is_file(), c.name.lower())):
+            nm = child.name
+            if _is_sensitive_filename(nm):
+                continue
+            if child.is_dir():
+                if nm in skip_dirs:
+                    tree.append(f"{nm}/  (略)")
+                    continue
+                tree.append(f"{nm}/")
+                try:  # 第二層只列 .py 與 dep 檔
+                    for g in sorted(child.iterdir()):
+                        if _is_sensitive_filename(g.name):
+                            continue
+                        if g.is_file() and (g.suffix == ".py" or g.name in dep_names):
+                            tree.append(f"  {nm}/{g.name}")
+                            if g.name in entry_names:
+                                entries.append(f"{nm}/{g.name}")
+                except Exception:
+                    pass
+            else:
+                tree.append(nm)
+                if nm in entry_names:
+                    entries.append(nm)
+                if nm in dep_names:
+                    deps.append(nm)
+                if nm.lower() in ("readme.md", "readme.txt", "readme.rst", "readme"):
+                    readmes.append(nm)
+    except Exception as e:
+        return f"讀取資料夾失敗:{e}"
+    if len(tree) > 120:
+        tree = tree[:120] + [f"...(還有 {len(tree) - 120} 項略過)"]
+    result = {
+        "project_dir": str(proj.resolve()),
+        "venv": venv,
+        "entry_candidates": entries or "(頂層沒找到常見入口檔、請看 top_level_tree 或讀 README)",
+        "dependency_files": deps,
+        "readme_files": readmes,
+        "top_level_tree": tree,
+        "hint": ("有 venv → batch 用 python_path 當前綴跑;無 venv → 用 python 並提醒依賴可能缺。"
+                 "下一步:read_project_file 讀入口檔/README 判斷怎麼跑與有哪些參數,再 ask_user 確認。"),
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@tool
+def read_project_file(path: str, max_chars: int = 8000) -> str:
+    """讀使用者既有專案裡的某個檔(原始碼 / README / requirements),判斷怎麼跑、有哪些 CLI 參數。
+
+    什麼時候用:inspect_project 之後,要讀入口檔(main.py 等)看它的 argparse / input() / 啟動方式,
+    或讀 README / requirements.txt 了解用法與依賴,據此組 batch 與 ask_user 的選項。
+    ⚠️ .env / *.key / credentials / *secret* / *token* 等敏感檔會被拒讀。
+
+    Args:
+        path: 檔案絕對路徑
+        max_chars: 最多回傳字元(預設 8000、避免 token 爆;超過會截斷並提示)
+    """
+    p = (path or "").strip().strip('"').strip("'")
+    if not p:
+        return "請提供檔案的絕對路徑。"
+    f = Path(p).expanduser()
+    if _is_sensitive_filename(f.name):
+        return f"⛔ 拒讀:{f.name} 屬敏感檔(.env / 金鑰 / 憑證 / token),不讀取內容。"
+    if not f.exists():
+        return f"檔案不存在:{f}"
+    if f.is_dir():
+        return f"{f} 是資料夾、不是檔案。要看目錄結構請用 inspect_project。"
+    try:
+        sz = f.stat().st_size
+        if sz > 2_000_000:
+            return f"檔案過大({sz} bytes),拒讀以免 token 爆。請改讀較小的入口檔 / README。"
+        raw = f.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"讀檔失敗:{e}"
+    n = max(500, int(max_chars))
+    if len(raw) > n:
+        return raw[:n] + f"\n\n...(檔案還有 {len(raw) - n} 字元被截斷;需要的話用更大的 max_chars 或讀特定段落)"
+    return raw or "(檔案是空的)"
+
+
 # Module-level export 給 main.py 用
 CHAT_TOOLS = [
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
     list_workflow_variables,                 # 列工作流可用變數(規劃 / 修改用)
     save_workflow_yaml, create_workflow_yaml, start_workflow,    # 寫工具(走 two-step approval)
+    create_subagent_role,                    # 新增自訂 subagent role(走 two-step approval)
     send_file_to_tg,                         # 送檔到 TG(走 two-step approval)
     web_search,                              # 網路搜尋(限定工作流相關研究)
     list_schedules, schedule_workflow, cancel_schedule,  # 排程相關(write 走 two-step)
@@ -1928,5 +2300,9 @@ CHAT_TOOLS = [
     read_subagent_file, send_subagent_file_to_tg,    # 子代理產物 讀 / 傳 TG(限定 task working_dir)
     cancel_subagent_task,                            # 中止正在跑的子代理(asyncio.cancel + push TG)
     read_help_doc,                                   # 進階用法 lazy doc(chain / files / cancel)
+    inspect_project, read_project_file,              # 探查既有專案 + 讀源碼(啟動既有 Python 專案、偵測 venv 用)
+    remember_fact, recall_fact, list_facts, forget_fact, recall_episode, memory_state,  # 長期記憶(memory_enabled 時掛載)
 ]
 CHAT_TOOLS_BY_NAME = {t.name: t for t in CHAT_TOOLS}
+# 記憶工具名單(main.py 依 settings.memory_enabled 決定掛不掛)
+MEMORY_TOOL_NAMES = {"remember_fact", "recall_fact", "list_facts", "forget_fact", "recall_episode", "memory_state"}

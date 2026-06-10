@@ -243,6 +243,11 @@ async def validate_step(
     - 圖片檔案以視覺方式驗證
     - 是否符合 expect 描述的期望
     """
+    # 確定性前置檢查:範本填充殘留 {{}}、或「要圖卻沒圖」→ 直接 failed(免叫 LLM)
+    _pre = _deterministic_precheck(step_name, command, output_path, output_expect, logger)
+    if _pre is not None:
+        return _pre
+
     # 收集輸出檔案資訊
     file_info = _check_output_file(output_path, step_start_time=step_start_time)
     file_content = _read_file_content(output_path)
@@ -448,6 +453,215 @@ def _check_output_file(path: Optional[str], step_start_time: Optional[str] = Non
                 f"可能是先前 run 的舊產物、本次未實際更新 — 應判 failed**"
             )
     return f"✅ 檔案存在，大小：{size:,} bytes{_stale_note}"
+
+
+# ── 確定性前置檢查：範本填充殘留佔位標籤 ────────────────────────────────────────
+# 與模型 / expect 無關的硬規則。輸出檔(pptx/docx/xlsx)若還留著 {{...}} 佔位標籤，
+# 代表「範本填充」根本沒填完，必判 failed → 觸發 self-heal。這比「拜託 LLM 在
+# prompt / expect 記得檢查」可靠得多（弱模型常忽略，且 expect 太寬鬆會放行空填充）。
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*[^{}\n]{1,40}?\s*\}\}")
+_TEMPLATE_FILL_EXTS = {'.pptx', '.docx', '.xlsx'}
+
+
+def _scan_leftover_placeholders(path: Optional[str]) -> list[str]:
+    """掃描範本填充類輸出檔是否殘留 {{...}} 佔位標籤。回傳去重後的標籤清單(最多 8 個)。
+    讀不出檔 / 非範本類副檔名 → 回空 list(不擋、交給後續 LLM 驗證)。"""
+    if not path:
+        return []
+    try:
+        p = _resolve_user_path(path)
+    except Exception:
+        return []
+    if not p.exists() or p.is_dir() or p.suffix.lower() not in _TEMPLATE_FILL_EXTS:
+        return []
+    texts = _office_texts(p)
+    found: list[str] = []
+    seen: set[str] = set()
+    for t in texts:
+        if not t:
+            continue
+        for m in _PLACEHOLDER_RE.findall(t):
+            mm = m.strip()
+            if mm not in seen:
+                seen.add(mm)
+                found.append(mm)
+    return found[:8]
+
+
+def _leftover_placeholder_result(found: list[str]) -> "ValidationResult":
+    return ValidationResult(
+        status="failed",
+        reason="輸出檔仍殘留未填入的佔位標籤(範本填充未完成):" + "、".join(found),
+        suggestion=(
+            "這些 {{...}} 佔位標籤沒有被實際資料取代。請逐一替換每個標籤("
+            "文字標籤換成對應的值;圖片佔位如 {{圖}} 要用 add_picture 在該位置插入圖片後、"
+            "再把原本的標籤文字清空)。不可留任何 {{}} 殘留。"
+        ),
+    )
+
+
+# 任務是否「預期要有圖片」(看 batch 指令 + expect 描述)。命中才會強制要求輸出有圖。
+_IMAGE_INTENT_RE = re.compile(
+    r"圖片|插圖|貼圖|配圖|照片|相片|圖表|截圖|logo|image|picture|photo|chart|\{\{\s*圖",
+    re.IGNORECASE,
+)
+
+
+def _expects_images(command: Optional[str], output_expect: Optional[str]) -> bool:
+    return bool(_IMAGE_INTENT_RE.search((command or "") + "\n" + (output_expect or "")))
+
+
+def _count_pictures(p: Path) -> int:
+    """數 office 檔內實際插入的圖片數。讀不出 → 回 -1(未知、不擋)。"""
+    ext = p.suffix.lower()
+    try:
+        if ext == '.pptx':
+            from pptx import Presentation
+            n = 0
+            for s in Presentation(str(p)).slides:
+                for sh in s.shapes:
+                    if sh.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
+                        n += 1
+            return n
+        if ext == '.docx':
+            from docx import Document
+            return len(Document(str(p)).inline_shapes)
+    except Exception:
+        return -1
+    return -1
+
+
+# 「圖片路徑被當成文字填進去」的偵測:輸出檔的可見文字裡出現圖片副檔名字串
+# = 模型把路徑填成文字、而非真的插入圖片。與 batch 寫不寫「圖」無關。
+_IMAGE_PATH_TEXT_RE = re.compile(r"[^\s\"']+\.(?:png|jpe?g|gif|webp|bmp)\b", re.IGNORECASE)
+
+
+def _office_texts(p: Path) -> list[str]:
+    """抽 pptx/docx/xlsx 的所有可見文字(供殘留標籤 / 圖片路徑文字掃描共用)。讀不出回 []。"""
+    ext = p.suffix.lower()
+    texts: list[str] = []
+    try:
+        if ext == '.pptx':
+            from pptx import Presentation
+            for s in Presentation(str(p)).slides:
+                for sh in s.shapes:
+                    if sh.has_text_frame:
+                        texts.append(sh.text_frame.text)
+                    if getattr(sh, "has_table", False):
+                        for row in sh.table.rows:
+                            for cell in row.cells:
+                                texts.append(cell.text)
+        elif ext == '.docx':
+            from docx import Document
+            doc = Document(str(p))
+            texts.extend(par.text for par in doc.paragraphs)
+            for t in doc.tables:
+                for row in t.rows:
+                    for cell in row.cells:
+                        texts.append(cell.text)
+        elif ext == '.xlsx':
+            import openpyxl
+            wb = openpyxl.load_workbook(str(p), read_only=True, data_only=False)
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    texts.extend(c for c in row if isinstance(c, str))
+            wb.close()
+    except Exception:
+        return []
+    return texts
+
+
+_OOXML_EXTS = {'.docx', '.xlsx', '.pptx'}
+
+
+def office_format_mismatch(path: Optional[str]) -> Optional[str]:
+    """Office 副檔名(.docx/.xlsx/.pptx)但檔案開頭不是 ZIP magic(PK)→ 回傳問題描述字串;
+    正常 / 非 Office 副檔名 / 檔案不存在 → None。
+
+    最常見的假檔:把 markdown / 純文字直接存成 .docx(開頭是 '# ' 之類)。真正的 OOXML 是 zip、
+    開頭一定是 b'PK'。這個檢查決定性、模型無關,skill 與 subagent 都適用。"""
+    if not path:
+        return None
+    try:
+        p = _resolve_user_path(path)
+    except Exception:
+        return None
+    if p.suffix.lower() not in _OOXML_EXTS or not (p.exists() and not p.is_dir()):
+        return None
+    try:
+        with open(p, "rb") as f:
+            head = f.read(4)
+    except Exception:
+        return None
+    if head[:2] != b"PK":
+        preview = head.decode("latin-1", "replace").strip()
+        return (
+            f"輸出檔 {p.name} 副檔名是 Office 格式,但檔案開頭不是 ZIP(PK)、而是「{preview}」——"
+            f"這不是真正的 {p.suffix.lower()} 檔(很可能是 markdown / 純文字被直接改副檔名存成它)。"
+        )
+    return None
+
+
+def _deterministic_precheck(
+    step_name: str, command: str, output_path: Optional[str],
+    output_expect: Optional[str], logger: logging.Logger,
+) -> "Optional[ValidationResult]":
+    """範本填充類任務的硬規則前置檢查(與模型 / expect 無關)。回傳 ValidationResult 代表
+    直接判 failed、None 代表通過、交給後續 LLM 驗證。"""
+    if not output_path:
+        return None
+    # 0) Office 副檔名但實際不是 OOXML(開頭非 PK)→ 假檔(常見:markdown 存成 .docx)
+    _fake = office_format_mismatch(output_path)
+    if _fake:
+        logger.warning(f"[{step_name}] 確定性檢查:{_fake} → 判 failed")
+        return ValidationResult(
+            status="failed",
+            reason=_fake,
+            suggestion=(
+                "請用對應函式庫實際產生 Office 檔:Word 用 python-docx(Document().save())、"
+                "Excel 用 openpyxl、PPT 用 python-pptx —— 不要把 markdown / 純文字直接改副檔名存成 Office 檔。"
+            ),
+        )
+    # 1) 殘留 {{}} 佔位標籤 → 沒填完
+    leftover = _scan_leftover_placeholders(output_path)
+    if leftover:
+        logger.warning(f"[{step_name}] 確定性檢查:輸出檔殘留佔位標籤 {leftover} → 判 failed")
+        return _leftover_placeholder_result(leftover)
+    try:
+        p = _resolve_user_path(output_path)
+    except Exception:
+        return None
+    if not (p.exists() and not p.is_dir() and p.suffix.lower() in {'.pptx', '.docx'}):
+        return None
+
+    # 2) 圖片路徑被當成文字填進去(輸出檔可見文字出現 *.png/*.jpg…)→ 沒真的插圖。
+    #    與 batch 寫不寫「圖」無關,是最明確的「貼圖失敗」訊號。
+    for _t in _office_texts(p):
+        m = _IMAGE_PATH_TEXT_RE.search(_t or "")
+        if m:
+            logger.warning(f"[{step_name}] 確定性檢查:輸出檔把圖片路徑當文字填了({m.group(0)}) → 判 failed")
+            return ValidationResult(
+                status="failed",
+                reason=f"輸出檔把圖片路徑當成文字填進去了(發現「{m.group(0)}」),沒有真的插入圖片。",
+                suggestion=(
+                    "不要把圖片路徑當文字填。請取得該位置的 left/top/width/height,用 "
+                    "slide.shapes.add_picture(圖片路徑, ...)(PPT)插入實際圖片,再清掉原本的文字。"
+                ),
+            )
+
+    # 3) 任務(batch / expect)明說要圖,但輸出檔一張實際圖片都沒有 → 沒把圖貼進去
+    if _expects_images(command, output_expect) and _count_pictures(p) == 0:
+        logger.warning(f"[{step_name}] 確定性檢查:任務要圖但輸出檔 0 張圖片 → 判 failed")
+        return ValidationResult(
+            status="failed",
+            reason="任務要求插入圖片,但輸出檔裡一張實際圖片都沒有。",
+            suggestion=(
+                "請真的把圖片插進去:取得放圖位置的 left/top/width/height,用 "
+                "slide.shapes.add_picture(圖片路徑, ...)(PPT)或 doc 對應 API 插入實際圖片。"
+                "每個該有圖的位置都要有圖。"
+            ),
+        )
+    return None
 
 
 # ── Skill 模式：ReAct Agent 驗證 ──────────────────────────────────────────────
@@ -770,41 +984,38 @@ async def validate_step_with_skill(
     - read_file(path): 讀取檔案內容
     - done(json): 結束驗證並回傳結果
     """
+    # 確定性前置檢查:範本填充殘留 {{}}、或「要圖卻沒圖」→ 直接 failed(免跑 agent 迴圈)
+    _pre = _deterministic_precheck(step_name, command, output_path, output_expect, logger)
+    if _pre is not None:
+        return _pre
+
     stdout_tail = stdout[-1500:] if len(stdout) > 1500 else stdout
     stderr_tail = stderr[-500:] if len(stderr) > 500 else stderr
 
     system_prompt = """你是一個 pipeline 步驟的 Skill 驗證 agent。
 你可以主動執行程式碼來驗證步驟的輸出是否正確，而不只是被動地閱讀文字。
 
-你有以下工具可用：
+你有以下工具可用（一律透過原生 function calling 呼叫，不要寫任何文字協議格式）：
 
-1. run_python — 執行 Python 程式碼
-   用法：<tool>run_python</tool>
-   <input>
-   import pandas as pd
-   df = pd.read_csv("/path/to/file.csv")
-   print(f"行數：{len(df)}")
-   print(f"欄位：{list(df.columns)}")
-   </input>
+1. run_python(code) — 執行 Python 程式碼
+   例：讀 csv、print 行數/欄位、檢查內容是否符合預期。
 
-2. run_shell — 執行系統命令
-   用法：<tool>run_shell</tool>
-   <input>wc -l /path/to/file.csv</input>
+2. run_shell(command) — 執行系統命令
    注意：盡量用 run_python 代替 run_shell，因為 Python 是跨平台的。
 
-3. read_file — 讀取檔案內容
-   用法：<tool>read_file</tool>
-   <input>/path/to/file.csv</input>
+3. read_file(path) — 讀取檔案內容。
 
-4. view_image — 查看圖片（視覺分析，支援 png/jpg/gif/webp）
-   用法：<tool>view_image</tool>
-   <input>/path/to/chart.png</input>
+4. view_image(path) — 查看圖片（視覺分析，支援 png/jpg/gif/webp）
    系統會將圖片顯示給你，你可以用視覺判斷圖片內容是否正確。
    適用場景：驗證圖表是否有標題、座標軸、資料是否合理、圖片是否正常渲染等。
 
-5. done — 結束驗證，回傳最終結果（必須是 JSON）
-   用法：<tool>done</tool>
-   <input>{"status": "ok", "reason": "說明", "suggestion": ""}</input>
+5. done(status, reason, suggestion) — 結束驗證，回傳最終判定
+   status 只能是 "ok"、"warning"、"failed" 三者之一；reason / suggestion 用中文。
+
+## ⛔ Tool 呼叫協議（最高優先級）
+本對話**使用原生 function calling API**、上述工具已透過 function_declarations 註冊。
+你**必須**透過 API 的 function_call 機制呼叫工具、**禁止**寫 `<tool>name</tool>` / `<input>...</input>`
+這類文字格式 — 那種純文字 orchestrator 不會解析、會被視為沒呼叫任何工具。直接 emit 結構化 tool_calls 即可。
 
 【可用 Python 套件】
 標準庫：csv, json, random, os, pathlib, re, math, datetime, io, collections
@@ -861,14 +1072,87 @@ Exit Code：{exit_code}
 請使用工具主動驗證輸出是否符合預期。開始吧。"""
 
     try:
+        from langchain_core.tools import tool as _lc_tool
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        # ── 5 個驗證工具(native function calling)───────────────────────
+        # 這些 wrapper 只負責「對 LLM 暴露乾淨 schema」、實際執行仍委派既有的
+        # _execute_tool / _view_image_sync(host 端、行為不變)。view_image / done
+        # 不在這裡真執行 — agent loop 看 tool_call.name 自己處理(多模態 / 回判定)。
+        @_lc_tool
+        def run_python(code: str) -> str:
+            """執行 Python 程式碼來驗證輸出(讀檔、檢查行數/欄位/內容)。
+
+            Args:
+                code: 要執行的 Python 程式碼(完整可獨立執行)
+            Returns:
+                stdout + stderr(如有)
+            """
+            return _execute_tool("run_python", code)
+
+        @_lc_tool
+        def run_shell(command: str) -> str:
+            """執行系統 shell 命令。盡量用 run_python 代替(跨平台)。
+
+            Args:
+                command: shell 命令
+            Returns:
+                stdout + stderr
+            """
+            return _execute_tool("run_shell", command)
+
+        @_lc_tool
+        def read_file(path: str) -> str:
+            """讀取檔案內容供判斷。
+
+            Args:
+                path: 檔案路徑
+            Returns:
+                檔案內容(截斷時會說明)
+            """
+            return _execute_tool("read_file", path)
+
+        @_lc_tool
+        def view_image(path: str) -> str:
+            """查看圖片(視覺分析、png/jpg/gif/webp)。輸出是圖片檔時必用此工具看內容再判斷。
+
+            Args:
+                path: 圖片檔路徑
+            Returns:
+                圖片會以多模態訊息顯示給你
+            """
+            return "__VIEW_IMAGE__"  # 不在此真執行、loop 看 tool name 自行注入多模態
+
+        @_lc_tool
+        def done(status: str, reason: str = "", suggestion: str = "") -> str:
+            """結束驗證、回傳最終判定。
+
+            Args:
+                status: 驗證結論、只能是 "ok" / "warning" / "failed"
+                reason: 判定理由(中文)
+                suggestion: 修復建議(中文、failed 時才有意義)
+            Returns:
+                結束標記
+            """
+            return "__DONE__"
+
+        validator_tools = [run_python, run_shell, read_file, view_image, done]
+
         llm = _get_llm(role=llm_role)
+        try:
+            llm_with_tools = llm.bind_tools(validator_tools)
+        except Exception as _be:
+            logger.error(f"[{step_name}] Skill 驗證 bind_tools 失敗:{_be}、退回一般驗證")
+            raise  # 由最外層 except 接住 → fallback 到 validate_step
+
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
+        _empty_streak = 0  # 連續空回應計數:gemma 在 native-FC config 下若 tool_calls + content 皆空 → 早退一般驗證、別空轉到逾時
         for iteration in range(SKILL_MAX_ITERATIONS):
-            logger.info(f"[{step_name}] Skill agent 迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS}")
+            logger.info(f"[{step_name}] Skill agent 迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS} [NATIVE]")
 
             # 冷卻機制
             if iteration > 0 and iteration % SKILL_COOLDOWN_EVERY == 0:
@@ -878,92 +1162,103 @@ Exit Code：{exit_code}
             if iteration > 0:
                 await asyncio.sleep(SKILL_REQUEST_INTERVAL)
 
-            from llm_factory import invoke_with_streaming
-            reply = (await invoke_with_streaming(
-                llm, messages, label=f"validator:{step_name}", timeout=180.0, logger=logger
-            )).strip()
-            _vp = reply if len(reply) <= 4000 else reply[:4000] + f"...[已截斷，完整長度 {len(reply)} 字]"
-            logger.debug(f"[{step_name}] Agent 回覆：\n{_vp}")
+            response: AIMessage = await asyncio.wait_for(
+                llm_with_tools.ainvoke(messages), timeout=180.0
+            )
+            tool_calls = list(getattr(response, "tool_calls", []) or [])
+            content_str = response.content if isinstance(response.content, str) else ""
+            logger.info(
+                f"[{step_name}] Agent 回覆(content {len(content_str)} 字, tool_calls={len(tool_calls)})"
+            )
+            if content_str:
+                _vp = content_str if len(content_str) <= 2000 else content_str[:2000] + f"...[截斷、共 {len(content_str)} 字]"
+                logger.debug(f"[{step_name}] Agent content：\n{_vp}")
 
-            # 解析工具呼叫
-            tool_calls = _parse_tool_calls(reply)
+            # AIMessage 進歷史(含 tool_calls、維持 tool_call/tool_result 配對)
+            messages.append(response)
 
             if not tool_calls:
-                # 嘗試直接解析為 JSON（LLM 可能直接回傳結果）
-                try:
-                    raw = reply
-                    if "```" in raw:
-                        parts = raw.split("```")
-                        raw = parts[1].strip()
-                        if raw.startswith("json"):
-                            raw = raw[4:].strip()
-                    data = json.loads(raw)
-                    if "status" in data:
-                        result = ValidationResult(
-                            status=data.get("status", "failed"),
-                            reason=data.get("reason", ""),
-                            suggestion=data.get("suggestion", ""),
+                # tool_calls 與 content 皆空 → 模型沒在配合(常見:gemma native-FC config 不吐工具也不吐字)。
+                # 連 2 輪空 → 直接 raise、由 except 退回一般驗證,別空轉 15 輪 + 最後 180s 逾時。
+                if len(content_str.strip()) < 5:
+                    _empty_streak += 1
+                    if _empty_streak >= 2:
+                        raise RuntimeError(
+                            f"skill 驗證 agent 連續 {_empty_streak} 輪空回應(tool_calls + content 皆空、疑似模型不相容)、提早退回一般驗證"
                         )
-                        logger.info(f"[{step_name}] Skill 驗證：{result.status} — {result.reason}")
-                        return result
-                except (json.JSONDecodeError, IndexError):
-                    pass
-                # 無法解析，加入提示讓 agent 繼續
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content="請使用工具來驗證，或呼叫 done 工具回傳最終結論。"))
+                else:
+                    _empty_streak = 0
+                # 有 content 但沒呼叫工具 → 提示繼續用 native function calling
+                messages.append(HumanMessage(
+                    content="請使用工具(原生 function calling)來驗證，或呼叫 done 工具回傳最終結論。不要用文字描述工具呼叫。"
+                ))
                 continue
 
-            # 執行第一個工具
-            call = tool_calls[0]
-            tool_name = call["tool"]
-            tool_input = call["input"]
+            _empty_streak = 0
 
-            # done 工具 → 結束
-            if tool_name == "done":
-                try:
-                    data = json.loads(tool_input)
-                    result = ValidationResult(
-                        status=data.get("status", "failed"),
-                        reason=data.get("reason", ""),
-                        suggestion=data.get("suggestion", ""),
+            # 掃出 done(若有)、其餘工具先執行;done 在最後處理
+            done_call: Optional[dict] = None
+            regular_calls = []
+            for tc in tool_calls:
+                if tc.get("name") == "done":
+                    done_call = tc  # 多個 done 取最後一個
+                else:
+                    regular_calls.append(tc)
+
+            for tc in regular_calls:
+                tool_name = tc.get("name", "")
+                tc_id = tc.get("id") or ""
+                tc_args = tc.get("args", {}) or {}
+                logger.info(f"[{step_name}] 執行工具 {tool_name} [NATIVE]")
+
+                # view_image 特殊處理：注入多模態 HumanMessage
+                if tool_name == "view_image":
+                    _img_path = str(tc_args.get("path", "") or "")
+                    img_data = await asyncio.get_event_loop().run_in_executor(
+                        None, _view_image_sync, _img_path
                     )
-                    logger.info(f"[{step_name}] Skill 驗證完成：{result.status} — {result.reason}")
-                    return result
-                except json.JSONDecodeError:
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=f"[系統] done 的 input 必須是有效 JSON，請重試。"))
+                    logger.debug(f"[{step_name}] view_image：{img_data['text']}")
+                    # ToolMessage 先回(維持 tool_call 配對)、圖片本體用後續 HumanMessage 多模態帶
+                    messages.append(ToolMessage(
+                        content=f"[view_image] {img_data['text']}", tool_call_id=tc_id
+                    ))
+                    if img_data["image_b64"]:
+                        messages.append(HumanMessage(content=[
+                            {"type": "text", "text": "請仔細觀察以下圖片內容，判斷是否符合預期。"},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:{img_data['image_mime']};base64,{img_data['image_b64']}"
+                            }},
+                        ]))
                     continue
 
-            # 執行工具
-            logger.info(f"[{step_name}] 執行工具 {tool_name}")
-
-            # view_image 特殊處理：注入多模態訊息
-            if tool_name == "view_image":
-                img_data = await asyncio.get_event_loop().run_in_executor(
-                    None, _view_image_sync, tool_input
-                )
-                logger.debug(f"[{step_name}] view_image：{img_data['text']}")
-                messages.append(HumanMessage(content=reply))
-                if img_data["image_b64"]:
-                    messages.append(HumanMessage(content=[
-                        {"type": "text", "text": f"[工具結果 — view_image]\n{img_data['text']}\n請仔細觀察圖片內容，判斷是否符合預期。"},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:{img_data['image_mime']};base64,{img_data['image_b64']}"
-                        }},
-                    ]))
+                # 其餘工具：取出對應參數 → 呼叫既有 _execute_tool(host 端、行為不變)
+                if tool_name == "run_python":
+                    _ti = str(tc_args.get("code", "") or "")
+                elif tool_name == "run_shell":
+                    _ti = str(tc_args.get("command", "") or "")
+                elif tool_name == "read_file":
+                    _ti = str(tc_args.get("path", "") or "")
                 else:
-                    messages.append(HumanMessage(content=f"[工具結果 — view_image]\n{img_data['text']}"))
-                continue
+                    _ti = ""
 
-            tool_result = await asyncio.get_event_loop().run_in_executor(
-                None, _execute_tool, tool_name, tool_input
-            )
-            _vt = tool_result if len(tool_result) <= 3000 else tool_result[:3000] + f"...[已截斷，完整長度 {len(tool_result)} 字]"
-            logger.debug(f"[{step_name}] 工具結果：\n{_vt}")
+                tool_result = await asyncio.get_event_loop().run_in_executor(
+                    None, _execute_tool, tool_name, _ti
+                )
+                _vt = tool_result if len(tool_result) <= 3000 else tool_result[:3000] + f"...[已截斷，完整長度 {len(tool_result)} 字]"
+                logger.debug(f"[{step_name}] 工具結果：\n{_vt}")
 
-            # 加入對話歷史
-            messages.append(HumanMessage(content=reply))
-            messages.append(HumanMessage(content=f"[工具結果 — {tool_name}]\n{tool_result}"))
+                messages.append(ToolMessage(content=tool_result, tool_call_id=tc_id))
+
+            # done 工具 → 直接讀 args 拿判定(免 JSON parse)
+            if done_call is not None:
+                _da = done_call.get("args", {}) or {}
+                result = ValidationResult(
+                    status=_da.get("status", "failed") or "failed",
+                    reason=_da.get("reason", "") or "",
+                    suggestion=_da.get("suggestion", "") or "",
+                )
+                logger.info(f"[{step_name}] Skill 驗證完成：{result.status} — {result.reason}")
+                return result
 
         # 超過最大迭代次數
         logger.warning(f"[{step_name}] Skill agent 達到最大迭代次數")

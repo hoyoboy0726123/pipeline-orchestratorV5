@@ -86,8 +86,20 @@ class ComputerUseAction(BaseModel):
     button: str = "left"       # click 按鈕：left/right/middle
     clicks: int = 1            # click 次數：1=單擊, 2=雙擊
     description: str = ""      # 使用者可讀的動作描述（給 UI 顯示）
-    use_coord: bool = True     # 預設 True = 用絕對座標點擊（快、不誤判，適合畫面穩定的場景）
-                               # False = 切換到圖像比對（視窗會移動時才需要）
+    # ── 三層 fallback toggle (預設全 True = UIA → CV → 強制座標) ─────
+    # 給「不會設定的使用者」最高命中率,進階使用者可關掉某層、自定義單一或組合:
+    #   全勾 (預設):  UIA → CV → 強制座標 (三層自動 fallback)
+    #   只勾 UIA:    UIA, 找不到立即 fail (嚴格 UIA 模式)
+    #   只勾 CV:     CV, 找不到立即 fail (嚴格 CV 模式)
+    #   只勾 座標:   直接點記錄座標 (= 舊 use_coord=True 短路行為)
+    #   UIA+CV:      UIA → CV, 都失敗 fail
+    #   UIA+座標:    UIA → 強制座標 (CV 跳過)
+    #   CV+座標:     CV → 強制座標 (UIA 跳過、跟 OCR/VLM mode 一樣的尊重原則)
+    # use_ocr=True 或 vlm_mode!=off 啟用時, OCR/VLM 自帶 primary 邏輯, 三個欄位不適用
+    use_uia: bool = True       # UIA element 結構定位(錄製時 mouse-down 抓的 ui 欄位)
+    use_cv: bool = True        # CV template matching(用錄製的 img_xxx.png 模板比對)
+    use_coord: bool = True     # 強制座標最終 fallback(用錄製的 x,y 直接點)
+                               # 注意: 跟舊 use_coord 同欄位名、但語意改成「最終座標 fallback 啟用」
     hold_sec: float = 0.0      # click 按住不放的持續時間（> 0 會在回放時 mouseDown-sleep-mouseUp 取代瞬擊）
     modifiers: list[str] = []  # click 時按著的修飾鍵（如 ["ctrl"] 或 ["ctrl","shift"]）
     use_ocr: bool = False      # click_image 專用：顯式 OCR 啟用旗標。True 且 ocr_text 有值才跑 OCR
@@ -127,6 +139,13 @@ class ComputerUseAction(BaseModel):
     # 不是讓 VLM 決定座標、不是讓它執行動作；只回傳 {"pass": bool, "reason": str}
     # 模型本身不支援視覺時，呼叫會直接報錯（不靜默 fallback）
     vlm_prompt: str = ""
+    # ── UIA-first 三層 fallback(click_image / click_at 用)─────────
+    # 錄製時(recorder.py)在 mouse-down 同時呼 uiautomation.ControlFromPoint 抓的元素資訊。
+    # 回放時 computer_use Phase 0 先用這資訊找元素、找到就點(跨機台、跨 scaling 最穩);
+    # 找不到才退到 CV 模板比對 → OCR → 強制座標的下層 fallback。
+    # 跟下面 UIA 純粹型 action(uia_click/uia_send_keys)那組 control/save_as 等是兩回事 —
+    # 那組是進階使用者手動透過 UIA Inspector 設定的、這組是錄製時自動抓的(無感)。
+    ui: dict = {}                 # {"name", "control_type", "automation_id", "window_title", "rect"} 任一/全有
     # ── UIA action 專用欄位(uia_click / uia_send_keys / uia_get_text 等用)──
     # control 識別:by Name / AutomationId / ControlType、可組合
     control: dict = {}           # {"type": "Button", "name": "儲存", "auto_id": "save-btn", "depth": 10}

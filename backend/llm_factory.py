@@ -58,7 +58,13 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
 
     if provider == "groq":
         from langchain_groq import ChatGroq
-        return ChatGroq(api_key=GROQ_API_KEY, model=model, temperature=temperature)
+        # max_tokens 不設 = LangChain default 1024-4096、大段 Python(含三引號 heredoc)
+        # 會被截斷成 unterminated string,LLM 寫 self-check py 一直 rc=1 syntax error 循環。
+        # 8192 對 Groq 系列(llama / kimi / qwen)夠用、只按實際 token 收費,設高不多花錢。
+        return ChatGroq(
+            api_key=GROQ_API_KEY, model=model, temperature=temperature,
+            max_tokens=8192,
+        )
 
     if provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -67,11 +73,25 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
             "model": model,
             "google_api_key": GEMINI_API_KEY,
             "temperature": temperature,
-            "max_output_tokens": 8192,  # 防止 gemma 等模型無限生成
+            # 16384:對齊其他 provider、寫大 Python code(三引號 heredoc 寫長 md/json 報告)
+            # 不被截斷。舊值 8192 對中文長報告會邊緣。Gemini 3 / Gemma 4 都支援這個上限。
+            "max_output_tokens": 16384,
         }
-        # 只有 gemini-2.5 和 gemini-3.x 系列支援思考模式,其他模型(gemma, gemini-2.0)靜默忽略
-        supports_thinking = model.startswith("gemini-2.5-") or _is_gemini_3x(model)
-        if gem_thinking != "off" and supports_thinking:
+        # 思考模式支援表(Gemini API):
+        # - gemini-2.5-* : thinking_budget(integer)
+        # - gemini-3.x   : thinking_level(low/medium/high)
+        # - gemma-4-*    : thinking_level only,且不支援 thinking_budget(API 會回錯)
+        #                  預設 thinking ON、要明確設 "minimal" 才會關(否則 reasoning 吃掉 tool_calls、native FC 失效)
+        # - 其他(gemini-2.0, gemma-3 等):不支援思考、靜默略過
+        is_gemma_4 = model.startswith("gemma-4-")
+        supports_thinking = model.startswith("gemini-2.5-") or _is_gemini_3x(model) or is_gemma_4
+        if is_gemma_4:
+            # Gemma 4 native FC 必須關 thinking(否則 LLM 回應全跑 reasoning field、tool_calls 永遠空)
+            # 即使 user 設 "off",對 Gemma 4 也要主動傳 "minimal" 才會真關(不傳 = 預設 thinking ON)
+            kwargs["thinking_level"] = (
+                gem_thinking if gem_thinking in ("low", "medium", "high") else "minimal"
+            )
+        elif gem_thinking != "off" and supports_thinking:
             if _is_gemini_3x(model):
                 kwargs["thinking_level"] = gem_thinking if gem_thinking != "auto" else "medium"
             else:
@@ -81,10 +101,14 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
 
     if provider == "openai":
         from langchain_openai import ChatOpenAI
+        # max_tokens 不設 = OpenAI default(gpt-4o-mini 可能僅 4096)、大段 Python heredoc
+        # 寫長 markdown/json 一定被截斷 → unterminated string → LLM 重寫 → 又截斷死循環。
+        # 16384 對主流 gpt-5 / gpt-4o / o1 系列都支援、按實際生成收費、設高不多花錢。
         return ChatOpenAI(
             model=model,
             api_key=OPENAI_API_KEY,
             temperature=temperature,
+            max_tokens=16384,
         )
 
     if provider == "anthropic":
@@ -93,17 +117,26 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
         # 8192 對寫大段 Python(含三引號 heredoc)會在中途被斷流、收不到結尾的 """,
         # 解析時就會抛 unterminated triple-quoted string literal。設 32768 給足夠空間。
         # 只按實際生成 token 收費、不會因為設高了多花錢。
+        #
+        # Prompt caching (#153):啟用 prompt-caching 1h-TTL beta、跨輪 system prompt 命中 cache。
+        # 多輪 workflow (V5 標準場景) 第 2 輪起 cached input 只 0.1x 計價、實測省 70-85%。
+        # 用法:caller(subagent_runner / executor)對 SystemMessage 加 cache_control:
+        #   SystemMessage(content=..., additional_kwargs={"cache_control": {"type": "ephemeral"}})
+        # ephemeral 預設 5 分 TTL,需要 1 小時 TTL 用 {"type":"ephemeral","ttl":"1h"} 並要 1h-cache beta header。
         return ChatAnthropic(
             model=model,
             api_key=ANTHROPIC_API_KEY,
             temperature=temperature,
             max_tokens=32768,
+            default_headers={
+                "anthropic-beta": "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11",
+            },
         )
 
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         thinking = cfg.get("ollama_thinking", "off")
-        num_ctx = cfg.get("ollama_num_ctx", 16384)
+        num_ctx = cfg.get("ollama_num_ctx", 32768)
         kwargs = {
             "model": model,
             "base_url": cfg.get("ollama_base_url") or "http://localhost:11434",
@@ -148,7 +181,14 @@ async def invoke_with_streaming(
     chunk_count = 0
     final_chunk = None
     # streaming 中 usage 可能 attach 在最後一個 chunk、也可能跨 chunk 增量；累計保險
-    acc_um = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    # cache_read / cache_creation 用來驗 Anthropic Prompt Caching 是否真的命中
+    acc_um = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
 
     try:
         input_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
@@ -168,6 +208,15 @@ async def invoke_with_streaming(
                     v = um.get(k)
                     if v:
                         acc_um[k] = acc_um.get(k, 0) + int(v)
+                # langchain 0.3+ Anthropic: input_token_details = {"cache_read": N, "cache_creation": N}
+                itd = um.get("input_token_details") or {}
+                if isinstance(itd, dict):
+                    cr = itd.get("cache_read")
+                    if cr:
+                        acc_um["cache_read_tokens"] += int(cr)
+                    cc = itd.get("cache_creation")
+                    if cc:
+                        acc_um["cache_creation_tokens"] += int(cc)
             c = getattr(chunk, "content", None)
             if c:
                 if isinstance(c, list):
@@ -261,6 +310,9 @@ async def invoke_with_streaming(
                     "input_tokens": int(tk.get("prompt_tokens") or tk.get("input_tokens") or 0),
                     "output_tokens": int(tk.get("completion_tokens") or tk.get("output_tokens") or 0),
                     "total_tokens": int(tk.get("total_tokens") or 0),
+                    # Anthropic native shape: cache_read_input_tokens / cache_creation_input_tokens
+                    "cache_read_tokens": int(tk.get("cache_read_input_tokens") or 0),
+                    "cache_creation_tokens": int(tk.get("cache_creation_input_tokens") or 0),
                 }
         if not usage:
             ak = getattr(final_chunk, "additional_kwargs", None) or {}
@@ -270,7 +322,19 @@ async def invoke_with_streaming(
                     "input_tokens": int(u.get("prompt_tokens") or u.get("input_tokens") or 0),
                     "output_tokens": int(u.get("completion_tokens") or u.get("output_tokens") or 0),
                     "total_tokens": int(u.get("total_tokens") or 0),
+                    "cache_read_tokens": int(u.get("cache_read_input_tokens") or 0),
+                    "cache_creation_tokens": int(u.get("cache_creation_input_tokens") or 0),
                 }
+        # streaming 已抓到 input/output/total 但 cache 沒抓到時、補抓一次
+        if usage and usage.get("cache_read_tokens", 0) == 0 and usage.get("cache_creation_tokens", 0) == 0:
+            rm = getattr(final_chunk, "response_metadata", None) or {}
+            tk = rm.get("token_usage") or rm.get("usage") or {}
+            if tk:
+                cr = int(tk.get("cache_read_input_tokens") or 0)
+                cc = int(tk.get("cache_creation_input_tokens") or 0)
+                if cr or cc:
+                    usage["cache_read_tokens"] = cr
+                    usage["cache_creation_tokens"] = cc
         # 仍空時把 acc_um 也丟回去（即使全 0、結構完整方便前端判斷 'stream 沒給 usage'）
         if not usage:
             usage = dict(acc_um)
@@ -285,15 +349,28 @@ async def invoke_with_streaming(
         except Exception:
             pass
 
+    # cache hit 摘要（只有 cache_read > 0 才顯示、避免噪音）
+    cache_read = usage.get("cache_read_tokens", 0) or 0
+    cache_creation = usage.get("cache_creation_tokens", 0) or 0
+    input_tok = usage.get("input_tokens", 0) or 0
+    if cache_read or cache_creation:
+        # cache hit 比例:cache_read / (cache_read + 非 cached input)
+        # Anthropic spec:input_tokens 已扣掉 cache_read,所以總 prompt = input_tokens + cache_read + cache_creation
+        total_prompt = input_tok + cache_read + cache_creation
+        hit_pct = (cache_read / total_prompt * 100) if total_prompt > 0 else 0
+        cache_str = f", cache_read {cache_read:,} ({hit_pct:.0f}%), cache_write {cache_creation:,}"
+    else:
+        cache_str = ""
+
     if reasoning_len:
         log.info(
             f"[{label}] ✅ LLM 完成（{elapsed:.0f}s, reasoning {reasoning_len} 字, content {total} 字, "
-            f"tokens {usage.get('total_tokens', '?')}）"
+            f"tokens {usage.get('total_tokens', '?')}{cache_str}）"
         )
     else:
         log.info(
             f"[{label}] ✅ LLM 完成（{elapsed:.0f}s, content {total} 字, "
-            f"tokens {usage.get('total_tokens', '?')}）"
+            f"tokens {usage.get('total_tokens', '?')}{cache_str}）"
         )
 
     if return_usage:

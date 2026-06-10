@@ -28,9 +28,10 @@ lxml_html_clean
 fake_useragent
 crawl4ai
 trafilatura
-html2text
+markdownify
 playwright
 yt-dlp
 markitdown[pptx]
 xlsxwriter
 tabulate
+pyfiglet

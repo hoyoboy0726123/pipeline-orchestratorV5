@@ -23,6 +23,10 @@ def get_conn() -> sqlite3.Connection:
         _local.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         _local.conn.execute("PRAGMA journal_mode=WAL")
         _local.conn.execute("PRAGMA foreign_keys=ON")
+        # WAL 仍只允許單一 writer；前端高頻輪詢 + 背景 run/scheduler 同時寫時，
+        # 若無 busy_timeout，writer 拿不到鎖會「立即」拋 database is locked → POST 回 500。
+        # 設 5s 等待，讓短暫寫鎖競爭自動退讓重試。
+        _local.conn.execute("PRAGMA busy_timeout=5000")
     return _local.conn
 
 

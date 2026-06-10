@@ -205,7 +205,11 @@ export interface ComputerUseAction {
   button?: 'left' | 'right' | 'middle'
   clicks?: number
   description?: string
-  use_coord?: boolean   // 勾起 = 強制用絕對座標，跳過圖像比對
+  // 三層 fallback toggle (UIA / CV / 強制座標), 預設全 True = UIA → CV → 強制座標
+  // 對應 backend ComputerUseAction.{use_uia, use_cv, use_coord}; 細節見 panel 註解
+  use_uia?: boolean     // UIA element 結構定位(預設 True)
+  use_cv?: boolean      // CV 圖像比對(預設 True)
+  use_coord?: boolean   // 強制座標最終 fallback(預設 True、舊欄位、語意改成「最終座標 fallback 啟用」)
   hold_sec?: number     // click 長按時間（>0 時回放走 mouseDown→sleep→mouseUp）
   modifiers?: string[]  // click 時按著的修飾鍵（如 ["ctrl"]、["ctrl","shift"]）
   use_ocr?: boolean     // click_image 顯式 OCR 啟用（勾選才跑 OCR，避免 silent 填字但沒觸發）
@@ -384,7 +388,7 @@ let _webCrawlerCounter = 0
 export function newWebCrawlerData(index = 0): WebCrawlerData {
   _webCrawlerCounter++
   return {
-    name: `網頁爬蟲 ${_webCrawlerCounter}`,
+    name: `網頁爬蟲_${_webCrawlerCounter}`,
     mode: 'web',
     url: '',
     urls: [],
@@ -425,7 +429,7 @@ let _outlookCounter = 0
 export function newOutlookData(index = 0): OutlookData {
   _outlookCounter++
   return {
-    name: `Outlook 自動化 ${_outlookCounter}`,
+    name: `Outlook自動化_${_outlookCounter}`,
     template: '',
     freeText: '',
     params: {},
@@ -442,7 +446,7 @@ let _visualValidationCounter = 0
 export function newVisualValidationData(index = 0): VisualValidationData {
   _visualValidationCounter++
   return {
-    name: `視覺驗證 ${_visualValidationCounter}`,
+    name: `視覺驗證_${_visualValidationCounter}`,
     source: 'prev_output',
     prompt: '',
     searchRegion: [],
@@ -456,7 +460,7 @@ let _conditionCounter = 0
 export function newConditionData(index = 0): ConditionData {
   _conditionCounter++
   return {
-    name: `條件 ${_conditionCounter}`,
+    name: `條件_${_conditionCounter}`,
     mode: 'if',
     expression: '',
     onTrue: '',
@@ -474,7 +478,7 @@ let _confirmCounter = 0
 export function newHumanConfirmData(index = 0): HumanConfirmData {
   _confirmCounter++
   return {
-    name: `人工確認 ${_confirmCounter}`,
+    name: `人工確認_${_confirmCounter}`,
     message: '',
     notifyTelegram: true,
     screenshot: false,
@@ -492,7 +496,7 @@ let _computerUseCounter = 0
 export function newComputerUseData(index = 0): ComputerUseData {
   _computerUseCounter++
   return {
-    name: `桌面自動化 ${_computerUseCounter}`,
+    name: `桌面自動化_${_computerUseCounter}`,
     actions: [],
     assetsDir: '',
     failFast: true,
@@ -521,7 +525,7 @@ let _counter = 0
 export function newStepData(index = 0): StepData {
   _counter++
   return {
-    name: `Python腳本 ${_counter}`,
+    name: `Python腳本_${_counter}`,
     batch: '',
     workingDir: '',
     outputPath: '',
@@ -542,7 +546,7 @@ let _subagentCounter = 0
 export function newSubagentData(index = 0): SubagentData {
   _subagentCounter++
   return {
-    name: `Subagent ${_subagentCounter}`,
+    name: `Subagent_${_subagentCounter}`,
     taskDescription: '',
     workingDir: '',
     outputPath: '',
@@ -559,7 +563,7 @@ export function newSubagentData(index = 0): SubagentData {
 export function newSkillData(index = 0): SkillData {
   _skillCounter++
   return {
-    name: `AI技能 ${_skillCounter}`,
+    name: `AI技能_${_skillCounter}`,
     taskDescription: '',
     workingDir: '',
     outputPath: '',
@@ -621,7 +625,9 @@ function buildFlowGraph(steps: StepData[]): { out: number[][]; edges: { i: numbe
         targets.push(i + 1)
       }
     }
-    for (const j of targets) { out[i].push(j); edges.push({ i, j }) }
+    // 同一目標去重:default 與某 case 指向同一節點時只連一條(避免畫面重複箭頭)
+    const seen = new Set<number>()
+    for (const j of targets) { if (seen.has(j)) continue; seen.add(j); out[i].push(j); edges.push({ i, j }) }
   })
   return { out, edges }
 }
@@ -992,7 +998,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
 
   // 孤立節點不加入（邊驅動執行）
 
-  return ordered.map((n, i) => {
+  const result = ordered.map((n, i) => {
     const aiData = aiDataByPredecessor.get(n.id)
 
     if (n.type === 'computerUse') {
@@ -1223,6 +1229,25 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       errorMsg: d.errorMsg,
     } as StepData
   })
+
+  // ── 依「邊 + 最終陣列順序」重算每步的 next,確保 YAML round-trip 不掉拍 ──
+  // 排序是 [最長路徑]+[分支節點],可能把「終點節點」排在分支節點前面。若不顯式標 next,
+  // 重新匯入時終點會「順序 fallthrough」掉到後面的分支節點 → 多一條錯誤箭頭(merge 工作流必踩)。
+  // 規則(condition 走 cases/onTrue/onFalse、不動):
+  //   - 0 出邊(終點):不是陣列最後一個 → next: end;是最後一個 → 留空。
+  //   - 1 出邊:目標剛好是陣列下一個 → 線性留空;否則顯式 next: <目標步驟名>。
+  const nameById = new Map(execNodes.map(n => [n.id, ((n.data as { name?: string }).name) || n.id]))
+  result.forEach((step, i) => {
+    const node = ordered[i]
+    if (node.type === 'condition') return
+    const outs = adjMulti.get(node.id) || []
+    if (outs.length === 0) {
+      step.next = (i < result.length - 1) ? 'end' : ''
+    } else if (outs.length === 1) {
+      step.next = (outs[0] === ordered[i + 1]?.id) ? '' : (nameById.get(outs[0]) || '')
+    }
+  })
+  return result
 }
 
 // ── Steps → YAML string ───────────────────────────────────────────────────────
@@ -1798,6 +1823,21 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
 }
 
 function buildStep(partial: Partial<StepData>, index: number): StepData {
+  // 防呆:弱 LLM 常把「桌面自動化步驟」漏寫 `computer_use: true`、只留一個名字
+  //（如「RPA操作」「自動化點擊」）→ 解析後會變成空白 script 節點、不是 computer_use。
+  // 若某步「完全沒有任何類型欄位、也沒有 batch」且名字明顯是桌面自動化/RPA 意圖,
+  // 就補正成空白 computer_use 節點(actions 留給使用者在畫布錄製)。
+  // 對齊 system prompt「桌面自動化節點」與「啟動既有專案第 0 點」的設計。
+  const _hasAnyType = !!(
+    (partial.batch && partial.batch.trim())
+    || partial.skillMode || partial.humanConfirm || partial.visualValidation
+    || partial.webCrawler || partial.outlookAutomation || partial.subagent
+    || partial.condition || partial.computerUse
+  )
+  if (!_hasAnyType && partial.name
+      && /RPA|computer[\s_-]?use|點擊|點按|滑鼠|鍵盤|錄製|桌面自動化|UI\s?自動化|自動化操作|自動化點擊|操作工具|操作視窗|視窗操作/i.test(partial.name)) {
+    partial.computerUse = true
+  }
   // Outlook 節點的編碼器把 outlookFreeText 寫進 batch:，這裡把它還原回 freeText、
   // 避免畫布上 freeText 欄空白而 batch 帶著一段使用者不會用到的描述
   if (partial.outlookAutomation && partial.batch && !partial.outlookFreeText) {
@@ -1853,6 +1893,21 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     subagent: partial.subagent ?? false,
     subagentRole: partial.subagentRole ?? 'data_analyst',
     subagentMaxIter: partial.subagentMaxIter ?? 5,
+    // condition / 分支控制(YAML 來源:condition: true + expression+on_true/on_false 或 switch+cases)
+    // 之前 buildStep 漏寫這 8 個欄位 → parseYaml 設好 cur.condition=true 等、進 buildStep 後全被丟掉、
+    // stepsToYaml 一看 s.condition===undefined 就完全不寫 condition 區塊 → YAML round-trip 丟失條件節點
+    condition: partial.condition ?? false,
+    expression: partial.expression ?? '',
+    onTrue: partial.onTrue ?? '',
+    onFalse: partial.onFalse ?? '',
+    switch: partial.switch ?? '',
+    cases: partial.cases ?? {},
+    default: partial.default ?? '',
+    next: partial.next ?? '',
+    llmRole: partial.llmRole ?? 'primary',
+    // 同類漏寫補齊:human_confirm 超時行為(wait/pass/reject/abort)、skill 主動問用戶模式
+    hcOnTimeout: partial.hcOnTimeout ?? 'wait',
+    askMode: partial.askMode ?? false,
     timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : (partial.visualValidation ? 120 : (partial.webCrawler ? 600 : (partial.outlookAutomation ? 600 : (partial.subagent ? 600 : 300))))),
     // YAML 沒寫 retry 時的 fallback — 跟 newSkillData / newStepData 跟 backend
     // PipelineStep.retry default 一致（都是 1）。讓「貼 YAML 進來」跟「拉新節點」

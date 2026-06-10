@@ -371,11 +371,27 @@ async def _cmd_menu(chat_id: int) -> None:
 async def _cmd_status(chat_id: int) -> None:
     """列出執行中的 run。"""
     from pipeline.store import get_store
+    from datetime import datetime
     runs = get_store().list_recent(limit=20)
-    active = [r for r in runs if r.status in ("running", "awaiting_human")]
+
+    # 只顯示「真正活著」的 run:
+    #   - running:一律顯示
+    #   - awaiting_human:只顯示近 2 小時內開始的(等你決策)。
+    # 排除「之前失敗/自我修復卡住而被遺棄」的舊 run —— 它們的背景任務早已結束、
+    # 卻仍停在 awaiting_human,會永遠霸佔 /status 變成雜訊(使用者反饋)。
+    def _is_recent(r, hours: float = 2.0) -> bool:
+        try:
+            return (datetime.now() - datetime.fromisoformat(r.started_at)).total_seconds() < hours * 3600
+        except Exception:
+            return True  # 解析不出時間 → 保守保留
+    active = [
+        r for r in runs
+        if r.status == "running" or (r.status == "awaiting_human" and _is_recent(r))
+    ]
     if not active:
         await _bot_instance.send_message(
-            chat_id=chat_id, text="🟢 目前沒有執行中的 run。",
+            chat_id=chat_id,
+            text="🟢 目前沒有執行中的 run。\n(等待你決策的暫停步驟會直接用通知+按鈕推給你、不列在這。)",
         )
         return
     lines = ["📊 <b>執行中的 Run</b>", ""]
@@ -1594,7 +1610,7 @@ async def _poll_loop():
                     logger.info(f"Telegram: 截圖 for run {run_id}")
                     try:
                         from pipeline.store import get_store
-                        from pipeline.runner import take_screenshots, _tg_send_photos
+                        from pipeline.runner import take_screenshots, _tg_send_photos, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
@@ -1604,7 +1620,9 @@ async def _poll_loop():
                         step_idx = run.current_step
                         step_name = steps[step_idx]["name"] if step_idx < len(steps) else "unknown"
                         await cb.answer("📸 正在截圖…")
-                        ss_paths = take_screenshots(run.pipeline_name, step_name)
+                        # 用 run-scoped 名(<顯示名>/run_<ts>)→ 截圖落進該次 run 的資料夾、跟其他產物同夾;
+                        # take_screenshots 回傳實際路徑、_tg_send_photos 用回傳值直接傳、不影響 TG 傳送。
+                        ss_paths = take_screenshots(_run_output_name(run), step_name)
                         if ss_paths:
                             await _tg_send_photos(
                                 cb.message.chat_id,
@@ -1697,13 +1715,16 @@ async def _poll_loop():
                     try:
                         from pipeline.store import get_store
                         from pipeline.models import PipelineConfig
-                        from pipeline.runner import _send_step_output_to_tg
+                        from pipeline.runner import _send_step_output_to_tg, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
                             await cb.answer("❌ 找不到此 run")
                             continue
                         config = PipelineConfig.from_dict(run.config_dict)
+                        # 回呼重建 config 不帶 run-scoping → 補上,讓 actual_output_path 缺席時的
+                        # fallback 也指向本次執行的 run_<ts>/ 子夾(送檔本身優先用 actual_output_path)
+                        config.name = _run_output_name(run)
                         # 跳過連續 human_confirm 找上一個可執行步驟（跟 auto-send 邏輯一致）
                         idx = run.current_step - 1
                         while idx >= 0 and config.steps[idx].human_confirm:
@@ -1743,13 +1764,14 @@ async def _poll_loop():
                     try:
                         from pipeline.store import get_store
                         from pipeline.models import PipelineConfig
-                        from pipeline.runner import _resolve_step_output_for_tg
+                        from pipeline.runner import _resolve_step_output_for_tg, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
                             await cb.answer("❌ 找不到此 run")
                             continue
                         config = PipelineConfig.from_dict(run.config_dict)
+                        config.name = _run_output_name(run)  # 回呼補 run-scoping(見 prev_output)
                         # 列「可能有輸出」的步驟：
                         #   - 明確設 output.path（任何節點類型）
                         #   - 節點類型有 default rule（outlook / web_crawler）
@@ -1821,13 +1843,14 @@ async def _poll_loop():
                     try:
                         from pipeline.store import get_store
                         from pipeline.models import PipelineConfig
-                        from pipeline.runner import _send_step_output_to_tg
+                        from pipeline.runner import _send_step_output_to_tg, _run_output_name
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
                             await cb.answer("❌ 找不到此 run")
                             continue
                         config = PipelineConfig.from_dict(run.config_dict)
+                        config.name = _run_output_name(run)  # 回呼補 run-scoping(見 prev_output)
                         if target_idx < 0 or target_idx >= len(config.steps):
                             await cb.answer("❌ 步驟索引超出範圍")
                             continue
@@ -1857,6 +1880,70 @@ async def _poll_loop():
                         await cb.answer()
                         # 把選單訊息刪掉、避免殘留
                         await cb.message.delete()
+                    except Exception:
+                        pass
+                    continue
+
+                # ── 自我修復成功 → 把修好的 YAML 存回工作流（pipe_heal_writeback）──
+                # 對齊 web 完成卡片的「存回工作流」,讓遠端使用者也能拍板。邏輯同
+                # main.py 的 /heal-writeback endpoint:把 run.config_dict(已含修好的 YAML)寫回。
+                if action == "heal_writeback":
+                    try:
+                        from pipeline.store import get_store
+                        from db import update_workflow
+                        import yaml as _yaml
+                        run = get_store().load(run_id)
+                        if not run or not run.workflow_id:
+                            await cb.answer("❌ 找不到 run 或無關聯工作流")
+                            continue
+                        clean = {k: v for k, v in (run.config_dict or {}).items() if not k.startswith("_")}
+                        yaml_str = _yaml.safe_dump(clean, allow_unicode=True, sort_keys=False)
+                        patch = {"yaml": yaml_str}
+                        try:
+                            from yaml_to_canvas import yaml_to_canvas
+                            _cv = yaml_to_canvas(yaml_str)
+                            if _cv:
+                                patch["canvas"] = _cv
+                        except Exception:
+                            pass
+                        wf = update_workflow(run.workflow_id, patch)
+                        # 與 main.py /heal-writeback 一致:寫回 YAML 同時落地延遲 recipe，
+                        # workflow batch 與 recipe task_hash 才一致，下次跑 0 成本命中。
+                        recipes_saved = 0
+                        if run.pending_recipes:
+                            from db import save_recipe as _db_save_recipe
+                            for r in run.pending_recipes:
+                                try:
+                                    _db_save_recipe(
+                                        r["pipeline_id"], r["step_name"], r["task_hash"],
+                                        r["input_fingerprints"], r["output_path"], r["code"],
+                                        r["python_version"], r["runtime_sec"],
+                                    )
+                                    recipes_saved += 1
+                                except Exception:
+                                    pass
+                            run.pending_recipes = []
+                            get_store().save(run)
+                        await cb.answer("✅ 已存回")
+                        _recipe_note = f"\n📦 同時存下 {recipes_saved} 筆 recipe,下次跑可 0 成本重播。" if recipes_saved else ""
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id,
+                            text=f"💾 已把修好的版本存回工作流「{(wf or {}).get('name', '')}」,下次跑同工作流不會再踩同樣的錯。{_recipe_note}",
+                        )
+                    except Exception as e:
+                        logger.error(f"heal_writeback failed: {e}")
+                        try: await cb.answer(f"❌ {str(e)[:150]}")
+                        except Exception: pass
+                    continue
+
+                # ── 自我修復成功但選擇不存回（pipe_heal_dismiss）──
+                if action == "heal_dismiss":
+                    try:
+                        await cb.answer("好的")
+                        await _bot_instance.send_message(
+                            chat_id=cb.message.chat_id,
+                            text="👌 這次的修正只用於本次執行,工作流存檔維持原樣。",
+                        )
                     except Exception:
                         pass
                     continue
@@ -2035,7 +2122,7 @@ async def _poll_loop():
                         )
                     continue
 
-                if action not in ("retry", "skip", "abort", "continue", "redo_prev"):
+                if action not in ("retry", "skip", "abort", "continue", "redo_prev", "self_heal_now"):
                     await cb.answer("❓ 未知操作")
                     continue
 
@@ -2052,6 +2139,7 @@ async def _poll_loop():
                         "abort": "🛑 已選擇中止",
                         "continue": "✅ 已確認繼續",
                         "redo_prev": "↩ 已選擇重做上一步",
+                        "self_heal_now": "🔧 已交給 AI 試修",
                     }
                     try:
                         original_text = cb.message.text or ""

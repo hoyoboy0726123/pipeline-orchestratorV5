@@ -1,6 +1,7 @@
 """
 Pipeline Orchestrator — 獨立後端
-啟動：uvicorn main:app --host 0.0.0.0 --port 8002
+啟動：uvicorn main:app --host 0.0.0.0 --port 8004
+（前端 next.config.mjs 與一鍵腳本 launch_full_project.bat / start.sh 都指向 8004,請保持一致）
 """
 # Windows console 預設 cp1252/cp950 無法印 emoji / 中文 → 啟動時強制 UTF-8
 # 不靠 PYTHONIOENCODING env var，避免使用者沒設或 .bat 傳遞失效
@@ -106,6 +107,15 @@ async def startup():
     # 全新安裝時 seed 預設範例工作流(已 seed 過會自動略過)
     from seed_examples import seed_example_workflows
     seed_example_workflows()
+    # 全新安裝時把內建 skill(default_skills/)複製到使用者 skill 目錄(已存在不覆蓋)
+    # → clone 後不必手動裝就能跑用到內建 skill 的範例(如 scraped-content-parser)
+    try:
+        from skill_scanner import seed_default_skills
+        _ns = seed_default_skills()
+        if _ns:
+            print(f"✅ 已植入 {_ns} 個內建 skill 到使用者 skill 目錄")
+    except Exception as _e:
+        print(f"⚠ 內建 skill 植入略過:{_e}")
     # 自動安裝 skill_packages.txt 中缺少的套件
     from skill_pkg_manager import auto_install_packages
     auto_install_packages()
@@ -118,6 +128,25 @@ async def startup():
     from telegram_handler import start_polling as tg_start
     await tg_start()
     print("✅ Telegram callback polling 已啟動")
+    # 首次啟動預載地端向量模型(背景 thread、不卡啟動)。失敗 → 明確提示、episodic 降級關鍵字。
+    from settings import get_settings as _gs_startup
+    if _gs_startup().get("memory_enabled", True):
+        import threading as _th
+
+        def _warmup_mem():
+            try:
+                import memory as _mem
+                ok = _mem.warmup_local_embedder()
+                if ok:
+                    print("✅ 記憶:地端向量模型已就緒(MiniLM 多語言)")
+                else:
+                    print("⚠️ 記憶:地端向量模型未就緒(可能首啟下載失敗 / 無網路 / 未裝 fastembed)、"
+                          "episodic 暫用關鍵字檢索。修復:確認網路後重啟、或 pip install fastembed。"
+                          "(provider=gemini 時用雲端 embedding、不受影響)")
+            except Exception as e:
+                print(f"⚠️ 記憶:地端向量模型預載例外、episodic 降級關鍵字:{type(e).__name__}: {e}")
+
+        _th.Thread(target=_warmup_mem, daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -1134,6 +1163,150 @@ async def get_available_skills():
     }
 
 
+# ── Subagent role CRUD ────────────────────────────────────────────────
+# 內建 32 個 role 永遠在、不可改不可刪。自訂 role 寫到 ~/ai_output/custom_subagent_roles.yaml,
+# 跟內建 merge 出最終可用 role 清單。前端設定頁 / AI 助手 create_subagent_role 工具都走這幾個 endpoint。
+
+class SubagentRolePayload(BaseModel):
+    role_id: str          # 英文 snake_case、不可跟內建撞名
+    label: str            # 中文顯示名(畫布看的)
+    description: str      # 一句話用途(下拉提示)
+    tools: list[str]      # 從 SELECTABLE_TOOLS 挑、done 會自動加
+    system_prompt: str    # role 看到的第一條指令
+
+
+def _validate_role_payload(p: SubagentRolePayload, *, allow_existing: bool = False) -> Optional[str]:
+    """回 error message string、None = OK。"""
+    import re as _re
+    from pipeline.subagent_runner import BUILTIN_ROLE_IDS, SELECTABLE_TOOLS, load_custom_roles
+    if not p.role_id:
+        return "role_id 不能空"
+    if not _re.match(r"^[a-z][a-z0-9_]{1,39}$", p.role_id):
+        return "role_id 必須英文 snake_case (小寫開頭、長 2-40、只能含 a-z 0-9 _)"
+    if p.role_id in BUILTIN_ROLE_IDS:
+        return f"role_id '{p.role_id}' 是內建角色名、不可使用"
+    if not allow_existing and p.role_id in load_custom_roles():
+        return f"role_id '{p.role_id}' 已存在自訂角色;要改用 PUT /subagent/roles/{p.role_id}"
+    if not p.label or not p.label.strip():
+        return "label(中文顯示名)不能空"
+    if not p.description or not p.description.strip():
+        return "description(一句話用途)不能空"
+    if not isinstance(p.tools, list):
+        return "tools 必須是 list"
+    _bad = [t for t in p.tools if t not in SELECTABLE_TOOLS]
+    if _bad:
+        return f"tools 含未知工具 {_bad};可選:{SELECTABLE_TOOLS}"
+    if not p.system_prompt or len(p.system_prompt.strip()) < 30:
+        return "system_prompt 太短(至少 30 字)、要寫清楚角色職能 + 工作流"
+    return None
+
+
+@app.get("/subagent/roles")
+async def list_subagent_roles():
+    """列所有 role(內建 + 自訂)、含 source 標籤跟 selectable tools 清單。"""
+    from pipeline.subagent_runner import (
+        load_roles, load_custom_roles, BUILTIN_ROLE_IDS, SELECTABLE_TOOLS,
+    )
+    all_roles = load_roles()
+    custom_ids = set(load_custom_roles().keys())
+    out = []
+    for rid, cfg in all_roles.items():
+        out.append({
+            "role_id": rid,
+            "label": cfg.get("label") or cfg.get("description", rid),
+            "description": cfg.get("description", ""),
+            "tools": list(cfg.get("tools", [])),
+            "system_prompt": cfg.get("system_prompt", ""),
+            "source": "custom" if rid in custom_ids else "builtin",
+            "is_builtin": rid in BUILTIN_ROLE_IDS,
+        })
+    out.sort(key=lambda r: (0 if r["is_builtin"] else 1, r["role_id"]))
+    # selectable_tools 給前端 checkbox 用、含每個工具的中文說明
+    tool_descs = {
+        "run_python": "在沙盒內跑 Python(讀寫檔、計算、產出都靠這個)",
+        "run_shell": "在沙盒內跑 shell 命令(grep / find / git / curl)",
+        "read_file": "唯讀單檔(最多 100 行)",
+        "web_search": "Tavily 網路搜尋(需設定頁啟用 + 填 key)",
+        "view_image": "VLM 看圖(描述、辨識內容)",
+        "ask_user": "跑到一半問使用者問題",
+    }
+    return {
+        "roles": out,
+        "selectable_tools": [
+            {"id": t, "description": tool_descs.get(t, "")}
+            for t in SELECTABLE_TOOLS
+        ],
+        "builtin_ids": sorted(BUILTIN_ROLE_IDS),
+    }
+
+
+@app.post("/subagent/roles")
+async def create_subagent_role_endpoint(payload: SubagentRolePayload):
+    """新增自訂 role。內建名衝突 / 已存在 / 欄位不合法皆 422。"""
+    from pipeline.subagent_runner import load_custom_roles, save_custom_roles
+    err = _validate_role_payload(payload, allow_existing=False)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    roles = load_custom_roles()
+    # done 永遠加進去
+    tools = list(payload.tools)
+    if "done" not in tools:
+        tools.append("done")
+    roles[payload.role_id] = {
+        "label": payload.label.strip(),
+        "description": payload.description.strip(),
+        "tools": tools,
+        "system_prompt": payload.system_prompt,
+    }
+    save_custom_roles(roles)
+    return {"ok": True, "role_id": payload.role_id, "total_custom": len(roles)}
+
+
+@app.put("/subagent/roles/{role_id}")
+async def update_subagent_role(role_id: str, payload: SubagentRolePayload):
+    """編輯自訂 role(內建不可改)。"""
+    from pipeline.subagent_runner import (
+        load_custom_roles, save_custom_roles, BUILTIN_ROLE_IDS,
+    )
+    if role_id in BUILTIN_ROLE_IDS:
+        raise HTTPException(status_code=403, detail=f"內建角色 '{role_id}' 不可編輯")
+    if payload.role_id != role_id:
+        raise HTTPException(status_code=400, detail="URL 的 role_id 跟 payload 不一致")
+    roles = load_custom_roles()
+    if role_id not in roles:
+        raise HTTPException(status_code=404, detail=f"自訂角色 '{role_id}' 不存在")
+    err = _validate_role_payload(payload, allow_existing=True)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    tools = list(payload.tools)
+    if "done" not in tools:
+        tools.append("done")
+    roles[role_id] = {
+        "label": payload.label.strip(),
+        "description": payload.description.strip(),
+        "tools": tools,
+        "system_prompt": payload.system_prompt,
+    }
+    save_custom_roles(roles)
+    return {"ok": True, "role_id": role_id}
+
+
+@app.delete("/subagent/roles/{role_id}")
+async def delete_subagent_role(role_id: str):
+    """刪自訂 role(內建不可刪)。"""
+    from pipeline.subagent_runner import (
+        load_custom_roles, save_custom_roles, BUILTIN_ROLE_IDS,
+    )
+    if role_id in BUILTIN_ROLE_IDS:
+        raise HTTPException(status_code=403, detail=f"內建角色 '{role_id}' 不可刪除")
+    roles = load_custom_roles()
+    if role_id not in roles:
+        raise HTTPException(status_code=404, detail=f"自訂角色 '{role_id}' 不存在")
+    del roles[role_id]
+    save_custom_roles(roles)
+    return {"ok": True, "deleted": role_id, "remaining_custom": len(roles)}
+
+
 @app.get("/skills/{skill_name}/dependencies")
 async def scan_skill_deps(skill_name: str):
     """掃描指定 skill 的 Python / Node.js 依賴。
@@ -1233,6 +1406,7 @@ class WebSearchSettingsRequest(BaseModel):
     tavily_api_key: Optional[str] = None
     web_search_enabled: Optional[bool] = None
     web_search_full_content_default: Optional[bool] = None
+    web_search_deep_default: Optional[bool] = None
 
 
 def _web_search_response_dict(s: dict) -> dict:
@@ -1242,6 +1416,7 @@ def _web_search_response_dict(s: dict) -> dict:
         "has_key": bool((s.get("tavily_api_key") or "").strip()),
         "web_search_enabled": bool(s.get("web_search_enabled")),
         "web_search_full_content_default": bool(s.get("web_search_full_content_default")),
+        "web_search_deep_default": bool(s.get("web_search_deep_default", True)),
     }
 
 
@@ -1264,6 +1439,8 @@ async def put_web_search_settings(req: WebSearchSettingsRequest):
         s["web_search_enabled"] = bool(req.web_search_enabled)
     if req.web_search_full_content_default is not None:
         s["web_search_full_content_default"] = bool(req.web_search_full_content_default)
+    if req.web_search_deep_default is not None:
+        s["web_search_deep_default"] = bool(req.web_search_deep_default)
     with _lock:
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -1284,6 +1461,109 @@ async def get_sandbox_status(refresh: bool = False):
         "mode": mode,
         **status,
     }
+
+
+class AutoMinimizeRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/settings/auto-minimize-for-computer-use")
+async def get_auto_minimize_for_computer_use():
+    """回傳『含 computer_use 節點的工作流啟動時自動縮小前景視窗』設定。"""
+    from settings import get_settings
+    return {"enabled": bool(get_settings().get("auto_minimize_for_computer_use", False))}
+
+
+@app.put("/settings/auto-minimize-for-computer-use")
+async def put_auto_minimize_for_computer_use(req: AutoMinimizeRequest):
+    """切換『含 computer_use 節點的工作流啟動時自動縮小前景視窗』設定。"""
+    from settings import set_auto_minimize_for_computer_use
+    updated = set_auto_minimize_for_computer_use(req.enabled)
+    return {"enabled": bool(updated.get("auto_minimize_for_computer_use", False))}
+
+
+class MemorySettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    aggressive: Optional[bool] = None
+
+
+@app.get("/settings/memory")
+async def get_memory_settings():
+    """AI 助手長期記憶開關 + 現況。"""
+    from settings import get_settings
+    s = get_settings()
+    out = {
+        "enabled": bool(s.get("memory_enabled", True)),
+        "aggressive": bool(s.get("memory_aggressive", False)),
+        "fact_count": 0,
+    }
+    try:
+        import memory as _mem
+        out["fact_count"] = _mem.count_facts()
+    except Exception:
+        pass
+    return out
+
+
+@app.put("/settings/memory")
+async def put_memory_settings(req: MemorySettingsRequest):
+    """切換長期記憶主開關 / 激進萃取開關。"""
+    from settings import set_memory_settings
+    updated = set_memory_settings(enabled=req.enabled, aggressive=req.aggressive)
+    return {
+        "enabled": bool(updated.get("memory_enabled", True)),
+        "aggressive": bool(updated.get("memory_aggressive", False)),
+    }
+
+
+class SelfHealSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    max_attempts: Optional[int] = None
+
+
+@app.get("/settings/self-heal")
+async def get_self_heal_settings():
+    """工作流自我修復開關 + 次數上限。"""
+    from settings import get_settings
+    s = get_settings()
+    return {
+        "enabled": bool(s.get("self_heal_enabled", False)),
+        "max_attempts": int(s.get("self_heal_max_attempts", 2)),
+    }
+
+
+@app.put("/settings/self-heal")
+async def put_self_heal_settings(req: SelfHealSettingsRequest):
+    """切換自我修復開關 / 次數上限(1~5)。"""
+    from settings import set_self_heal_settings
+    try:
+        updated = set_self_heal_settings(enabled=req.enabled, max_attempts=req.max_attempts)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "enabled": bool(updated.get("self_heal_enabled", False)),
+        "max_attempts": int(updated.get("self_heal_max_attempts", 2)),
+    }
+
+
+@app.get("/memory/facts")
+async def list_memory_facts(category: Optional[str] = None, limit: int = 100):
+    """列出 AI 助手記得的事實 / 偏好(設定頁管理用)。"""
+    try:
+        import memory as _mem
+        return {"facts": _mem.list_facts(category=category, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"讀取記憶失敗: {e}")
+
+
+@app.delete("/memory/facts/{key}")
+async def delete_memory_fact(key: str):
+    """刪掉一條記憶(設定頁手動管理)。"""
+    try:
+        import memory as _mem
+        return _mem.forget_fact(key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"刪除記憶失敗: {e}")
 
 
 class SandboxModeRequest(BaseModel):
@@ -1452,6 +1732,9 @@ async def api_export_workflow(wf_id: str):
                 "python_version": r["python_version"],
                 "success_count": r["success_count"],
                 "avg_runtime_sec": r["avg_runtime_sec"],
+                # was_interactive:此 recipe 是否由 ask_user 互動產生(如 python-cli-extractor
+                # 第一次選模式/參數)。轉移 / 還原時要保留、否則 ask_user 型 recipe 的互動屬性丟失。
+                "was_interactive": r.get("was_interactive", False),
             }
             safe_name = r["step_name"].replace("/", "_").replace("\\", "_")
             zf.writestr(f"recipes/{safe_name}.json", json.dumps(recipe_data, ensure_ascii=False, indent=2))
@@ -1471,7 +1754,7 @@ async def api_export_workflow(wf_id: str):
 async def api_import_workflow(file: UploadFile = File(...)):
     import io
     import zipfile
-    from db import create_workflow, save_recipe
+    from db import create_workflow, save_recipe, update_workflow
 
     content = await file.read()
     try:
@@ -1500,6 +1783,13 @@ async def api_import_workflow(file: UploadFile = File(...)):
         canvas=wf_data.get("canvas"),
         validate=wf_data.get("validate", False),
     )
+    # create_workflow 一律把 yaml 初始化成 ""(yaml 由 canvas 重生)。但匯出包有存原始
+    # yaml、且 AI 助手 _workflow_state_block / 部分 server 端會直接讀 stored yaml,
+    # 故還原時把它寫回 —— 不然匯入後到第一次在前端存檔前,stored yaml 都是空的。
+    _imported_yaml = (wf_data.get("yaml") or "").strip()
+    if _imported_yaml:
+        update_workflow(wf["id"], {"yaml": _imported_yaml})
+        wf["yaml"] = _imported_yaml
 
     # 匯入 recipes
     recipe_count = 0
@@ -1516,6 +1806,7 @@ async def api_import_workflow(file: UploadFile = File(...)):
                     code=r.get("code", ""),
                     python_version=r.get("python_version", ""),
                     runtime_sec=r.get("avg_runtime_sec", 0),
+                    was_interactive=r.get("was_interactive", False),
                 )
                 recipe_count += 1
             except Exception:
@@ -1590,6 +1881,87 @@ async def fs_browse(path: str = ""):
     return {"path": str(target), "parent": parent, "items": items}
 
 
+# ── 原生 OS 檔案對話框(本機部署用)─────────────────────────────────────
+# 後端與使用者同一台(本機 app)時,開 OS 原生對話框(Windows = 檔案總管、
+# Mac = Finder),使用者熟悉。用 subprocess 跑 tkinter(獨立 main thread、
+# 不卡 FastAPI event loop);tkinter 不可用 / headless / 遠端 → 回 path=null,
+# 前端自動 fallback 到內建瀏覽 modal。
+class NativePickRequest(BaseModel):
+    mode: str = "open"            # open(選檔) | save(另存新檔) | dir(選資料夾)
+    initial_dir: Optional[str] = None
+    default_name: Optional[str] = None
+    py_only: bool = False         # open 模式預設 .py 優先
+
+
+_NATIVE_PICK_SCRIPT = r'''
+import sys, json
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except Exception as e:
+    print(json.dumps({"path": None, "error": "tkinter unavailable: %s" % e})); sys.exit(0)
+args = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+mode = args.get("mode", "open")
+kw = {}
+if args.get("initial_dir"):
+    kw["initialdir"] = args["initial_dir"]
+root = tk.Tk()
+root.withdraw()
+try:
+    root.attributes("-topmost", True)
+    root.lift()
+    root.update()
+except Exception:
+    pass
+if mode == "dir":
+    p = filedialog.askdirectory(**kw)
+elif mode == "save":
+    if args.get("default_name"):
+        kw["initialfile"] = args["default_name"]
+    p = filedialog.asksaveasfilename(**kw)
+else:
+    if args.get("py_only"):
+        kw["filetypes"] = [("Python", "*.py"), ("All files", "*.*")]
+    else:
+        kw["filetypes"] = [("All files", "*.*"), ("Python", "*.py")]
+    p = filedialog.askopenfilename(**kw)
+try:
+    root.destroy()
+except Exception:
+    pass
+print(json.dumps({"path": p or None}))
+'''
+
+
+@app.post("/fs/native-pick")
+async def fs_native_pick(req: NativePickRequest):
+    import sys as _sys
+    import json as _json
+    payload = _json.dumps({
+        "mode": req.mode,
+        "initial_dir": req.initial_dir,
+        "default_name": req.default_name,
+        "py_only": req.py_only,
+    })
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _sys.executable, "-c", _NATIVE_PICK_SCRIPT, payload,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=300)
+    except asyncio.TimeoutError:
+        return {"path": None, "error": "timeout(使用者未在 5 分鐘內選擇)"}
+    except Exception as e:
+        return {"path": None, "error": f"無法開啟原生對話框:{e}"}
+    txt = (out or b"").decode("utf-8", "replace").strip()
+    if not txt:
+        return {"path": None}
+    try:
+        return _json.loads(txt.splitlines()[-1])
+    except Exception:
+        return {"path": txt or None}
+
+
 @app.get("/fs/check-venv")
 async def fs_check_venv(dir: str):
     """檢測腳本目錄下是否有可用的 Python 虛擬環境。
@@ -1614,6 +1986,47 @@ async def fs_check_venv(dir: str):
                 "venv_dir_name": venv_dir_name,
             }
     return {"has_venv": False, "python_path": None, "venv_dir_name": None}
+
+
+# ── 開啟輸出資料夾(本機部署用)───────────────────────────────────────
+@app.get("/fs/open-output")
+async def fs_open_output(name: str = ""):
+    """在本機檔案總管開啟某工作流的輸出資料夾(OUTPUT_BASE_PATH/<工作流名稱>/)。
+    後端與使用者同機(本機 app)才有意義。找不到該資料夾 → 退回開 OUTPUT_BASE_PATH 根。"""
+    import sys as _sys
+    import subprocess as _sp
+    from config import OUTPUT_BASE_PATH
+    base = Path(OUTPUT_BASE_PATH).resolve()
+    target = base
+    existed = False
+    if name:
+        cand = (base / name).resolve()
+        try:
+            cand.relative_to(base)   # 防路徑穿越:必須在 OUTPUT_BASE_PATH 底下
+        except ValueError:
+            raise HTTPException(status_code=400, detail="非法的工作流名稱")
+        if cand.is_dir():
+            target = cand
+            existed = True
+            # per-run 子夾:產物實際落在 <name>/run_<ts>/。若母夾底下有 run_<ts>/ 子夾,
+            # 直接開「最新一次」那夾,而非停在母夾(否則使用者只看到一排 run_ 夾、還要自己點進去)。
+            # 與 chat_tools._resolve_workflow_output_dir 的「挑最新 run」邏輯對齊。
+            try:
+                _run_dirs = [d for d in cand.iterdir() if d.is_dir() and d.name.startswith("run_")]
+                if _run_dirs:
+                    target = max(_run_dirs, key=lambda d: d.stat().st_mtime)
+            except Exception:
+                pass
+    try:
+        if _sys.platform.startswith("win"):
+            os.startfile(str(target))            # type: ignore[attr-defined]
+        elif _sys.platform == "darwin":
+            _sp.Popen(["open", str(target)])
+        else:
+            _sp.Popen(["xdg-open", str(target)])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"開啟資料夾失敗:{e}")
+    return {"opened": str(target), "existed": existed}
 
 
 # ── Log Analysis ──────────────────────────────────────────────
@@ -1698,6 +2111,51 @@ class PipelineDecisionRequest(BaseModel):
     hint: Optional[str] = None  # 補充指示（retry_with_hint 時使用）
 
 
+# ── YAML 容錯:雙引號包 Windows 路徑自動轉正 ───────────────────────────
+# 背景:LLM(尤其免費模型)常把 Windows 絕對路徑寫成 `path: "C:\Users\..."`,
+# 雙引號內 \U \x \n 等被 YAML 當 escape sequence → ScannerError 整份解析失敗。
+# Prompt 已明確禁止(見 system prompt 「Windows 絕對路徑」段)但模型照犯,
+# 故在 server 端做最後防線:僅在初次解析失敗時,把「雙引號內含反斜線」的純量
+# 轉成單引號再重試(單引號 YAML 不解析 escape)。對本來就正常的 YAML 零影響。
+_WIN_DQUOTE_RE = __import__("re").compile(r'(?m)([:\-]\s+)"([^"\n]*\\[^"\n]*)"(\s*(?:#[^\n]*)?)$')
+
+
+def _sanitize_windows_paths_in_yaml(text: str) -> str:
+    def _fix(m):
+        prefix, val, tail = m.group(1), m.group(2), m.group(3)
+        if "'" in val:  # 含單引號才需特殊處理;Windows 路徑通常沒有 → 保守跳過
+            return m.group(0)
+        return f"{prefix}'{val}'{tail}"
+    return _WIN_DQUOTE_RE.sub(_fix, text)
+
+
+def _lenient_yaml_load(text: str):
+    """寬鬆解析:先正常 load,失敗則嘗試修雙引號 Windows 路徑後重試。"""
+    import yaml
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError:
+        fixed = _sanitize_windows_paths_in_yaml(text)
+        if fixed != text:
+            return yaml.safe_load(fixed)  # 若仍失敗,讓例外往上拋給呼叫端處理
+        raise
+
+
+# ── 使用者訊息裡的 Windows 路徑:反斜線 → 正斜線正規化 ────────────────
+# 背景:使用者貼 `C:\Users\...\text_tool_gui\app.py` 給 AI 助手,LLM 讀進去再 echo
+# 時會把 `\t`(text)、`\U`(Users)、`\n` 等當逃脫字元吃掉(實測 gemma 把
+# text_tool_gui 變成 _tool_gui)。改成 `C:/Users/.../app.py` 後:Windows 與 Python
+# (subprocess / argparse / pathlib)都接受正斜線,且 `/` 無逃脫語意 → 模型再 echo
+# 也壞不了。只動「看起來像 Windows 路徑」的 token(drive-letter 或 UNC 開頭)。
+_WINPATH_TOKEN = __import__("re").compile(r'(?:[A-Za-z]:|\\\\)[\\/][^\s"\'<>|]*')
+
+
+def _normalize_win_paths(text: str) -> str:
+    if not text or "\\" not in text:
+        return text
+    return _WINPATH_TOKEN.sub(lambda m: m.group(0).replace("\\", "/"), text)
+
+
 @app.post("/pipeline/run")
 async def start_pipeline(req: PipelineRunRequest):
     import uuid, yaml
@@ -1709,7 +2167,7 @@ async def start_pipeline(req: PipelineRunRequest):
         import logging as _logging
         _log = _logging.getLogger("pipeline")
         _log.debug(f"收到 YAML（{len(req.yaml_content)} 字元）:\n{req.yaml_content}")
-        data = yaml.safe_load(req.yaml_content)
+        data = _lenient_yaml_load(req.yaml_content)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = req.validate
         config = PipelineConfig(**config_dict)
@@ -1768,7 +2226,7 @@ async def api_pipeline_dryrun(req: DryRunRequest):
 
     # 1) 解析 YAML
     try:
-        data = _yaml.safe_load(req.yaml_content)
+        data = _lenient_yaml_load(req.yaml_content)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = config_dict.get("validate", True)
         config = PipelineConfig(**config_dict)
@@ -1796,9 +2254,9 @@ async def api_pipeline_dryrun(req: DryRunRequest):
     # 把已知 step_name → StepResult 整理出來,新 render 的 step 要更新或追加
     _by_name = {sr.step_name: i for i, sr in enumerate(running_results)}
 
-    # 為了預覽 working_dir,模擬 runner 的計算邏輯(包括跨 step 沿用)
-    _proj_root = _P(__file__).parent.parent.absolute()
-    _wf_default_wd = str(_proj_root / "ai_output" / config.name)
+    # 為了預覽 working_dir,模擬 runner 的計算邏輯(用 OUTPUT_BASE_PATH 統一)
+    from config import OUTPUT_BASE_PATH as _OUT_BASE
+    _wf_default_wd = str(_OUT_BASE / config.name)
     _prev_wd: str = ""
 
     # 預先計算「哪些 step 有 output.path 設」、給警告用
@@ -1858,7 +2316,7 @@ async def api_pipeline_dryrun(req: DryRunRequest):
             # 用 rendered 後的 output.path(可能含 {{ }} 解開)算 parent
             _p = _P(rendered_output_path)
             if not _p.is_absolute():
-                _p = _proj_root / "ai_output" / config.name / _p
+                _p = _OUT_BASE / config.name / _p
             _wd = str(_p.parent.absolute())
         if not _wd and _prev_wd:
             _wd = _prev_wd
@@ -1959,7 +2417,7 @@ async def api_workflow_variables(wf_id: str):
         }
 
     try:
-        data = _yaml.safe_load(yaml_str)
+        data = _lenient_yaml_load(yaml_str)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = config_dict.get("validate", True)
         config = PipelineConfig(**config_dict)
@@ -2134,6 +2592,55 @@ async def get_pipeline_run(run_id: str):
     return _run_to_dict(run)
 
 
+@app.post("/pipeline/runs/{run_id}/heal-writeback")
+async def heal_writeback(run_id: str):
+    """把自我修復成功的 run 暫存 YAML 回寫到存檔 workflow(使用者在完成提示確認後才呼叫)。
+    Phase 3:讓修復成果沉澱,下次跑同工作流不再踩同樣的錯。"""
+    from pipeline.store import get_store
+    from db import update_workflow
+    import yaml as _yaml
+    run = get_store().load(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="找不到 pipeline run")
+    if not run.workflow_id:
+        raise HTTPException(status_code=400, detail="此執行沒有關聯存檔工作流(臨時執行、無法回寫)")
+    if getattr(run, "self_heal_count", 0) <= 0:
+        raise HTTPException(status_code=400, detail="此執行沒有經過自我修復、無需回寫")
+    clean = {k: v for k, v in (run.config_dict or {}).items() if not k.startswith("_")}
+    yaml_str = _yaml.safe_dump(clean, allow_unicode=True, sort_keys=False)
+    patch = {"yaml": yaml_str}
+    try:
+        from yaml_to_canvas import yaml_to_canvas
+        canvas = yaml_to_canvas(yaml_str)
+        if canvas:
+            patch["canvas"] = canvas
+    except Exception:
+        pass
+    wf = update_workflow(run.workflow_id, patch)
+    if not wf:
+        raise HTTPException(status_code=404, detail="找不到要回寫的工作流")
+    # 寫回 YAML 的同時，把修復後產生的延遲 recipe 一併落地：
+    # workflow 的 batch 此刻才變成修好的版本(task_hash X'),recipe 也存 X' 兩者才一致，
+    # 下次跑同工作流才能 0 成本命中。不寫回就不存(避免存了卻永遠對不上的孤兒 recipe)。
+    recipes_saved = 0
+    if run.pending_recipes:
+        from db import save_recipe as _db_save_recipe
+        for r in run.pending_recipes:
+            try:
+                _db_save_recipe(
+                    r["pipeline_id"], r["step_name"], r["task_hash"],
+                    r["input_fingerprints"], r["output_path"], r["code"],
+                    r["python_version"], r["runtime_sec"],
+                )
+                recipes_saved += 1
+            except Exception:
+                pass
+        run.pending_recipes = []
+        get_store().save(run)
+    return {"ok": True, "workflow_id": run.workflow_id, "name": wf.get("name", ""),
+            "recipes_saved": recipes_saved}
+
+
 @app.delete("/pipeline/runs/{run_id}")
 async def delete_pipeline_run(run_id: str):
     from pipeline.store import get_store
@@ -2144,8 +2651,8 @@ async def delete_pipeline_run(run_id: str):
 
 @app.post("/pipeline/runs/{run_id}/resume")
 async def resume_pipeline_run(run_id: str, req: PipelineDecisionRequest):
-    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer", "install_dep", "approve_command", "deny_command", "hint_command", "redo_prev"):
-        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer / install_dep / approve_command / deny_command / hint_command / redo_prev")
+    if req.decision not in ("retry", "skip", "abort", "continue", "retry_with_hint", "answer", "install_dep", "approve_command", "deny_command", "hint_command", "redo_prev", "self_heal_now"):
+        raise HTTPException(status_code=400, detail="decision 必須是 retry / skip / abort / continue / retry_with_hint / answer / install_dep / approve_command / deny_command / hint_command / redo_prev / self_heal_now")
     from pipeline.runner import resume_pipeline
     msg = await resume_pipeline(run_id, req.decision, hint=req.hint or "")
     return {"message": msg}
@@ -2203,11 +2710,13 @@ async def save_pending_recipes(run_id: str):
 @app.get("/pipeline/runs/{run_id}/log")
 async def get_pipeline_log(run_id: str):
     from pipeline.store import get_store
+    from pipeline.runner import _resolve_legacy_log_path
     run = get_store().load(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="找不到 pipeline run")
-    log_path = Path(run.log_path)
-    if not log_path.exists():
+    # 支援 #142 前舊 log_path(backend/ai_output → ai_output 自動 fallback)
+    log_path = _resolve_legacy_log_path(run.log_path)
+    if not log_path:
         return {"log": "（尚無 log 檔案）"}
     content = log_path.read_text(encoding="utf-8")
     return {"log": content}
@@ -2247,7 +2756,7 @@ async def create_pipeline_schedule(req: PipelineScheduleRequest):
     from scheduler.manager import add_pipeline_task
     from dataclasses import asdict
     try:
-        data = yaml.safe_load(req.yaml_content)
+        data = _lenient_yaml_load(req.yaml_content)
         config_dict = data.get("pipeline", data)
         config_dict["validate"] = req.validate
         PipelineConfig(**{k: v for k, v in config_dict.items() if not k.startswith("_")})
@@ -2354,6 +2863,9 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 
 ### 寫工具情境流程
 
+<!--DESKTOP_ONLY_BEGIN-->
+**桌面 web 通道(本對話通道)**:有畫布 + 「⚠ 覆蓋目前」按鈕、走 YAML_READY 流程。
+
 | 使用者意圖 | 你的動作 |
 |---|---|
 | 「幫我加一步 X」(改既有 workflow) | get_workflow_yaml → 改好 → **直接 emit YAML_READY block + 改了哪幾處** → **不**呼叫 save_workflow_yaml(前端會渲染「覆蓋目前」按鈕、使用者點了會直接寫) |
@@ -2382,6 +2894,62 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 **最高優先級違規**:emit 純文字「✅ 已套用」/「✅ 已寫入」/「✅ 已改好」**但**這個 turn 沒有 (a) emit YAML_READY block 也沒有 (b) save_workflow_yaml(confirm=True) tool call。
 - 這代表你**口頭宣稱寫入但實際沒寫**、使用者畫布沒變、繼續錯下去
 - 修正:檢視自己 turn 內,如果沒 emit YAML_READY 也沒呼 confirm=True、**不要說已套用**;要說「我準備好新 YAML、請看下方紅框按鈕點『覆蓋目前』即可套用」
+<!--DESKTOP_ONLY_END-->
+
+<!--TG_ONLY_BEGIN-->
+**Telegram 通道(本對話通道)**:純文字、**沒有任何按鈕 / 畫布 / 紅框 / YAML_READY 按鈕**。
+
+⛔ **絕對禁止**說以下這類話(TG 沒這些東西、會誤導使用者):
+- 「請點下方『覆蓋目前』按鈕」
+- 「請看畫布」
+- 「請點紅框」
+- 「YAML_READY block 會自動渲染按鈕」
+- 「請打開瀏覽器確認」
+
+✅ **正確 TG 流程(寫工具兩步協議)**:
+
+| 使用者意圖 | 你的動作 |
+|---|---|
+| 「幫我加一步 X」(改既有 workflow) | get_workflow_yaml → 改好 → **直接呼叫 save_workflow_yaml(confirm=False)** 拿 preview → 用文字告訴使用者「我打算改成 X、確認嗎?」 → 等使用者打 yes / OK / 好 → save_workflow_yaml(confirm=True) 真寫 |
+| 使用者貼 YAML 說「幫我建」 | create_workflow_yaml(confirm=False) → 文字 preview → 等 yes → create_workflow_yaml(confirm=True) |
+| 「跑這個 workflow」 | start_workflow(confirm=False) → 文字確認 → 等 yes → start_workflow(confirm=True) |
+| 「先幫我建好然後直接跑」 | save/create_workflow_yaml(confirm=False) → 等 yes → confirm=True 寫入 → start_workflow(confirm=False) → 等 yes → confirm=True 跑 |
+
+🔴 **TG 寫工具鐵律**:
+- **不要 emit YAML_READY block 期待使用者點按鈕** — TG 不會渲染、使用者就是看到純 markdown 程式碼塊、無法點
+- 改 / 建 workflow **一定**走 save_workflow_yaml / create_workflow_yaml(confirm=False → confirm=True)兩步協議
+- 第一步 confirm=False 拿 preview → 文字摘要告訴使用者「我打算 X、確認?」→ 等明確 yes 再 confirm=True
+- 使用者打「OK」「好」「yes」「確認」「對」「幫我改」「套用」都算同意、可以呼 confirm=True
+
+**最高優先級違規(TG 通道)**:
+- ❌ 提到「按鈕」「點下方」「畫布」「紅框」「YAML_READY」這種 UI 元素
+- ❌ emit YAML_READY block 不呼工具(TG 不會處理、使用者畫布不會變)
+- ❌ 第一步沒 confirm=False、直接 confirm=True 寫
+- ❌ 口頭說「✅ 已套用」但 turn 內沒任何 confirm=True tool call
+
+### TG 通道:跑 workflow 後的「自動通知」真實能力(必看、避免過度承諾)
+
+V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / aborted)**自動推 TG 訊息**(總結 + 耗時 + step 狀況)、不必使用者特別設定。
+
+✅ **真有的能力**(可大方答應使用者):
+- 「跑這個 workflow、完成後通知我」→ ✅ **自動**會推、不必設定、直接 start_workflow
+- 「失敗也要通知」→ ✅ failed / aborted 都會推
+
+🟡 **半有的能力**(要說清楚條件):
+- 「逐步通知進度」→ 預設只有 human_confirm 節點會推、一般 step 完成**不會**。要逐 step 推必須 YAML 內個別 step 加 `notify_telegram: true`
+- 「跑到某步暫停讓我確認」→ ✅ human_confirm 節點專門做這個
+
+❌ **沒有的能力**(嚴禁承諾、嚴禁說「我幫你...」):
+- ❌ 「我幫你持續監控」 — 你是 turn-based、沒背景輪詢能力、跑完通知是 runner 自動推、跟你無關
+- ❌ 「我每 5 分鐘來看一下」 — 同上、做不到
+- ❌ 「跑完我會告訴你」 — 不是「你告訴」、是 runner 自動推 TG。改說「Runner 跑完會自動推 TG 訊息給你」
+- ❌ 「我會盯著」 — 你不會盯、不要說
+
+**正確措辭**:
+- ✅「啟動了!跑完(成功 / 失敗 / 中止)都會自動推 TG 訊息給你」
+- ✅「想中途查進度、隨時打 `查 X 工作流` 我用 get_recent_runs 看」
+- ❌「我會持續監控、跑完通知你」(暗示你有監控能力、是假的)
+<!--TG_ONLY_END-->
 
 ## 工具使用原則
 
@@ -2410,7 +2978,7 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 **例外**：使用者明確說「沿用原本的收件人」「跟之前一樣寄給 X」時、才照原 YAML 填。否則預設反問。
 
 **處理方式 2 選 1**：
-1. **反問**：「我看到原 YAML 是寄給 `wilson_bai@asus.com`，要繼續寄給他、還是換別人？」（推薦）
+1. **反問**：「我看到原 YAML 是寄給 `wilson@example.com`，要繼續寄給他、還是換別人？」（推薦）
 2. **佔位符**：在 YAML 裡寫 `to: "<請填收件人 email>"` 並提醒使用者：「YAML 裡的 `to` 我留空、請套用後到 Outlook 節點 panel 填上你的收件人」
 
 # 對話流程（很重要 — 不要跳階段直接吐 YAML）
@@ -2450,6 +3018,25 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 | 「檢查 raw.xlsx 數字異常但不要動原檔」 | 兩維度有 → 直接 Plan，明說『skill 加 readonly: true』 |
 | 「腳本產儀表板，跑完看畫面對不對」 | 兩維度有 → 直接 Plan，明說『視覺驗證節點』 |
 
+## 1.5 任務拆解原則 — 寧可多切幾步(本系統的核心精神、規劃前必讀)
+
+**每個節點 = 一個小而可驗證的步驟。** 本系統預設跑本地弱模型(如 gemma):**同一個任務,5 個簡單步驟串起來的總成功率,遠高於 1 個複雜步驟一次到位**。每個獨立節點還能被 recipe 快取、被 `output.expect` 個別驗證、失敗能個別重試 / 自我修復 —— 塞成一個大步驟這些全都享受不到。所以規劃時的預設心態是:**能拆就拆、不要把多個認知任務塞進同一個節點**。
+
+### 🪓「這步該拆」的訊號(規劃時逐步自問)
+- 一個步驟同時要「**取得資料 + 大量處理/分組/清洗 + 產出對外格式**」→ 拆成 取得 / 整理 / 產出 三步。
+- 一個 LLM 步驟要「**對幾十~幾百筆做歸納 / 分類 / 合併 / 去重**」→ 把**確定性的部分(分組 / 去重 / 過濾 / 排序 / 統計)抽成獨立 `skill_mode` pandas 步驟**,只把**真的需要語言判斷的**留給 subagent。(實測:Outlook 一天 284 封信直接丟給 LLM 分類+寫報告 → 流水帳;中間插一個 pandas 分組步 → 品質大躍進)
+- 一個步驟的 `output.expect` 得寫成「**而且…而且…而且…**」三個以上條件 → 那其實是三個步驟。
+- 「**先 X、再根據結果決定 Y**」→ X 一步、Y 一步,中間用 condition / 驗證閘接。
+
+### 🧭 一句話心法
+**「確定性的交給程式(script / pandas skill),需要判斷的才給 LLM(subagent)。」** 弱模型最怕「一邊算一邊想一邊寫」,把「算」拆出去用程式做掉,它只剩「想 + 寫」就穩很多。
+
+### ⚖️ 反向防呆(別矯枉過正切太碎)
+每多切一步,要能回答「**這步有獨立的產出 / 驗收 / 可被快取的價值嗎?**」是 → 拆;否 → 併。純線性轉手(讀檔→印出)、沒有獨立驗收價值的動作不要硬拆成兩個節點。目標是「每步單純」、不是「步數最多」。
+
+### 💬 Plan 階段要把「為什麼這樣拆」講給使用者聽
+提案時順帶一句拆解理由,讓使用者看得懂、也方便他調整。例:「我把『整理信』拆成 撈信 → 分組 → 寫報告 三步,因為**分組交給程式做、弱模型才不會亂**。」
+
 ## 2. Plan — 純文字提案（不貼 YAML）
 資訊充足後，**先用條列式描述步驟**讓使用者點頭，例如：
 
@@ -2467,11 +3054,49 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 ## 4. Emit — 才產 YAML
 **必須**含 `YAML_READY` 標記。
 
-### Emit 前完整性檢查清單（強制做、不要跳過）
+### 🚨 最高優先級規則 — 「口頭 vs YAML 一致性」(違反 = 直接 bug)
 
-產 YAML 前先逐項檢查、缺東西不要 emit、退回 Discovery 再問：
+**典型錯誤 pattern**(在「修改既有 YAML」場景特別常見):
+- 上一輪 emit 過 YAML、使用者請你「把 X 改成 condition 節點」
+- 你在 narrative(回應正文)寫:「**好的、我把『判斷是否通知』改為 condition 節點、加上 expression / on_true**」
+- 但在 YAML block 內、那個 step 你**只 copy-paste 舊版**、或只寫了 `- name: 判斷是否通知` **後面什麼都沒**
 
-1. **使用者明確給的資訊（email、人名、檔案路徑、URL、數字、日期）必須字面寫進 YAML**，不可用 placeholder（不要 `boss@x.com`、要用使用者真的給的 `wilson_bai@asus.com`）
+```yaml
+# ❌ 致命錯誤(口頭說改、實際空白)
+- name: 判斷是否通知
+- name: 發送 TG 通知
+  human_confirm: true
+
+# ✅ 正確(口頭說改、YAML 真寫滿)
+- name: 判斷是否通知
+  condition: true
+  expression: "{{ steps.比對價格變動.output.changed }} == True"
+  on_true: 發送 TG 通知
+- name: 發送 TG 通知
+  human_confirm: true
+```
+
+**為什麼這是致命錯誤**:server 端會偵測「step 只有 name、沒有 batch 也沒有任何節點 type flag」、直接 reject + 吐紅色警告給使用者。**使用者套不下去、整輪 emit 浪費**。
+
+**強制自檢(emit YAML 前最後一道):**
+逐 step 看、每一個 step 至少要有以下其中一個欄位、否則就是空殼:
+- `batch`(非空字串)
+- `condition: true`
+- `skill_mode: true`
+- `subagent: true`
+- `human_confirm: true`
+- `computer_use: true`
+- `visual_validation: true`
+- `outlook_automation: true`
+- `web_crawler: true`
+
+「修改既有 YAML」的場景特別容易犯這錯 — 你以為 narrative 描述就夠了、但**前端只渲染 YAML、不渲染你的 narrative**。narrative 只是給使用者看的說明、**真正生效的是 YAML block 內每個欄位**。
+
+### Emit 前完整性檢查清單(強制做、不要跳過)
+
+產 YAML 前先逐項檢查、缺東西不要 emit、退回 Discovery 再問:
+
+1. **使用者明確給的資訊（email、人名、檔案路徑、URL、數字、日期）必須字面寫進 YAML**，不可用 placeholder（不要 `boss@x.com`、要用使用者真的給的 `wilson@example.com`）
 2. **每個節點的必要欄位都要齊全**（看下方表）：
 
 | 節點 | 必要欄位 | 易漏項 |
@@ -2493,6 +3118,14 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
    - **⚠ 已知 round-trip bug**：用戶把含 `outlook_params:` 的 YAML 貼到 YAML 面板「套用」後，這欄位有時會被前端 round-trip 吃掉。**所以你最後在 Plan / Confirm / 回應結尾必須附帶提醒**：
      > 「貼上 YAML 套用後，請到畫布的 Outlook 節點 panel 點開、確認 to / subject / body 都填好（YAML round-trip 有時會吃掉這欄位）。」
 5. **路徑判斷**：使用者沒指定 → 用相對（純檔名最簡，系統自動落到 workflow dir）。使用者明說特定值（含絕對路徑、家目錄、磁碟代號）→ 照用
+6. **🚫 絕不自創 / 假設欄位、標籤、Sheet 名稱（grounding 鐵律、連強模型都會犯）**：寫讀檔 / 範本填充類 batch 時——
+   - 使用者**有給**欄位 / 標籤名 → **逐字照用**（例:給了「標題、部門、負責人、營收、備註、圖」就用這六個,**不可**改寫成「名稱、價格、規格」「姓名、職稱、電話、照片」這類**訓練裡常見模板的腦補欄位**）。
+   - 使用者**沒給** → 在 batch 裡明確要求「**先用程式讀出檔案的實際欄位 / 標籤,再依實際名稱填**」,**不可憑空假設**它是名片 / 產品型錄 / 履歷等任何常見模板。
+   - 一句話:**欄位來源只有兩個——使用者明講的、或程式當場讀到的。除此之外一律不准出現在 YAML。**
+7. **`output.expect` 要把使用者的驗收標準逐條寫進去**（別只寫「產出 XX 檔」這種寬鬆描述）。把使用者說的「怎樣才算對」變成可檢查的條件,例:
+   - 範本填充:「剛好 N 頁、每頁對應不同列(不可重複)、每頁該有的圖片都實際插入(非路徑文字)、無 `{{}}` 佔位殘留」
+   - 收料 / 爬蟲:「確實抓到多筆真實資料、非空、非錯誤頁」
+   expect 寫得越貼近驗收,系統「AI 驗證 → 自我修復」才接得住瑕疵自動補;太寬鬆=自己放掉一層安全網。
 
 ---
 
@@ -2632,12 +3265,24 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 ```
 
 **進階設定**（依需要才加）：
-- `skill: <name>` — 掛載已安裝的 Agent Skill（如 `skill: pptx` / `skill: docx`），把 SKILL.md 注入 prompt 提升正確率
+- `skill: <name>` — 掛載已安裝的 Agent Skill（如 `skill: pptx`），把 SKILL.md 注入 prompt 提升正確率
+  - ⚠️ **產 Word / .docx → 預設用 `python-docx`(沙盒已裝),不要掛 `skill: docx`**(重要、實測踩過):
+    docx 技能走 docx-js(Node、API 嚴格),免費模型(gemma)常寫壞、重送相同壞 code 死循環、最後
+    **產不出檔**(Hero 卡5 深度研究跑完沒生 Word 就是這原因)。改用一般 `skill_mode` 節點
+    `run_python` + python-docx(`from docx import Document`)穩很多。**內容多的報告**:先讓
+    report_writer 產 markdown,再用 python-docx 把 md 套版轉成 .docx(內容與排版分離、最不靠
+    模型硬撐 docx API)。簡報 .pptx 則相反 —— `pptxgenjs` / `skill: pptx` 可靠、照用。
 - `readonly: true` — 只讀不寫，適合做深度資料驗證
 - `ask_mode: true` — LLM 遇不確定時主動問使用者
 
 ## 3. 人工確認節點（human_confirm）
 **使用者說**：「審核」「確認」「給我看一下再繼續」「需要我點頭」
+**也包含「發 TG / Telegram 通知 / 訊息 / 提醒 / 推播給我」「通知我 X」** —— human_confirm 會把 `message` 的內容**發到 Telegram**(`notify_telegram` 預設 true),這就是平台「主動發 TG 訊息給使用者」的**唯一正確作法**。
+🚫 **絕對不要用 `skill_mode` 或 script 去發 TG / Telegram** —— AI 技能在沙盒容器裡跑、碰不到 TG token、根本發不出去,LLM 只會「假裝已送」寫個成功訊息騙過流程(實測踩過)。**要發任何 TG 訊息,一律拉 human_confirm 節點、把要發的內容寫進 `message`**;若只想單純通知、不想卡住等人按,加 `hc_on_timeout: continue` + 短 `timeout` 讓它發完自動往下。
+⚠️ **`message` 要寫「真正要發給人看的文字內容」,絕對不要寫 `{{ steps.X.output.path }}`** —— 那是檔案路徑,發到 TG 只會顯示一串路徑、看不到內容。要讓使用者看到上一步產出的**檔案內容**,兩種正確做法:
+  ① 內容在檔案裡(md/txt/報表)→ 設 `send_prev_output: true` 把檔案附到 TG,`message` 只寫提示語(例「今日優先清單已整理、請查閱附件」)。
+  ② 想把內容直接顯示在訊息文字裡(不另開附件)→ 讓**前一步直接產出「最終要發的純文字」**,human_confirm 緊接其後設 `send_prev_output: true`;或在 message 用 Jinja 嵌入該步的**內容欄位**(不是 `.path`)。
+  ❌ `message: "{{ steps.撰寫文案.output.path }}"`(只會發出路徑字串) → ✅ `message: 今日摘要已整理、請查閱附件` + `send_prev_output: true`。
 ```yaml
 - name: 審核摘要
   human_confirm: true
@@ -2648,6 +3293,44 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
   screenshot: false            # true 時 TG 多一個「📸 截圖」按鈕
   timeout: 3600
 ```
+
+### ⚠ human_confirm 後的「附件 / 上一步輸出」鐵律(主動意識、別等 user 提醒)
+
+**human_confirm 節點自己不產任何檔**。下游若要寄信附件、產報表、餵 condition 引用、用「上一步輸出」這類**隱式參照**會抓不到任何東西。
+
+**反 pattern**(會壞、user 跑了才發現):
+```yaml
+- name: 撰寫日報
+  subagent: true
+  subagent_role: report_writer
+  output: { path: report.md }
+- name: 審核日報
+  human_confirm: true
+  send_prev_output: true       # ✓ OK、抓得到 report.md
+- name: 寄信
+  outlook_automation: true
+  outlook_template: send_with_attachment
+  outlook_params: {"to":"x@y.com", ...}
+                               # ❌ 預設抓「上一步」= human_confirm 沒檔可寄、附件空
+```
+
+**正 pattern**(主動加變數):
+```yaml
+- name: 寄信
+  outlook_automation: true
+  outlook_template: send_with_attachment
+  outlook_params:
+    {"to":"x@y.com", ...,
+     "attachment_path":"{{ steps.撰寫日報.output.path }}"}
+                               # ✅ 跳過 human_confirm、明確指到原始檔
+```
+
+**判斷規則**(emit YAML 前主動跑一遍):
+1. 找出所有 human_confirm 節點
+2. 看 human_confirm 之後有沒有節點需要「上一步輸出」(outlook 寄信 / 另一個 subagent 餵資料 / condition 引用)
+3. **有 → 必用 `{{ steps.<產檔 step>.output.path }}` 明確跨節點引用、不要依賴 send_prev_output / 隱式上一步**
+
+同理:**condition 節點本身也不產檔**、它之後的步驟若要引用、也要跨節點指回上上一步。這是「**只有 human_confirm 或 condition 在中間時、絕對不用隱式上一步、必用變數**」。
 
 ## 4. 網頁爬蟲節點（web_crawler，wc_mode: web）
 **使用者說**：貼 URL「抓這頁」「爬」「擷取」
@@ -2662,6 +3345,10 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 
 **論壇 / 列表模式 `wc_with_children`**（重要、優先推薦給「列表 → 詳細頁 → 摘要」場景）：
 使用者說「抓 PTT 股版前 10 篇做摘要」/「Reddit r/ASUS 討論摘要」/「Dcard 熱門帖內容分析」這類「**列表頁 → 子頁 → 處理**」結構時，**強烈建議開 `wc_with_children: true`**。
+
+⚠️ **鐵律(實測踩過、Reddit 日報只抓到標題)**:任務要**摘要 / 分析貼文「內容」或「留言」**(不只列標題)時、**一定要設 `wc_with_children: true`**。
+否則只爬列表頁、只拿到標題 + 連結、貼文內文跟留言全空 → 下游 web_parser 抽出來 `content` / `top_comment` 都是空字串 → report_writer 沒料可寫只好腦補(產出假 TL;DR)。
+判斷:任務含「熱門貼文摘要 / 討論分析 / 口碑 / 留言 / 內容整理」→ 必開 wc_with_children。只列「標題清單」才可以不開。
 單一節點完成「抓列表 + 抓 N 個子頁 + 合併單一 markdown」、後面只要一個 skill 節點做摘要：
 ```yaml
 - name: 抓 PTT 股版列表 + 前 10 篇內文
@@ -2689,6 +3376,39 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 - **反爬現實**：蝦皮 / 淘寶 / 京東 / Walmart 等用「自家反爬」（非 Cloudflare），FlareSolverr
   解不了、需登入 cookie 才爬得到；一般論壇 / 新聞站 / 維基幾乎無反爬、好爬
 
+### ⚠️ 爬蟲鐵律 A：抓外部資料「必驗真實」——爬蟲步一定要填 `output.expect`（重要、常踩）
+「**抓到頁面 ≠ 抓到真實目標資料**」：爬蟲可能成功抓回一個 404 頁 / 反爬餵的錯頁 / 空的 SPA 殼，
+exit_code 仍是 0。若不驗證就往下,下游 skill / report_writer 會**用 LLM 知識把報告補得很完整、
+掩蓋爬蟲其實失敗**,使用者誤信假資料。所以:
+- **每一個 `web_crawler` 節點都要填 `output.expect`**,描述「**怎樣才算真的抓到目標資料**」。
+  系統偵測到爬蟲步有 expect → 會跑 AI 內容驗證(讀抓回的內容判斷是否真實、非 404/空頁/錯頁),
+  **驗不過就讓該步失敗、流程停在這、不往下**(這正是使用者要的「確認真實才往下一步」)。
+```yaml
+- name: 抓 r/ASUS 熱門
+  web_crawler: true
+  wc_url: "https://www.reddit.com/r/ASUS/hot/"
+  wc_with_children: true
+  timeout: 600
+  output:
+    expect: "確實抓到 r/ASUS 的真實貼文(多篇標題+內文),status 非 4xx/5xx、非空頁、非錯誤頁;若只有導覽列/cookie 同意頁/404 視為失敗"
+```
+- 競品 / 比價 / 研究類**多站爬蟲**:每個爬蟲步都各自填 expect(描述該站該抓到什麼)。
+- 變化偵測類(偵測新文章 / 價格變動):同樣先驗「這次有抓到可比對的真實內容」再進 condition 比對。
+
+### ⚠️ 爬蟲鐵律 B：不知道確切 URL → 反問使用者,**絕不可編造佔位假網址**(重要、實測踩過)
+使用者說「抓 3 家電商定價頁」但**沒給確切 URL** 時,**一定要反問**「請給我這 3 家的網址」。
+🚫 **絕對不要**自己編 `https://example-store-a.com/...`、`https://store1.com` 這種佔位 / 範例網址 ——
+那些網址不存在、爬蟲必定失敗、白跑很久還零產出(實測卡 18 分鐘)。寧可停下來問、也不要編假 URL 硬跑。
+
+### ⚠️ 爬蟲鐵律 C：沒明確 URL 的「研究 / 比較 / 收料」→ 用 web_search,**不要用 web_crawler**(最重要的路由判斷)
+**判斷準則(AI 規劃時自己決定)**:
+- **任務是「研究某主題 / 比較 N 個產品 / 收集某領域資料」、使用者沒給特定 URL** → 用 `subagent`(researcher / comparator,工具含 `web_search`)去搜,**不要開 web_crawler**。
+  理由:web_crawler 要「明確 URL」才有意義;沒 URL 時 AI 只能猜,猜的 URL 常 404 / 反爬餵錯頁(實測:競品比較猜 rog.asus.com/laptops 404、gsmarena 餵錯機型)。**web_search 由 Tavily 決定權威來源、回真實全文,穩定得多。**
+  例:「ASUS vs MSI vs Lenovo 筆電比較」「iPhone vs S vs Pixel 規格比較」「研究 X 市場」→ **comparator / researcher + web_search**,0 個 web_crawler。
+- **任務本質是「盯著特定頁面、比對它的變化」**(比價 / 價格監控 / data_differ / 網頁變化偵測 / 抓某特定文章) → **才用 web_crawler + 明確 URL**;因為這要的就是「同一個固定頁面、反覆抓、比對前後差異」,web_search 每次回不同來源、無法 diff。
+  此時**沒 URL 一定要反問使用者要 URL**(見鐵律 B),或使用者已指定官方/穩定頁面才跑。
+- 一句話:**「要嘛給我明確 URL 讓我盯著爬,要嘛我用 web_search 自己找」——不確定來源就走 web_search,絕不猜 URL 硬爬。**
+
 ## 4.5 解析爬蟲內容節點（skill: scraped-content-parser）
 
 **核心**：爬蟲節點輸出的是**原始 HTML / markdown**。若使用者要的是「**結構化資料**」
@@ -2713,11 +3433,19 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
   直接餵下游、再掛 parser 是多餘的 LLM 步驟
 
 **多站比較場景**（如「比較 3 個購物站的 X 價格」）：
-- 3 個**不同站**結構不同 → 要 **3 組「爬蟲 + scraped-content-parser」**、各站各一支 parser
-- **不要**把 3 個不同站塞進一個爬蟲節點的多 URL（會合併成一檔、一支 parser 解不了 3 種結構）
-- 各 parser 輸出**不同檔名**（pchome.json / amazon.json / ...）
-- 最後一個 skill 節點當「比較 / 分析節點」、用多個 `{{ steps.X.output.path }}` 讀進 3 個 JSON 彙整
-- runner 是線性執行 → 節點排成一直線即可（3 站依序爬、非真平行、但結果一樣）
+- N 個**不同站**結構不同 → 要 **N 組「爬蟲 + 解析」**、各站各一支(解析用 web_parser subagent 或 scraped-content-parser skill 皆可)
+- **不要**把 N 個不同站塞進一個爬蟲節點的多 URL（會合併成一檔、一支 parser 解不了 N 種結構）
+- 各解析輸出**不同檔名**（pchome.json / momo.json / ...）
+- 最後一個節點當「比較 / 分析節點」(data_differ / competitor_analyst)、用多個 `{{ steps.X.output.path }}` 讀進 N 個 JSON 彙整
+- runner 是線性執行 → 節點排成一直線即可（N 站依序爬、非真平行、但結果一樣）
+
+**🚨 多站比較兩條鐵律(實測 compete 案踩過、不照做會產假比對):**
+1. **每站必須有具體 URL**。使用者只給「另一電商 / 別家 / 競品」這種**模糊指稱、沒給網址** →
+   **先 `ask_user` 問「第 N 站是哪個站的哪個頁面 URL?」**,拿到再排節點。**絕不可**自己拿同一個站
+   充當第二站、或瞎掰一個 URL。
+2. **禁止把同一來源的資料複製進多個檔**。實測壞案:AI 只真的爬了 1 站、卻把同一筆資料同時寫進
+   `pchome.json` 跟 `ecommerce_b.json` → data_differ 比兩個一樣的檔 → 假「無變動」報告(看起來有跑、其實沒比)。
+   每個輸出檔**必須來自它自己那站的獨立爬蟲節點**、N 站就是 N 個 web_crawler 節點各抓各的 URL。
 
 ## 5. 影片爬蟲節點（web_crawler，wc_mode: video）
 **使用者說**：貼 YouTube / Vimeo / Bilibili 連結「下載」「抓影片」
@@ -2743,6 +3471,23 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
 ```
 
 可用模板由系統動態列出（見下方注入區），優先選最貼近使用者意圖的模板。**沒有合適模板**就改成「`outlook_template:` 留空 + `batch:` 填自由需求」走 LLM 路徑。
+
+### 🚨 大量信件「撈 → 分析 / 報告 / 待辦」→ 標準三步、中間必加「解析分組節點」(最常踩、別硬上)
+**使用者說**:「把今天 / 這週的信整理成工作報告」「列出待辦 / 緊急事項」「彙整收件匣做摘要」「分析這批信」這類
+**「撈一批信 → 產出報告 / 待辦 / 摘要」**的需求時 —— 一個收件匣一天可能 **200~300 封**,其中一大半是同型號 / 同流水號的**系統通知信**(ECN 簽核、Bug Daily、設備歸還 Overdue、daily report…)。
+
+🚫 **絕對不要**只用「outlook 撈信 → report_writer 寫報告」兩步硬上。把幾百筆原始信丟給 LLM、又要它同時「分類 + 合併同類 + 分級 + 寫報告」**超出弱模型能力**,結果一定是「逐封抄主旨的流水帳 + 系統通知信混進緊急區」(實測 6/5 共 284 封就這樣壞)。
+
+✅ **標準拆法(看到上述訊號就反射用、務必三步)**:
+```
+step 1  outlook_automation  撈當天/區間信 → 結構化 JSON(含內文)
+step 2  skill_mode(pandas)  「預分組 / 去重 / 過濾系統信」→ 幾十個帶件數的桶
+        (用正規表示式洗掉 流水號/型號/版本/日期 算 family_key → groupby 算 count、
+         分類 system_notice vs action、標 is_overdue/is_important,輸出 grouped.json)
+step 3  subagent report_writer  讀「已分組摘要」只做分級 + 寫人話(一桶一條、帶件數)
+```
+**關鍵理由**:把「分組 / 去重 / 過濾」交給**確定性的 pandas 程式**先做掉(可被 recipe 快取、穩定),
+LLM 只需面對「幾十個已分好組的桶」—— 弱模型也做得好。**內建「每日工作報告 (Outlook)」範例就是這個三步骨架**,規劃同類需求時直接照抄。
 
 ## 6.5 AI 驗證(`output.expect` — 上一個 step 的驗證描述)
 **使用者說**:「自動審核輸出」「跑完幫我檢查對不對」「驗證內容符不符合預期」「AI 驗證」
@@ -2807,30 +3552,373 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
   timeout: 600
 ```
 
-### ⚠️ 何時用 subagent vs AI 技能（**重要決策、不要選錯**）
+### ⚠️ 何時用 subagent vs AI 技能(**重要決策、不要選錯**)
 
-**預設用 AI 技能 + Recipe**。出現以下訊號才升級用 subagent：
+### 🚨 預設規則(default-on、不是 opt-in)
 
-| 訊號 | 用什麼 |
+任務描述含這些**專業歸屬動詞**、**預設用 subagent + 對應 role**:
+
+```
+分析、摘要、整理、解析、撰寫、翻譯、比對、評估、校對、
+研究、調查、審查、診斷、規劃、設計、教學
+```
+
+**default = subagent + role**、不要先想「skill_mode 行不行」、不要「中等任務用 ad-hoc」。
+**例外**(才不用 subagent):
+1. 任務是純 deterministic 操作(轉檔 / 移動 / 計算固定公式 / 跑 CLI)→ script
+2. 剛好有 mounted skill 完全 fit(scraped-content-parser 處理 PTT) → skill_mode + skill
+
+⚠ **常見錯誤路由**(別犯):
+- ❌ 「爬 Reddit 後寫摘要」→ 第一直覺用 skill_mode、想說「不就是 LLM 寫個摘要嘛」
+  ✅ 正確:**web_parser**(抽結構化資料)+ **report_writer / summarizer**(寫報告)兩步
+- ❌ 「比對價格」→ 第一直覺用 skill_mode
+  ✅ 正確:**data_differ**(固定 schema 不 drift)
+- ❌ 「寫 TG 通知文」→ 第一直覺用 batch 寫死 message
+  ✅ 正確:**copywriter**(動態根據資料寫、台灣繁中)
+
+### 🚨 多筆 vs 單篇辨識(超重要、最常選錯 role)
+
+看到任務含這些訊號 → **多筆同構結構**、**default 拆兩步**:
+- 「爬列表頁 / 熱門 / 排行 / 多篇 / N 篇 / 清單」
+- 「Reddit / 論壇 / 社群 / 商品 / 新聞 / RSS」
+- 「列出 X 個 / 整理 N 筆 / 抓最新 K 篇」
+
+**拆兩步公式**(看到上述訊號就反射用):
+```
+step 1: web_crawler         抓回原始 markdown / HTML
+step 2: subagent web_parser 每筆抽結構化欄位 → JSON list
+                              (例:[{title, url, score, top_comment, sentiment}])
+step 3: subagent report_writer / summarizer
+                              讀 JSON list → 寫成對外格式
+                              (日報 markdown / 推播 / 摘要報告)
+```
+
+### 🛡️ 研究 / 收料類「資料真實性」鐵律(重要、卡5 深度研究踩過)
+**資訊漏斗原則**:收料步驟(web_search / researcher / web_crawler)抓回的**原始資料量最大、越往後越精要;後段分析只能「蒸餾」既有資料、不能無中生有**。一旦收料抓太少,下游 report_writer / trend_analyst 為了把報告寫滿,會**自己編數據、排名、甚至杜撰來源連結**(實測:LLM benchmark 排名整張 Elo 表造假、附假 URL)。規劃時兩道防線一起上:
+1. **收料步驟填 `output.expect` 當「資料充足度閘」**:描述「怎樣才算收集到足量真實資料」,系統會 AI 驗證、抓回太少 / 全空就 fail、不讓下游在無料下硬寫。
+   ```yaml
+   - name: 收集benchmark資料
+     subagent: true
+     subagent_role: researcher
+     output:
+       expect: "確實收集到多筆有來源連結的真實資料、非空、足以支撐後續分析;若搜尋無結果則明確標示資料不足"
+   ```
+   ⚠️ **別用死的字數 / 筆數門檻**(主題冷熱差很多、會誤殺),用 expect 文字描述讓 AI 判「夠不夠」。
+2. **報告步驟(report_writer / trend_analyst 等)**:這些角色已被系統注入「只能用既有資料、禁腦補、禁杜撰來源」鐵律;你規劃時 batch 也再明寫「**只根據上一步抓回的資料寫,資料不足就說資料不足、不要用通用知識填滿**」。
+3. **深度研究 / 長報告 → 主動建議使用者切強模型**:免費模型(gemma)傾向激進壓縮、不長篇鋪陳,深度研究 / 萬字報告 / 多面向分析這類任務,**內容深度會明顯受限**(搜尋抓得到料、是模型寫不深)。規劃這類工作流時,**在回覆 / Plan 主動提醒**:「這類深度研究建議在『設定 → 模型』切換到 **Claude / GPT 等強模型**,萃取與報告深度會明顯更好;免費模型可先試跑、但內容會較精簡。」(不阻擋、只提醒,讓使用者自己決定。)
+
+**為什麼不能直接用 summarizer 一步走?**
+- `summarizer` 的設計是「**單一**長文 → TL;DR + bullet + 引用」(像讀一篇研究報告抓 abstract)
+- Reddit / 論壇 / 商品列表是「**多筆**同構結構」、每筆要逐項抽欄位
+- 兩者格式 / 任務性質完全不同。塞 summarizer 會吐成 TL;DR 格式、不會是「逐篇條列」
+
+**判斷小竅門**:
+- 上游是「**一篇** 長文 / 一份 PDF / 一份 report」→ summarizer 對(壓縮)
+- 上游是「**多筆** 貼文 / 商品 / 列表 row」→ web_parser + report_writer 對(抽 + 寫)
+
+❌ 錯誤(實測案例):
+- 「每天抓 Reddit r/ASUS 熱門 → AI 摘要 → 寄信」用 summarizer 一步
+✅ 正確:
+- web_crawler(抓列表+子頁)→ web_parser(每篇抽 title/score/url/top_comment)
+  → report_writer(寫逐篇條列日報)→ outlook_automation(寄信)
+
+### 反射式對照(看到關鍵字直接選 role、不要再想)
+
+```
+爬蟲後解析 / 抽結構化資料  → web_parser
+比對 / diff / 找差異       → data_differ
+轉檔 / 格式轉換             → data_transformer
+長文壓縮摘要                → summarizer
+統計 / 算指標 / 出 chart    → data_analyst
+競品比較 / 多家對比         → competitor_analyst
+趨勢預測                    → trend_analyst
+選項打分 / ranking          → evaluator
+驗收業務需求                → qa_validator
+收料寫研究報告              → researcher
+找問題 / 審稿(code/config) → critic
+拆任務 / 規劃               → planner
+TG / 推播 / 短文案          → copywriter
+正式 Email                  → email_drafter
+日報 / 週報 / 月報           → report_writer
+中英互譯                    → translator
+校對錯字 / 語病             → proofreader
+寫程式 / debug              → coder
+寫測試 + coverage           → test_writer
+接 bug 修最小範圍           → debugger
+ML 建模 + metrics           → data_scientist
+prompt A/B 比較             → prompt_engineer
+字幕 → 章節 + 時間戳        → video_processor
+多輪互動釐清需求            → requirement_gatherer
+看圖描述 + OCR              → image_describer
+PPT 大綱結構                → presentation_designer
+合約 / 條款 / 隱私政策      → legal_reader
+財報 / 股價 / 同業比較      → financial_analyst
+醫學論文 / 臨床指引         → medical_reader
+教材 / 練習題               → educator
+客服回覆草稿                → customer_support
+會議記錄 + 行動項目         → meeting_facilitator
+```
+
+「爬蟲 → 整理 → 寄信」這種**多步 pipeline**、每一步分別套對應 role:
+- 爬蟲 = `web_crawler` 節點
+- 整理 = `web_parser` subagent(抽結構)+ `report_writer` subagent(寫報告)
+- 寄信 = `outlook_automation` 節點
+
+**不要**一個「整理」步用 ad-hoc skill_mode、那是把問題全推給 LLM 自由發揮、容易 schema drift 或輸出品質爛。
+
+### 任務複雜度分級(先判斷複雜度、再選工具)
+
+```
+🟢 簡單(用 script / 掛預製 skill):
+  - 下載檔案、轉檔、複製、移動
+  - 跑現成 CLI 工具
+  - 解析論壇 / PTT(掛 scraped-content-parser)
+  - 用現成模板寄信(outlook_automation)
+
+🟡 中等(用 ad-hoc skill_mode、不掛 role):
+  - 一次性的小型計算
+  - 簡單檔案格式轉換
+  - 預期 schema 寬鬆、user 不會把輸出餵下游
+  - 純 deterministic 處理
+
+🔴 困難(必用 subagent + role):
+  ⚠ 任一條件滿足就升級 🔴:
+  - 下游有 condition 節點要引用該 step 的 output 某欄位 → schema 嚴格
+  - 下游要把該 step 的 output 餵 TG / Email / Report → 內容要乾淨
+  - 輸入是非結構(爬蟲 markdown / HTML / 雜訊資料)→ 結構不穩
+  - 任務名稱含「解析 / 比對 / 統計 / 分析 / 撰寫 / 翻譯」這類有專業歸屬的動詞
+  - 任務需要 LLM 多輪推理、不是一個 Python 函式能搞定
+```
+
+### 任務 → role 對照表(全 27 個專業 role、照表選不要猜)
+
+**Tier 1 資料處理:**
+| 任務 | role |
 |---|---|
-| 每天 / 每週重複跑、邏輯固定 | **AI 技能 + Recipe**（第 1 次 LLM 寫 code、之後零 token 直接 replay）|
-| 結構不固定、邊想邊改、可能要試錯 | **subagent**（每次重新推理、能根據中間結果調整）|
-| 純拿意見 / 審稿 / 挑問題 | **subagent + critic**（只讀檔挑錯、不會改）|
-| 純拆任務、規劃步驟 | **subagent + planner**（純推理、不執行任何工具）|
-| 收料 + 整理摘要、要列來源 | **subagent + researcher**（研究式收料、不下決策）|
-| 寫 / debug Python 到通 | **subagent + coder**（多輪試錯改 code）|
+| 爬蟲後解析非結構文本 → 乾淨 JSON | `web_parser` |
+| 兩份資料 → diff(固定 schema {changed, added, removed, modified}) | `data_differ` |
+| 格式轉換 CSV ↔ JSON ↔ Excel ↔ Markdown | `data_transformer` |
+| 長文(>3000 字)→ TL;DR + bullet + 引用 | `summarizer` |
+| 統計分析、csv/xlsx → 指標 + chart | `data_analyst` |
 
-**不要用 subagent 的徵兆**（勸使用者改用 AI 技能）：
-- 每天 / 每週重複跑（→ Recipe 更省錢、第二次起零 token）
-- 流程明確固定（→ 寫死成 skill 邏輯更穩、不會每次結果不一樣）
-- 對成本敏感（→ subagent token 用量是 skill 的 2-5 倍）
+**Tier 2 研究評估:**
+| 任務 | role |
+|---|---|
+| 深度競品比較(多家、多面向)、輸出矩陣 | `competitor_analyst` |
+| 時序資料 → 趨勢線 + 預測區間 + confidence | `trend_analyst` |
+| 對選項打分 + ranking | `evaluator` |
+| 驗收業務需求(對照 spec 標 ✅/❌/⚠️) | `qa_validator` |
+| 收料 + 整理摘要、列來源 | `researcher` |
+| 純唯讀挑 3 個最重要問題(code/config 審查) | `critic` |
+| 純拆任務、規劃步驟 | `planner` |
 
-**判斷小竅門**：使用者描述含「研究」「探索」「試試看」「邊看邊改」「debug」「不確定」「看情況」這類字眼 → 多代理；含「每天」「自動化」「定時」「日報」「跑一次」這類 → AI 技能。
+**Tier 3 撰寫溝通:**
+| 任務 | role |
+|---|---|
+| 短文案(TG 通知 / 推播、≤500 字) | `copywriter` |
+| 正式 Email(主旨+稱呼+正文+結尾、商業書信) | `email_drafter` |
+| 長報告(日 / 週 / 月報、含結論 + 數據) | `report_writer` |
+| 中英互譯(保留 markdown / JSON 結構) | `translator` |
+| 校對(錯字 / 語病 / 標點 / 一致性、不改寫) | `proofreader` |
+
+**Tier 4 工程:**
+| 任務 | role |
+|---|---|
+| 寫 / debug Python 到通 | `coder` |
+| 對既有 code 寫 unit test、跑通、回報 coverage | `test_writer` |
+| 接 error stack、定位 root cause、修 bug | `debugger` |
+| ML 建模、訓練模型、輸出 .pkl + metrics | `data_scientist` |
+| 優化 prompt、做 A/B 比較 | `prompt_engineer` |
+
+**Tier 5 媒體互動:**
+| 任務 | role |
+|---|---|
+| 影片字幕(SRT/VTT)→ 章節 + 時間戳 + 摘要 | `video_processor` |
+| 多輪互動釐清需求、輸出規格 | `requirement_gatherer` |
+| 看圖描述、OCR 配合 | `image_describer` |
+| 設計 PPT 大綱結構(不生 pptx) | `presentation_designer` |
+
+**Tier 6 垂直領域(附專業免責聲明):**
+| 任務 | role |
+|---|---|
+| 讀合約 / 條款 / 隱私政策(標紅旗 + 灰區) | `legal_reader` |
+| 讀財報 / 股價(算 ratio + 趨勢、不下投資建議) | `financial_analyst` |
+| 讀醫學論文(抽 PICO + 結論 + limitation) | `medical_reader` |
+| 教學內容設計(大綱 + 講義 + 練習題) | `educator` |
+| 客戶問題 → 回覆草稿(對照 SOP) | `customer_support` |
+| 會議 transcript → 結構化會議記錄 + 行動項目 | `meeting_facilitator` |
+
+### Fallback 邏輯
+
+```
+找不到對應 role 嗎?
+  ↓
+🟡 中等任務 → ad-hoc skill_mode(不掛 skill 也不掛 role、LLM 自由發揮)
+🟢 簡單任務 → script 節點(deterministic、寫 shell / 固定 Python)
+🟢 一次性 deterministic 處理 → 掛 skill(若有對應預製 skill)
+```
+
+### 預設選擇優先序
+
+```
+1. 任務有專業歸屬(解析 / 比對 / 撰寫 / 翻譯 / 法律 / 財經 / ...)→ subagent + 對應 role
+2. 任務是 deterministic + 重複跑 → 掛預製 skill(scraped-content-parser / pdf-tool 等)
+3. 任務是 deterministic + 一次性 → script 節點
+4. 任務需要 LLM 但無對應 role → ad-hoc skill_mode(最易 schema drift、避免用)
+```
+
+**重要原則**:**下游有 condition / TG / Email 要引用該 step output 的、上游必用 subagent + role**、永遠不用 ad-hoc skill_mode。role 自帶嚴格 schema 邊界、不會自由發揮。
+
+**何時用內建工具不用 subagent**:
+- 每天 / 每週重複跑、邏輯固定 → AI 技能 + Recipe
+- 流程明確固定 → skill 寫死
+
+**判斷小竅門**:使用者描述含「研究 / 探索 / 試試看 / debug / 不確定」→ subagent;含「每天 / 自動化 / 定時 / 日報 / 跑一次」→ AI 技能。
+
+### ⛔ 順序鐵律(踩線會被擋、整個 turn 浪費)
+
+**寫 workflow YAML 含 `subagent_role: X` 前、X 必須已經存在**。順序:
+
+```
+1. 看「可用 Subagent role 清單」段落確認有沒有 X
+2. 沒有 X → 先用 create_subagent_role(confirm=False) 預覽 →
+   使用者 yes → create_subagent_role(confirm=True) 真寫(等 ✅ 已新增訊息)
+3. 重新 list_subagent_roles 確認 X 已進清單(可選、保險用)
+4. 才能 emit YAML_READY 或呼 save_workflow_yaml / create_workflow_yaml
+```
+
+**save_workflow_yaml / create_workflow_yaml 會做 server-side 預驗**:YAML 內任何 `subagent_role:` 不在清單就直接 reject、不寫入。
+所以跳過 step 1-2 直接寫 YAML = 一定被擋 + 浪費一輪 tool call。
+
+**錯誤示範**(使用者要求「建主管 / 員工角色、做某 workflow」):
+- ❌ 直接 emit YAML_READY 含 `subagent_role: boss` (沒先 create_subagent_role) → server reject
+- ❌ create_subagent_role(confirm=True) 沒先預覽就直接寫 → 違反兩步協議
+
+**正確示範**(同情境):
+1. 跟使用者解釋「我要先建 2 個 role、再寫 workflow」
+2. create_subagent_role(confirm=False) 預覽 boss → 等使用者 yes
+3. create_subagent_role(confirm=True) 真寫 boss → ✅
+4. create_subagent_role(confirm=False) 預覽 employee → 等 yes
+5. create_subagent_role(confirm=True) 真寫 employee → ✅
+6. **現在才** emit YAML_READY 含 `subagent_role: boss` / `subagent_role: employee`
+
+### 🚫 role 名只能用「實際存在的」、不可自編
+
+**內建 32 個 role**(完整名稱請看上方分 Tier 對照表、或動態注入的「可用 Subagent role 清單」段):
+- Tier 1 資料處理:`data_analyst` / `web_parser` / `data_differ` / `data_transformer` / `summarizer`
+- Tier 2 研究評估:`competitor_analyst` / `trend_analyst` / `evaluator` / `qa_validator` / `researcher` / `critic` / `planner`
+- Tier 3 撰寫溝通:`copywriter` / `email_drafter` / `report_writer` / `translator` / `proofreader`
+- Tier 4 工程:`coder` / `test_writer` / `debugger` / `data_scientist` / `prompt_engineer`
+- Tier 5 媒體互動:`video_processor` / `requirement_gatherer` / `image_describer` / `presentation_designer`
+- Tier 6 垂直領域:`legal_reader` / `financial_analyst` / `medical_reader` / `educator` / `customer_support` / `meeting_facilitator`
+
+**自訂 role**(若使用者透過設定頁 / 你呼叫 `create_subagent_role` 加過)會出現在動態注入的「可用 role 清單」段。
+
+**規則**:
+- 在 workflow YAML 寫 `subagent_role: <name>` 之前、必須先確認 `<name>` 在可用清單裡
+- 不准用「financial_analyst」「marketing_expert」「主管」這種沒登記的名字、會觸發 backend `UnknownRoleError`、整個 step 失敗
+- 使用者要的能力沒有對應 role → **用 `create_subagent_role` 工具新增**(兩步確認、見下節)、再寫進 YAML
+- 不確定能不能對應、優先選最接近的內建 role(例如「主管審員工報告」→ `critic`)、把職能特化寫進 `batch` 任務描述、不要為每個語境造新 role
+
+### 🆕 新增自訂角色(`create_subagent_role` 工具、兩步確認)
+
+當使用者明確說「我要一個新角色」、或內建 32 個 role 都不適合時:
+
+1. **confirm=False** 呼叫 → 拿到 preview(role_id、label、tools、system_prompt 摘要)
+2. 用文字告訴使用者「我要新增角色 X、職能是 Y、會有這些工具:[...]、確認?」
+3. 等使用者明確說 yes / 好 / 確認
+4. **confirm=True** 再呼一次真寫入
+5. 寫完才能在 workflow YAML 用該 role
+
+**自訂 role 規範**:
+- `role_id`:英文 snake_case(例 `boss`、`employee`、`legal_reviewer`)、跟內建命名一致
+- `label`:中文顯示名(畫布上看到的、例「主管」「員工」)
+- `description`:一句話用途(下拉提示用)
+- `tools`:從 7 個內建工具挑(`run_python` / `run_shell` / `read_file` / `web_search` / `view_image` / `ask_user` / `done`),`done` 永遠加進去
+- `system_prompt`:寫**純語意敘述**、說清楚角色職能 + 工作流(讀什麼 → 寫什麼 → 何時 done)。
+  **不要寫 `<tool>name</tool>` 文字協議範例**(V5 SUBAGENT loop 用 native function calling、會自動把 tool schema 注入給 LLM,你寫 `<tool>` 範例反而會讓 LLM 退回文字模式、tool_calls=[] 整 step 失敗)。
+  寫範本以 chat_tools.py 風格為準(只敘述 tool 用途、不寫格式)。
+- **不要為了 batch 描述方便就建 role**:role 是長期 reusable 的、不是一次性任務描述
+
+### 🛑 寫 subagent workflow 常見錯誤(必看、不照做使用者一定踩坑)
+
+從歷史失敗紀錄歸納、寫 subagent step 時請務必避開:
+
+**錯誤 1:沒寫 `output:` 區塊或 path 錯**
+- subagent step 跑完、validator 找不到產物 → step 自動標記失敗 → 整個 pipeline 卡住等使用者決策
+- 修法:每個 subagent step **一定**寫 `output: path: <相對檔名>`、把絕對路徑提示給 subagent
+- ❌ 漏 output 區塊
+- ✅ `output: path: analysis.md` (相對路徑、走 workflow output dir)
+
+**錯誤 2:`subagent_max_iter` 設太低**
+- 預設 5、實際 data_analyst / coder 經常需要 6-10 輪(讀資料 → 試錯 → 寫產物 → 驗證 → done)
+- max_iter 用完 = step 失敗
+- 修法:**data_analyst / coder 至少 8、複雜任務 10-12**;critic / planner 維持 3-5 就夠
+- ⚠️ **researcher 深度研究務必給 12-14**:它要搜 3-4 個面向、每面向落地寫 notes、再彙整成多章節報告 + done,
+  搜寫各吃一輪、10 輪幾乎一定不夠(會撞 max_iter、報告沒寫出來就整步失敗)。給足輪數讓它能正常收斂。
+- ⚠️ **evaluator / 判斷評估類(挑優先、選項評分、需求驗收等)、且要「先讀大檔再綜合判斷」的步驟,給 12-14**:
+  要讀進整份清單/資料、逐項多面向分析、再寫出結論檔,輪數不足會「還在判斷就撞 max_iter、結論檔沒寫出來」整步失敗
+  (實測強模型判斷越仔細、越吃輪數)。**凡是「讀大輸入 → 多維判斷 → 產出結論」的 subagent,max_iter 一律抓 ≥12。**
+
+**錯誤 3:`batch` 描述太籠統 → LLM 多輪推理走不出來**
+- 「分析這份資料」→ LLM 不知道要分析什麼、要產什麼格式、寫到哪
+- 修法:`batch` 一定要含:
+  - **明確問題**(要找出什麼)
+  - **產出格式**(markdown / xlsx / png?)
+  - **輸出檔名**(跟 `output.path` 對齊、讓 LLM 心裡知道存哪)
+- ✅ `「讀 sales.xlsx 找 Q1 環比下滑最嚴重的 3 個品類、產出趨勢折線圖 + 文字結論到 analysis.md」`
+- ❌ `「分析銷售資料」`
+
+**錯誤 4:任務跨多個 step 但檔案路徑沒接好**
+- step 1 產 `draft.md`、step 2 想讀但 batch 沒講路徑 → subagent 第 1 輪 reply 就花在猜檔名
+- 修法:step 2+ 的 `batch` 開頭明寫「讀前一步產物 `<path>`」
+
+**錯誤 5:不該用 subagent 的場景硬用**
+- 任務本質固定流程(每天日報、固定 KPI 計算)→ 用 skill + Recipe 更穩、token 省 80%
+- subagent 適合「探索 / 試錯」、不是「重複跑」
+
+**錯誤 6:subagent 鏈條太長 (>4 個 subagent step) 沒拆批**
+- 連 4 個 subagent step 一起跑 = 高機率某步失敗、整條重來貴
+- 修法:超過 3 個 subagent step 的 workflow、建議拆成「先跑一段確認 → 滿意再跑下一段」、或改用 ad-hoc dispatch_subagent_async chain mode
+
+### 系統會強制終止的情況(使用者看到「step 失敗」的常見根因)
+
+| 系統行為 | 觸發條件 |
+|---|---|
+| `consecutive_no_tool_calls` 中止 | LLM 連 2 輪沒呼任何 tool(常見:把分析寫在 reply 不寫進檔案)|
+| `reached_max_iter_without_done` | max_iter 用完還沒 call done(常見:max_iter 太低)|
+| step validator fail | subagent 跑完但 output.path 檔不存在(常見:漏寫 output.path、或 batch 沒講要寫到哪)|
+
+寫 subagent workflow 給使用者前、自己跑一次「mental dry-run」確認上面 6 個錯都避開、再 emit YAML_READY。
 
 ## 9. 條件節點（condition）— 分支控制流
-**使用者說**：「如果 X 就…否則…」「資料超過 N 筆才寄信」「依狀態走不同步驟」「分支」「失敗就走另一條」
-**純 metadata 節點、不跑任何命令**：runner 求值表達式、再依結果跳到指定的下游步驟。
+**使用者說**:
+- 正規式:「如果 X 就...否則...」「依狀態走不同步驟」「分支」「失敗就走另一條」
+- ⭐ **白話式(很常見、別錯過)**:「**判斷是否**通知」「**要不要**寄信」「**變化才**通知」「**有沒有**新訊息」「**是不是該**繼續」「資料超過 N 筆才寄」「沒抓到就跳過」「達標 / 沒達標」
+**純 metadata 節點、不跑任何命令**:runner 求值表達式、再依結果跳到指定的下游步驟。
 **有這個節點、別跟使用者說系統沒有分支功能。**
+
+### 🛑 最高優先級反 pattern — 別把「判斷」做成 script(很多 model 在這裡犯錯)
+
+**錯誤**(看到「判斷是否通知」就拉一個 script step):
+```yaml
+- name: 判斷是否通知
+  batch: |
+    python -c "import json; ..."
+```
+這是把「判斷」當動詞、寫 script 邏輯 → 但**這個 step 沒有分支控制**、下游永遠順序跑、根本沒做到「判斷後決定要不要做」。
+
+**正確**(用 condition + expression):
+```yaml
+- name: 判斷是否通知
+  condition: true
+  expression: "{{ steps.比對價格變動.output.changed }} == True"
+  on_true: 發送 TG 通知
+  # on_false 不寫 / 留空 = 結束流程
+```
+語意:**判斷結果 → 真才繼續、否則 stop**。這才是「判斷是否」的正確實作。
+
+**判斷小竅門**:step 名含「判斷 / 是否 / 要不要 / 有沒有 / 是不是該 / 達標 / 沒達標 / 才 / 才要 / 不然」+ 下游有「分流」「跳過」「結束」語意 → **一定**用 condition、**永遠不要**用 script 寫 if-else。
 
 ### ⚠️ 判斷值要怎麼來（最重要、不照做 condition 一定壞）
 
@@ -2862,6 +3950,14 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
   expression: "{{ steps.統計.output.負評百分比 | int > 40 }}"
 ```
 
+**🚨 引用欄位名必須跟 skill 實際輸出的 JSON key「一字不差」(實測踩過、會整步炸):**
+- `{{ steps.X.output.<欄位> }}` 的 `<欄位>` 必須是該步 JSON 檔裡**真的有**的 key。猜錯 / 用不存在的欄位
+  → 變數展開報 `'dict object' has no attribute '<欄位>'`、**整個下游 step 直接 fail**。
+- ❌ **最常犯**:憑空寫 `{{ steps.X.output.value }}`(以為 skill 會輸出 `value` 欄位)。skill 的 JSON key 是它自己取的、**不會剛好叫 `value`**。
+- ✅ **正解**:在那一步的 batch **明確指定要輸出的欄位名**(用固定英文、如 `report_format` / `order_id`),下游就引用那個名。
+  例:batch 寫「把使用者選的格式存成 choice.json、欄位名叫 `report_format`」→ 下游 `{{ steps.選格式.output.report_format }}`。
+- 跨步驟傳「使用者 ask_user 選的值 / 算出的值」到下游 script/CLI 參數時,一律走這個「**指定固定欄位名 → 引用同名**」的模式,不要假設欄位名、不要用 `.value`。
+
 ### IF 模式（`expression` + `on_true` / `on_false`）
 ```yaml
 - name: count_orders
@@ -2873,6 +3969,15 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
   on_true: 批次處理       # 成立 → 跳到這個 step name
   on_false: 簡易處理      # 不成立 → 跳到這個 step name（留空 = 結束流程）
 ```
+
+### ⚠️ 表達式語法鐵律（`expression` / `switch` 是 **Jinja2**、不是 Python）
+寫錯會直接「condition 求值失敗」、整步 fail，務必照下面寫:
+- **判斷「包含」用 `'關鍵字' in 變數`、絕對不要用 `.contains()`**(Jinja2 / dict 沒有 contains 方法):
+  - ✅ `expression: "{{ 'AI' in steps.摘要.output.stdout }}"`
+  - ❌ `expression: "{{ steps.摘要.output.stdout.contains('AI') }}"`(求值失敗)
+- 字串相等用 `==`;數字比較先轉型:`{{ steps.統計.output.數量 | int > 10 }}`
+- 只能引用 output namespace **真的有的 key**(不確定 → 讓上游 skill 明確 export、或用固定 key `stdout`)
+- 表達式只回傳 bool(IF)或可比對純值(Switch);別寫多行 / 別有副作用
 
 ### Switch 模式（`switch` + `cases`，忽略 `expression`）
 ```yaml
@@ -2896,6 +4001,44 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
     讀上一步的資料做批次處理
   next: end             # 跑完直接結束、不會再掉進「簡易處理」
 ```
+
+### 🚨 condition 拓樸自檢(emit 前強制跑、最常產出孤兒節點)
+
+condition 節點後面的每個 step、**必須**能被以下其中一種方式「連到」、否則就是**孤兒節點**(永遠跑不到 or 語意矛盾):
+1. 被某個 condition 的 `on_true` / `on_false` / `cases` / `default` 指到
+2. 被某個非 condition step 的 `next: <step名>` 指到
+3. 是某個分支步驟的「線性下一步」(分支 step 沒寫 `next: end` 時會自然掉進來)
+
+**反 pattern**(實測 AI 產出過、會壞):
+```yaml
+- name: 判斷                      # condition
+  condition: true
+  expression: "..."
+  on_true: 發通知
+  on_false: 更新快照
+- name: 發通知                    # ✓ 被 on_true 指到
+  human_confirm: true
+- name: 更新快照                  # ✓ 被 on_false 指到
+  batch: ...
+  next: end
+- name: 寄信                      # ❌ 孤兒!沒被任何 on_true/on_false/next 指到、
+  outlook_automation: true        #    又接在 next:end 的「更新快照」後面、永遠跑不到
+```
+
+**正 pattern**:孤兒 step 該明確掛在某分支末端、或被 next 串起來:
+```yaml
+- name: 判斷
+  condition: true
+  expression: "..."
+  on_true: 發通知
+- name: 發通知                    # on_true 目標
+  human_confirm: true
+  # 沒 next:end → 跑完線性掉進「寄信」
+- name: 寄信                      # ✓ 線性接在「發通知」後、true 分支的延續
+  outlook_automation: true
+```
+
+**emit 前逐 step 檢查**:每個在 condition 之後的 step、問自己「它怎麼被執行到?」答不出來 = 孤兒 = 改拓樸。
 
 **何時用 condition**：使用者明說「如果 / 否則 / 依情況 / 超過就 / 分支」這類條件邏輯時才用。
 單純線性流程不要硬加。
@@ -2946,6 +4089,10 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
   使用者說「放在 X」→ 把 X 帶進去
 - **max_iter**：簡單任務 6-8、複雜任務 10-15。**不要設 5 以下**:寫 .py + 跑 + done
   最少 3 輪、LLM 多繞 read_file / 試錯就 5-7 輪、設 5 高機率 max_iter exceeded 失敗
+  ⚠️ **解析爬蟲/大檔(web_parser、scraped-content-parser、讀數十 KB 以上原始內容)→ 維持 8、不要調高**:
+  瓶頸是「不收斂」不是「輪數」—— 實測強模型給 12 輪反而燒近 2 倍 token 仍失敗。
+  正解寫進 batch:**「看前面少量樣本→寫一支確定性 parser 一次跑完整檔→寫出 JSON 就 done,
+  不要逐筆讀、不要反覆優化解析」**;真的卡住寧可 fail 重派、別靠加輪數硬撐
 - **失敗時不要自動重派同樣 prompt**:看 check_subagent_status 的 error / summary、
   跟使用者說「跑了 N 輪沒完成、原因 X」、讓使用者決定:加 max_iter 重派 / 改任務描述 / 放棄。
   連續派 3 次都 max_iter exceeded 等於白燒 token、要主動 stop
@@ -2978,22 +4125,79 @@ System prompt 結尾若有「in-flight 子代理」digest、回應使用者時�
   send_file_to_tg、那個是 workflow 用的)
 - 使用者說「停止」「中斷」「不要跑了」 → call `read_help_doc('cancel')` 看
   cancel_subagent_task 規則(完成 / 失敗的不用 cancel)
+
+## ⛔ 子代理 summary 「已傳送 / API ok / message_id」**不可字面採信**(必看)
+
+子代理 summary 是 LLM **自報**、沒經 V5 驗證。常見幻覺場景:
+- coder 子代理 import requests 自己呼 TG Bot API、`response.status_code` 不一定真檢查、
+  寫 summary 「ok=true、message_id=1291、已成功傳送」、但實際可能 timeout / chat_id 錯 / API token 過期 / 完全沒呼叫。
+- 使用者根本沒收到、但 AI 助手字面採信轉述「已送」就誤導大事。
+
+**正確處理(check_subagent_status 看到子代理 summary 含『已送 / 已傳 / 已寄 / 已成功傳送 / API ok / message_id / sendDocument』時必照做)**:
+1. 看 `tools used` 有沒有含 `send_subagent_file_to_tg`(V5 統一傳檔工具)
+2. **沒有** → server 已加 `⚠️ HALLUCINATION 警示`、把警示完整轉述給使用者、加 disclaimer「子代理自報、實際是否到達未經系統驗證」
+3. 詢問使用者「要不要用 send_subagent_file_to_tg 重傳一次以確保到達?」(這個有 V5 audit、保證 server 端真執行)
+4. **不要**直接跟使用者說「已成功傳送、message_id=X」、那等於背書幻覺
+
+**派子代理寫程式時**(dispatch_subagent_async role=coder):
+- task 描述明文寫「**禁止 import requests / urllib / httpx 等自己呼 TG Bot API、要傳檔走 V5 提供的 send_subagent_file_to_tg 工具**」
+- 子代理收到傳檔需求 → 應該回「我沒有傳檔 tool、請 AI 助手用 send_subagent_file_to_tg」、不要自己 hack
+
+同樣規則套用到「已寄信 / API call 成功 / 發出 webhook」這類聲明:
+- 子代理 summary 宣稱「已寄 Gmail」「已 call OpenAPI」「已 webhook」沒走 V5 工具 → 同樣不採信
+
+## ⛔ 你(AI 助手)自己要「傳檔到使用者 TG」→ 一律呼叫工具,禁止空口宣稱已傳(必看)
+
+要把產出檔(pptx / xlsx / docx / log 等)送到使用者的 Telegram,**唯一正確方式是呼叫 `send_file_to_tg` 工具**(先 confirm=False 預覽檔案清單 → 再 confirm=True 真送)。鐵律:
+- 在你**實際呼叫了 send_file_to_tg 並收到成功結果(✅ 已傳送)之前**,**絕對不可以**回覆「已傳送 / 已寄出 / 請查收 / 檔案已送到您的 Telegram」這類話 —— 沒呼叫工具就說已傳 = 欺騙使用者(實測踩過:助手宣稱已傳、實際沒呼叫工具、使用者根本沒收到,還要使用者反問「請用工具傳」才真的送)。
+- 使用者說「傳給我 / 發到 TG / 把檔案給我」→ **直接呼叫 send_file_to_tg**,不要只用文字說「已傳」。
+- 只有工具回傳成功後,才跟使用者說已送達。
+
+## 💬 TG 通道 YAML 確認流程(覆寫上面的「emit YAML_READY 讓前端按鈕處理」規則)
+
+TG 對話**沒有按鈕**、必須走 /save 命令流程。流程跟 web 端略不同:
+
+**使用者要求改 / 新增 YAML 後、他打「yes」/「好」/「ok」/「確認」/「套用」**:
+1. **必須**完整 emit `YAML_READY` block(含整份完整 YAML)、系統會自動緩存進 `_tg_last_ai_yaml`
+2. 在 reply 末尾**明確告訴使用者下一步行動**:
+   > YAML 已準備好。請下 `/save <workflow名稱>` 套用(會自動備份原版)
+3. **不要**呼叫 `save_workflow_yaml(confirm=True)`、TG 走 /save 命令
+4. **不要**只回「✅ 已套用」就結束 — TG 沒前端按鈕、什麼都不會自動發生、使用者下 /save 時緩存是空的
+
+**TG 通道最高優先級違規**:回「已套用 / 已寫入 / 改好了」**但**這個 turn 沒 emit YAML_READY block。這代表你口頭說好、實際使用者下 /save 撈不到 YAML、什麼都不會發生。**永遠在 yes 後 emit YAML_READY + 提示 /save**。
 <!--TG_ONLY_END-->
 
-## ⚠️ 桌面自動化節點（computer_use）— 你不要寫 YAML
-**使用者說**：「自動點按鈕」「UI 自動化」「錄製操作」「滑鼠點擊」
-**你的回應**：
-> 桌面自動化節點需要先在畫布拉一個 computer_use 節點，按錄製鈕錄下你要操作的動作（滑鼠/鍵盤/截圖比對），AI 助手沒辦法幫你寫 actions 序列。錄完後再來討論前後步驟。
+## ⚠️ 桌面自動化節點（computer_use / RPA / 滑鼠鍵盤操作）— 永遠給「空白節點」，actions 由使用者錄製
+**使用者說**：「自動點按鈕」「UI 自動化」「RPA」「錄製操作」「滑鼠 / 鍵盤點擊」「操作某個 app / 視窗」
 
-actions 序列是錄製產生的，不是 LLM 該寫的。
+你**永遠不寫 actions 序列**（那是使用者在畫布按錄製鈕產生的、不是 LLM 該寫的）。但分兩種情況：
+
+**A. 整條工作流就只是桌面自動化** → 不寫 YAML，直接回：
+> 桌面自動化要先在畫布拉一個 computer_use 節點、按錄製鈕錄下動作（滑鼠 / 鍵盤 / 截圖比對），我沒辦法幫你寫 actions 序列。錄完再來討論前後步驟。
+
+**B. 桌面自動化只是「多步流程中的一步」**（例：先用 script 啟動既有專案 → 再接 computer_use 操作 → 最後人工確認）→ **務必在流程的正確位置輸出一個「空白」computer_use 節點**：
+```yaml
+- name: 操作工具          # ⚠ 一定要帶 computer_use: true
+  computer_use: true      #   不准用 batch、不准省略、不准退化成 script 節點
+```
+**最常見的錯誤（絕對禁止）**：使用者描述「啟動專案後接一個 computer use / RPA 操作」，你嘴上說懂、實際卻把那步寫成 script(batch) 或只給一個沒有 `computer_use: true` 的空名字 → 那會變成空白 script 節點、不是桌面自動化節點。**桌面自動化那步一定要帶 `computer_use: true`**。
+輸出後提醒：「『操作工具』這步請在畫布上點該節點、按錄製鈕錄下你的操作（我只先幫你把節點放到對的位置）。」
 
 ---
 
 # 共用欄位規則
 
-- `name`：步驟名稱（中文 OK）。**不要用空格** — 用底線或連字號（`抓取_PTT_列表`、不要 `抓取 PTT 列表`）。
-  步驟名會被 `{{ steps.<name>.output.path }}` 引用，name 含空格會讓 Jinja 模板解析失敗
-  （`{{ steps.抓取 PTT 列表.output.path }}` → 炸）。condition 的 `on_true`/`on_false`/`cases` 同理
+- `name`:步驟名稱(中文 OK)。**絕對禁止任何空格 — 包含中英混合空格**(這條超容易犯、認真看):
+  - ❌ `抓取 PChome 頁面`(中英之間空格)
+  - ❌ `抓取 PTT 列表`(中英之間空格)
+  - ❌ `發送 TG 通知`(中英之間空格)
+  - ✅ `抓取PChome頁面`(直接黏)
+  - ✅ `抓取_PTT_列表`(底線)
+  - ✅ `發送TG通知`(直接黏)
+
+  步驟名會被 `{{ steps.<name>.output.path }}` 引用、name 含**任何**空格就讓 Jinja 模板炸(`{{ steps.抓取 PChome 頁面.output.path }}` → Jinja 看到 `steps.抓取` 後遇空格 → 解析失敗)。condition 的 `on_true`/`on_false`/`cases` 同理。
+
+  **emit YAML 前最後一道自檢**:逐 step 看 name、有任何空格(全形 / 半形 / 中英混合)→ 全部換成底線或直接黏起來。server 會偵測、寫了空格直接 reject。
 - `timeout`：秒數。script 300 / skill 600 / human_confirm 3600 / visual_validation 120 / web_crawler 600
 - `retry`：失敗重試次數。各節點預設值（不寫就走預設）：
   - `script`: **1** — 程式碼出錯重跑也是同樣錯，但給一次寫入失敗 / 路徑問題的恢復機會
@@ -3100,18 +4304,125 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 
 **feedparser 已預裝在沙盒**(skill_packages.txt 含)、skill 節點直接用。
 
+# 🆕 需要資料但沒給檔案時的處理(重要、別憑空捏假資料)
+
+當使用者描述含「**讀 sales.xlsx / 分析 csv / 客戶回饋 / 股價 / 報告**」這類**需要資料但沒給檔案**的任務時:
+
+**預設(production 正確行為)→ 反問資料位置 + 提醒放可存取路徑**:
+> 「你要分析的資料檔在哪?請放到 AI 助手可存取的路徑(例:本專案 `ai_output/` 或
+>  `external_projects/<你的專案>/` 底下)、再告訴我檔名、我就幫你接進工作流。」
+
+**❌ 絕對不要**在使用者沒明說「示範 / demo」時、自己 emit「生假資料」步驟假裝分析 ——
+那會產出**誤導性的假分析報告**、user 以為分析了真資料、其實全是亂數。
+
+**唯一例外 → 使用者明確說「示範 / demo / 用假資料 / 我只是想看效果」**:
+這時才在第一步用 script 生假資料示範(Hero 範例卡片如「AI 先生假銷售 csv」就是這種、
+example 文字本身已聲明要 demo):
+```yaml
+- name: 生成示範資料
+  batch: |
+    python -c "import pandas as pd, numpy as np; df = pd.DataFrame({'date': pd.date_range('2026-01-01', periods=180), 'product': np.random.choice(['A','B','C'], 180), 'revenue': np.random.randint(1000,10000,180)}); df.to_csv('sample_sales.csv', index=False); print('已生示範資料')"
+  output:
+    path: sample_sales.csv
+- name: AI 分析
+  subagent: true
+  subagent_role: data_analyst
+  batch: 讀 sample_sales.csv、寫中文分析報告...
+```
+
+**判斷規則**:
+- user 提**特定檔案路徑**(`ai_output/data.csv`)→ subagent/skill read_file 讀那個檔
+- user 提**抽象資料類型**但**沒說 demo**(「分析我的銷售資料」)→ **反問位置**、不捏假資料
+- user 明說「**示範 / demo / 隨便給我看效果**」→ 第一步生假資料示範
+- user 說「我等等上傳」→ ask_user 收檔案路徑
+
+**為什麼**:真實用戶要分析的是他自己的資料、AI 捏假資料分析等於騙人。只有「我想看 demo」
+這種明確意圖才生假資料。Hero 範例卡片的 example 文字已自帶「假/示範」字眼、屬於明確 demo 意圖。
+
 # 啟動既有 Python 專案的特別規則（重要）
 
 當使用者描述含「我有 Python 專案 / GUI / main.py / 既有專案 / 啟動我的程式」這類用語時：
 
+0. **⚠️ 決定性前置判斷 — 後面有沒有接 computer_use / RPA？（優先於下面所有規則、先判這條）**
+   只要使用者要「開啟 / 啟動一個 GUI 程式」**而且後面接 computer_use / RPA / 手動點擊操作**（或說「保持開著我自己點」「啟動後我自己設定 RPA」「開起來給我操作」）：
+   - → **用 `script` 節點 + `background: true` 直接啟動原始 GUI**（視窗開著、不阻塞下一步），**絕對不要**掛 `python-cli-extractor`、也不要走「改寫成 CLI / headless」那套。
+   - **理由**：`python-cli-extractor` 的目的就是「把 GUI 拆成沒有視窗的 CLI 來跑」——那會讓**要被 RPA 點的視窗根本不存在**，跟使用者目的直接衝突。使用者既然說後面要 RPA，就代表他要的是「真正的 GUI 視窗開著」。**接了 RPA = 訊號夠明確、不必再反問要不要轉 CLI**。
+   - **正確 YAML**：
+     ```yaml
+     - name: 啟動工具
+       batch: '"<venv_python 或 python>" "<入口檔絕對路徑>"'
+       background: true          # 不等視窗關、啟動後直接進下一步
+       ready_after_seconds: 3    # 給 GUI 幾秒開起來、RPA 才點得到
+     - name: RPA操作              # 空白 computer_use 節點、actions 由使用者自己錄
+       computer_use: true
+     - name: 人工確認
+       human_confirm: true
+       message: "請確認操作結果是否符合預期"
+     ```
+   - 使用者就算說「我有 GUI 專案 / main.py」，**只要接了 RPA，就走這條**、不要被下面第 5 / 7 點的「GUI → skill / cli-extractor」帶偏。
+   - 🚫 **反例（本規則出現前 AI 反覆犯的錯，務必避免）**：使用者三番兩次明說「開 GUI 後我自己接 RPA 點擊、不要轉 CLI、用 script 就好」，AI 仍堅持掛 `python-cli-extractor` 轉 CLI —— 視窗沒了、RPA 無從點起、且違背使用者直接指示。
+
 1. **沒給專案路徑 → 必須先反問**：「你的 Python 專案放在哪個資料夾？」
-   - **同時主動告知標準位置**：「建議放在本專案根目錄底下的 `external_projects/<你的專案名>/`，AI 技能才能讀寫該專案內容並修改。」
+   - **同時主動告知標準位置**：「建議放在本專案根目錄底下的 `external_projects/<你的專案名>/`，AI 才讀寫得到。」
+   - ⚠️ **路徑在 `pipeline-orchestratorV5` 專案根目錄之外時(例:`C:/Users/.../Downloads/...`、桌面、其他磁碟)→ 規劃時就先提醒、別等跑到一半才發現**：skill 在 sandbox 容器裡只掛得到專案根目錄底下的檔,專案外的路徑容器看不到 → 一定卡 ask_user / 失敗。請在 Plan / 回覆**第一時間**告訴使用者:「這個路徑在本工具專案外、沙盒看不到,請先把整個專案資料夾複製到 `external_projects/<你的專案名>/` 再給我路徑」,等使用者搬好、給新路徑後才開始,**不要先送 YAML 開跑**。
    - 確認路徑後再進 Plan、不要先猜路徑跳到 Emit
-2. **GUI / 含 `input()` 互動 → 用 skill 節點而非 script 節點**：
-   - script 節點直接 subprocess 跑 GUI 會被 input() 阻塞（直到 timeout），體驗很差
-   - skill 節點會自動 read_file 源碼、找出互動點、改寫成 CLI 參數版本再跑
-   - Plan 中要明說「AI 技能會先讀 main.py、把 GUI / input() 改成 CLI 版本」
-3. **若使用者明確說「不要改原檔」**：skill 走 `readonly: true` 並且生成 `main_cli.py` 副本；否則預設會直接 in-place 改寫 main.py（並 git diff 可追溯）。
+
+2. **拿到路徑 → 第一步一定先呼叫 `inspect_project(path)` 探查**（別憑空猜入口或依賴）。回傳 JSON 重點：
+   - `venv`：`has_venv=true` → **記住 `python_path`**，組 batch 時把它當 python 前綴 → 確保依賴齊全、不會 ModuleNotFoundError
+   - `entry_candidates`：入口檔候選；`dependency_files`：依賴檔；`top_level_tree`：目錄結構
+
+3. **再用 `read_project_file(入口檔 / README)` 讀源碼判斷怎麼跑**：
+   - 看有沒有 `argparse`（哪些 CLI 參數、預設值）、有沒有 `input()`（互動點）、輸出檔寫到哪
+   - 讀懂才知道要 `ask_user` 問哪些選擇、batch 怎麼組。**不要沒讀就亂猜參數**
+
+4. **venv 映射規則（對齊手動節點的「使用虛擬環境」勾選、最重要）**：
+   - `has_venv=true` → batch 的 python 用**絕對路徑前綴**：`"<python_path>" "<入口檔絕對路徑>" <參數>`
+   - `has_venv=false` → 用 `python`(= **系統全域 Python**,script 節點不會用本工具自己的環境、不污染它),**並在 Plan / 回覆主動提醒**:「此專案沒有虛擬環境,會用系統全域 Python 跑;若它有特殊依賴、全域沒裝 → 會直接失敗。建議先在專案目錄建 venv 裝好依賴,我再用該 venv 的絕對路徑跑。」
+   - ⚠️⚠️ **Windows 路徑在 YAML / batch / 任何地方一律用正斜線 `/`、不要用反斜線 `\\`**（最重要、第一守則）：
+     - ✅ 強烈建議:`C:/Users/me/proj/main.py`、`path: C:/Users/me/proj/out.json`
+     - 原因:反斜線 `\\t`(`\\text...`)、`\\U`(`\\Users`)、`\\n` 會在**兩個地方**出事 —— (1) 你產生文字時自己把 `\\t` 當逃脫吃掉(`\\text_tool_gui` → `_tool_gui`,路徑就壞了)、(2) YAML 純量解析時 `\\U` 被當 unicode escape 直接報錯。**改用 `/` 兩個問題都不存在**(Windows 的 python / subprocess / argparse / pathlib 全部接受正斜線)。
+     - 使用者就算貼給你反斜線路徑,**你回覆與寫 YAML 時都要轉成正斜線 `/`**、不要再改回反斜線。
+   - 萬一真的要用反斜線:**絕不要用雙引號包**(雙引號會觸發 escape):✅ 單引號 `path: 'C:\\Users\\me\\out.json'` 或裸值;❌ 雙引號 `path: "C:\\Users\\..."`(會炸)。
+
+5. **GUI / 含 `input()` 互動 → 用 skill 節點而非 script 節點**：
+   - script 節點直接 subprocess 跑 GUI 會被 input() 阻塞（直到 timeout）
+   - skill 節點會自動讀源碼、找互動點、改寫成 CLI 參數版本再跑（一樣優先用偵測到的 venv python）
+   - 若使用者明確說「不要改原檔」→ skill `readonly: true` 並生成 `main_cli.py` 副本；否則預設 in-place 改寫
+   - 純 CLI（已能 `python main.py --arg` 直接跑）→ 用 **script 節點**即可，不必走 skill
+   - **既有 CLI 但要「互動問參數再跑」（例:選報表類型 / 格式 / 期間）→ 用單一 skill 節點(`skill_mode: true`,但❌不要掛 `skill: python-cli-extractor`)**：在同一個 skill 節點內 `ask_user` 收齊所有參數、再由 skill 自己組指令**直接呼叫原檔**那支 CLI（skill 同時有 ask_user 與 run_shell / run_python，一個節點就能問+跑）。
+     - ⚠️ **判斷關鍵**:`read_project_file` 看到源碼已有 `argparse` / `add_subparsers` / `click` / `sys.argv` 解析 → **這個專案本來就是 CLI、沒東西可「拆解」或「抽取」**。直接 `python <入口檔> <子命令> <參數>` 跑原檔即可,**不要寫「拆解 argparse 結構 / 拆出 CLI 介面」這種 batch、不要生 `main_CLI.py` 包裝**(那是 GUI 專案才需要、見下面第 7 點)。
+     ```yaml
+     - name: 互動執行分析
+       skill_mode: true            # 注意:不掛 skill: python-cli-extractor
+       batch: |
+         讀 C:/path/to/proj/cli.py 了解 argparse 子命令與參數。
+         用 ask_user 問我要跑哪個子命令(filter/stats/search)與其參數,
+         再用 run_shell 直接執行原檔:python C:/path/to/proj/cli.py <子命令> <參數> --out <output.path>。
+       output:
+         path: result.txt
+     ```
+     - ❌ **絕對不要**用多個 `requirement_gatherer`（或任何收集型 subagent）節點來收參數、再用 `{{ steps.X.output.欄位 }}` 餵給下游 script。`requirement_gatherer` 的工具只有 `ask_user` / `read_file` / `done`、**沒有寫檔或執行工具**，無法把使用者的答案持久化成下游 script 引用得到的值 → 步驟必定以「工具權限不足」失敗。
+     - 收集型 subagent 只適合「輸出一份規格 / 需求文件(.md)」、不適合「產出要被機器精確引用的結構化參數」。
+
+7. **掛 `python-cli-extractor` skill — ⚠️僅限「GUI / 只有 `input()` / 沒有命令列介面」的專案**（重要、常見錯誤）：
+   - 🚫 **先判斷再決定掛不掛**:`read_project_file` 已看到 `argparse` / `add_subparsers` / `click`(專案**本來就是 CLI**)→ **不要掛這個 skill**!改用上面第 5 點的「單一 skill 節點(不掛 cli-extractor)直接呼叫原檔」。掛了只會多此一舉去生 `main_CLI.py` 包裝一個本來就能跑的 CLI。
+   - ✅ **只有**當專案是 tkinter / PyQt GUI、或只靠 `input()` 互動、**完全沒有 argparse/命令列介面**時,才掛 `python-cli-extractor`(它負責把 GUI/input 抽成 CLI)。
+   這個 skill 是「一條龍」：它自己會 **分析 GUI 專案 → 拆出 main_CLI.py → `ask_user` 問你要跑哪個功能 → 直接跑選中的**。所以**只要一個 skill 節點**就完成全部：
+   ```yaml
+   - name: 啟動我的GUI專案
+     skill_mode: true
+     skill: python-cli-extractor
+     batch: 分析 C:\專案絕對路徑 這個 GUI 專案、拆成 CLI、用 ask_user 讓我選一個功能來跑
+   ```
+   - ❌ **不要**拆成「skill 分析 + human_confirm 選功能 + script 跑」三步 —— 選功能是 skill **內部的 ask_user** 在做、不是另開 `human_confirm` 節點；skill 自己會執行選中的功能、不需要你再加 script 節點去跑 main_CLI.py。
+   - ❌ **不要**用 `{{ steps.X.output.stdout }}` 去接「使用者選的功能」再餵給下游 —— skill 內部已經把選擇執行掉了，下游接不到也不需要。
+   - 若後面真的還要把這個專案的輸出接到「另一個專案」→ 那是下一個 skill / script 節點的事，用 `{{ steps.啟動我的GUI專案.output.path }}` 接 skill 產出的結果檔。
+
+6. **多個既有專案接續執行（A 的輸出 → B 接著處理）**：
+   - 每個專案各一個 script 節點、依序用邊連起來
+   - 小專案常把輸出檔寫在**自己資料夾的根目錄**（不是 ai_output）。所以 A 步驟要宣告 `output.path` 指向**該檔的絕對路徑**（例 `external_projects/proj_a/result.json`）
+   - B 步驟 batch 直接引用上一步的絕對路徑：用變數 `{{ steps.<A步驟名>.output.path }}` 當輸入參數傳給 B 的程式（例 `"<B的venv python>" "<B入口絕對路徑>" --input "{{ steps.proj_a.output.path }}"`）
+   - 這樣 B 就精確接到 A 寫在 A 自己資料夾裡的輸出檔，不靠猜路徑
 
 # 互動原則（記在心裡）
 
@@ -3124,7 +4435,7 @@ actions 序列是錄製產生的，不是 LLM 該寫的。
 - 一次只問 1-2 個最關鍵的問題
 - 反問超過 3 輪還沒釐清 → 給草稿讓使用者改，比一直問好
 - 增量需求（「再加一步人工確認」）→ 在現有 YAML 上修改，不打掉重練
-- 提到 computer_use → 直接告訴他要錄製、不寫 YAML
+- 提到 computer_use:整條就是桌面自動化 → 叫他錄製、不寫 YAML;若只是多步流程中的一步 → 在對的位置輸出「空白 `computer_use: true` 節點」(別寫成 script、別省略)、actions 留給使用者錄
 
 # Discovery → Plan 的判定（很重要 — 先前過度反問）
 
@@ -3250,11 +4561,16 @@ LLM agent 對「邊角案例清單」「禁止 X 禁止 Y 禁止 Z」這類**防
 # 跟前端 _outlookPanel.tsx 的清單同步維護（前端是 UI 顯示用，這裡是 LLM prompt 注入用）。
 # 新增模板時兩邊都要加；只在前端加 → AI 助手不會推薦；只在這裡加 → UI 看不到。
 _OUTLOOK_TEMPLATES_FOR_PROMPT = [
-    ("daily_todo", "整理符合條件信件 → 待辦清單",
-     "掃指定資料夾的信，按條件過濾，整理成 markdown / xlsx 待辦清單",
+    ("daily_todo", "整理符合條件信件 → 待辦清單 / 結構化清單",
+     "掃指定資料夾的信，按條件過濾，整理成 markdown / xlsx / json 清單。"
+     "⭐ 想整理「某時間範圍 / 某資料夾的所有信」(不限特定關鍵字)就用這個 — 例『整理今天/某日的信』『當日工作清單』。"
+     "⭐ **若下游 subagent 還要用『信件原始內文』(翻譯 / 分析 / 逐封分檔)→ 用這個、且 output_format: json** —— "
+     "json 會保留每封的結構化欄位(寄件人/主旨/收件時間/內文等)交給下游;**不要用 search_summary 取原文**(那會先摘要、拿不到全文)。",
      "folder, subject, sender, since, until, unread_only, output_format"),
-    ("search_summary", "指定關鍵字撈相關信件 → 摘要報告",
-     "用 LLM 摘要符合條件的信件群、產出報告",
+    ("search_summary", "指定關鍵字撈相關信件 → LLM 摘要報告",
+     "用 LLM 摘要符合條件的信件群、產出報告。"
+     "⚠️ **必須有明確關鍵字 / 主題**(keywords)才用;若只是『整理某時段全部信、沒特定關鍵字』→ 改用 daily_todo,用這個會撈 0 封。"
+     "⚠️ **它輸出的是『摘要』、不是原始內文** —— 若下游還要拿『每封信原文』再處理(翻譯 / 分檔 / 二次分析)→ 不要用這個,改用 daily_todo + output_format: json。",
      "keywords, search_in, folder, since, until, detail_level, output_format"),
     ("unanswered", "未回覆超過 N 天的信",
      "找出收件匣中我還沒回過、且收件超過指定天數的信",
@@ -3283,7 +4599,120 @@ _OUTLOOK_TEMPLATES_FOR_PROMPT = [
 ]
 
 
-def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
+# ── 漸進揭露(progressive disclosure):核心常駐 + 節點專屬大段依意圖注入 ──────────
+# 把底稿按 h1/h2 標題切塊;「節點專屬」的大段(subagent 全套、既有專案、爬蟲、condition…)
+# 只在對話提到該節點意圖時才保留,其餘剝掉。核心(對話流程/安全/路徑/變數/節點清單)永遠留。
+# 目的:核心從 ~32k token 降到 ~13-15k、弱模型注意力不被稀釋。
+# 安全:意圖偵測偏寬鬆(寧可多留);convo_text 空 → 原樣返回(向後相容、不影響舊呼叫)。
+#
+# (node_key, [標題關鍵字 — 塊標題命中即歸此節點], [意圖關鍵字 — 對話命中才保留該節點段])
+_INJECTABLE_NODE_GROUPS = [
+    ("python_project",
+     ["啟動既有 Python 專案"],
+     ["專案", "project", "main.py", "venv", "gui", "streamlit", "flask", "fastapi",
+      "django", "既有的程式", "我的程式", "我的專案", "跑我的", "接進", "轉成 cli", "cli 化"]),
+    ("crawler",
+     ["網頁爬蟲節點", "解析爬蟲內容", "影片爬蟲", "RSS / Atom"],
+     ["爬", "抓網", "網頁", "網站", "論壇", "比價", "reddit", "momo", "蝦皮", "商品頁",
+      "留言", "評論", "貼文", "http", "feed", "rss", "訂閱", "影片", "youtube", "ptt", "dcard",
+      "web_crawler", "wc_url", "scraped-content-parser"]),
+    ("condition",
+     ["條件節點", "分支控制流"],
+     ["判斷", "如果", "若", "條件", "分支", "否則", "大於", "小於", "超過", "低於", "達標",
+      "switch", "符合就", "才寄", "才做", "視情況", "依結果", "依...決定",
+      "condition:", "expression", "on_true", "on_false"]),
+    ("subagent",
+     ["多輪代理節點", "subagent"],
+     ["子代理", "多代理", "代理", "多輪", "研究", "評估", "競品", "探索", "彙整", "深度",
+      "盤點", "調查", "輿情", "情緒分析", "逐一", "分別處理", "撰寫報告", "分析報告", "agent"]),
+    ("human_confirm",
+     ["人工確認節點"],
+     ["確認", "審批", "人工", "等我", "通知我", "核可", "批准", "我看過", "讓我先看",
+      "human_confirm"]),
+    ("outlook",
+     ["Outlook 自動化節點"],
+     ["outlook", "郵件", "寄信", "寄出", "寄", "收件", "收信", "寄件", "email",
+      "電子郵件", "信箱", "寄給", "附件寄", "待辦信"]),
+    ("visual",
+     ["視覺驗證節點"],
+     ["視覺驗證", "截圖驗證", "看起來對", "版面", "排版對", "畫面對不對",
+      "visual_validation"]),
+    ("computer_use",
+     ["桌面自動化節點", "computer_use"],
+     ["點按", "按鈕", "操作軟體", "操作軟", "桌面", "桌面自動", "自動點", "滑鼠", "鍵盤",
+      "uia", "點視窗"]),
+]
+
+
+def _split_prompt_blocks(text: str) -> list:
+    """按行首 h1/h2(`# ` / `## `)切塊;h3 留在所屬 h2 內。回傳 [(title_line|None, block_text)]。"""
+    import re as _re
+    blocks, cur_title, cur = [], None, []
+    for ln in text.split("\n"):
+        if _re.match(r"^#{1,2}\s", ln):
+            if cur:
+                blocks.append((cur_title, "\n".join(cur)))
+            cur_title, cur = ln, [ln]
+        else:
+            cur.append(ln)
+    if cur:
+        blocks.append((cur_title, "\n".join(cur)))
+    return blocks
+
+
+def _detect_needed_nodes(convo_text: str) -> set:
+    t = (convo_text or "").lower()
+    needed = set()
+    for key, _titles, intents in _INJECTABLE_NODE_GROUPS:
+        if any(kw.lower() in t for kw in intents):
+            needed.add(key)
+    return needed
+
+
+def _classify_block(title_line) -> "Optional[str]":
+    """此塊歸屬的 node_key;None = 核心(永遠保留)。"""
+    if not title_line:
+        return None
+    for key, titles, _intents in _INJECTABLE_NODE_GROUPS:
+        if any(tm in title_line for tm in titles):
+            return key
+    return None
+
+
+def _apply_progressive_disclosure(base: str, convo_text: str) -> str:
+    """核心常駐 + 命中意圖的節點段保留,其餘剝掉。convo_text 空 → 原樣返回(相容)。"""
+    if not convo_text:
+        return base
+    needed = _detect_needed_nodes(convo_text)
+    kept = []
+    for title, body in _split_prompt_blocks(base):
+        node = _classify_block(title)
+        if node is None or node in needed:
+            kept.append(body)
+    return "\n".join(kept)
+
+
+def _convo_text_for_disclosure(req) -> str:
+    """漸進揭露的意圖偵測來源:近幾則對話 + (編輯既有工作流時)該工作流 YAML。
+    把 YAML 納入 → 編輯含 condition/subagent/crawler… 的工作流時也會帶回對應節點段。"""
+    try:
+        msgs = getattr(req, "messages", None) or []
+        parts = [str(m.get("content", "")) for m in msgs[-8:] if isinstance(m, dict)]
+        wid = getattr(req, "workflow_id", None)
+        if wid:
+            try:
+                import db as _db
+                wf = _db.get_workflow(wid)
+                if wf and wf.get("yaml"):
+                    parts.append(wf["yaml"])
+            except Exception:
+                pass
+        return "\n".join(parts)
+    except Exception:
+        return ""  # 出錯 → 空字串 → 全留(安全 fallback)
+
+
+def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = "") -> str:
     """組裝 AI 助手 system prompt：底稿 + 動態注入已安裝的 Agent Skills + Outlook 模板清單。
 
     channel:
@@ -3293,15 +4722,25 @@ def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
         不存在的工具。
     """
     base = _PIPELINE_SYSTEM_BASE
+    import re as _re
+    if channel == "telegram":
+        # TG 通道 → strip DESKTOP_ONLY 區段(畫布按鈕、YAML_READY 等 web 才有的概念)
+        base = _re.sub(
+            r"<!--DESKTOP_ONLY_BEGIN-->.*?<!--DESKTOP_ONLY_END-->\s*",
+            "",
+            base,
+            flags=_re.DOTALL,
+        )
     if channel != "telegram":
         # 把 <!--TG_ONLY_BEGIN--> ... <!--TG_ONLY_END--> 之間整塊拿掉(含 marker)
-        import re as _re
         base = _re.sub(
             r"<!--TG_ONLY_BEGIN-->.*?<!--TG_ONLY_END-->\s*",
             "",
             base,
             flags=_re.DOTALL,
         )
+    # ── 漸進揭露:核心常駐、節點專屬大段依對話意圖注入(convo_text 空則全留)──
+    base = _apply_progressive_disclosure(base, convo_text)
     parts = [base]
     # ── Agent Skills 清單 ──────────────────────────────────────────────
     try:
@@ -3332,6 +4771,30 @@ def _build_pipeline_system_prompt(channel: str = "desktop") -> str:
                      "把使用者提供的資訊填到 `outlook_params` 裡。**沒有合適模板**才退而填空 `outlook_template:` "
                      "改用 `batch:` 自由描述需求走 LLM 路徑。")
         parts.append("\n".join(lines))
+    except Exception:
+        pass
+    # ── Subagent 可用 role 清單(內建 + 自訂、動態)──────────────────
+    # 規範跟 BUILTIN_ROLE_IDS / 自訂 yaml 對齊,AI 助手不准用清單外的 role 名
+    try:
+        from pipeline.subagent_runner import load_roles, BUILTIN_ROLE_IDS
+        all_roles = load_roles()
+        if all_roles:
+            lines = ["", "## 可用 Subagent role 清單(寫 `subagent_role:` 只能用這些)", ""]
+            for rid in sorted(all_roles.keys(), key=lambda r: (0 if r in BUILTIN_ROLE_IDS else 1, r)):
+                cfg = all_roles[rid]
+                src_tag = "(內建)" if rid in BUILTIN_ROLE_IDS else "(自訂)"
+                desc = (cfg.get("description") or cfg.get("label") or "").strip()
+                tools_list = cfg.get("tools", [])
+                lines.append(f"- **`{rid}`** {src_tag} — {desc}")
+                lines.append(f"  - 工具:{tools_list}")
+            lines.append("")
+            lines.append(
+                "**規則**:寫 `subagent_role: X` 之前 X 必須在上面清單裡。"
+                "若使用者要的能力沒對應 role、用 `create_subagent_role` 工具新增"
+                "(兩步協議:confirm=False 預覽 → 使用者 yes → confirm=True 真寫)、"
+                "寫好之後新 role 立刻可在 workflow YAML 使用。"
+            )
+            parts.append("\n".join(lines))
     except Exception:
         pass
     # ── 今日日期(讓 web_search query 能用最新年份)──────────────────
@@ -3452,6 +4915,16 @@ def _workflow_state_block(workflow_id: str) -> str:
             lines.append("```yaml")
             lines.append(yaml_text)
             lines.append("```")
+        lines.append("")
+        lines.append(
+            f"⚠️ **以上這條(id={workflow_id})才是你「現在所在」的工作流（即使對話歷史是從別條複製過來的）。**"
+            "對話歷史裡若出現其他工作流名稱或 id（很可能是這條被「另存為新工作流」/改名之前的舊資訊），"
+            "一律以這個當前 id 為準、不要被舊記憶誤導成在操作別條。"
+        )
+        lines.append(
+            f"**當使用者要「執行 / 跑這條 / 再跑一次」時**：呼叫 start_workflow 請帶當前 **id「{workflow_id}」**，"
+            "不要用工作流名稱——名稱可能與其他工作流重複，用名稱會撈到多條或撈錯。"
+        )
         lines.append("")
         lines.append("**若使用者要求是修改 / 增量調整**（如「再加一步」、「把第 2 步改成…」），"
                      "在既有基礎上改動後回覆完整新 YAML；不是打掉重練。")
@@ -3583,6 +5056,138 @@ def _friendly_llm_error(e: Exception) -> tuple[int, str]:
     return 500, f"LLM 呼叫失敗（{name}）：{msg[:300]}"
 
 
+def _memory_filtered_tools(tools: list) -> list:
+    """memory_enabled=False 時把記憶工具從工具清單拿掉(省 schema token)。"""
+    try:
+        from settings import get_settings
+        if get_settings().get("memory_enabled", True):
+            return tools
+        from chat_tools import MEMORY_TOOL_NAMES
+        return [t for t in tools if t.name not in MEMORY_TOOL_NAMES]
+    except Exception:
+        return tools
+
+
+def _memory_snapshot_text() -> str:
+    """記憶快照(注入 system 之後的獨立 message、不污染 cacheable 主 prompt)。
+    memory_enabled=False 或無 facts → 回空字串。"""
+    try:
+        from settings import get_settings
+        if not get_settings().get("memory_enabled", True):
+            return ""
+        import memory as _mem
+        facts = _mem.snapshot(limit=25)
+    except Exception:
+        return ""
+    if not facts:
+        # 還沒記任何事 — 仍告訴 LLM 它有記憶能力,否則永遠不會主動 remember
+        return ("[你具備長期記憶。使用者明確要你「記住 / 記一下」偏好或事實時(例「我報告都要正式 Word」),"
+                "呼叫 remember_fact(走 confirm 兩步)記下,跨對話永久記得。一次性需求不要記。]")
+    lines = ["[關於這位使用者,你已經記得這些(長期記憶、可直接參考、不必再查工具):]"]
+    for f in facts:
+        src = "(推測)" if f.get("source") == "inferred" else ""
+        lines.append(f"  - {f['key']} = {f['value']}{src}")
+    lines.append("使用者問他自己的偏好 / 習慣(例「我都用哪個模型」「我報告要多長」「我幾點跑」)時 ——"
+                 "先看上面這份記憶回答;**若上面沒列到該項、先呼叫 list_facts 查全部記憶再回答,不要直接說「沒記錄」、"
+                 "也不要去查系統當前狀態(模型設定 / cron)當作答案**。"
+                 "使用者問「上次 / 之前聊的那個…」「我們之前討論的 X 結論」這類過去對話的事 → 呼叫 recall_episode 查對話摘要。"
+                 "使用者明確要你「記住」某事 → remember_fact(confirm 兩步);標(推測)是系統推斷、可能不準,更正用 forget_fact。")
+    return "\n".join(lines)
+
+
+_autoshelve_tasks: set = set()
+
+
+async def _autoshelve_memory(messages: list, reply: str, workflow_id=None):
+    """對話結束時 fire-and-forget:摘要這段對話存成 episode;memory_aggressive 開時
+    順便保守萃取使用者偏好存 inferred fact。memory_enabled=False 或對話太短 → 跳過。"""
+    try:
+        from settings import get_settings
+        s = get_settings()
+        if not s.get("memory_enabled", True):
+            return
+        convo = [m for m in (messages or []) if m.get("role") in ("user", "assistant") and m.get("content")]
+        if sum(1 for m in convo if m["role"] == "user") < 2:
+            return  # 至少兩輪使用者發言才值得存(避免一次性問答洗版)
+        convo = convo + [{"role": "assistant", "content": reply}]
+        import hashlib as _h, json as _j, re as _re
+        first_user = next((m["content"] for m in convo if m["role"] == "user"), "")
+        conv_key = workflow_id or ("c_" + _h.md5(first_user.encode("utf-8", "replace")).hexdigest()[:12])
+        aggressive = bool(s.get("memory_aggressive", False))
+        import memory as _mem
+        from llm_factory import build_llm
+        from langchain_core.messages import SystemMessage, HumanMessage
+        convo_text = "\n".join(f"{m['role']}: {str(m['content'])[:500]}" for m in convo[-24:])
+        if aggressive:
+            instr = ('用 1-3 句繁體中文摘要這段對話(使用者想做什麼、實際做了什麼)。'
+                     '另外【積極】抓出使用者透露的偏好 / 習慣 / 身份 / 領域 / 慣用做法 —— '
+                     '寧可多抓也不要漏;只排除「這次一次性的具體任務」。'
+                     '範例:使用者說「我習慣看正式 Word 排版、markdown 我不太看」'
+                     '→ prefs 應含 {"key":"report_format","value":"偏好正式 Word、不要 markdown","category":"workflow_pref"}。'
+                     '真的完全沒透露任何偏好才給空陣列。'
+                     '只回 JSON、不要其他字:'
+                     '{"summary":"...","prefs":[{"key":"短鍵英數","value":"值","category":"workflow_pref|domain|preference"}]}')
+        else:
+            instr = ('用 1-3 句繁體中文摘要這段對話(使用者想做什麼、實際做了什麼)。'
+                     '只回 JSON、不要其他字:{"summary":"..."}')
+        llm = build_llm(temperature=0.2)
+        resp = await llm.ainvoke([SystemMessage(content=instr), HumanMessage(content=convo_text)])
+        # Gemma 4 / Claude 的 content 可能是 structured blocks(list of {type,text/thinking});
+        # 要抽 type=='text' 的 text、不能直接 str()(會變 Python repr、parse 不到 JSON)
+        _c = resp.content
+        if isinstance(_c, list):
+            txt = "".join(b.get("text", "") for b in _c if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            txt = _c if isinstance(_c, str) else str(_c)
+        mobj = _re.search(r"\{.*\}", txt, _re.DOTALL)
+        raw = mobj.group(0) if mobj else ""
+        data = {}
+        if raw:
+            try:
+                data = _j.loads(raw)               # 標準 JSON
+            except Exception:
+                try:
+                    import ast as _ast
+                    data = _ast.literal_eval(raw)  # Gemma 常回單引號 dict
+                    if not isinstance(data, dict):
+                        data = {}
+                except Exception:
+                    data = {}
+        # 連 dict 都解不出 → 退而求其次:整段清理後當摘要(至少 episode 存得進)
+        if not data.get("summary"):
+            _clean = _re.sub(r"```\w*|```", "", txt).strip()
+            data["summary"] = _clean[:300]
+        summary = (data.get("summary") or "").strip()
+        import logging as _lg2
+        if summary:
+            _mem.add_episode(conv_key, summary)
+        _lg2.getLogger(__name__).info(
+            f"[autoshelve] episode存={bool(summary)} aggressive={aggressive} "
+            f"prefs={len(data.get('prefs') or [])} summary={summary[:40]!r}")
+        if aggressive:
+            for p in (data.get("prefs") or [])[:5]:
+                k = (p.get("key") or "").strip()
+                v = (p.get("value") or "").strip()
+                if k and v:
+                    rr = _mem.remember_fact(k, v, category=p.get("category", "preference"),
+                                            source="inferred", confidence=0.6)
+                    _lg2.getLogger(__name__).info(f"[autoshelve] 萃取記入 {k}={v} → {rr.get('ok')}")
+    except Exception as e:
+        import logging as _lg
+        _lg.getLogger(__name__).warning(f"[autoshelve] 失敗(不影響對話):{type(e).__name__}: {e}")
+
+
+def _fire_autoshelve(messages: list, reply: str, workflow_id=None):
+    """非阻塞觸發 autoshelve(保存 task 引用避免 GC)。"""
+    try:
+        import asyncio as _aio
+        t = _aio.create_task(_autoshelve_memory(messages, reply, workflow_id))
+        _autoshelve_tasks.add(t)
+        t.add_done_callback(_autoshelve_tasks.discard)
+    except Exception:
+        pass
+
+
 async def _chat_agent_loop(
     req: PipelineChatRequest,
     on_tool_event=None,
@@ -3615,7 +5220,8 @@ async def _chat_agent_loop(
     # TG 通道才放 dispatch_subagent_async / check_subagent_status 兩個 ad-hoc 子代理工具
     # + 帶 in-flight digest 教學區塊。
     _channel = "telegram" if on_tool_event is not None else "desktop"
-    system_prompt = _build_pipeline_system_prompt(channel=_channel)
+    _convo_for_disclosure = _convo_text_for_disclosure(req)
+    system_prompt = _build_pipeline_system_prompt(channel=_channel, convo_text=_convo_for_disclosure)
     if req.workflow_id:
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
@@ -3633,6 +5239,7 @@ async def _chat_agent_loop(
     _active_tools = CHAT_TOOLS if _channel == "telegram" else [
         t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS
     ]
+    _active_tools = _memory_filtered_tools(_active_tools)   # memory_enabled=False → 拿掉記憶工具
     try:
         llm_with_tools = llm.bind_tools(_active_tools)
     except Exception as e:
@@ -3640,12 +5247,25 @@ async def _chat_agent_loop(
         llm_with_tools = llm
         tools_enabled = False
 
-    lc_messages: list = [SystemMessage(content=system_prompt)]
-    # 只取最近 _CHAT_HISTORY_CAP 則訊息送進 LLM，避免對話太長 token 爆炸
+    # Prompt caching (#153):AI 助手 system prompt 是 V5 最大的 input(50K+ 字、動態注入)。
+    # 加 ephemeral 1h TTL cache_control、跨輪對話命中 cache、Anthropic 第 2 輪起 input cost 0.1x。
+    # 注意:cache 命中需 prefix 穩定、main.py:3318 _build_pipeline_system_prompt 內動態注入區塊
+    # (今日日期、in-flight digest)應放在底稿後面、保最大化 cache prefix。
+    _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
+    # 記憶快照:獨立一條 system message(不帶 cache_control)、放在 cacheable 主 prompt 之後、
+    # 不污染主 prompt 的 cache。memory_enabled=False 或無 facts → 空、不加。
+    _mem_snap = _memory_snapshot_text()
+    if _mem_snap:
+        lc_messages.append(SystemMessage(content=_mem_snap))
+    # 只取最近 _CHAT_HISTORY_CAP 則訊息送進 LLM、避免對話太長 token 爆炸
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
         cls = HumanMessage if m["role"] == "user" else AIMessage
-        lc_messages.append(cls(content=m["content"]))
+        _c = m["content"]
+        if m["role"] == "user":
+            _c = _normalize_win_paths(_c)
+        lc_messages.append(cls(content=_c))
 
     # ── Agent loop：最多 _CHAT_MAX_TOOL_ITERATIONS 輪 ─────────────
     # 用 ainvoke (async) 讓 event loop 不被 LLM call 阻塞、
@@ -3744,27 +5364,61 @@ async def _chat_agent_loop(
                 if _actually_wrote:
                     break
             if not _actually_wrote:
-                _log.warning("[/pipeline/chat] LLM 宣稱已套用但 turn 內沒 confirm=True tool call 也沒 YAML_READY、附 warning prefix")
+                _log.warning(f"[/pipeline/chat] (channel={_channel}) LLM 宣稱已套用但 turn 內沒 confirm=True tool call 也沒 YAML_READY、附 warning prefix")
+                if _channel == "telegram":
+                    _next_step_hint = (
+                        "請再跟我說一次「請套用」、我會重新產出 YAML(下次會出現一段 `YAML_READY` 區塊)、"
+                        "然後你下 `/save <workflow名稱>` 套用。"
+                    )
+                else:
+                    _next_step_hint = "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。"
                 content = (
-                    "⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。"
-                    "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。\n\n"
+                    f"⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。{_next_step_hint}\n\n"
                     "(原回覆:)\n" + content
                 )
 
     if has_yaml:
-        match = re.search(r"```yaml\n([\s\S]+?)```", content)
-        if match:
-            yaml_content = match.group(1).strip()
+        # LLM 可能 emit 多份 yaml block(diff snippet 在前、完整版在後)。
+        # 之前 re.search 只抓第一個、撞到 snippet 會 validation fail。改 findall 取最後一個。
+        _yaml_blocks = re.findall(r"```yaml\n([\s\S]+?)```", content)
+        if _yaml_blocks:
+            yaml_content = _yaml_blocks[-1].strip()
             # ── 語法驗證：試跑 PipelineConfig.from_dict 檢查 schema ──
             try:
                 import yaml as _yaml
                 from pipeline.models import PipelineConfig
-                parsed = _yaml.safe_load(yaml_content) or {}
+                parsed = _lenient_yaml_load(yaml_content) or {}
                 raw_cfg = parsed.get("pipeline", parsed)
                 PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
-            except Exception as e:
-                yaml_error = f"YAML 語法/結構錯誤：{type(e).__name__}：{str(e)[:300]}"
 
+                # ── 空 step 偵測:AI 經典 bug — 嘴上說「改為 condition / 加 X 節點」
+                #    但實際 emit 的 YAML 內 step 只寫了 name、節點 type flag / batch 全漏掉。
+                #    這種 step 解析後 fallback 到空 script、UI 看起來像沒改。
+                _empty_steps: list[str] = []
+                for _s in (raw_cfg.get("steps") or []):
+                    if not isinstance(_s, dict):
+                        continue
+                    _name = str(_s.get("name", "")).strip()
+                    _has_batch = bool(str(_s.get("batch", "")).strip())
+                    _has_type_flag = any(_s.get(k) for k in (
+                        "condition", "skill_mode", "subagent", "human_confirm",
+                        "computer_use", "visual_validation", "outlook_automation",
+                        "web_crawler",
+                    ))
+                    if _name and not _has_batch and not _has_type_flag:
+                        _empty_steps.append(_name)
+                if _empty_steps:
+                    _names = "、".join(f"「{n}」" for n in _empty_steps)
+                    yaml_error = (
+                        f"⚠ step {_names} 沒有任何節點類型(batch / condition / skill_mode / ... 全空)。\n"
+                        f"AI 可能口頭說『改為 condition 節點』但實際只寫了 name、漏掉 condition: true + expression + on_true。\n"
+                        f"請跟 AI 說『{_empty_steps[0]} 還是空的、請補完整 condition 欄位(condition: true + expression + on_true)』。"
+                    )
+            except Exception as e:
+                yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
+
+    # 對話結束 → 背景摘要存 episode(+ aggressive 時萃取偏好);不阻塞回應
+    _fire_autoshelve(req.messages, content or "", req.workflow_id)
     return {"reply": content, "has_yaml": has_yaml, "yaml_content": yaml_content, "yaml_error": yaml_error}
 
 
@@ -3808,7 +5462,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
 
     # SSE stream 端點(/pipeline/chat/stream)是給桌面 chat 用、永遠 desktop 通道。
     # TG handler 不走 stream、直接 await _chat_agent_loop。
-    system_prompt = _build_pipeline_system_prompt(channel="desktop")
+    system_prompt = _build_pipeline_system_prompt(channel="desktop", convo_text=_convo_text_for_disclosure(req))
     if req.workflow_id:
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
@@ -3822,6 +5476,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         "cancel_subagent_task", "read_help_doc",
     }
     _active_tools = [t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS]
+    _active_tools = _memory_filtered_tools(_active_tools)   # memory_enabled=False → 拿掉記憶工具
     try:
         llm_with_tools = llm.bind_tools(_active_tools)
     except Exception as e:
@@ -3829,11 +5484,20 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         llm_with_tools = llm
         tools_enabled = False
 
-    lc_messages: list = [SystemMessage(content=system_prompt)]
+    # Prompt caching (#153):chat/stream endpoint 同 _chat_agent_loop 處理
+    _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
+    # 記憶快照:獨立 system message、不帶 cache_control、不污染主 prompt cache(同 _chat_agent_loop)
+    _mem_snap = _memory_snapshot_text()
+    if _mem_snap:
+        lc_messages.append(SystemMessage(content=_mem_snap))
     recent = req.messages[-_CHAT_HISTORY_CAP:] if len(req.messages) > _CHAT_HISTORY_CAP else req.messages
     for m in recent:
         cls = HumanMessage if m["role"] == "user" else AIMessage
-        lc_messages.append(cls(content=m["content"]))
+        _c = m["content"]
+        if m["role"] == "user":
+            _c = _normalize_win_paths(_c)
+        lc_messages.append(cls(content=_c))
 
     full_content_parts: list[str] = []  # 累積整輪 chat 看到的純文字 content
 
@@ -3942,18 +5606,42 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 )
 
     if has_yaml:
-        match = re.search(r"```yaml\n([\s\S]+?)```", content)
-        if match:
-            yaml_content = match.group(1).strip()
+        # 同 pipeline_chat:LLM 可能 emit 多份 yaml block、取最後一個
+        _yaml_blocks = re.findall(r"```yaml\n([\s\S]+?)```", content)
+        if _yaml_blocks:
+            yaml_content = _yaml_blocks[-1].strip()
             try:
                 import yaml as _yaml
                 from pipeline.models import PipelineConfig
-                parsed = _yaml.safe_load(yaml_content) or {}
+                parsed = _lenient_yaml_load(yaml_content) or {}
                 raw_cfg = parsed.get("pipeline", parsed)
                 PipelineConfig.from_dict({k: v for k, v in raw_cfg.items() if not str(k).startswith("_")})
+
+                _empty_steps: list[str] = []
+                for _s in (raw_cfg.get("steps") or []):
+                    if not isinstance(_s, dict):
+                        continue
+                    _name = str(_s.get("name", "")).strip()
+                    _has_batch = bool(str(_s.get("batch", "")).strip())
+                    _has_type_flag = any(_s.get(k) for k in (
+                        "condition", "skill_mode", "subagent", "human_confirm",
+                        "computer_use", "visual_validation", "outlook_automation",
+                        "web_crawler",
+                    ))
+                    if _name and not _has_batch and not _has_type_flag:
+                        _empty_steps.append(_name)
+                if _empty_steps:
+                    _names = "、".join(f"「{n}」" for n in _empty_steps)
+                    yaml_error = (
+                        f"⚠ step {_names} 沒有任何節點類型(batch / condition / skill_mode / ... 全空)。\n"
+                        f"AI 可能口頭說『改為 condition 節點』但實際只寫了 name、漏掉 condition: true + expression + on_true。\n"
+                        f"請跟 AI 說『{_empty_steps[0]} 還是空的、請補完整 condition 欄位(condition: true + expression + on_true)』。"
+                    )
             except Exception as e:
                 yaml_error = f"YAML 語法/結構錯誤:{type(e).__name__}:{str(e)[:300]}"
 
+    # 對話結束 → 背景摘要存 episode(+ aggressive 時萃取偏好);不阻塞回應
+    _fire_autoshelve(req.messages, content or "", req.workflow_id)
     yield {
         "type": "done",
         "reply": content,
@@ -4076,6 +5764,8 @@ def _run_to_dict(r):
         "awaiting_message": getattr(r, 'awaiting_message', '') or '',
         "awaiting_suggestion": getattr(r, 'awaiting_suggestion', '') or '',
         "input_params": getattr(r, 'input_params', None) or {},
+        "workflow_id": getattr(r, 'workflow_id', None),
+        "self_heal_count": getattr(r, 'self_heal_count', 0),
     }
 
 

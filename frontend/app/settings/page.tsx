@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain, Package, Plus, Trash2, Loader2, Sparkles, MessageSquare, Bell, Search, Shield } from 'lucide-react'
+import { Settings as SettingsIcon, Save, RefreshCw, AlertCircle, CheckCircle2, Cloud, HardDrive, ArrowLeft, Brain, Package, Plus, Trash2, Loader2, Sparkles, MessageSquare, Bell, Search, Shield, Users, Edit2, X as XIcon } from 'lucide-react'
 import Link from 'next/link'
 import { toast, Toaster } from 'sonner'
 import {
@@ -11,6 +11,8 @@ import {
   getWebSearchSettings, saveWebSearchSettings,
   analyzeRecentLogs,
   listAvailableSkills, scanSkillDependencies,
+  listSubagentRoles, createSubagentRole, updateSubagentRole, deleteSubagentRole,
+  type SubagentRole, type SubagentRolePayload, type SelectableTool,
   scanUnlistedPackages, adoptExistingPackage,
   getNodeStatus,
   getHostTools,
@@ -397,6 +399,393 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
 
 
 // ── Skill Packages Section ────────────────────────────────────────────────────
+// ── Subagent 角色管理 ───────────────────────────────────────────────────────
+// 內建 5 role 不可改不可刪、自訂可 CRUD
+// 工具用 checkbox 多選 (done 永遠隱式 ON)
+const ROLE_PROMPT_TEMPLATE = `你是 [角色職能描述]、負責 [主要工作]。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ 最高優先級違規(連 2 輪犯規系統會強制終止 step):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 每一輪 reply 必須含 <tool>...</tool> 標籤(或 <tool>done</tool>)
+2. reply 必須短(< 500 字),分析 / 結論 / 報告寫進 run_python 的 Path.write_text(),不要寫在 reply 裡
+3. 產物必須寫到指定的 output_path、不寫檔 = step fail
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+任務原則:
+- [這個 role 的核心邏輯]
+- [工作流程順序]
+
+工作流(每步要 tool):
+1. <tool>...</tool> — [第一步做什麼]
+2. <tool>...</tool> — [第二步做什麼]
+3. <tool>done</tool> — \`{"success": true, "summary": "..."}\`
+
+停止條件:
+- [何時 done]
+- 達 max_iter 上限
+
+回繁體中文、reply 永遠短。`
+
+interface RoleFormState {
+  role_id: string
+  label: string
+  description: string
+  tools: string[]
+  system_prompt: string
+}
+
+function emptyRoleForm(): RoleFormState {
+  return { role_id: '', label: '', description: '', tools: [], system_prompt: '' }
+}
+
+function SubagentRolesSection() {
+  const [roles, setRoles] = useState<SubagentRole[]>([])
+  const [selectableTools, setSelectableTools] = useState<SelectableTool[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null) // null = 新增、有值 = 編輯該 id
+  const [form, setForm] = useState<RoleFormState>(emptyRoleForm())
+  const [saving, setSaving] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [expandedSP, setExpandedSP] = useState<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const r = await listSubagentRoles()
+      setRoles(r.roles)
+      setSelectableTools(r.selectable_tools)
+    } catch (e) {
+      toast.error('載入 subagent role 失敗:' + (e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  const startCreate = () => {
+    setEditingId(null)
+    setForm(emptyRoleForm())
+    setShowForm(true)
+  }
+
+  const startEdit = (r: SubagentRole) => {
+    if (r.is_builtin) return
+    setEditingId(r.role_id)
+    setForm({
+      role_id: r.role_id,
+      label: r.label,
+      description: r.description,
+      tools: r.tools.filter(t => t !== 'done'),
+      system_prompt: r.system_prompt,
+    })
+    setShowForm(true)
+  }
+
+  const cancelForm = () => {
+    setShowForm(false)
+    setEditingId(null)
+    setForm(emptyRoleForm())
+  }
+
+  const toggleTool = (t: string) => {
+    setForm(prev => ({
+      ...prev,
+      tools: prev.tools.includes(t)
+        ? prev.tools.filter(x => x !== t)
+        : [...prev.tools, t],
+    }))
+  }
+
+  const applyTemplate = () => {
+    if (form.system_prompt.trim() && !confirm('已有內容、要替換成範本?')) return
+    setForm(prev => ({ ...prev, system_prompt: ROLE_PROMPT_TEMPLATE }))
+  }
+
+  const submit = async () => {
+    if (saving) return
+    setSaving(true)
+    try {
+      const payload: SubagentRolePayload = {
+        role_id: form.role_id.trim(),
+        label: form.label.trim(),
+        description: form.description.trim(),
+        tools: form.tools,
+        system_prompt: form.system_prompt,
+      }
+      if (editingId) {
+        await updateSubagentRole(editingId, payload)
+        toast.success(`已更新自訂角色 '${editingId}'`)
+      } else {
+        await createSubagentRole(payload)
+        toast.success(`已新增自訂角色 '${payload.role_id}'`)
+      }
+      cancelForm()
+      await load()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const onDelete = async (r: SubagentRole) => {
+    if (r.is_builtin) return
+    if (!confirm(`確定刪除自訂角色 '${r.role_id}' (${r.label})?`)) return
+    setDeletingId(r.role_id)
+    try {
+      await deleteSubagentRole(r.role_id)
+      toast.success(`已刪除 '${r.role_id}'`)
+      await load()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  const builtins = roles.filter(r => r.is_builtin)
+  const customs = roles.filter(r => !r.is_builtin)
+
+  return (
+    <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 mb-4">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Users className="w-4 h-4 text-indigo-600" />
+          <h2 className="text-base font-semibold text-gray-900">Subagent 角色管理</h2>
+        </div>
+        {!showForm && (
+          <button
+            onClick={startCreate}
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+          >
+            <Plus className="w-3.5 h-3.5" /> 新增角色
+          </button>
+        )}
+      </div>
+
+      <p className="text-xs text-gray-500 mb-3">
+        Subagent 節點用「角色」決定 system prompt + 可用工具。
+        內建 5 個不可改;自訂角色 AI 助手呼叫 <code className="bg-gray-100 px-1 rounded">create_subagent_role</code> 也會出現在這。
+      </p>
+
+      {/* 新增 / 編輯表單 */}
+      {showForm && (
+        <div className="mb-4 p-4 rounded-xl border-2 border-indigo-300 bg-indigo-50/30">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-indigo-900">
+              {editingId ? `編輯角色 '${editingId}'` : '新增自訂角色'}
+            </h3>
+            <button onClick={cancelForm} className="text-gray-400 hover:text-gray-700">
+              <XIcon className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                Role ID <span className="text-red-500">*</span>
+                <span className="text-gray-400 ml-1">(英文 snake_case、不可改、yaml 鍵)</span>
+              </label>
+              <input
+                value={form.role_id}
+                onChange={(e) => setForm({ ...form, role_id: e.target.value })}
+                placeholder="例: boss, legal_reviewer, supervisor"
+                disabled={!!editingId}
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm font-mono disabled:bg-gray-100"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                中文顯示名 <span className="text-red-500">*</span>
+                <span className="text-gray-400 ml-1">(畫布上看到的)</span>
+              </label>
+              <input
+                value={form.label}
+                onChange={(e) => setForm({ ...form, label: e.target.value })}
+                placeholder="例: 主管, 法務審稿員"
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                用途描述 <span className="text-red-500">*</span>
+                <span className="text-gray-400 ml-1">(一句話、出現在工具提示)</span>
+              </label>
+              <input
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                placeholder="例: 審視員工方案、做最終決策"
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                可用工具 <span className="text-gray-400 ml-1">(done 永遠 ON、不顯示)</span>
+              </label>
+              <div className="space-y-1.5 bg-white rounded-lg border border-gray-200 p-3">
+                {selectableTools.map(t => (
+                  <label key={t.id} className="flex items-start gap-2 cursor-pointer hover:bg-gray-50 -mx-1 px-1 py-0.5 rounded">
+                    <input
+                      type="checkbox"
+                      checked={form.tools.includes(t.id)}
+                      onChange={() => toggleTool(t.id)}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-mono text-gray-800">{t.id}</div>
+                      <div className="text-[11px] text-gray-500">{t.description}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-medium text-gray-600">
+                  System Prompt <span className="text-red-500">*</span>
+                  <span className="text-gray-400 ml-1">(role 看到的第一條指令、至少 30 字)</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={applyTemplate}
+                  className="text-[11px] px-2 py-0.5 rounded border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+                >
+                  使用範本
+                </button>
+              </div>
+              <textarea
+                value={form.system_prompt}
+                onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+                placeholder="點「使用範本」可填入含『最高優先級違規規則』的起手範本、然後改成你要的角色"
+                rows={12}
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-xs font-mono outline-none focus:border-indigo-400"
+              />
+              <p className="text-[11px] text-gray-500 mt-1">
+                💡 強烈建議含「最高優先級違規規則」段落(避免 LLM 寫長 prose 不呼工具的死循環)。
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={cancelForm}
+                className="px-3 py-1.5 text-xs rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={submit}
+                disabled={saving}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+                {editingId ? '儲存' : '建立'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 內建 role */}
+      <div className="mb-3">
+        <div className="text-[11px] uppercase font-semibold text-gray-400 mb-1.5 tracking-wider">內建角色(5 個、不可改不可刪)</div>
+        {loading ? (
+          <div className="text-xs text-gray-400 italic">載入中...</div>
+        ) : (
+          <div className="space-y-1.5">
+            {builtins.map(r => (
+              <div key={r.role_id} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-mono text-gray-800">{r.role_id}</span>
+                      <span className="text-xs text-gray-600">— {r.label}</span>
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">{r.description}</div>
+                    <div className="text-[11px] text-gray-400 mt-0.5 font-mono truncate">tools: {r.tools.join(', ')}</div>
+                  </div>
+                  <button
+                    onClick={() => setExpandedSP(expandedSP === r.role_id ? null : r.role_id)}
+                    className="text-[11px] px-2 py-0.5 rounded border border-gray-200 text-gray-600 hover:bg-white"
+                  >
+                    {expandedSP === r.role_id ? '收起' : '看 prompt'}
+                  </button>
+                </div>
+                {expandedSP === r.role_id && (
+                  <pre className="mt-2 text-[10px] font-mono bg-white border border-gray-200 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto">
+                    {r.system_prompt}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 自訂 role */}
+      <div>
+        <div className="text-[11px] uppercase font-semibold text-gray-400 mb-1.5 tracking-wider">
+          自訂角色({customs.length} 個)
+        </div>
+        {customs.length === 0 ? (
+          <div className="text-xs text-gray-400 italic py-2">
+            尚無自訂角色。點上方「新增角色」、或讓 AI 助手用 <code className="bg-gray-100 px-1 rounded">create_subagent_role</code> 工具幫你建。
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            {customs.map(r => (
+              <div key={r.role_id} className="rounded-lg border border-indigo-200 bg-indigo-50/30 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-mono text-indigo-900">{r.role_id}</span>
+                      <span className="text-xs text-indigo-700">— {r.label}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">自訂</span>
+                    </div>
+                    <div className="text-[11px] text-gray-600 mt-0.5">{r.description}</div>
+                    <div className="text-[11px] text-gray-400 mt-0.5 font-mono truncate">tools: {r.tools.join(', ')}</div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setExpandedSP(expandedSP === r.role_id ? null : r.role_id)}
+                      className="text-[11px] px-2 py-0.5 rounded border border-gray-200 text-gray-600 hover:bg-white"
+                    >
+                      {expandedSP === r.role_id ? '收起' : '看 prompt'}
+                    </button>
+                    <button
+                      onClick={() => startEdit(r)}
+                      className="p-1 text-indigo-600 hover:bg-indigo-100 rounded"
+                      title="編輯"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => onDelete(r)}
+                      disabled={deletingId === r.role_id}
+                      className="p-1 text-red-600 hover:bg-red-100 rounded disabled:opacity-50"
+                      title="刪除"
+                    >
+                      {deletingId === r.role_id
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Trash2 className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+                {expandedSP === r.role_id && (
+                  <pre className="mt-2 text-[10px] font-mono bg-white border border-gray-200 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto">
+                    {r.system_prompt}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
 function SkillPackagesSection() {
   const [packages, setPackages] = useState<SkillPackage[]>([])
   const [loading, setLoading] = useState(true)
@@ -924,6 +1313,9 @@ function WebSearchSection() {
   const [origHasKey, setOrigHasKey] = useState(false)
   const [origEnabled, setOrigEnabled] = useState(false)
   const [origVerbose, setOrigVerbose] = useState(false)
+  // 搜尋深度預設(advanced vs basic);Atlas 預設 true(深度模式)。
+  const [deepMode, setDeepMode] = useState(true)
+  const [origDeepMode, setOrigDeepMode] = useState(true)
 
   useEffect(() => {
     (async () => {
@@ -933,6 +1325,7 @@ function WebSearchSection() {
         setHasKey(s.has_key); setOrigHasKey(s.has_key)
         setEnabled(s.web_search_enabled); setOrigEnabled(s.web_search_enabled)
         setVerbose(s.web_search_full_content_default); setOrigVerbose(s.web_search_full_content_default)
+        setDeepMode(s.web_search_deep_default); setOrigDeepMode(s.web_search_deep_default)
       } catch (e) { toast.error((e as Error).message) }
       finally { setLoading(false) }
     })()
@@ -941,7 +1334,8 @@ function WebSearchSection() {
   const dirty =
     apiKey.length > 0 ||            // 使用者輸入了新 key
     enabled !== origEnabled ||
-    verbose !== origVerbose
+    verbose !== origVerbose ||
+    deepMode !== origDeepMode
 
   const handleSave = async () => {
     setSaving(true)
@@ -949,12 +1343,14 @@ function WebSearchSection() {
       const patch: WebSearchSettingsInput = {
         web_search_enabled: enabled,
         web_search_full_content_default: verbose,
+        web_search_deep_default: deepMode,
       }
       if (apiKey.trim()) patch.tavily_api_key = apiKey.trim()
       const saved = await saveWebSearchSettings(patch)
       setHasKey(saved.has_key); setOrigHasKey(saved.has_key)
       setOrigEnabled(saved.web_search_enabled)
       setOrigVerbose(saved.web_search_full_content_default)
+      setOrigDeepMode(saved.web_search_deep_default)
       setApiKey('')  // 儲存完清空輸入，避免使用者以為要重填
       toast.success('網路搜尋設定已儲存')
     } catch (e) { toast.error((e as Error).message) }
@@ -1071,6 +1467,35 @@ function WebSearchSection() {
                 }`} />
               </button>
             </div>
+
+            {/* 深度搜尋模式 toggle */}
+            <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+              <div>
+                <div className="text-sm font-medium text-gray-800">深度搜尋模式</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {deepMode
+                    ? '已啟用 — Tavily advanced mode、品質好 5-10x、AI 助手 / Skill / Subagent 全部受惠'
+                    : '未啟用 — Tavily basic mode、簡單查詢用、研究類任務不建議'}
+                </div>
+                <div className="text-[11px] text-amber-600 mt-1 font-medium">
+                  ⚠️ Tavily credit 用量 2x、但深度研究品質提升大;
+                  Atlas 定位深度研究、預設 ON。
+                </div>
+                <div className="text-[11px] text-gray-500 mt-0.5">
+                  💡 影響範圍:全域 — AI 助手 chat、TG bot、Skill 節點、Subagent 節點都會用此預設
+                </div>
+              </div>
+              <button
+                onClick={() => setDeepMode(!deepMode)}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+                  deepMode ? 'bg-cyan-500' : 'bg-gray-300'
+                }`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                  deepMode ? 'translate-x-5' : 'translate-x-0'
+                }`} />
+              </button>
+            </div>
           </div>
 
           {dirty && (
@@ -1087,6 +1512,282 @@ function WebSearchSection() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+
+// ── computer_use 自動縮視窗設定 ────────────────────────────────────────────────
+function ComputerUseAutoMinimizeSection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [toggling, setToggling] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/backend/settings/auto-minimize-for-computer-use')
+      .then(r => r.json())
+      .then(d => setEnabled(!!d.enabled))
+      .catch(() => setEnabled(false))
+  }, [])
+
+  const toggle = async () => {
+    if (enabled === null || toggling) return
+    setToggling(true)
+    const next = !enabled
+    try {
+      const res = await fetch('/api/backend/settings/auto-minimize-for-computer-use', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setEnabled(!!data.enabled)
+      toast.success(next ? '已啟用 — workflow 開跑會自動縮小視窗' : '已關閉')
+    } catch (e) {
+      toast.error('設定切換失敗')
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  if (enabled === null) return null
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
+          <Shield className="w-5 h-5 text-amber-700" />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">桌面自動化執行體驗</h2>
+          <p className="text-sm text-gray-500">含 computer_use 節點的工作流啟動時的視窗行為</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="p-5 flex items-start justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-sm font-semibold text-gray-800">
+                工作流啟動時自動縮小前景視窗
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              當你按執行 / 排程觸發一個含 <code className="bg-gray-100 px-1 rounded">computer_use</code> 節點的工作流時、
+              自動把當下的前景視窗(通常就是 V5 瀏覽器)縮到最小、避免擋住自動化的目標 app。
+              工作流結束(成功 / 失敗)後會自動還原。並發多個工作流時用 ref-count 處理、不會反覆 minimize/restore。
+            </p>
+          </div>
+          <button
+            onClick={toggle}
+            disabled={toggling}
+            className={cn(
+              'relative w-12 h-7 rounded-full transition-colors shrink-0',
+              enabled ? 'bg-amber-500' : 'bg-gray-300',
+              toggling && 'opacity-50 cursor-not-allowed'
+            )}
+          >
+            <span className={cn(
+              'absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform',
+              enabled ? 'translate-x-5' : 'translate-x-0'
+            )} />
+          </button>
+        </div>
+        <div className="px-5 py-3 bg-gray-50/50 text-xs text-gray-500 space-y-1 border-t border-gray-100">
+          <p>• 預設關閉、要用再開,純 Windows 平台有效(Mac/Linux backend 會自動跳過)</p>
+          <p>• 只縮「當下前景視窗」、不會強制關使用者其他工作中的視窗</p>
+          <p>• 失敗(找不到前景或 API 例外)會 log warning 不擋 workflow 執行</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+// ── AI 助手長期記憶 Section ───────────────────────────────────────────────────
+function MemorySection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [aggressive, setAggressive] = useState(false)
+  const [facts, setFacts] = useState<{ key: string; value: string; category: string; source: string }[]>([])
+  const [busy, setBusy] = useState(false)
+
+  const loadFacts = () => {
+    fetch('/api/backend/memory/facts')
+      .then(r => r.json()).then(d => setFacts(d.facts || [])).catch(() => {})
+  }
+  useEffect(() => {
+    fetch('/api/backend/settings/memory')
+      .then(r => r.json())
+      .then(d => { setEnabled(!!d.enabled); setAggressive(!!d.aggressive) })
+      .catch(() => setEnabled(true))
+    loadFacts()
+  }, [])
+
+  const put = async (payload: { enabled?: boolean; aggressive?: boolean }) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/backend/settings/memory', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      })
+      if (!res.ok) throw new Error()
+      const d = await res.json()
+      setEnabled(!!d.enabled); setAggressive(!!d.aggressive)
+      toast.success('記憶設定已更新')
+    } catch { toast.error('設定切換失敗') } finally { setBusy(false) }
+  }
+
+  const delFact = async (key: string) => {
+    try {
+      await fetch(`/api/backend/memory/facts/${encodeURIComponent(key)}`, { method: 'DELETE' })
+      setFacts(f => f.filter(x => x.key !== key)); toast.success(`已忘記「${key}」`)
+    } catch { toast.error('刪除失敗') }
+  }
+
+  if (enabled === null) return null
+  const Toggle = ({ on, onClick, color = 'bg-violet-500', disabled = false }: { on: boolean; onClick: () => void; color?: string; disabled?: boolean }) => (
+    <button onClick={onClick} disabled={disabled}
+      className={cn('relative w-12 h-7 rounded-full transition-colors shrink-0', on ? color : 'bg-gray-300', disabled && 'opacity-50 cursor-not-allowed')}>
+      <span className={cn('absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform', on ? 'translate-x-5' : 'translate-x-0')} />
+    </button>
+  )
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center text-xl">🧠</div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">AI 助手長期記憶</h2>
+          <p className="text-sm text-gray-500">記得你的偏好 / 事實,跨對話「越用越懂你」</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {/* 主開關 */}
+        <div className="p-5 flex items-start justify-between gap-4 border-b border-gray-100">
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">開啟長期記憶</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              開 → AI 助手能記住你明確要它記的偏好 / 事實(走確認),每次對話自動參考。
+              關 → 不載入記憶工具、不注入記憶(已存的不刪、之後再開仍在)。敏感資料(密碼 / 金鑰)一律拒記。
+            </p>
+          </div>
+          <Toggle on={enabled} onClick={() => put({ enabled: !enabled })} disabled={busy} />
+        </div>
+
+        {/* 激進萃取開關 */}
+        <div className={cn('p-5 flex items-start justify-between gap-4 border-b border-gray-100', !enabled && 'opacity-40 pointer-events-none')}>
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">激進學習(自動推斷偏好)</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              開 → 每次對話結束自動「推斷」你的偏好存成<b>低信心(推測)</b>記憶、不必你明說「記下」,越用越懂最快;
+              但 AI 可能過度推斷 / 記錯(都標(推測)、你可隨時刪)。關 → 只記你明確說「記下」的事(保守、零誤記)。
+            </p>
+            <p className="text-[11px] text-amber-600 mt-1">⚠️ 預設關閉。要 AI 更積極學你再開。</p>
+          </div>
+          <Toggle on={aggressive} onClick={() => put({ aggressive: !aggressive })} color="bg-amber-500" disabled={busy || !enabled} />
+        </div>
+
+        {/* 記憶清單 */}
+        <div className="px-5 py-4 bg-gray-50/50">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-gray-600">目前記得 {facts.length} 筆</span>
+            <button onClick={loadFacts} className="text-xs text-violet-600 hover:underline">重新整理</button>
+          </div>
+          {facts.length === 0 ? (
+            <p className="text-xs text-gray-400">還沒記任何事。對話中跟 AI 說「記住我…」就會出現在這。</p>
+          ) : (
+            <div className="space-y-1.5">
+              {facts.map(f => (
+                <div key={f.key} className="flex items-center gap-2 text-xs bg-white rounded-lg border border-gray-100 px-3 py-2">
+                  <span className="px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 shrink-0">{f.category}</span>
+                  <span className="font-medium text-gray-700 shrink-0">{f.key}</span>
+                  <span className="text-gray-500 truncate flex-1">= {f.value}{f.source === 'inferred' && <span className="text-amber-500">(推測)</span>}</span>
+                  <button onClick={() => delFact(f.key)} className="text-gray-300 hover:text-red-500 shrink-0" title="忘記這條">🗑</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+function SelfHealSection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [maxAttempts, setMaxAttempts] = useState(2)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/backend/settings/self-heal')
+      .then(r => r.json())
+      .then(d => { setEnabled(!!d.enabled); setMaxAttempts(d.max_attempts || 2) })
+      .catch(() => setEnabled(false))
+  }, [])
+
+  const put = async (payload: { enabled?: boolean; max_attempts?: number }) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/backend/settings/self-heal', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      })
+      if (!res.ok) throw new Error()
+      const d = await res.json()
+      setEnabled(!!d.enabled); setMaxAttempts(d.max_attempts || 2)
+      toast.success('自我修復設定已更新')
+    } catch { toast.error('設定切換失敗') } finally { setBusy(false) }
+  }
+
+  if (enabled === null) return null
+  const Toggle = ({ on, onClick, disabled = false }: { on: boolean; onClick: () => void; disabled?: boolean }) => (
+    <button onClick={onClick} disabled={disabled}
+      className={cn('relative w-12 h-7 rounded-full transition-colors shrink-0', on ? 'bg-teal-500' : 'bg-gray-300', disabled && 'opacity-50 cursor-not-allowed')}>
+      <span className={cn('absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform', on ? 'translate-x-5' : 'translate-x-0')} />
+    </button>
+  )
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-teal-100 flex items-center justify-center text-xl">🔧</div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">工作流自我修復</h2>
+          <p className="text-sm text-gray-500">步驟失敗時,讓 AI 讀 log + 改 YAML + 重跑,自動修到好</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {/* 主開關 */}
+        <div className="p-5 flex items-start justify-between gap-4 border-b border-gray-100">
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">開啟自我修復</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              開 → 某步驟失敗(重試耗盡)時,AI 助手自動讀執行 log、比對自己寫的 YAML、找出錯誤、改好、從失敗步重跑;
+              到上限仍沒修好才轉人工決策。關(預設)→ 失敗即停下等你決定。
+            </p>
+            <p className="text-[11px] text-amber-600 mt-1">⚠️ 預設關閉。自動改 YAML 有風險,確認要無人值守再開。</p>
+          </div>
+          <Toggle on={enabled} onClick={() => put({ enabled: !enabled })} disabled={busy} />
+        </div>
+
+        {/* 次數上限 */}
+        <div className={cn('p-5 flex items-center justify-between gap-4', !enabled && 'opacity-40 pointer-events-none')}>
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-gray-800">最多自動修復次數</span>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              單次執行最多自動嘗試幾輪「診斷 → 改 YAML → 重跑」。到上限仍失敗就轉人工。範圍 1~5。
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button onClick={() => put({ max_attempts: Math.max(1, maxAttempts - 1) })} disabled={busy || maxAttempts <= 1}
+              className="w-8 h-8 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40">−</button>
+            <span className="w-8 text-center text-sm font-semibold text-gray-800">{maxAttempts}</span>
+            <button onClick={() => put({ max_attempts: Math.min(5, maxAttempts + 1) })} disabled={busy || maxAttempts >= 5}
+              className="w-8 h-8 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40">＋</button>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1252,7 +1953,7 @@ export default function SettingsPage() {
   const [model, setModel] = useState('')
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
   const [thinking, setThinking] = useState<'auto' | 'on' | 'off'>('off')
-  const [numCtx, setNumCtx] = useState<number>(16384)
+  const [numCtx, setNumCtx] = useState<number>(32768)
   const [geminiThinking, setGeminiThinking] = useState<'off' | 'auto' | 'low' | 'medium' | 'high'>('off')
   const [antThinking, setAntThinking] = useState<'off' | 'on'>('off')
   // ── 副模型 state(空 provider = 不啟用)──
@@ -1299,7 +2000,7 @@ export default function SettingsPage() {
       setModel(cur.model)
       setOllamaUrl(cur.ollama_base_url || 'http://localhost:11434')
       setThinking(cur.ollama_thinking || 'off')
-      setNumCtx(cur.ollama_num_ctx || 16384)
+      setNumCtx(cur.ollama_num_ctx || 32768)
       setGeminiThinking(cur.gemini_thinking || 'off')
       setAntThinking(cur.anthropic_thinking || 'off')
       // 載入副模型(provider 有值 = 已啟用)
@@ -1702,7 +2403,7 @@ export default function SettingsPage() {
                   Context 長度 (num_ctx)
                 </label>
                 <p className="text-xs text-gray-500 mb-3">
-                  模型一次能處理的 token 數。越大越不容易截斷，但吃更多 VRAM 且變慢。預設 16384 通常足夠。
+                  模型一次能處理的 token 數。越大越不容易截斷，但吃更多 VRAM 且變慢。本應用 AI 助手 system prompt 約 17~22k tokens，預設 32768 才不會被截斷；若 VRAM 不足可調低，但低於 32768 在規劃工作流時可能斷句。
                 </p>
                 <div className="grid grid-cols-4 gap-2 mb-3">
                   {[8192, 16384, 32768, 65536].map((v) => (
@@ -1723,7 +2424,7 @@ export default function SettingsPage() {
                 <input
                   type="number"
                   value={numCtx}
-                  onChange={(e) => setNumCtx(Math.max(2048, Math.min(262144, parseInt(e.target.value) || 16384)))}
+                  onChange={(e) => setNumCtx(Math.max(2048, Math.min(262144, parseInt(e.target.value) || 32768)))}
                   min={2048}
                   max={262144}
                   step={2048}
@@ -1946,6 +2647,9 @@ export default function SettingsPage() {
           }
         }} />
 
+        {/* Subagent 角色管理 */}
+        <SubagentRolesSection />
+
         {/* Skill Packages */}
         <SkillPackagesSection />
 
@@ -1957,6 +2661,14 @@ export default function SettingsPage() {
 
         {/* Skill Sandbox (V3) */}
         <SandboxSection />
+
+        {/* computer_use 自動縮視窗 */}
+        <ComputerUseAutoMinimizeSection />
+
+        {/* AI 助手長期記憶 */}
+        <MemorySection />
+
+        <SelfHealSection />
 
         {/* 提示 */}
         <div className="mt-4 text-xs text-gray-500 space-y-1">

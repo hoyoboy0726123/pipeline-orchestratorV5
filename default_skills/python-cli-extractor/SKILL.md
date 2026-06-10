@@ -40,7 +40,7 @@ Happy path 大致:冪等檢查(1)→ 模式偵測(0 個 tool、純讀 prompt)→
 2. **不要重覆掃描** — `**/*.py` 掃過就把結果記在心裡、下一輪別再掃一次
 3. **模式偵測不花 ask_user** — Step 0 是讀 system prompt、不是問使用者。省下的 ask_user 額度留給 A/B、subcommand、參數
 4. **碰到 retry(失敗歷史注入)→ 先讀失敗歷史內的錯誤訊息、直接修**:
-   - 訊息含 `ModuleNotFoundError` → 直接 `pip install <pkg>`、不要回頭問 A/B
+   - 訊息含 `ModuleNotFoundError` → 直接 `done(success=false, missing_packages=["<pkg>"])`(系統會跳確認、裝後自動重跑)、**不要自己 pip install**、不要回頭問 A/B
    - 訊息含 `os.add_dll_directory` / `delvewheel` → 上次 run_shell 含 PYTHONPATH、拿掉重發
    - 訊息含 `command not found` → 改用對應 Linux 工具
    - 都不是上述 → 跑 Step −1 冪等檢查、再決定下一步
@@ -92,7 +92,7 @@ else:
 2. **絕對不要設 `PYTHONPATH` 指向使用者 venv**(`...\.venv\Lib\site-packages`):
    - 那是 Windows 二進位、Linux 容器 import 就死
    - 容器**已預裝 pandas / openpyxl / requests / pillow** 等常用套件、**直接 import 就好**
-   - 真有缺套件 → 用 `run_shell("pip install <pkg>")` 在容器內裝、不要拿使用者 venv 補
+   - 真有缺套件 → **不要自己 `pip install`**、直接 `done(success=false, missing_packages=["<pkg>"])`,系統會跳「允許安裝」確認、使用者同意後裝到容器、自動重跑(也別拿使用者 venv 補)
 3. **`subprocess` 呼叫不要打 `powershell` / `cmd` / `where`**、只能用 Linux 工具
 4. **`run_shell` 範例**(專案在 `external_projects/AI-/`):
    ```bash
@@ -103,14 +103,14 @@ else:
    ```
 5. **🪜 碰到 ImportError → 立即爬樓梯、不要回到 Step 0/1/3 重來**
 
-   ⚠️ **絕對守則**:run_shell 跑 main_CLI.py 撞 ImportError、**下一個 tool 必須是直接修復(pip install / 改命令)**、不要重 scan、不要重問 host/sandbox、不要重問 A/B、不要 read_file 看程式碼。retry 時看到失敗歷史有 `ModuleNotFoundError` 的、直接從這個 SOP 第一階開始、跳過 Step 0/1/3。
+   ⚠️ **絕對守則**:run_shell 跑 main_CLI.py 撞 ImportError、**下一個 tool 必須是依下方 SOP 對應處理(缺套件 → `done(missing_packages)` 讓系統裝、PYTHONPATH 牽連 → 改命令)**、不要重 scan、不要重問 host/sandbox、不要重問 A/B、不要 read_file 看程式碼。retry 時看到失敗歷史有 `ModuleNotFoundError` 的、直接從這個 SOP 第一階開始、跳過 Step 0/1/3。
 
    ### SOP(依錯誤訊息直接對應)
 
-   **訊息含 `ModuleNotFoundError: No module named 'X'`** → 容器沒裝
-   - 立刻發 `run_shell("pip install X")`(同 reply 內只發這一個 tool)
-   - 裝完成功 → 重跑原本的 main_CLI.py run_shell
-   - 裝完仍失敗(例如 X 需要編譯 C 套件)→ 進「Windows-only 判定」階
+   **訊息含 `ModuleNotFoundError: No module named 'X'`** → 容器沒裝該套件
+   - ⚠️ **不要自己 `pip install`**(executor 會攔截、你也裝不進系統管控的環境)。直接 `done(success=false, missing_packages=["X"])`。
+   - 系統會跳出「✅ 允許安裝 X」確認給使用者、同意後裝到容器、**自動重跑這步**(你不用管安裝、重跑後該套件就在了)。
+   - 重跑後 X 仍 import 失敗(例如 X 需編譯 C 套件、linux 裝不起來)→ 進「Windows-only 判定」階
 
    **訊息含 `os.add_dll_directory` 不存在 / `_delvewheel_patch_` 字樣** → user 的 Windows venv 被 PYTHONPATH 灌進來
    - 檢查上一次 run_shell 是不是含 `PYTHONPATH=...\.venv\...`
@@ -264,6 +264,19 @@ for f in files[:50]:  # 只 print 前 50 個、再多沒意義
 
 **控制 read 數量**:一次最多 read 10 個檔(每個 < 500 行);若專案大、優先 read entry + import depth ≤ 2 的模組、不要全 read。
 
+### 🚨 Windows-only 執行期依賴預檢(sandbox 模式:**讀完源碼後立刻做、別等到跑才發現**)
+
+讀源碼時**除了看 import、也要看函式體內的執行期呼叫**。若核心功能**靠 Windows-only 機制**才能完成,Linux 沙盒容器永遠跑不了 —— 這時**不要往下問參數、不要寫 main_CLI.py、不要試跑**,直接走下方「Windows-only 判定階」`done(success=false)` 引導使用者切 host。早期 fail-fast + 明確引導,遠勝填完參數後在最後一刻撞 `FileNotFoundError: 'powershell'`。
+
+**偵測訊號**(出現任一、且該功能核心就靠它):
+- `subprocess` / `os.system` / `os.popen` 字串含 `powershell` / `pwsh` / `cmd /c` / `wmic` / `reg ` / `where ` / 某個 Windows `.exe`
+- `import winrt` / `Windows.Media.*`(WinRT)、`win32com` / `win32api` / `pywin32` / `comtypes`、`ctypes.windll` / `ctypes.WinDLL`
+- 寫死的 Windows 系統路徑(`C:\Windows\System32\...`)
+
+> 範例(就是這次 SSD 失敗的型態):OCR 工具用 `subprocess.run(["powershell", ... Windows.Media.Ocr ...])` 做辨識 → 沙盒沒 powershell / WinRT → **預檢階段就判 Windows-only**,直接告知「請到設定頁切 host 重跑」,**不要**再 `ask_user` 問關鍵字 / 圖片路徑。
+
+⚠️ **分辨核心 vs 順手**:OCR 工具的辨識本體靠 WinRT = 核心 → 判 Windows-only。若只是某非必要分支用到、主功能不靠它 → 照常解耦、那分支略過即可、別誤判整個專案。
+
 **識別 GUI 框架**(看 import):
 | import | 框架 |
 |---|---|
@@ -386,6 +399,12 @@ ask_user({
   "context": "選了之後我會跑 python main_CLI.py <你選的> --input ... 。下次同樣工作流跑、會自動 replay 你的選擇、不再問。"
 })
 ```
+
+⚠️ **`options` 一定要填、每個 subcommand 列一項、絕對不可留空 `[]`**(最常見錯誤、務必遵守):
+前端 / TG 是靠 `options` 陣列把「可點選的功能按鈕」顯示給使用者。**options 留空 → 使用者只看到「自由輸入」、完全不知道有哪些功能可選**,等於沒列功能、體驗很差。
+- main_CLI.py 有幾個 subcommand,options 就要有幾項,格式 `"<subcommand>: <一句話說明>"`
+- 例:main_CLI.py 有 `random` / `sequence` → **options 必須是** `["random: 隨機產生數字", "sequence: 產生等差序列"]`、不可寫 `[]`
+- 你剛剛 Step 2 掃描識別出的「可抽出功能清單」裡每一項,都要變成一個 option
 
 如果使用者選項需要額外參數(input 路徑、輸出位置等),**再用一次 ask_user** 問:
 ```

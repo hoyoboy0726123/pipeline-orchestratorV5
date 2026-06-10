@@ -83,4 +83,4 @@ steps:
   - name: Outlook 自動化 1
     outlook_automation: true
     outlook_template: send_with_attachment
-    outlook_params: {"to":"wilson_bai@asus.com","subject":"PTT分析報告","body":"請查收本日分析結果"}
+    outlook_params: {"to":"YOUR_EMAIL@example.com","subject":"PTT分析報告","body":"請查收本日分析結果"}

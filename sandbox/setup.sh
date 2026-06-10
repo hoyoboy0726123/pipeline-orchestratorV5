@@ -25,7 +25,7 @@ for arg in "${@:2}"; do
 done
 if [[ -z "$PROJECT_DIR" ]]; then
     echo "用法：$0 <project_dir_in_wsl> [--rebuild]"
-    echo "範例：$0 /mnt/c/Users/GU605_PR_MZ/pipeline-orchestratorV5"
+    echo "範例：$0 /mnt/c/Users/<you>/pipeline-orchestratorV5"
     echo "改了 Dockerfile / requirements.txt 要重裝：$0 ... --rebuild"
     exit 1
 fi
@@ -219,10 +219,10 @@ try:
 except Exception as e:
     print(f'  ⚠ crawl4ai 未安裝（{e.__class__.__name__}）— setup_sandbox.bat --rebuild')
 try:
-    import trafilatura, html2text
-    print('  ✓ trafilatura + html2text')
+    import trafilatura, markdownify
+    print('  ✓ trafilatura + markdownify')
 except Exception as e:
-    print(f'  ⚠ trafilatura / html2text 缺：{e}')
+    print(f'  ⚠ trafilatura / markdownify 缺：{e}')
 # 用 Playwright 自己 API 拿 chromium binary 路徑（最可靠；版本不同子目錄名稱會變）
 try:
     from playwright.sync_api import sync_playwright

@@ -8,6 +8,7 @@ Skill 模式：LLM 解讀自然語言任務描述，自主撰寫並執行程式�
 """
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -29,7 +30,7 @@ log = logging.getLogger(__name__)
 from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 
 SKILL_TOOL_TIMEOUT = 60          # 預設值：給沒透過 execute_step_with_skill 流程的呼叫者用
-SKILL_TOOL_TIMEOUT_MAX = 180     # 動態 tool timeout 上限（避免 step.timeout 開超大時 run_python 永遠不被砍）
+SKILL_TOOL_TIMEOUT_MAX = 300     # 動態 tool timeout 上限(2026-05-24 從 180→300:node build_pptx 等任務常超 180s、放寬避免 SIGTERM)
 SKILL_MAX_ITERATIONS = 20  # 互動式 skill(python-cli-extractor:問 A-B/subcommand/參數 + 掃描大專案找函式簽名 + GUI 解耦 + retry 補套件 + 重跑)耗 iter 多;較不聰明的模型(Gemma 等)還會空回覆 / 多繞、15 仍會撞牆。20 留足容錯。純運算 skill 照樣 4-5 輪結束
 
 # 連續 N 輪 LLM 口頭說「完成」但沒下 <tool>done</tool> → 強制 done 收尾
@@ -53,6 +54,16 @@ def _looks_like_done(reply: str) -> bool:
 # 保留最近 KEEP_RECENT_FULL 輪的完整結果、更早的截首尾各 PREVIEW_CHARS 字
 SKILL_CONTEXT_KEEP_RECENT_FULL = 3
 SKILL_CONTEXT_PREVIEW_CHARS = 200
+
+# Prose-before-tool 守門(backport 自 subagent_runner、task #160)。
+# native FC 下「prose before tool」= AIMessage.content（伴隨 tool_calls 的長篇文字）。
+# 共用 subagent 的環境變數 SUBAGENT_PROSE_CAP_MODE(soft/enforce/off、預設 soft),
+# 不另開旗標。實測 Sonnet 4.6 在 skill loop 單輪寫 5 萬字 parser → 拖斷連線 → 燒額度。
+_SKILL_PROSE_BEFORE_TOOL_THRESHOLD = 3000   # 跟 subagent 同閾值
+_SKILL_PROSE_BEFORE_TOOL_LIMIT = 2          # 連 N 輪違規才中止(enforce)
+_SKILL_PROSE_CAP_MODE = (os.environ.get("SUBAGENT_PROSE_CAP_MODE", "soft").strip().lower())
+if _SKILL_PROSE_CAP_MODE not in ("soft", "enforce", "off"):
+    _SKILL_PROSE_CAP_MODE = "soft"
 
 
 # ── 錯誤分類 + 對症提示 ───────────────────────────────────────────────────────
@@ -219,15 +230,19 @@ def _compute_tool_timeout(step_timeout: int) -> int:
     """從 step.timeout 推導「單次 run_python / run_shell 上限秒數」。
     使用者已用 step.timeout 標註過該步驟大概要多久、tool 上限自然該跟著放寬。
 
-    公式：min(180, max(60, step.timeout // 5))
-    - step.timeout=300（短任務） → 60s
-    - step.timeout=600（skill 節點預設） → 120s
-    - step.timeout=1200（爬蟲類偏大 budget）→ 180s（封頂）
+    公式(2026-05-24 寬鬆化):min(300, max(90, step.timeout // 3))
+    - step.timeout=270(短任務)  → 90s
+    - step.timeout=300(預設)    → 100s
+    - step.timeout=600          → 200s
+    - step.timeout=900+         → 300s(封頂)
 
-    為什麼 step.timeout/5：skill agent 預期會跑 SKILL_MAX_ITERATIONS=15 次工具呼叫、
-    /5 留出 1/3 ratio 給 LLM 思考 + tool retry buffer，不會把整個 step.timeout 用光。
+    寬鬆化原因(取代 //5 60s 公式):
+    - node build_pptx.js 生 9 slide 含複雜 shape 超 60s → SIGTERM、step fail
+    - npm install 偶發 > 60s
+    - 60s 上限對「複雜但合理」的單次 tool 太緊、user 體感卡住
+    - 改 //3 仍留 2/3 budget 給 LLM 思考 + 多次 tool retry,不會吃光 step.timeout
     """
-    return min(SKILL_TOOL_TIMEOUT_MAX, max(60, int(step_timeout) // 5))
+    return min(SKILL_TOOL_TIMEOUT_MAX, max(90, int(step_timeout) // 3))
 ASK_USER_MAX = 6          # 一個 skill 節點最多 ask_user 次數（ask_mode ON 時取消）。互動式 skill（python-cli-extractor 要問 模式/A-B/subcommand/參數 ≥4 次）3 太緊跑不完、6 留容錯
 ASK_USER_TIMEOUT = 3600   # 單次等待使用者回答的逾時（秒）
 
@@ -236,10 +251,10 @@ ASK_USER_TIMEOUT = 3600   # 單次等待使用者回答的逾時（秒）
 #   OFF：輕量 — answer + URL 清單（~500 字）
 #   ON： 完整 — answer + URL + 每則文章完整原文（~15000 字）
 #        由 Tavily 端直接回完整內容（include_raw_content=True），Agent 不用自己寫爬蟲
-WEB_SEARCH_MAX_PER_STEP = 5             # 單一 skill step 最多呼叫次數
+WEB_SEARCH_MAX_PER_STEP = 8             # 單一 skill step 最多呼叫次數(深度研究要拆多子題各搜、5→8)
 WEB_SEARCH_OUTPUT_CHAR_CAP_LIGHT = 2000 # OFF 模式：輕量硬上限
-WEB_SEARCH_OUTPUT_CHAR_CAP_FULL = 20000 # ON 模式：完整內容硬上限（雲端 context 足夠）
-WEB_SEARCH_PER_RESULT_FULL_CHARS = 3000 # ON 模式：每則原文截斷長度
+WEB_SEARCH_OUTPUT_CHAR_CAP_FULL = 30000 # ON 模式：完整內容硬上限(放寬 20K→30K 容納更多來源)
+WEB_SEARCH_PER_RESULT_FULL_CHARS = 4000 # ON 模式：每則原文截斷長度(3000→4000)
 WEB_SEARCH_TITLE_CHARS = 100            # Title 顯示最大長度
 
 
@@ -259,10 +274,18 @@ def deliver_ask_user_answer(run_id: str, answer: str) -> bool:
 
 
 def get_pending_question(run_id: str) -> Optional[dict]:
-    """查詢某 run 目前是否正在等 ask_user 答案。"""
+    """查詢某 run 目前是否正在等 ask_user 答案。
+    回 {question, options, context}(不含 event);沒在等則回 None。
+    (2026-05-31 修:原本 pending 存在時 fall through 隱式回 None、害 GET /ask-user 永遠
+     pending=False、前端/API 查不到問題、自動化 resume 全卡死。)"""
     pending = _pending_questions.get(run_id)
     if not pending:
         return None
+    return {
+        "question": pending.get("question"),
+        "options": pending.get("options") or [],
+        "context": pending.get("context") or "",
+    }
 
 
 # ── Phase B: ask_mode 命令分類攔截（in-memory pending state）──
@@ -551,6 +574,36 @@ def _clean_env() -> dict:
     return env
 
 
+def _script_env() -> dict:
+    """script 節點專用環境(刻意與 V5 venv 脫鉤)。
+
+    設計決策(2026-06-01):script 節點未勾「使用虛擬環境」時,裸 `python` 走
+    **系統全域** Python,而非 V5 後端 venv —— 避免使用者腳本的依賴污染編排器自己的
+    執行環境。缺依賴就 loud fail(由使用者改用專案自帶 venv 解決)。
+    與 `_clean_env()`(skill/AI code 用、會導向 _SKILL_PYTHON)相反:這裡**防禦性移除**
+    V5 venv 的 bin 目錄與 active VIRTUAL_ENV 對 PATH 的影響,確保裸 `python` 不會落到 V5 venv。
+    """
+    env = os.environ.copy()
+    venv = env.pop("VIRTUAL_ENV", None)
+    env.pop("PYTHONHOME", None)
+    paths = env.get("PATH", "").split(os.pathsep)
+    drop = []
+    if venv:
+        drop.append(os.path.join(venv, "Scripts" if os.name == "nt" else "bin"))
+    skill_py = globals().get("_SKILL_PYTHON")
+    if skill_py:
+        d = os.path.dirname(skill_py)
+        if d:
+            drop.append(d)
+    if drop:
+        dropn = {os.path.normcase(os.path.normpath(p)) for p in drop}
+        paths = [p for p in paths if os.path.normcase(os.path.normpath(p)) not in dropn]
+    env["PATH"] = os.pathsep.join(paths)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 import re as _re
 
 
@@ -659,9 +712,10 @@ async def execute_step(
     Returns:
         ExecResult(exit_code, stdout, stderr)
     """
-    # 把指令開頭的 python / python3 / py 換成偵測到的可用 interpreter
-    # （避免 shell 解析到 PATH 上沒裝必要套件的那顆 python）
-    command = _rewrite_python_cmd(command)
+    # 設計決策(2026-06-01):script 節點**不**把裸 `python` 改寫成 V5 venv interpreter。
+    # 裸 `python` 走系統全域(見 _script_env);要用特定 venv 請在 batch 用該 venv 的
+    # 絕對路徑(UI「使用虛擬環境」勾選會自動填)。避免污染編排器自己的 venv。
+    # （skill / AI 生成 code 仍走 _SKILL_PYTHON,不受此影響。）
 
     # 多行 `python -c "..."` 在 Windows cmd 會被換行切斷 → 改寫成暫存 .py 執行
     command, _inline_tmp = _maybe_extract_multiline_python_c(command)
@@ -673,8 +727,8 @@ async def execute_step(
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
 
-    # 準備環境變數
-    env = _clean_env()
+    # 準備環境變數(script 節點專用:與 V5 venv 脫鉤、裸 python 走系統全域)
+    env = _script_env()
     cwd_arg: Optional[str] = None
     if working_dir:
         # 強制將工作目錄注入環境變數,供 stage 系列腳本主動讀取
@@ -882,6 +936,95 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
             Path(tmp_path).unlink(missing_ok=True)
 
 
+def _is_pip_install_cmd(cmd: str) -> bool:
+    """偵測 run_shell 命令是否在 pip install 套件(pip/pip3/python -m pip/uv pip + install)。
+    擋下後強制走 missing_dependency 使用者確認 —— skill 不准自己裝套件繞過確認。
+    只攔 install、不攔 pip list / pip show / pip --version 等查詢命令。"""
+    import re
+    if not cmd:
+        return False
+    return bool(re.search(
+        r'(^|[\s;&|(])(pip3?|python3?\s+-m\s+pip|uv\s+pip)\s+install\b',
+        cmd, re.IGNORECASE))
+
+
+# ── 共用 helper:native skill / subagent loop 都用,避免保護 drift ───────────────
+# (2026-06-01 重構:把「pip 安裝偵測 + 缺套件偵測」集中。涵蓋 run_shell command
+#  與 run_python code 內(subprocess/os.system/pip.main/['pip','install'])兩種繞法。)
+_PIP_IN_CODE_PATTERNS = [
+    r'\bpip3?\s+install\b',                          # os.system("pip install x") / !pip install
+    r'-m\s+pip\s+install\b',                         # python -m pip install
+    r'["\']pip3?["\']\s*,\s*["\']install["\']',      # subprocess([... 'pip','install' ...])
+    r'\bpip\.main\s*\(',                             # pip.main(['install',...])
+    r'\bensurepip\b',                                # ensurepip
+]
+_PKG_STOPWORDS = {
+    "pip", "pip3", "install", "python", "python3", "u", "upgrade", "user",
+    "q", "quiet", "m", "no", "cache", "dir", "r", "import", "subprocess",
+    "os", "system", "run", "check_call", "call", "popen", "main", "uv",
+}
+
+
+def _extract_pip_pkgs(text: str) -> list:
+    """從 pip install 命令 / code 片段抽套件名(去 flags / 版本 / 路徑)。
+    遇到不像套件名的 token(含 . ( 等 code 邊界)就停 —— 避免把 install 後整段 code 都當套件。"""
+    import re
+    if not text or "install" not in text:
+        return []
+    after = text.split("install", 1)[1]
+    out = []
+    for raw in re.split(r"[\s,]+", after):
+        tok = raw.strip().strip("'\"[](){};:")
+        if not tok:
+            continue
+        if tok.startswith("-"):   # flag(-q / -U / --no-cache-dir)→ 跳過、不中斷
+            continue
+        base = tok.split("==")[0].split(">")[0].split("<")[0].split("~")[0]
+        if (re.fullmatch(r"[A-Za-z][\w\-]*", base)
+                and base.lower() not in _PKG_STOPWORDS
+                and not base.endswith((".txt", ".cfg", ".toml", ".py"))):
+            if base not in out:
+                out.append(base)
+            # 原始 token 帶字串/命令結束標記(' " ) ;)→ run_python code 內的 pip、
+            # 套件清單到此為止(後面是程式碼、別把 result / print 等 identifier 當套件)
+            if any(c in raw for c in (")", "'", '"', ";")):
+                break
+        else:
+            break   # 遇到不像套件的 token(含 . ( 等 → code 邊界)→ 套件清單結束
+    return out[:5]
+
+
+def detect_pip_install(tc_name: str, tc_args) -> list:
+    """共用:偵測 run_shell command 或 run_python code 內的 pip install 企圖。
+    回偵測到的套件名 list(caller 應攔截、轉 missing_dependency / steering);空 list = 放行。
+    tc_args 接 dict 或 JSON 字串(native FC 兩種格式都處理)。"""
+    import re
+    if not isinstance(tc_args, dict):
+        try:
+            import json as _j
+            tc_args = _j.loads(tc_args) if (isinstance(tc_args, str) and tc_args.strip().startswith("{")) else {}
+        except Exception:
+            tc_args = {}
+    if tc_name == "run_shell":
+        cmd = str(tc_args.get("command") or tc_args.get("input") or "")
+        if _is_pip_install_cmd(cmd):
+            return _extract_pip_pkgs(cmd) or ["(未知套件)"]
+    elif tc_name == "run_python":
+        code = str(tc_args.get("code") or tc_args.get("input") or "")
+        if any(re.search(p, code, re.IGNORECASE) for p in _PIP_IN_CODE_PATTERNS):
+            return _extract_pip_pkgs(code) or ["(未知套件)"]
+    return []
+
+
+def detect_missing_module(result: str) -> list:
+    """共用:從 tool result 偵測 ModuleNotFoundError、回缺的套件名 list(或空)。"""
+    import re
+    if not result:
+        return []
+    m = re.search(r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]", result)
+    return [m.group(1).split(".")[0]] if m else []
+
+
 def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "",
                      tool_timeout: int = SKILL_TOOL_TIMEOUT) -> str:
     """執行 shell 命令。"""
@@ -1010,17 +1153,41 @@ def _skill_read_file(path: str, max_lines: int = 100, offset: int = 0) -> str:
 # 跟 run_python 互補:run_python 仍是邏輯處理主力,新 tool 接管「LLM 已知做什麼」場景
 
 def _skill_write_file(input_str: str) -> str:
-    """write_file(path, content) — JSON input: {"path": "...", "content": "..."}.
-    解 triple-quote 雷:LLM 直接傳 content,不用 Python 字串嵌入。"""
+    """write_file(path, content) — 兩種 input 格式:
+    1. JSON(短內容、< 5KB 推薦):{"path": "...", "content": "..."}
+    2. RAW MULTILINE(長內容、推薦):
+       path: /absolute/path/file.js
+       ---
+       <raw content here, no escaping needed, can contain \\u and " freely>
+
+    raw 格式 detection:input 第一行是 `path: ...` 且第二行(或之後)有 `---` 分隔線。
+    避免 30K+ JS code 包 JSON 踩 escape 雷(\\u / 引號 / 換行)。"""
     try:
-        import json as _json
-        data = _json.loads(input_str)
-        path = data.get("path") or data.get("file_path") or ""
-        content = data.get("content")
+        stripped = (input_str or "").lstrip()
+
+        # 偵測 raw multiline 格式:第一行 `path: ...` + `---` 分隔
+        if stripped.lower().startswith("path:") and "\n---" in stripped:
+            first_newline = stripped.find("\n")
+            path_line = stripped[:first_newline].strip()
+            path = path_line.split(":", 1)[1].strip()
+            rest = stripped[first_newline + 1:]
+            # 找第一個獨佔行的 `---`
+            sep_match = re.search(r"^---\s*$", rest, flags=re.MULTILINE)
+            if not sep_match:
+                return ("[錯誤] raw 格式需要獨佔行 '---' 分隔 path 跟 content\n"
+                        "範例:\n  path: /abs/path.js\n  ---\n  <content>")
+            content = rest[sep_match.end():].lstrip("\n")
+        else:
+            # JSON 格式
+            import json as _json
+            data = _json.loads(input_str)
+            path = data.get("path") or data.get("file_path") or ""
+            content = data.get("content")
+            if content is None:
+                return "[錯誤] write_file 需要 'content' 欄位"
+
         if not path:
             return "[錯誤] write_file 需要 'path' 欄位"
-        if content is None:
-            return "[錯誤] write_file 需要 'content' 欄位"
         # WSL→Windows 路徑轉換
         path = _wsl_to_windows_path(path)
         p = Path(path).expanduser()
@@ -1030,9 +1197,23 @@ def _skill_write_file(input_str: str) -> str:
         size = p.stat().st_size
         return f"✓ 已寫入 {p}({size:,} bytes、{len(content.splitlines()) if isinstance(content, str) else '?'} 行)"
     except _json.JSONDecodeError as e:
+        # 30K+ content 包 JSON 太容易踩 escape 雷、引導 LLM 改 raw multiline 或 run_python
+        _len = len(input_str)
+        if _len > 5000:
+            return (
+                f"[錯誤] JSON 解析失敗(content {_len:,} 字、太長易踩 escape 雷):{e}\n\n"
+                f"⚠ 長內容(> 5KB)請改用 RAW MULTILINE 格式(無需 escape):\n"
+                f"```\n"
+                f"path: /絕對路徑/檔名.js\n"
+                f"---\n"
+                f"const x = `中文 \\u OK`;  // content 可自由用 \" \\ \\n \\u 任何字元、不必 escape\n"
+                f"const y = \"也可以\";\n"
+                f"```\n"
+                f"或用 run_python + r''' heredoc 寫檔。"
+            )
         return (f"[錯誤] JSON 格式錯誤:{e}\n"
-                f"正確格式:{{\"path\":\"x.js\",\"content\":\"檔案內容\"}}\n"
-                f"注意 content 內的 \" 要 escape 為 \\\"、換行用 \\n")
+                f"短內容 JSON:{{\"path\":\"x.js\",\"content\":\"...\"}}(content 內 \" 要 escape 為 \\\")\n"
+                f"長內容請改 RAW MULTILINE:\n  path: /abs/path.js\n  ---\n  <content>")
     except Exception as e:
         return f"[錯誤] 寫檔失敗:{e.__class__.__name__}: {e}"
 
@@ -1093,7 +1274,10 @@ def _skill_export_var(input_str: str, cwd: Optional[str] = None) -> str:
         return "[錯誤] export_var 的 name 不能為空"
     value = d.get("value")
     try:
-        base = Path(cwd) if cwd else Path(".")
+        # skill 在 WSL 沙盒跑時 cwd 是 /mnt/c/... → host(Windows)上 Path("/mnt/c/..") 會解成
+        # 磁碟根的 \mnt\c\.. bogus 路徑、寫入 FileNotFoundError(其它工具都有做這轉換、唯獨這裡漏了)。
+        # 轉成 Windows 路徑後才寫,runner 才讀得到 _step_export.json → 變數才進得了 step_vars。
+        base = Path(_wsl_to_windows_path(cwd)) if cwd else Path(".")
         export_f = base / "_step_export.json"
         existing: dict = {}
         if export_f.is_file():
@@ -1285,8 +1469,15 @@ def _skill_web_search(tool_input: str, call_count: int = 0,
     query = (params.get("query") or "").strip()
     if not query:
         return "[web_search 錯誤] query 不可為空"
-    max_results = max(1, min(int(params.get("max_results", 5)), 5))
-    search_depth = "advanced" if str(params.get("search_depth", "basic")).lower() == "advanced" else "basic"
+    max_results = max(1, min(int(params.get("max_results", 5)), 8))
+    # search_depth 預設讀 settings.web_search_deep_default(預設 True、advanced)、
+    # LLM 可以在 input 內傳 search_depth 個別 override(基本上不必、預設就好)。
+    _deep_default = bool(s.get("web_search_deep_default", True))
+    _depth_input = params.get("search_depth")
+    if _depth_input is None:
+        search_depth = "advanced" if _deep_default else "basic"
+    else:
+        search_depth = "advanced" if str(_depth_input).lower() == "advanced" else "basic"
     # 完整內容模式：預設從 settings 取、agent 可 per-call 覆寫
     full_content = bool(params.get("include_full_content",
                                    s.get("web_search_full_content_default", False)))
@@ -1496,14 +1687,47 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
     force_host=True：跳過沙盒檢查直接走 host（使用者透過 ask_user 同意 fallback 時 caller 會傳）。
     logger: per-step 的 pipeline logger（有寫到 .log 檔）；None 的話沙盒標記只會印到 backend stdout。
     tool_timeout：單次 run_python / run_shell 上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。"""
+    # sandbox fallback 警告:設成 wsl_docker 但 sandbox 跑不起來時 LLM 不知情、
+    # 繼續用 /mnt/d/ Linux 路徑撞 Windows host、燒 token 瘋狂 retry(2026-05-24 root cause)。
+    # 在 host result 前綴明確告知 LLM 路徑與 shell 已切換。
+    # ── 硬攔 run_shell 的 pip install:skill 不准自己裝套件、強制走 missing_dependency 使用者確認 ──
+    # (2026-05-31 發現:gemma 會 run_shell pip install 繞過確認;executor 的 missing_module steering
+    #  只是軟提示、擋不住會自作主張的模型。這裡硬攔、回 steering 逼它改 done(missing_packages)。)
+    if tool_name == "run_shell" and _is_pip_install_cmd(tool_input):
+        if logger:
+            logger.warning(f"[run_shell] 攔截 pip install、要求改走 done(missing_packages)：{(tool_input or '')[:80]}")
+        return (
+            "[系統攔截] 不允許用 run_shell 直接 pip install 裝套件。\n"
+            "缺套件時請改呼叫 done(success=false, missing_packages=[\"套件名\"])、"
+            "系統會跳出『允許安裝』確認給使用者、同意後才裝到容器、並自動重跑這步。\n"
+            "(這是系統層級的安全規定:裝任何依賴都必須經使用者確認、不能由 skill 自行安裝。)"
+        )
+
+    _sandbox_warn_prefix = ""
     if tool_name in ("run_python", "run_shell") and not force_host:
-        sandbox_out = _try_sandbox_exec(tool_name, tool_input, cwd, run_id, logger, tool_timeout=tool_timeout)
+        _sandbox_meta: dict = {}
+        sandbox_out = _try_sandbox_exec(
+            tool_name, tool_input, cwd, run_id, logger,
+            tool_timeout=tool_timeout, out_meta=_sandbox_meta,
+        )
         if sandbox_out is not None:
             return sandbox_out
+        # 真的 fallback 到 host 才加 warning(不是 host 模式 normal 跑)
+        if _sandbox_meta.get("mode_was") == "wsl_docker":
+            _reason = _sandbox_meta.get("fallback_reason") or "未知"
+            _sandbox_warn_prefix = (
+                f"[⚠️ 沙盒不可用、本次 fallback 到 Windows host 執行 — 原因:{_reason}]\n"
+                f"⚠ 路徑請用 Windows 格式:D:\\... 或 C:\\...(不要用 /mnt/d/ 等 Linux 路徑)\n"
+                f"⚠ shell 是 cmd.exe、不認 ls / cat / grep / which:用 dir / type / findstr / where\n"
+                f"⚠ 設定請使用者去 Settings 切換沙盒開關恢復 — 之前已正常跑、現在突然不行通常是 Docker 或 WSL 暫斷\n"
+                f"---\n"
+            )
     if tool_name == "run_python":
-        return _skill_run_python(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        _r = _skill_run_python(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        return _sandbox_warn_prefix + _r if _sandbox_warn_prefix else _r
     elif tool_name == "run_shell":
-        return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        _r = _skill_run_shell(tool_input, cwd=cwd, run_id=run_id, tool_timeout=tool_timeout)
+        return _sandbox_warn_prefix + _r if _sandbox_warn_prefix else _r
     elif tool_name == "read_file":
         # 兩種輸入皆支援:
         #   1) 裸路徑字串(舊行為、向後相容)
@@ -1544,8 +1768,11 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
 
 
 # ── 沙盒路由（V3） ────────────────────────────────────────────────
-# 避免每次呼叫都 log「沙盒不可用」洗頻，用 set 去重（reason 作為 key）
-_SANDBOX_WARNED: set[str] = set()
+# 避免每次呼叫都 log「沙盒不可用」洗頻、但又要避免「第一次失敗後永久靜音」
+# 導致 LLM 一直用 sandbox 路徑撞 host(2026-05-24 ai_coding_market_research 燒
+# $1.5-2 token 的 root cause)。改用 dict[reason, last_warn_ts],過 5 分鐘可再 log。
+_SANDBOX_WARNED: dict[str, float] = {}
+_SANDBOX_WARN_COOLDOWN_SEC = 300.0  # 同 reason 每 5 分鐘最多 log 一次
 
 
 async def _preflight_sandbox(
@@ -1637,12 +1864,15 @@ async def _preflight_sandbox(
 
 def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_id: str,
                       logger: Optional[logging.Logger] = None,
-                      tool_timeout: int = SKILL_TOOL_TIMEOUT) -> Optional[str]:
+                      tool_timeout: int = SKILL_TOOL_TIMEOUT,
+                      out_meta: Optional[dict] = None) -> Optional[str]:
     """若 settings.skill_sandbox_mode='wsl_docker' 且沙盒可用，就把 run_python/run_shell
     送進 pipeline-sandbox-v4 容器執行。回傳組好的 output 字串（格式對齊 host 版本）；
     若 mode=host 或沙盒不可用則回傳 None 讓 caller fallback 到 host subprocess。
     logger: per-step pipeline logger；若提供則沙盒標記會出現在 .log 檔，否則只出現在 backend stdout。
-    tool_timeout：單次 tool 執行上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。"""
+    tool_timeout：單次 tool 執行上限秒數（從 step.timeout 推導，見 _compute_tool_timeout）。
+    out_meta: mutable dict, 失敗時填 {"fallback_reason": str, "mode_was": "wsl_docker"}
+              caller 用來判斷要不要在 host result 前綴警告給 LLM（防 LLM 還以為在 sandbox)。"""
     _lg = logger if logger is not None else log
     try:
         import sys as _sys
@@ -1653,6 +1883,9 @@ def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_i
         from pipeline import sandbox as _sandbox
     except Exception as e:
         _lg.warning(f"[sandbox] import 失敗（fallback 到 host）：{e}")
+        if out_meta is not None:
+            out_meta["fallback_reason"] = f"import failed: {e}"
+            out_meta["mode_was"] = "wsl_docker"  # 不知道、保守假設
         return None
 
     settings_dict = get_settings()
@@ -1663,12 +1896,28 @@ def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_i
     if mode != "wsl_docker":
         return None
 
+    # ensure_running 失敗時 retry 一次,可能只是 Docker 暫時 hiccup
     ok, reason = _sandbox.ensure_running()
     if not ok:
+        _lg.info(f"[sandbox] ensure_running 失敗({reason})、1s 後 retry...")
+        import time as _t
+        _t.sleep(1.0)
+        ok, reason = _sandbox.ensure_running()
+    if not ok:
+        # cooldown:同 reason 5 分鐘最多 log warning 一次,但不會永久靜音
         key = reason or "unknown"
-        if key not in _SANDBOX_WARNED:
-            _lg.warning(f"[sandbox] 沙盒不可用，此次 fallback 到 host：{reason}")
-            _SANDBOX_WARNED.add(key)
+        import time as _t
+        now = _t.time()
+        last = _SANDBOX_WARNED.get(key, 0)
+        if now - last >= _SANDBOX_WARN_COOLDOWN_SEC:
+            _lg.warning(
+                f"[sandbox] ⚠ 沙盒不可用、此次 fallback 到 Windows host:{reason}"
+                f"(同錯誤 {_SANDBOX_WARN_COOLDOWN_SEC:.0f}s 內不重複 log)"
+            )
+            _SANDBOX_WARNED[key] = now
+        if out_meta is not None:
+            out_meta["fallback_reason"] = reason or "sandbox not running"
+            out_meta["mode_was"] = "wsl_docker"
         return None
     # 沙盒恢復健康後，清掉之前的告警記錄下次若又壞可再提醒
     if _SANDBOX_WARNED:
@@ -1732,6 +1981,15 @@ async def _wait_for_ask_user(
     if not run:
         logger.warning(f"[{step_name}] ask_user 失敗：找不到 run {run_id}")
         return None
+
+    # gemma 常把範例路徑寫成 `C:\\Users\\X`(雙反斜線、像在寫程式字串字面值)、顯示給人看很怪。
+    # 問句 / context 純粹是給人讀的提示文字、不影響使用者實際輸入的答案 → 把 2+ 連續反斜線收斂成
+    # 單一(純顯示修正、log 與前端對話框一起乾淨)。
+    _bs = __import__("re")
+    if question:
+        question = _bs.sub(r"\\{2,}", lambda _m: "\\", question)
+    if context:
+        context = _bs.sub(r"\\{2,}", lambda _m: "\\", context)
 
     event = asyncio.Event()
     _pending_questions[run_id] = {
@@ -1925,6 +2183,145 @@ def _read_file_sample(path: str, max_chars: int = 700) -> str:
         return ""
 
 
+import re as _re_runts
+_RUN_TS_RE = _re_runts.compile(r"run_\d{8}_\d{6}")
+
+
+def _rebase_recipe_run_dir(code: str, output_path: Optional[str]) -> tuple[str, int]:
+    """B′:快取 recipe 的程式碼裡寫死了「錄製當時」的 run_<時間戳> 子夾路徑,
+    但每次執行的 run 夾時間戳不同。重播前把碼內所有 run_<舊ts> 換成「本次」的 run_<ts>。
+
+    本次 run_<ts> 從 output_path 取(output_path 一定是 .../run_<ts>/... 的形式),
+    比用 working_dir.basename 穩 —— 當 output.path 帶子目錄時(如 sub/report.md),
+    working_dir 會是 .../run_<ts>/sub、basename='sub' 不是 run_ts,但 output_path 仍含 run_ts。
+
+    回傳 (改寫後的碼, 替換處數)。下列情況回 (原碼, 0):
+      - output_path 為空 / 不含 run_<ts>(例:output.path 是絕對路徑、本就不在 run 夾)
+      - 快取碼裡根本沒有 run_<ts>(例:LLM 自己寫死了不含時間戳的固定路徑)→ 無從替換
+    """
+    if not code or not output_path:
+        return code, 0
+    m = _RUN_TS_RE.search(str(output_path))
+    if not m:
+        return code, 0
+    return _RUN_TS_RE.subn(m.group(0), code)
+
+
+# ── 自動探查輸入檔結構 → 餵給 code-gen，杜絕模型腦補欄位/標籤(grounding、模型無關)──
+# batch 裡引用到的「已存在」資料檔(輸出檔還沒生成、會自動跳過),在 skill 生 code 前
+# 把真實 schema(Excel 欄位 / CSV 表頭 / PPT/Word 佔位標籤 / JSON keys)攤給模型看,
+# 連弱模型(Gemma)也不會把欄位腦補成「產品/價格」「姓名/照片」。輕量:最多探 3 檔、
+# 大檔跳過、read_only 只讀表頭+前幾列。
+_INPUT_PEEK_RE = re.compile(r"[^\s\"'`\n,;()\[\]<>]+\.(?:xlsx|xls|csv|json|pptx|docx)", re.IGNORECASE)
+_INPUT_PEEK_MAX_FILES = 3
+_INPUT_PEEK_MAX_BYTES = 30 * 1024 * 1024  # 單檔 > 30MB 跳過(避免拖慢)
+_TAG_RE = re.compile(r"\{\{[^{}\n]{1,40}?\}\}")
+
+
+def _summarize_input_file(p: "Path") -> str:
+    ext = p.suffix.lower()
+    nm = p.name
+    try:
+        if ext in (".xlsx", ".xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+            parts = []
+            for sn in wb.sheetnames[:3]:
+                ws = wb[sn]
+                rows = list(ws.iter_rows(max_row=4, values_only=True))
+                if not rows:
+                    parts.append(f"  工作表「{sn}」: (空)"); continue
+                hdr = [str(c) if c is not None else "" for c in rows[0]]
+                samp = ["、".join(str(c) if c is not None else "" for c in r) for r in rows[1:4]]
+                parts.append(f"  工作表「{sn}」欄位: {', '.join(hdr)}" +
+                             (("\n    前幾列: " + " | ".join(samp)) if samp else ""))
+            wb.close()
+            return f"Excel {nm}:\n" + "\n".join(parts)
+        if ext == ".csv":
+            import csv as _csv
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                rows = []
+                for i, r in enumerate(_csv.reader(fh)):
+                    rows.append(r)
+                    if i >= 3:
+                        break
+            if not rows:
+                return f"CSV {nm}: (空)"
+            return (f"CSV {nm} 欄位: {', '.join(rows[0])}" +
+                    (("\n  前幾列: " + " | ".join("、".join(r) for r in rows[1:4])) if len(rows) > 1 else ""))
+        if ext == ".json":
+            import json as _json
+            d = _json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(d, dict):
+                return f"JSON {nm} keys: {', '.join(list(d.keys())[:20])}"
+            if isinstance(d, list) and d and isinstance(d[0], dict):
+                return f"JSON {nm}(陣列、每筆 keys): {', '.join(list(d[0].keys())[:20])}"
+            return f"JSON {nm}: {type(d).__name__}"
+        if ext == ".pptx":
+            from pptx import Presentation
+            prs = Presentation(str(p))
+            slides = list(prs.slides)
+            tags = set()
+            for s in slides:
+                for sh in s.shapes:
+                    if sh.has_text_frame:
+                        tags.update(_TAG_RE.findall(sh.text_frame.text))
+            return (f"PPT {nm}: {len(slides)} 頁、"
+                    f"佔位標籤: {', '.join(sorted(tags)) if tags else '(無 {{}} 標籤)'}")
+        if ext == ".docx":
+            from docx import Document
+            doc = Document(str(p))
+            tags = set()
+            for par in doc.paragraphs:
+                tags.update(_TAG_RE.findall(par.text))
+            return f"Word {nm}: 佔位標籤: {', '.join(sorted(tags)) if tags else '(無 {{}} 標籤)'}"
+    except Exception as e:
+        return f"{nm}: (讀取結構失敗、{e.__class__.__name__})"
+    return ""
+
+
+def _peek_input_files(task_description: str, logger) -> str:
+    seen: set = set()
+    summaries: list = []
+    for raw in _INPUT_PEEK_RE.findall(task_description or ""):
+        cand = raw.strip()
+        wm = re.match(r"^/mnt/([a-z])/(.*)$", cand)  # 沙盒 linux 路徑 → Windows
+        if wm:
+            cand = f"{wm.group(1).upper()}:\\" + wm.group(2).replace("/", "\\")
+        try:
+            p = Path(cand).expanduser()
+        except Exception:
+            continue
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not (p.exists() and p.is_file()):
+                continue  # 不存在 = 多半是「待產出的輸出檔」→ 跳過
+            if p.stat().st_size > _INPUT_PEEK_MAX_BYTES:
+                continue
+        except Exception:
+            continue
+        s = _summarize_input_file(p)
+        if s:
+            summaries.append(s)
+        if len(summaries) >= _INPUT_PEEK_MAX_FILES:
+            break
+    if not summaries:
+        return ""
+    blob = "\n".join(summaries)
+    if len(blob) > 1800:
+        blob = blob[:1800] + "…(截斷)"
+    try:
+        logger.info(f"[input-peek] 已注入 {len(summaries)} 個輸入檔的實際結構")
+    except Exception:
+        pass
+    return ("\n\n【📂 輸入檔的實際結構(以下是程式實際讀到的、是真的)】\n" + blob +
+            "\n→ 請**完全依照上面的真實欄位 / 標籤名稱**填寫,絕對不可自行假設或改寫"
+            "(例:不可把欄位腦補成「產品/價格/規格」或「姓名/職稱/照片」等常見模板)。")
+
+
 async def execute_step_with_skill(
     task_description: str,
     timeout: int,
@@ -2044,13 +2441,19 @@ async def execute_step_with_skill(
                 # 改走 _try_sandbox_exec 先判斷沙盒可用性，可用就用沙盒（原本錄製就是在沙盒）；
                 # 沙盒不可用才退 host（這時 LLM 重學會學到 host 路徑、新 recipe 自洽）
                 def _replay_recipe():
+                    # B′ per-run 夾相容:快取碼寫死了錄製當時的 run_<ts> 子夾,重播前換成本次的
+                    # run_<ts>(從 output_path 取),否則快取碼寫到舊夾、本次夾空 → output_path
+                    # 不存在 → recipe 被誤判失敗、退回 LLM、0 成本失效。詳見 _rebase_recipe_run_dir。
+                    code_to_run, _n = _rebase_recipe_run_dir(cached["code"], output_path)
+                    if _n:
+                        logger.info(f"[{step_name}] 🔁 Recipe 重播:快取碼內 {_n} 處舊 run 夾 → 本次 run 夾")
                     sandbox_out = _try_sandbox_exec(
-                        "run_python", cached["code"], working_dir, run_id, logger,
+                        "run_python", code_to_run, working_dir, run_id, logger,
                         tool_timeout=tool_timeout,
                     )
                     if sandbox_out is not None:
                         return sandbox_out
-                    return _skill_run_python(cached["code"], cwd=working_dir, run_id=run_id,
+                    return _skill_run_python(code_to_run, cwd=working_dir, run_id=run_id,
                                               tool_timeout=tool_timeout)
                 tool_result = await loop.run_in_executor(None, _replay_recipe)
                 runtime = _time.time() - t0
@@ -2101,11 +2504,18 @@ async def execute_step_with_skill(
    ✗ 不要用於:「驗證自己剛 write 的檔存在」(Python exit 0 已證、用 Path.exists() 在 run_python 內就行)
    ✗ 不要用於:「再確認一次自己剛寫的內容對不對」(交給外部 validator、不要重複工作浪費 iter)
 4. write_file — **整檔寫入**(LLM 已知 content、直接寫,**避免用 Python 三引號包大段外語碼**)
+   **短內容(< 5KB)用 JSON**:
    <input>{"path":"output.js","content":"const x = ...整段內容..."}</input>
+   注意 JSON content 內 " 要 escape 為 \\"、換行用 \\n
+   **長內容(> 5KB、含特殊字元、不想 escape)用 RAW MULTILINE**(推薦):
+   <input>
+   path: /abs/path.js
+   ---
+   const x = `中文直接寫`;  // 完全免 escape、可自由用引號 / 反斜線 / 換行 / unicode
+   const y = "也可以放雙引號";
+   </input>
    ✓ 用於:寫 JS/HTML/CSS/SQL/markdown/設定檔等「LLM 知道全部內容、要原樣寫到檔」
-   ✓ 解 triple-quote 雷:不要再 run_python 然後用 Python 三引號(三個雙引號)包大段 JS
    ✗ 不要用於:寫 pandas DataFrame、計算結果(用 run_python + to_csv 才對)
-   注意:content 內 " 要 escape 為 \\"、換行用 \\n(JSON 標準)
 5. edit_file — **局部替換**(部分修改既有檔案、不整檔重寫)
    <input>{"path":"x.py","old_text":"return None","new_text":"return result"}</input>
    ✓ 用於:換一行、改一個函式、修一個 bug
@@ -2183,9 +2593,9 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
 - ✅ 即時資訊(股價 / 新聞 / 匯率)、使用者提「查」「最新」、缺背景知識、確認套件 / API 最新做法
 - ❌ 純資料處理、任務已給完整資料、為「驗證想法」亂搜(先動手)
 
-<input>{"query":"今天美國科技新聞","max_results":5,"search_depth":"basic","include_full_content":true}</input>
+<input>{"query":"今天美國科技新聞","max_results":5,"include_full_content":true}</input>
 - max_results: 1-5(預設 5)
-- search_depth: "basic"(預設便宜) / "advanced"(貴 2x、較精)
+- search_depth: 不必傳、系統會用設定頁的預設(預設 advanced、深度好、適合研究類任務)
 - include_full_content=true → 拿每則完整原文(~3000 字/篇)
 
 ⭐ 任務要「擷取內文 / 分析全文」時直接 `include_full_content=true`、別寫 requests/newspaper 自己爬
@@ -2280,15 +2690,37 @@ Tavily 搜網、結果回對話。**不是每個任務都要搜**:
 【🛡️ Sandbox 環境(Linux Docker 容器、python:3.13-slim、不是 Windows)】
 - OS = Linux:沒有 win32com / pywin32 / PowerShell / cmd.exe — 用純 Python 或 Linux 工具
 - 產 PPT 用 `python-pptx`(首選)或 Node.js + `pptxgenjs`(走 `.agents/skills/pptx`);**不要 import win32com.client**(永遠 ImportError)
-- Node.js 全域套件已預裝(`pptxgenjs`、`docx`、可能還有其他 npm 包),`NODE_PATH=/usr/local/lib/node_modules` 已設好
-  → **JS 檔內 require 一律用裸模組名**:`require('pptxgenjs')`、`require('docx')`
+- Node.js 全域套件已預裝(`pptxgenjs`、`docx`、可能還有其他 npm 包)、NODE_PATH 已自動對齊
+  → **JS 檔內 require 用裸模組名**:`require('pptxgenjs')`、`require('docx')`(NODE_PATH 自動解析、不必寫絕對路徑)
   → **絕對禁止** `require('C:/...')`、`require('/mnt/c/.../node_modules/pptxgenjs')`(那是 Windows / 主機路徑、container 內找不到、必定 Cannot find module)
+  → **絕對禁止** `find / -name "..."`(掃整碟 > 60s timeout、會 SIGTERM、且 NODE_PATH 已對齊不需要找)
 - 路徑轉換:Windows `C:\...` / `C:/...` 在容器無效、pathlib 會當相對路徑導致找不到檔
   - `C:\Users\X\...` → `/mnt/c/Users/X/...`
   - `D:\data\...` → `/mnt/d/data/...`
   - 容器 `~`(`/root`)mount `.agents`、`Path.home()/".agents"` 跟 `/mnt/c/Users/X/.agents` 同一份
 - PATH 只有 Linux 工具(node/npm/python3/bash/ls/grep/curl);沒 where/dir/type/copy
 - 任務給 Windows 路徑 → 自動轉 `/mnt/<drive>/...` 再用
+
+【⛔ 兩個 mount 不要混淆 — 寫產物搞錯位置 = step 找不到產物 fail】
+容器有兩個獨立 mount 各管不同事:
+
+A. **專案目錄**(寫 workflow 產物的地方、絕大多數情境):
+   容器內:`{_v5_root_wsl}/`
+   host 對應:`{_v5_root_win}`
+   workflow 產物寫到 `{_v5_root_wsl}/ai_output/<workflow_name>/<檔名>`
+   ✅ 範例:`/mnt/d/Atlas/pipeline-orchestratorV5/ai_output/sales_q1_analysis/report.md`
+
+B. **Skill / Agent 目錄**(讀 only、skill 自身程式碼住的地方):
+   容器內:`/root/.agents/`
+   host 對應:`~\.agents\`
+   裡面是 SKILL.md / scripts / references — **不是 workflow 產物存放區**
+
+⛔ **絕對不要把 workflow 產物寫到 `/root/.agents/ai_output/<xxx>/`**!
+   那個路徑你可能看得到資料夾(因為 .agents/ai_output 巧合也存在)、
+   但**不對應到 host 的 ai_output**、Pipeline runner 看不到、step 標 fail。
+   這是踩過的真實坑、必須記牢。
+
+✅ **正確寫法**:`output_path` 提示給的是哪個容器內絕對路徑、就寫到那、不要自作主張改路徑。
 
 【📁 專案根目錄】`{_v5_root_wsl}`
 - 任務裡相對路徑(`external_projects/...` / `scripts/...` / `docs/...`)以**專案根**展開、不要拿 sandbox CWD
@@ -2358,8 +2790,35 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         except Exception as e:
             logger.warning(f"[{step_name}] ⚠️ 載入 Skill {skill_name} 失敗：{e}")
 
-    output_hint = f"\n輸出路徑提示：請將結果存到 {output_path}" if output_path else ""
-    wd_hint = f"\n工作目錄：{working_dir}（所有相對路徑都相對於此目錄，請使用絕對路徑存取檔案）" if working_dir else ""
+    # output_path / working_dir hint:在 sandbox 模式下、自動翻 Windows path → 容器內 /mnt/<drive>/...
+    # 防 LLM 在沙盒內看到 D:\ 想破頭、或誤推「/root/.agents/ai_output/...」(那是 skill 目錄、不對應 host)
+    def _to_wsl_path_for_hint(p: str) -> str:
+        if not p:
+            return p
+        try:
+            from settings import get_settings
+            if (get_settings().get("skill_sandbox_mode") or "host").strip() != "wsl_docker":
+                return p  # host 模式直接用原 path
+            import re as _re
+            m = _re.match(r"^([A-Za-z]):[\\/](.+)$", p)
+            if m:
+                drive = m.group(1).lower()
+                rest = m.group(2).replace("\\", "/")
+                return f"/mnt/{drive}/{rest}"
+        except Exception:
+            pass
+        return p
+
+    _hint_output = _to_wsl_path_for_hint(output_path) if output_path else None
+    _hint_wd = _to_wsl_path_for_hint(working_dir) if working_dir else None
+    output_hint = (
+        f"\n輸出路徑提示:請將結果存到 `{_hint_output}`(這是**容器內絕對路徑**、寫到這 host 端會直接看到、不要改別處)"
+        if _hint_output else ""
+    )
+    wd_hint = (
+        f"\n工作目錄(容器內絕對路徑):`{_hint_wd}` (所有相對路徑相對於此、但建議直接用絕對路徑)"
+        if _hint_wd else ""
+    )
 
     # 組合前步驟的輸出資訊 —— 附上「實際內容樣本」,讓 LLM 一開始就看到真實的
     # 欄位名 / 值的格式(大小寫…),不用自己猜(猜錯又不當機就會靜默產出爛結果)。
@@ -2433,9 +2892,12 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
     else:
         logger.debug(f"[{step_name}] 初次執行（無失敗歷史）")
 
+    # ── 自動探查 batch 引用到的輸入檔結構、餵真實 schema 給模型(防腦補欄位/標籤)──
+    input_peek_hint = _peek_input_files(task_description, logger)
+
     user_prompt = f"""請完成以下任務：
 
-{task_description}{output_hint}{wd_hint}{prev_hint}{failures_hint}
+{task_description}{output_hint}{wd_hint}{prev_hint}{input_peek_hint}{failures_hint}
 
 請直接使用 <tool>run_python</tool> 執行完整程式碼，不要用 markdown 展示。"""
 
@@ -2443,8 +2905,12 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 
     try:
         llm = _get_skill_llm(role=llm_role)
+        # Prompt caching (#153):對 SystemMessage 加 ephemeral 1h cache_control。
+        # SKILL loop 多輪、第 2 輪起 system_prompt 命中 cache、input cost 0.1x。
+        # 非 Anthropic provider 會略過 cache_control(不影響功能)。
+        _sys_cache_kwargs = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
         messages = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=system_prompt, additional_kwargs=_sys_cache_kwargs),
             HumanMessage(content=user_prompt),
         ]
 
@@ -2517,6 +2983,26 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 
         # 「完成」字樣連續輪數計數 — 連 2 輪 LLM 口頭說完成但沒下 done tag 就強制收尾
         done_keyword_streak = 0
+        prose_before_tool_violations = 0   # task #160:第一個 <tool> 前 prose 過長累計
+
+        # ── Phase A.2 — Native function calling 切換點 ──────────────────
+        # 共用 SUBAGENT_LOOP_MODE flag(SUBAGENT / SKILL 同個 .env 設定即可)。
+        # native(**預設**,#157): 跑下方獨立 inner function、用 LangChain bind_tools()、消滅 <tool> 文字協議
+        # text(opt-out): 繼續走原本 SKILL loop(向後相容、.env 設 SUBAGENT_LOOP_MODE=text 可退回)
+        _skill_loop_mode = (os.environ.get("SUBAGENT_LOOP_MODE", "native") or "native").strip().lower()
+        if _skill_loop_mode == "native":
+            logger.info(f"[{step_name}] 🚀 SKILL loop 用 [NATIVE] function calling 模式")
+            return _attach_trace(await _execute_skill_native_loop(
+                llm=llm, messages=messages,
+                output_path=output_path, working_dir=working_dir,
+                run_id=run_id, step_name=step_name, logger=logger,
+                tool_timeout=tool_timeout, ask_mode=ask_mode,
+                acc_usage=acc_usage, acc_tool_calls=acc_tool_calls,
+                all_stdout=all_stdout,
+                pipeline_id=pipeline_id, task_description=task_description,
+                input_paths=input_paths, no_save_recipe=no_save_recipe,
+                silent_recipe=silent_recipe, recipe_step_key=_rkey,
+            ))
 
         for iteration in range(SKILL_MAX_ITERATIONS):
             logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS}")
@@ -2645,6 +3131,37 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             else:
                 # 有 tool call、清掉 done streak
                 done_keyword_streak = 0
+
+            # ── Prose-before-tool 守門(task #160、backport 自 subagent text 版)──
+            # 第一個 <tool> 前 prose 過長 = LLM「想很多/寫長篇才動手」(Sonnet 4.6 寫 5 萬字
+            # parser 案例)、燒 output token + 拖斷長連線。soft 只 log、enforce 連 _LIMIT 輪中止。
+            if _SKILL_PROSE_CAP_MODE != "off":
+                _tool_pos = reply.find("<tool>")
+                _prose_chars = len(reply[:_tool_pos].strip()) if _tool_pos > 0 else 0
+                if _prose_chars > _SKILL_PROSE_BEFORE_TOOL_THRESHOLD:
+                    prose_before_tool_violations += 1
+                    logger.warning(
+                        f"[{step_name}] ⚠ 第 {iteration + 1} 輪 tool 前 prose {_prose_chars:,} 字"
+                        f"(上限 {_SKILL_PROSE_BEFORE_TOOL_THRESHOLD})、累計違規 "
+                        f"{prose_before_tool_violations}/{_SKILL_PROSE_BEFORE_TOOL_LIMIT} "
+                        f"[mode={_SKILL_PROSE_CAP_MODE}]"
+                    )
+                    if (_SKILL_PROSE_CAP_MODE == "enforce"
+                            and prose_before_tool_violations >= _SKILL_PROSE_BEFORE_TOOL_LIMIT):
+                        err_msg = (
+                            f"連續 {_SKILL_PROSE_BEFORE_TOOL_LIMIT} 輪 tool 前 prose 超過 "
+                            f"{_SKILL_PROSE_BEFORE_TOOL_THRESHOLD} 字、強制中止避免燒 token / 拖斷連線。"
+                            f"解析請直接寫進 run_python 程式碼、不要在 reply 寫長篇 parser / 解釋。"
+                        )
+                        logger.error(f"[{step_name}] ✗ {err_msg}")
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout) if all_stdout else reply[:500],
+                            stderr=err_msg,
+                            agent_concluded_fail=True,
+                        )
+                else:
+                    prose_before_tool_violations = 0
 
             # 多工具偵測：LLM 一次塞 run_python + done 是惡習（會把假成功訊息混進 done），
             # 預設只跑第一個 tool（既有行為）、明確告訴 LLM「這次只跑 X、忽略 Y」
@@ -2957,6 +3474,37 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     # _decision == "allow" → 繼續執行
                     logger.info(f"[{step_name}] ✓ 用戶授權執行命令（{_cat}）")
 
+            # ── run_shell 的 pip install → 直接轉 missing_dependency 使用者確認(不執行) ──
+            # (2026-05-31:sandbox 跑外部腳本(main_CLI.py)撞缺套件時 stderr 常沒完整傳回、
+            #  ModuleNotFoundError regex 抓不到;但 skill 想自己裝時命令明擺著有套件名 → 從這抽最可靠。
+            #  抽到套件名就直接轉系統『允許安裝』確認,不靠 stderr 格式、也不靠 skill 乖乖 done(missing_packages)。)
+            if tool_name == "run_shell":
+                # tool_input 可能是純字串、或 native FC 的 JSON {"command":"..."} → 正規化成命令字串
+                # (2026-05-31:skill loop 這層的 tool_input 是 JSON、_is_pip_install_cmd 直接判會 False;
+                #  _execute_skill_tool 內部才解析成純字串、所以要在這先正規化。)
+                _cmd_norm = tool_input
+                if isinstance(_cmd_norm, str) and _cmd_norm.lstrip().startswith("{"):
+                    try:
+                        import json as _j_norm
+                        _parsed = _j_norm.loads(tool_input)
+                        _cmd_norm = _parsed.get("command") or _parsed.get("input") or tool_input
+                    except Exception:
+                        _cmd_norm = tool_input
+                if _is_pip_install_cmd(_cmd_norm):
+                    _after = _cmd_norm.split("install", 1)[1] if "install" in _cmd_norm else ""
+                    _pkgs = [p.split("==")[0].split(">")[0].split("<")[0].strip()
+                             for p in _after.split()
+                             if not p.startswith("-") and not p.endswith((".txt", ".cfg", ".toml"))]
+                    if _pkgs:
+                        logger.warning(f"[{step_name}] 🛑 攔 run_shell pip install {_pkgs} → 轉 missing_dependency 使用者確認")
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"偵測到 skill 嘗試自行安裝套件 {_pkgs}。已改走系統的『允許安裝』使用者確認流程。",
+                            pending_recipe=None,
+                            missing_packages=_pkgs,
+                        )
+
             tool_result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda tn=tool_name, ti=tool_input, lg=logger, fh=force_host, tt=tool_timeout: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id, logger=lg, force_host=fh, tool_timeout=tt)
             )
@@ -2974,6 +3522,26 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                 else:
                     last_run_shell_ok = False
                     logger.info(f"[{step_name}] run_shell 失敗 → last_run_shell_ok=False(下次 done 會被守門)")
+                    # ── ModuleNotFoundError 早期攔截(同 run_python):run_shell 跑外部腳本(如 main_CLI.py)撞缺套件 ──
+                    # 自動抽套件名 → missing_packages → runner 走 missing_dependency 使用者確認。
+                    # (2026-05-31:原本只 run_python 有;cli-extractor 用 run_shell 跑 main_CLI.py 撞缺套件時
+                    #  沒攔到、靠模型自填 missing_packages 不可靠 → 走 failure。系統層級自動抽才 robust。)
+                    import re as _mnf_re2
+                    _m_shell = _mnf_re2.search(
+                        r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]", tool_result)
+                    if _m_shell:
+                        _pkg_shell = _m_shell.group(1).split(".")[0]
+                        logger.warning(
+                            f"[{step_name}] 🛑 run_shell 偵測 ModuleNotFoundError: '{_pkg_shell}' "
+                            f"→ 中止 agent loop、轉 runner 走 missing_dependency 確認")
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"ModuleNotFoundError: 缺少套件 '{_pkg_shell}'。"
+                                   f"系統將彈出安裝確認對話框（TG / 前端 modal）。",
+                            pending_recipe=None,
+                            missing_packages=[_pkg_shell],
+                        )
             # 追蹤 run_python 成敗：用 [exit code:] 在 tool_result 是否出現當判斷
             # （sandbox 跟 host 兩條路徑都用同個 marker，見 _skill_run_python / _try_sandbox_exec）
             if tool_name == "run_python":
@@ -3235,6 +3803,771 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         ))
 
 
+# ============================================================
+# Skill recipe 儲存(native + text loop 共用、避免 drift)
+# ============================================================
+def _recipe_code_from(shell_cmd: Optional[str], py_code: Optional[str]) -> Optional[str]:
+    """recipe 要存的 code:**優先**用「跑某支 .py 的 run_shell 指令」(= cli-extractor /
+    既有 CLI 的實際執行,已含使用者選擇),包成 subprocess 可重播;否則退回最後一段成功的
+    run_python code。優先 shell 是因為 agent 常在 run_shell 跑完 CLI 後又補一個只 print
+    output 存在的驗證 run_python,若取「最近成功動作」會被驗證步驟蓋掉(E2E 抓到的破綻)。"""
+    if shell_cmd:
+        return (
+            "import subprocess, sys\n"
+            f"_p = subprocess.run({shell_cmd!r}, shell=True)\n"
+            "sys.exit(_p.returncode)"
+        )
+    return py_code
+
+
+def _save_skill_recipe(
+    *, pipeline_id, rkey, task_description, input_paths, output_path,
+    code, was_interactive, runtime, silent_recipe, no_save_recipe,
+    logger, step_name,
+):
+    """done(success=true) 後存 skill recipe。回傳 _pending_recipe(no_save_recipe 且已有舊 recipe 時、
+    需等使用者確認再寫)、否則 None。與 text loop 行為一致:
+    - 只在 pipeline_id 是真實 workflow 時存(ad-hoc YAML 的 pipeline_id 非 workflow → FK 約束會炸)
+    - silent_recipe:有舊的跳過、無則 seed;no_save_recipe:有舊的延遲、無則建;正常:直接存
+    """
+    if not (pipeline_id and code):
+        return None
+    try:
+        from db import get_workflow as _gw
+        if _gw(pipeline_id) is None:
+            return None  # 非真實 workflow → 跳過(本來也不會被前端 cache 重播)
+    except Exception:
+        return None
+    try:
+        import sys as _sys2
+        from pipeline.recipe import _sha1 as _recipe_sha1, _fingerprint_input as _recipe_fp
+        from db import get_recipe as _get_recipe, save_recipe as _db_save_recipe
+        _fp = {str(p): _recipe_fp(p) for p in (input_paths or [])}
+        task_hash = _recipe_sha1(task_description)
+        pyver = f"{_sys2.version_info.major}.{_sys2.version_info.minor}"
+        existing = _get_recipe(pipeline_id, rkey)
+
+        def _save():
+            _db_save_recipe(pipeline_id, rkey, task_hash, _fp, output_path, code,
+                            pyver, runtime, was_interactive=was_interactive)
+
+        if silent_recipe:
+            if existing:
+                logger.info(f"[{step_name}] silent_recipe:Recipe 已存在、跳過(不覆寫)")
+            else:
+                _save(); logger.info(f"[{step_name}] silent_recipe:首次建立 Recipe")
+        elif no_save_recipe:
+            if existing:
+                logger.info(f"[{step_name}] Recipe 已存在、延遲儲存等待確認")
+                return {
+                    "pipeline_id": pipeline_id, "step_name": rkey, "task_hash": task_hash,
+                    "input_fingerprints": _fp, "output_path": output_path, "code": code,
+                    "python_version": pyver, "runtime_sec": runtime,
+                    "was_interactive": was_interactive,
+                }
+            _save(); logger.info(f"[{step_name}] 首次建立 Recipe")
+        else:
+            _save(); logger.info(f"[{step_name}] ✅ Recipe 已儲存(native skill loop)")
+    except Exception as e:
+        logger.warning(f"[{step_name}] Recipe 儲存失敗:{e}")
+    return None
+
+
+# ============================================================
+# Phase A.2 — SKILL loop native function calling
+# ============================================================
+async def _execute_skill_native_loop(
+    *,
+    llm,
+    messages: list,
+    output_path: Optional[str],
+    working_dir: Optional[str],
+    run_id: str,
+    step_name: str,
+    logger: logging.Logger,
+    tool_timeout: int,
+    ask_mode: bool,
+    acc_usage: dict,
+    acc_tool_calls: list,
+    all_stdout: list,
+    pipeline_id: Optional[str] = None,
+    task_description: str = "",
+    input_paths: Optional[list] = None,
+    no_save_recipe: bool = False,
+    silent_recipe: bool = False,
+    recipe_step_key: Optional[str] = None,
+) -> ExecResult:
+    """Phase A.2 — SKILL loop 用 LangChain bind_tools() native function calling 版本。
+
+    跟 text 版同 ExecResult 回傳格式、execute_step_with_skill 看 SUBAGENT_LOOP_MODE=native 就 dispatch 過來。
+    保留守門:done preflight(output 存在 / run_python 成功 / run_shell 成功)、consecutive_no_tool。
+    省略(MVP):recipe save(下次同任務不快取、LLM 重跑)、visual_validation 由外層處理。
+    """
+    from langchain_core.messages import AIMessage, ToolMessage, HumanMessage as _HM
+    from pipeline.sandbox_tools import build_subagent_tools
+    import time as _time  # recipe runtime 計算用(native loop 區域、與 text loop 對齊)
+
+    # SKILL 完整工具集 = 跟 _execute_skill_tool dispatch + system prompt 教的工具對齊。
+    # (含 write_file/edit_file/grep/glob/view_image —— 這些 prompt 有教、dispatch 接得住,
+    #  之前 native 遷移漏註冊導致一呼叫就被擋,屬與 export_var 同類的 native FC 副作用。)
+    # view_image 由 native loop 特判 tc_name 走多模態注入(見下方 view_image 處理)。
+    allowed_tools = {"run_python", "run_shell", "read_file", "write_file", "edit_file",
+                     "grep", "glob", "view_image", "ask_user", "export_var", "done"}
+    # web_search 與 system prompt 的「條件揭露」對齊:沒開 / 沒 tavily key 就不註冊,
+    # 避免 native 模式下工具 schema 仍餵給 LLM、被呼叫卻無效(gate 失效)。
+    try:
+        from settings import get_settings as _gs_ws
+        _ws_cfg = _gs_ws()
+        if _ws_cfg.get("web_search_enabled", True) and _ws_cfg.get("tavily_api_key"):
+            allowed_tools.add("web_search")
+    except Exception:
+        allowed_tools.add("web_search")  # 取不到設定 → 保守保留(維持舊行為)
+    web_counter = {"count": 0}
+
+    tools = build_subagent_tools(
+        cwd=working_dir, run_id=run_id, logger=logger,
+        tool_timeout=tool_timeout, allowed_tool_names=allowed_tools,
+        step_name=step_name, web_search_counter=web_counter,
+    )
+    name_to_tool = {t.name: t for t in tools}
+
+    try:
+        llm_with_tools = llm.bind_tools(tools)
+    except Exception as e:
+        logger.error(f"[{step_name}] bind_tools 失敗:{e}")
+        return ExecResult(
+            exit_code=-1, stdout="\n".join(all_stdout) or "",
+            stderr=f"SKILL bind_tools 失敗: {e}",
+        )
+
+    # Native FC override — SKILL system_prompt(execute_step_with_skill line 2181 起)教 LLM
+    # 用 <tool>name</tool> 文字協議,跟 bind_tools 的 native function_declarations 衝突。
+    # Gemma 4 等模型會選文字協議、回 content 含 <tool>...</tool> 純文字、tool_calls=[]。
+    # 在 system_prompt 結尾加 override 強制走 native。
+    if messages and isinstance(messages[0].content, str):
+        _native_override = (
+            "\n\n## ⛔ 最高優先級 — Tool 呼叫協議(本對話使用)\n"
+            "本對話**使用 native function calling API**、tool 已透過 function_declarations 註冊。\n"
+            "你**必須**透過 API 的 function_call 機制呼叫工具、**禁止**寫 `<tool>name</tool>` 文字格式。\n"
+            "✓ 正確:直接 emit tool_calls(API 結構化欄位)、不要在 reply 文字內寫 `<tool>` tag。\n"
+            "✗ 錯誤:寫 `<tool>run_python</tool>\\n```python\\n...` 純文字 — orchestrator 不會解析、會被視為沒呼叫 tool。\n"
+            "上面 system prompt 內若有 `<tool>...</tool>` 範例、那是文字協議的舊範例、本次 native 模式請忽略格式、保留語意(該用哪個 tool / 何時 done)。\n"
+            "\n## 🔁 失敗重試規則(重要)\n"
+            "若某次 run_python / run_shell 失敗(回傳含 `[exit code: N]` / Error / traceback)、"
+            "**禁止把相同的程式碼或命令原封不動再送一次** — 那只會得到一模一樣的錯誤、純粹浪費。\n"
+            "你必須:① 先讀錯誤訊息找真因 → ② **實質改寫**(換 API 用法 / 修語法 / 補缺套件 / 換做法)再試;"
+            "③ 若連續嘗試都修不動、坦白呼叫 done(success=false)說明卡在哪、不要硬撐重送相同內容。\n"
+        )
+        messages[0] = SystemMessage(
+            content=messages[0].content + _native_override,
+            additional_kwargs=getattr(messages[0], "additional_kwargs", {}) or {},
+        )
+
+    last_run_python_ok: Optional[bool] = None
+    last_run_shell_ok: Optional[bool] = None
+    last_successful_code: Optional[str] = None  # 最後一段成功 run_python code → 供 recipe 儲存
+    last_successful_shell: Optional[str] = None  # 最後一條成功「跑 .py 腳本」的 run_shell(CLI 執行)→ recipe 優先用它
+    was_interactive = False                      # 過程用過 ask_user → recipe 標記(replay 時提醒可能要再問)
+    _recipe_start = _time.time()                 # 算 recipe runtime_sec 用
+    consecutive_no_tool = 0
+    prose_before_tool_violations = 0   # task #160:有 tool_calls 但 content 過長累計
+    fake_done_count = 0
+    _FAKE_DONE_LIMIT_SKILL = 3
+
+    # ── 不收斂守門(task #187、2026-05-29):偵測「相同 tool input 重複失敗」死循環 ──
+    # 真實案例:Gemma 寫的 docx-js code 有 API bug、node rc=1,它每輪重寫一模一樣的
+    # 9230 字 code、又 rc=1、鬼打牆到 max_iter(空轉 6 分鐘燒 quota)。
+    # 同一份失敗 input hash:第 2 次→注入「別重送」強提示、第 3 次→提早中止 + 診斷。
+    repeat_fail_hashes: dict[str, int] = {}
+    _REPEAT_FAIL_REMIND_AT = 2
+    _REPEAT_FAIL_ABORT_AT = 3
+
+    # Output-ready 自動 done 偵測:LLM 寫成 output 檔後常持續 verify / thumbnail / preview
+    # 不主動 done(2026-05-26 PPT workflow 真實案例:iter 11 寫成、iter 12-20 全空轉燒 ~770K tokens)。
+    #
+    # 誤殺防護(mtime-based):
+    # - 檔案 mtime 變動 = LLM 真的在改檔 / polish → reset counter(允許繼續優化)
+    # - 檔案 mtime 沒變 = LLM 在做別的(verify / thumbnail / ls)→ counter++
+    # 這樣只會擋「真正空轉」、不會誤殺「正在 polish」的合理場景。
+    output_ready_no_done_count = 0
+    last_output_mtime: Optional[float] = None
+    _OUTPUT_READY_REMINDER_AT = 1   # 第幾輪 ready+mtime未變後注入 reminder
+    _OUTPUT_READY_FORCE_AT = 4       # 第幾輪 ready+mtime未變後強制收尾(從 3 調 4、更保守)
+    _OFFICE_EXTS_SKILL = {".pptx", ".docx", ".xlsx"}
+    _OFFICE_MIN_BYTES_SKILL = 5000
+    _GENERIC_MIN_BYTES_SKILL = 100
+
+    def _output_is_ready() -> tuple[bool, int, Optional[float]]:
+        """檢查 output_path 是否存在且 size 達門檻。回 (ready, size, mtime)。"""
+        if not output_path:
+            return False, 0, None
+        p = Path(output_path)
+        if not p.exists():
+            return False, 0, None
+        try:
+            st = p.stat()
+        except OSError:
+            return False, 0, None
+        floor = (
+            _OFFICE_MIN_BYTES_SKILL
+            if p.suffix.lower() in _OFFICE_EXTS_SKILL
+            else _GENERIC_MIN_BYTES_SKILL
+        )
+        return st.st_size >= floor, st.st_size, st.st_mtime
+
+    _RETRIABLE = (
+        "503", "429", "unavailable", "rate limit", "rate_limit",
+        "overloaded", "internal error", "500", "deadline", "resource_exhausted",
+        # 網路瞬斷 / DNS 抖動 — 退避重連、不直接判失敗
+        "apiconnectionerror", "connection error", "connection refused",
+        "connection reset", "connection aborted", "getaddrinfo",
+        "timed out", "timeout", "temporarily unavailable", "econnreset",
+        "remotedisconnected", "max retries",
+    )
+
+    for iteration in range(SKILL_MAX_ITERATIONS):
+        logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS} [NATIVE]")
+
+        # Context 雪崩防護(跟 text 版同邏輯)
+        if iteration >= SKILL_CONTEXT_KEEP_RECENT_FULL + 1:
+            _compacted = _compact_old_tool_results(messages)
+            if _compacted:
+                logger.debug(f"[{step_name}] 🪶 壓縮 {_compacted} 條舊 tool 結果(防 context 膨脹)")
+
+        # 第一輪後 strip FIRST_ITER 區塊(省 prompt token)
+        if iteration == 1 and isinstance(messages[0].content, str) and "<!--FIRST_ITER_BEGIN-->" in messages[0].content:
+            _stripped = re.sub(
+                r"<!--FIRST_ITER_BEGIN-->.*?<!--FIRST_ITER_END-->\s*",
+                "", messages[0].content, flags=re.DOTALL,
+            )
+            messages[0] = SystemMessage(
+                content=_stripped,
+                additional_kwargs=getattr(messages[0], "additional_kwargs", {}) or {},
+            )
+            logger.debug(f"[{step_name}] 🪶 第二輪起 system prompt 已 strip first-iter blocks")
+
+        if iteration > 0:
+            await asyncio.sleep(SKILL_REQUEST_INTERVAL)
+
+        # LLM call with retry
+        response: Optional[AIMessage] = None
+        last_err: Optional[Exception] = None
+        _input_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
+        for _attempt in range(3):
+            try:
+                logger.info(f"[{step_name}] 🤖 LLM 開始處理(input {_input_chars:,} 字)…")
+                _t0 = asyncio.get_event_loop().time()
+                response = await asyncio.wait_for(
+                    llm_with_tools.ainvoke(messages), timeout=600.0,
+                )
+                _el = asyncio.get_event_loop().time() - _t0
+                _content_str = response.content if isinstance(response.content, str) else ""
+                _tc_count = len(getattr(response, 'tool_calls', []) or [])
+                # Cache stats(Anthropic / OpenAI 有,Gemini / Groq / Ollama 沒)
+                _um_this = getattr(response, "usage_metadata", None) or {}
+                _itd_this = _um_this.get("input_token_details") if isinstance(_um_this, dict) else None
+                _cache_read = (_itd_this or {}).get("cache_read", 0) or 0
+                _cache_create = (_itd_this or {}).get("cache_creation", 0) or 0
+                _in_tok_this = _um_this.get("input_tokens", 0) or 0
+                _cache_str = ""
+                if _cache_read or _cache_create:
+                    _total_prompt = _in_tok_this + _cache_read + _cache_create
+                    _hit_pct = (_cache_read / _total_prompt * 100) if _total_prompt > 0 else 0
+                    _cache_str = f", cache_read {_cache_read:,} ({_hit_pct:.0f}%), cache_write {_cache_create:,}"
+                logger.info(
+                    f"[{step_name}] ✅ LLM 完成({_el:.0f}s, content {len(_content_str)} 字, "
+                    f"tool_calls={_tc_count}{_cache_str})"
+                )
+                # 診斷:LLM 回 content + tool_calls 都空 → dump 完整 response 看哪個 field 真有輸出
+                if len(_content_str) == 0 and _tc_count == 0:
+                    logger.warning(
+                        f"[{step_name}] ⚠ 空回應診斷:\n"
+                        f"  response.content = {response.content!r}\n"
+                        f"  response.additional_kwargs = {dict(getattr(response, 'additional_kwargs', None) or {})}\n"
+                        f"  response.response_metadata = {dict(getattr(response, 'response_metadata', None) or {})}\n"
+                        f"  response.usage_metadata = {dict(getattr(response, 'usage_metadata', None) or {})}\n"
+                        f"  response.tool_calls (raw) = {getattr(response, 'tool_calls', None)!r}\n"
+                        f"  response.invalid_tool_calls = {getattr(response, 'invalid_tool_calls', None)!r}"
+                    )
+                last_err = None
+                break
+            except asyncio.TimeoutError as e:
+                last_err = e
+                if _attempt < 2:
+                    _w = 2 ** _attempt
+                    logger.warning(f"[{step_name}] LLM 逾時、{_w}s retry({_attempt + 1}/2)")
+                    await asyncio.sleep(_w)
+                    continue
+                break
+            except Exception as e:
+                last_err = e
+                if any(k in str(e).lower() for k in _RETRIABLE):
+                    if _attempt < 2:
+                        _w = 2 ** _attempt
+                        logger.warning(
+                            f"[{step_name}] LLM 暫時錯誤、{_w}s retry({_attempt + 1}/2):"
+                            f"{type(e).__name__}: {str(e)[:200]}"
+                        )
+                        await asyncio.sleep(_w)
+                        continue
+                break
+
+        if last_err is not None or response is None:
+            err = f"LLM 失敗: {type(last_err).__name__ if last_err else 'None'}: {last_err}"
+            logger.error(f"[{step_name}] {err}")
+            return ExecResult(
+                exit_code=-2, stdout="\n".join(all_stdout), stderr=err,
+            )
+
+        # 累計 token usage
+        um = getattr(response, "usage_metadata", None) or {}
+        if isinstance(um, dict) and um:
+            for _k in ("input_tokens", "output_tokens", "total_tokens"):
+                _v = um.get(_k) or 0
+                if _v:
+                    acc_usage[_k] = acc_usage.get(_k, 0) + int(_v)
+            itd = um.get("input_token_details") or {}
+            if isinstance(itd, dict):
+                acc_usage["cache_read_tokens"] = (
+                    acc_usage.get("cache_read_tokens", 0) + (itd.get("cache_read", 0) or 0)
+                )
+                acc_usage["cache_creation_tokens"] = (
+                    acc_usage.get("cache_creation_tokens", 0) + (itd.get("cache_creation", 0) or 0)
+                )
+        if not acc_usage.get("model"):
+            _rm = getattr(response, "response_metadata", None) or {}
+            acc_usage["model"] = _rm.get("model_name") or _rm.get("model") or ""
+
+        # AIMessage 加進 messages(含 tool_calls)
+        messages.append(response)
+
+        tool_calls = list(getattr(response, "tool_calls", []) or [])
+        content_str = response.content if isinstance(response.content, str) else ""
+
+        # 沒 tool_calls → Claude 原生 end_turn(想結束)。對齊 Anthropic 官方:
+        # 完成時就不呼叫工具、回純文字,這是天生的結束信號、不是異常。
+        # 若 output 檔已 ready → 視為正常完成,別當 consecutive_no_tool 懲罰逼它空轉。
+        if not tool_calls:
+            _ready_et, _sz_et, _ = _output_is_ready()
+            if _ready_et:
+                logger.info(
+                    f"[{step_name}] ✅ LLM 回 end_turn(純文字結束)且輸出檔已 ready"
+                    f"({_sz_et:,} bytes)→ 視為完成(對齊原生 end_turn 結束)"
+                )
+                return ExecResult(
+                    exit_code=0,
+                    stdout=_build_clean_success_stdout(all_stdout, "[Skill 完成]"),
+                    stderr="",
+                )
+            consecutive_no_tool += 1
+            logger.warning(
+                f"[{step_name}] ⚠ 第 {iteration + 1} 輪沒 tool_calls"
+                f"(content {len(content_str)} 字)、累計 {consecutive_no_tool}/2"
+            )
+            if consecutive_no_tool >= 2:
+                err_msg = (
+                    f"連 2 輪沒呼叫任何 tool、強制中止。"
+                    f"LLM 把分析寫 content 而非 run_python 寫檔。"
+                )
+                logger.error(f"[{step_name}] ✗ {err_msg}")
+                return ExecResult(
+                    exit_code=1,
+                    stdout="\n".join(all_stdout) or content_str[:500],
+                    stderr=err_msg,
+                    agent_concluded_fail=True,
+                )
+            messages.append(_HM(content=(
+                "請呼叫一個 tool(run_python / read_file / 等)繼續、或 done 結束。"
+                "分析請寫進 run_python 程式碼、不要寫 content。"
+            )))
+            continue
+        consecutive_no_tool = 0
+
+        # ── Prose-before-tool 守門(task #160、backport 自 subagent)──
+        # 有 tool_calls 但伴隨超長 content(Sonnet 4.6 寫 5 萬字 parser 案例)→ 燒 output token、
+        # 拖斷長連線。soft 只 log、enforce 連 _LIMIT 輪違規才中止。
+        if _SKILL_PROSE_CAP_MODE != "off":
+            _prose_chars = len((content_str or "").strip())
+            if _prose_chars > _SKILL_PROSE_BEFORE_TOOL_THRESHOLD:
+                prose_before_tool_violations += 1
+                logger.warning(
+                    f"[{step_name}] ⚠ 第 {iteration + 1} 輪 tool 前 content {_prose_chars:,} 字"
+                    f"(上限 {_SKILL_PROSE_BEFORE_TOOL_THRESHOLD})、累計違規 "
+                    f"{prose_before_tool_violations}/{_SKILL_PROSE_BEFORE_TOOL_LIMIT} "
+                    f"[mode={_SKILL_PROSE_CAP_MODE}]"
+                )
+                if (_SKILL_PROSE_CAP_MODE == "enforce"
+                        and prose_before_tool_violations >= _SKILL_PROSE_BEFORE_TOOL_LIMIT):
+                    err_msg = (
+                        f"連續 {_SKILL_PROSE_BEFORE_TOOL_LIMIT} 輪 tool 前 content 超過 "
+                        f"{_SKILL_PROSE_BEFORE_TOOL_THRESHOLD} 字、強制中止避免燒 token / 拖斷連線。"
+                        f"解析請直接寫進 run_python 程式碼、不要在 content 寫長篇 parser / 解釋。"
+                    )
+                    logger.error(f"[{step_name}] ✗ {err_msg}")
+                    return ExecResult(
+                        exit_code=1,
+                        stdout="\n".join(all_stdout) or content_str[:500],
+                        stderr=err_msg,
+                        agent_concluded_fail=True,
+                    )
+            else:
+                # 沒違規這輪 → 重置(只擋「連續」冗長、跟 subagent 一致)
+                prose_before_tool_violations = 0
+
+        # 處理 tool_calls — 先掃出 done(若有)、其他先跑
+        done_call: Optional[dict] = None
+        regular_calls = []
+        for tc in tool_calls:
+            if tc.get("name") == "done":
+                done_call = tc  # 多個 done 取最後
+            else:
+                regular_calls.append(tc)
+
+        _repeat_fail_reminder: Optional[str] = None
+        for tc in regular_calls:
+            tc_name = tc.get("name", "")
+            tc_id = tc.get("id") or ""
+            tc_args = tc.get("args", {}) or {}
+            # native FC 的「意圖」在結構化 tool_call 裡(content 常為空)→ 必須印出實際參數,
+            # 否則 log 只剩 args_keys、看不到 LLM 到底要跑什麼指令 / 程式碼(改 native 前的可見度)。
+            _pv = (tc_args.get("command") or tc_args.get("code") or tc_args.get("question")
+                   or tc_args.get("path") or tc_args.get("query") or "")
+            _pv = str(_pv).rstrip()
+            _full_len = len(_pv)
+            if _full_len > 1500:
+                _pv = _pv[:1500] + f"\n…[截斷、完整 {_full_len} 字]"
+            if _pv:
+                # 保留原始換行 → log 檢視器多行整齊顯示(對齊舊 text 模式的可讀性),
+                # 不要壓成單行;延續行沒有 [INFO] 等級標記 → 前端上中性灰、不會誤判紅字。
+                logger.info(f"[{step_name}] 🛠 tool={tc_name}（{_full_len} 字）:\n{_pv}")
+            else:
+                logger.info(f"[{step_name}] 🛠 tool={tc_name} (keys={list(tc_args.keys())})")
+
+            # ── native loop:pip install 企圖(run_shell command + run_python code)→ 轉 missing_dependency ──
+            # (共用 helper detect_pip_install:涵蓋 run_shell 的 pip 命令 + run_python code 內的
+            #  subprocess/os.system/pip.main/['pip','install'] 繞法。skill 是 pipeline step → 直接轉確認。)
+            _pip_pkgs = detect_pip_install(tc_name, tc_args)
+            if _pip_pkgs:
+                logger.warning(f"[{step_name}] 🛑 攔 native pip install {_pip_pkgs} → 轉 missing_dependency 使用者確認")
+                _real_pkgs = [p for p in _pip_pkgs if p != "(未知套件)"]
+                return ExecResult(
+                    exit_code=1,
+                    stdout="\n".join(all_stdout),
+                    stderr=f"偵測到嘗試自行安裝套件 {_pip_pkgs}。已改走系統的『允許安裝』使用者確認流程。",
+                    missing_packages=_real_pkgs or None,
+                )
+
+            # run_shell 用:跑工具前先記 output 檔 mtime,跑完比對 → 只認「真的產出/更新 output」的
+            # .py 指令當 recipe(排除 --help / ls / 探查 / 驗證,那些不動 output 檔)。
+            _out_mtime_before = None
+            if tc_name == "run_shell" and output_path:
+                try:
+                    _out_mtime_before = Path(output_path).stat().st_mtime
+                except Exception:
+                    _out_mtime_before = None
+
+            # view_image 特判:走多模態注入(讀圖→base64→image_url),不走泛用 dispatch
+            # (泛用 dispatch 只會回 "__VIEW_IMAGE__" sentinel、對 LLM 無意義)。
+            if tc_name == "view_image":
+                _vi_path = tc_args.get("path", "") if isinstance(tc_args, dict) else str(tc_args)
+                _vi = await asyncio.get_event_loop().run_in_executor(None, _skill_view_image, _vi_path)
+                _vi_text = _vi.get("text", "") if isinstance(_vi, dict) else str(_vi)
+                logger.info(f"[{step_name}] view_image:{_vi_text}")
+                all_stdout.append(f"[view_image] {_vi_text}")
+                acc_tool_calls.append({
+                    "name": "view_image",
+                    "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                    "result_preview": _vi_text[:300],
+                })
+                # 先回 ToolMessage 滿足 tool_call 配對,再 append 帶圖的 HumanMessage(視覺模型才看得到圖)
+                messages.append(ToolMessage(content=f"[view_image] {_vi_text}", tool_call_id=tc_id))
+                if isinstance(_vi, dict) and _vi.get("image_b64"):
+                    messages.append(_HM(content=[
+                        {"type": "text", "text": f"[view_image 圖片]\n{_vi_text}\n請觀察圖片內容後再決定下一步。"},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{_vi.get('image_mime', 'image/png')};base64,{_vi['image_b64']}"
+                        }},
+                    ]))
+                continue
+
+            tool_fn = name_to_tool.get(tc_name)
+            try:
+                if tool_fn is None:
+                    result = f"[錯誤] tool '{tc_name}' 不在白名單。可用:{sorted(name_to_tool.keys())}"
+                else:
+                    raw = await tool_fn.ainvoke(tc_args)
+                    result = str(raw) if raw is not None else ""
+            except Exception as e:
+                result = f"[執行失敗] {type(e).__name__}: {e}"
+
+            # 追蹤 last_run_python_ok / last_run_shell_ok(守門用)+ was_interactive(recipe 用)
+            if tc_name == "run_python":
+                last_run_python_ok = "[exit code:" not in result
+                if last_run_python_ok:
+                    last_successful_code = tc_args.get("code", "")
+            elif tc_name == "run_shell":
+                last_run_shell_ok = "[exit code:" not in result
+                if last_run_shell_ok:
+                    # cli-extractor / 既有 CLI 這種「靠 run_shell 跑 <某>.py <args>」的 skill:
+                    # 只記「執行某支 .py 腳本、且真的寫出/更新了 output 檔」的 run_shell
+                    # (= CLI 實際執行、已含使用者選擇)。用 mtime 比對排除 --help / ls / 探查 /
+                    # 驗證類(那些不動 output);recipe save 時**優先**用它,避免被後面補的
+                    # 驗證 run_python(只 print output 存在)蓋掉(E2E 抓到的破綻)。
+                    _cmd = str(tc_args.get("command", "") or "")
+                    if ".py" in _cmd:
+                        if output_path:
+                            try:
+                                _mt_after = Path(output_path).stat().st_mtime
+                            except Exception:
+                                _mt_after = None
+                            if _mt_after is not None and (
+                                _out_mtime_before is None or _mt_after > _out_mtime_before
+                            ):
+                                last_successful_shell = _cmd  # 這條真的產出了 output
+                        else:
+                            # 無 output_path 可比對 → 退回寬鬆(仍優於完全不抓)
+                            last_successful_shell = _cmd
+            elif tc_name == "ask_user":
+                was_interactive = True  # 用過人工問答 → recipe 標記(replay 時提醒可能要再問)
+
+            # ── ModuleNotFoundError 早期攔截(共用 helper detect_missing_module)──
+            _miss = detect_missing_module(result)
+            if _miss:
+                logger.warning(f"[{step_name}] 🛑 native 偵測 ModuleNotFoundError: {_miss} → 轉 missing_dependency 使用者確認")
+                return ExecResult(
+                    exit_code=1,
+                    stdout="\n".join(all_stdout),
+                    stderr=f"ModuleNotFoundError: 缺少套件 {_miss}。系統將彈出安裝確認對話框（TG / 前端 modal）。",
+                    missing_packages=_miss,
+                )
+
+            # ── 不收斂守門:相同失敗 input 重複偵測 ──
+            _call_failed = ("[exit code:" in result) or result.startswith("[執行失敗]")
+            if _call_failed and tc_name in ("run_python", "run_shell"):
+                _fh = hashlib.md5(
+                    (tc_name + "\x00"
+                     + json.dumps(tc_args, ensure_ascii=False, sort_keys=True))
+                    .encode("utf-8", "replace")
+                ).hexdigest()
+                repeat_fail_hashes[_fh] = repeat_fail_hashes.get(_fh, 0) + 1
+                _rep = repeat_fail_hashes[_fh]
+                if _rep >= _REPEAT_FAIL_ABORT_AT:
+                    err_msg = (
+                        f"相同的 {tc_name} input 連續失敗 {_rep} 次(內容完全相同、錯誤相同)、"
+                        f"判定不收斂、提早中止避免空轉燒 token。"
+                        f"可能此任務超出當前模型能力(常見:docx-js 等嚴格 API)、"
+                        f"建議改用強模型或換做法。"
+                    )
+                    logger.error(f"[{step_name}] ✗ 不收斂守門觸發:{err_msg}")
+                    return ExecResult(
+                        exit_code=1,
+                        stdout="\n".join(all_stdout),
+                        stderr=err_msg,
+                        agent_concluded_fail=True,
+                    )
+                if _rep >= _REPEAT_FAIL_REMIND_AT and _repeat_fail_reminder is None:
+                    _repeat_fail_reminder = (
+                        f"[系統] ⚠ 你已用**完全相同**的 {tc_name} 內容失敗 {_rep} 次。"
+                        f"再送一次必然得到同樣的錯。請先讀上面錯誤訊息找真因、"
+                        f"**實質改寫**(換 API 用法 / 修語法 / 補缺套件)再試;"
+                        f"若真的修不動就呼叫 done(success=false)說明卡點、別再重送相同內容。"
+                    )
+                    logger.warning(
+                        f"[{step_name}] 🔁 相同 {tc_name} 失敗第 {_rep} 次、注入「別重送」提示"
+                    )
+
+            all_stdout.append(f"[{tc_name}] {result[:500]}")
+            acc_tool_calls.append({
+                "name": tc_name,
+                "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                "result_preview": result[:300],
+            })
+
+            # 截斷大 result 防 context 雪崩
+            _MAX = 3000 if tc_name == "read_file" else 5000
+            _HEAD = 2000 if tc_name == "read_file" else 4000
+            _TAIL = 1000
+            if len(result) > _MAX:
+                _h = result[:_HEAD]
+                _t = result[-_TAIL:]
+                result = (
+                    f"{_h}\n…[中間省略 {len(result) - _HEAD - _TAIL} 字、"
+                    f"完整長度 {len(result)}]…\n{_t}"
+                )
+
+            messages.append(ToolMessage(content=result, tool_call_id=tc_id))
+
+        # 不收斂守門:本輪偵測到相同失敗重送 → 注入一次「別重送」強提示
+        # (放在所有 tool 結果後、維持 tool_call/tool_result 配對、再加 human turn)
+        if _repeat_fail_reminder is not None:
+            messages.append(HumanMessage(content=_repeat_fail_reminder))
+
+        # Output-ready 自動 done 偵測 — mtime-based、區分「真 polish」vs「純空轉」
+        if done_call is None:
+            _ready, _size, _mtime = _output_is_ready()
+            if _ready:
+                # mtime 有變 = LLM 真的在改檔(可能是 polish)→ 重置 counter、允許繼續
+                if last_output_mtime is None or (_mtime is not None and _mtime > last_output_mtime):
+                    if last_output_mtime is not None:
+                        logger.info(
+                            f"[{step_name}] 📝 Output 檔有更新(mtime 變動、{_size:,} bytes)、"
+                            f"LLM 仍在 polish → counter 重置"
+                        )
+                    last_output_mtime = _mtime
+                    output_ready_no_done_count = 0
+                else:
+                    # mtime 沒變 = LLM 在做別的事(verify / thumbnail / ls)→ 累計
+                    output_ready_no_done_count += 1
+                    logger.info(
+                        f"[{step_name}] 📦 Output ready 但 mtime 未變({_size:,} bytes)、"
+                        f"LLM 未動檔也未 done、累計 {output_ready_no_done_count}/{_OUTPUT_READY_FORCE_AT}"
+                    )
+                    if output_ready_no_done_count >= _OUTPUT_READY_FORCE_AT:
+                        logger.warning(
+                            f"[{step_name}] ⚠ Output 已 ready 且 mtime 未變 {output_ready_no_done_count} 輪、"
+                            f"LLM 仍未 done — 強制 success 收尾。檔案:{output_path}({_size:,} bytes)"
+                        )
+                        all_stdout.append(
+                            f"[Skill 完成] 系統強制收尾:輸出檔 {Path(output_path).name} "
+                            f"({_size:,} bytes)已 ready 且 {output_ready_no_done_count} 輪未動、LLM 未 done"
+                        )
+                        _pending_fs = None
+                        _rc_code = _recipe_code_from(last_successful_shell, last_successful_code)
+                        if _rc_code:
+                            _pending_fs = _save_skill_recipe(
+                                pipeline_id=pipeline_id, rkey=(recipe_step_key or step_name),
+                                task_description=task_description, input_paths=input_paths,
+                                output_path=output_path, code=_rc_code,
+                                was_interactive=was_interactive, runtime=_time.time() - _recipe_start,
+                                silent_recipe=silent_recipe, no_save_recipe=no_save_recipe,
+                                logger=logger, step_name=step_name,
+                            )
+                        return ExecResult(
+                            exit_code=0,
+                            stdout=_build_clean_success_stdout(all_stdout, "[Skill 完成]"),
+                            stderr="",
+                            pending_recipe=_pending_fs,
+                        )
+                    if output_ready_no_done_count >= _OUTPUT_READY_REMINDER_AT:
+                        messages.append(HumanMessage(content=(
+                            f"[系統] ✅ 目標檔案 {output_path} 已存在({_size:,} bytes)且本輪未改檔。"
+                            f"如果你還在 polish — 直接寫檔(run_python 改檔)、系統會偵測 mtime 變動允許繼續。"
+                            f"如果你只是想 verify / 看 thumbnail / 確認大小 — 那是多餘的、**請立刻呼叫 done** 結束 step。"
+                            f"連續 {_OUTPUT_READY_FORCE_AT} 輪不動檔也不 done 會被強制收尾。"
+                        )))
+            else:
+                # 沒 ready → 重置 counter + mtime tracking(允許 LLM 繼續寫檔嘗試)
+                output_ready_no_done_count = 0
+                last_output_mtime = None
+
+        # 處理 done(在 regular_calls 全跑完後)
+        if done_call is not None:
+            tc_id = done_call.get("id") or ""
+            tc_args = done_call.get("args", {}) or {}
+            _success = bool(tc_args.get("success", True))
+            _summary = (
+                tc_args.get("summary")
+                or tc_args.get("error")
+                or "(空 summary)"
+            )
+
+            # 守門 1:run_python 失敗 → 拒 done(防 LLM 在程式炸掉後硬送 success=true)
+            if _success and last_run_python_ok is False:
+                logger.warning(f"[{step_name}] done 被拒:最近 run_python 失敗")
+                messages.append(ToolMessage(
+                    content=(
+                        "[拒收] 最近一次 run_python 執行失敗、看上面 stderr / traceback。"
+                        "請先用 run_python 修正、確認沒 [exit code: N] 才能 done。"
+                    ),
+                    tool_call_id=tc_id,
+                ))
+                continue
+
+            # 守門 1b:run_shell 失敗 → 拒 done
+            if _success and last_run_shell_ok is False:
+                logger.warning(f"[{step_name}] done 被拒:最近 run_shell 失敗")
+                messages.append(ToolMessage(
+                    content=(
+                        "[拒收] 最近一次 run_shell 失敗。請修正命令(常見:路徑、模組缺裝、quote)、"
+                        "確認 rc=0 沒 Error 後才能 done。"
+                    ),
+                    tool_call_id=tc_id,
+                ))
+                continue
+
+            # 守門 2:output_path 不存在 → 拒 done + surgical retry
+            if (
+                _success and output_path
+                and not Path(output_path).exists()
+                and fake_done_count < _FAKE_DONE_LIMIT_SKILL
+            ):
+                fake_done_count += 1
+                logger.warning(
+                    f"[{step_name}] done 被拒:output 檔 {output_path} 不存在"
+                    f"({fake_done_count}/{_FAKE_DONE_LIMIT_SKILL})"
+                )
+                messages.append(ToolMessage(
+                    content=(
+                        f"[拒收] 你宣稱成功但 output 檔 {output_path} 不存在!"
+                        f"請用 run_python 真實寫檔到那個路徑(Path(...).write_text() / "
+                        f"df.to_excel() / fig.savefig() 等)、跑完 print Path('{output_path}').exists() "
+                        f"確認 True 才能 done。不准只展示 code、必須真跑。"
+                    ),
+                    tool_call_id=tc_id,
+                ))
+                continue
+
+            # 通過 → 結束 loop
+            messages.append(ToolMessage(content="__DONE_ACCEPTED__", tool_call_id=tc_id))
+            acc_tool_calls.append({
+                "name": "done",
+                "input_preview": json.dumps(tc_args, ensure_ascii=False)[:200],
+                "result_preview": "",
+            })
+            all_stdout.append(f"[Skill 完成] {_summary}")
+            logger.info(
+                f"[{step_name}] ✅ Skill 完成(success={_success}, "
+                f"summary 前 80 字={_summary[:80]})"
+            )
+
+            # 成功 → 存 recipe(下次同任務 + 同輸入指紋直接 replay、省 LLM token)
+            # native loop 原本省略了這段(MVP)→ native 成預設後 skill recipe 整個沒在存,這裡補回。
+            _pending = None
+            _rc_code = _recipe_code_from(last_successful_shell, last_successful_code)
+            if _success and _rc_code:
+                _pending = _save_skill_recipe(
+                    pipeline_id=pipeline_id, rkey=(recipe_step_key or step_name),
+                    task_description=task_description, input_paths=input_paths,
+                    output_path=output_path, code=_rc_code,
+                    was_interactive=was_interactive, runtime=_time.time() - _recipe_start,
+                    silent_recipe=silent_recipe, no_save_recipe=no_save_recipe,
+                    logger=logger, step_name=step_name,
+                )
+
+            _final_stdout = (
+                _build_clean_success_stdout(all_stdout, "[Skill 完成]")
+                if _success else "\n".join(all_stdout)
+            )
+
+            return ExecResult(
+                exit_code=0 if _success else 1,
+                stdout=_final_stdout,
+                stderr="" if _success else _summary,
+                agent_concluded_fail=(not _success),
+                pending_recipe=_pending,
+            )
+
+    # max_iter 用完未 done
+    err_msg = f"max_iter ({SKILL_MAX_ITERATIONS}) 用完未 done"
+    logger.error(f"[{step_name}] {err_msg}")
+    return ExecResult(
+        exit_code=1,
+        stdout="\n".join(all_stdout),
+        stderr=err_msg,
+        agent_concluded_fail=True,
+    )
+
+
 # ── Outlook 自動化節點專屬 agent ──────────────────────────────────────────────
 # 跟 skill 模式類似（LLM 寫 code、解析 tool calls、迴圈），但有以下差異：
 #   1. 強制 host 執行（pywin32 在 sandbox / Linux 容器跑不了）
@@ -3295,23 +4628,23 @@ create_meeting(*, subject, start, end, location="", body="",
                reminder_minutes=15, send_invitation=True) -> str
 ```
 
-## 工具
+## 工具（原生 function calling）
 
-每次 reply 只能呼叫**一個**工具。格式嚴格如下，不可加 markdown code fence：
+本對話**使用原生 function calling API**、工具已透過 function_declarations 註冊。你**必須**透過 API 的 function_call 機制呼叫工具、**禁止**寫 `<tool>name</tool>` / `<input>...</input>` 這類文字格式 — 那種純文字 orchestrator 不會解析、會被視為沒呼叫任何工具。直接 emit 結構化 tool_calls 即可。
 
-```
-<tool>run_python</tool>
-<input>
-import pandas as pd
-from win32_helpers.outlook import search_mail
-df = search_mail(subject="報告", since="2026-04-25")
-print(df.head())
-</input>
-```
+可用工具：
+- **run_python(code)**：執行 Python 程式碼處理 Outlook 需求。
+  例：
+  ```python
+  import pandas as pd
+  from pipeline.win32_helpers.outlook import search_mail
+  df = search_mail(subject="報告", since="2026-04-25")
+  print(df.head())
+  ```
+- **done(success, summary)**：結束任務。success=true/false、summary 用中文說明結果（失敗時說明卡在哪）。
+- **ask_user(question, options, context)**：問使用者（極少用，例如「找到 50 封信，要不要全部處理？」）。
 
-或 `<tool>done</tool><input>{"success": true, "summary": "..."}</input>`。
-
-也可以呼叫 `<tool>ask_user</tool>` 問使用者（極少用，例如「找到 50 封信，要不要全部處理？」）。
+每次 reply 呼叫**一個**工具即可。
 
 ## 規則
 
@@ -3319,7 +4652,34 @@ print(df.head())
 2. 整理結果如果指定了 output_path，**一定要把結果存到那個路徑**（xlsx / md / json 等格式由情境決定）
 3. 出錯後不要直接 done(success=true)！先用 run_python 修錯、確認 stdout 沒有 traceback 才 done
 4. 永遠不要寫 fake stdout（不要在 <input> 後面寫『Successfully sent.』『DataFrame: ...』之類字串）— 真實結果系統會回給你
-5. 如果使用者描述太模糊、缺關鍵資訊（例如要寄給誰、日期區間），用 ask_user 問；不要瞎猜亂寄信"""
+5. 如果使用者描述太模糊、缺關鍵資訊（例如要寄給誰、日期區間），用 ask_user 問；不要瞎猜亂寄信
+
+## 進階：建立資料夾 / 收件規則（wrapper 沒有、用原始 win32com COM）
+
+- **新增資料夾**（可重複跑、已存在就沿用、不要報錯）：
+  ```python
+  import win32com.client as w
+  ns = w.Dispatch("Outlook.Application").GetNamespace("MAPI")
+  inbox = ns.GetDefaultFolder(6)  # olFolderInbox
+  name = "我的資料夾"
+  existing = {inbox.Folders.Item(i + 1).Name for i in range(inbox.Folders.Count)}
+  folder = inbox.Folders[name] if name in existing else inbox.Folders.Add(name)
+  ```
+- **建立收件規則（自動分流「未來」的信）** — ⚠️ 規則 API **需要 Exchange 在線**：
+  ```python
+  try:
+      rules = ns.DefaultStore.GetRules()      # 離線 / 未連 Exchange 會丟例外
+  except Exception as e:
+      # ↓ 不要假裝成功！老實回報需要上線
+      raise RuntimeError(f"Outlook 離線或未連 Exchange、無法建規則：{e}")
+  r = rules.Create("規則名稱", 0)              # 0 = olRuleReceive（收件時觸發）
+  c = r.Conditions.SenderAddress; c.Enabled = True; c.Address = ["someone@example.com"]
+  a = r.Actions.MoveToFolder;     a.Enabled = True; a.Folder = folder   # 上面建/取到的資料夾物件
+  rules.Save()
+  ```
+- **建完規則務必「重新讀回」驗證**：再 `ns.DefaultStore.GetRules()`、確認找得到該規則名才算成功；找不到 → `done(success=false)`。**別憑「沒丟例外」就說成功。**
+
+6. ⚠️ **離線 / 連不上 Exchange 的硬規則（最重要、防假成功）**：凡是需要「伺服器端生效」的操作（建/改收件規則、伺服器端搬大量信、寄信）一旦遇到「離線工作 / 必須連線 Microsoft Exchange」這類 COM 例外 → **立刻 `done(success=false)` 說明「Outlook 目前離線、此操作需先連上 Exchange」**，**絕對不要回報成功**。建資料夾通常本機就能成功、不受此限。"""
 
 
 def _build_outlook_prompt(
@@ -3531,8 +4891,9 @@ async def execute_step_with_outlook(
             logger.warning(f"[{step_name}] ⚠ 預抓失敗：{err_pf}（LLM 將自己抓）")
 
     # LLM
-    from llm_factory import build_llm, invoke_with_streaming
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from llm_factory import build_llm
+    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+    from langchain_core.tools import tool as _lc_tool
     llm = build_llm(role=llm_role)
 
     user_prompt = _build_outlook_prompt(
@@ -3554,9 +4915,64 @@ async def execute_step_with_outlook(
     import time as _time
     start_time = _time.time()
 
+    # ── 3 個工具（native function calling）─────────────────────────────
+    # 這些 @tool wrapper 只負責「對 LLM 暴露乾淨 schema」、實際執行（AST 檢查 /
+    # sys.path 注入 / host 執行 / done 守門 / ask_user 等待）仍在下方 loop 處理，
+    # loop 看 tc["name"] 自己 dispatch（跟 validator 的 view_image/done 同模式）。
+    @_lc_tool
+    def run_python(code: str) -> str:
+        """執行 Python 程式碼來處理 Outlook 需求（寄信 / 讀信 / 行事曆 / 寫檔）。
+
+        Args:
+            code: 要執行的 Python 程式碼（完整可獨立執行；用 from pipeline.win32_helpers.outlook import ...）
+        Returns:
+            stdout + stderr（如有）
+        """
+        return "__RUN_PYTHON__"  # 不在此真執行、loop 看 tool name 做 AST 檢查 + host 執行
+
+    @_lc_tool
+    def done(success: bool, summary: str = "") -> str:
+        """結束任務、回傳最終結果。
+
+        Args:
+            success: 是否成功完成
+            summary: 結果說明（中文；失敗時說明卡在哪）
+        Returns:
+            結束標記
+        """
+        return "__DONE__"
+
+    @_lc_tool
+    def ask_user(question: str, context: str = "") -> str:
+        """需求模糊 / 缺關鍵資訊時問使用者（極少用）。
+
+        Args:
+            question: 要問的問題(若有多選請直接寫在問題內,例「A/B/C 哪個?」)
+            context: 補充情境（可省略）
+        Returns:
+            使用者的回答
+        """
+        return "__ASK_USER__"  # 不在此真執行、loop 看 tool name 等待使用者回答
+        # 註:不暴露 options 參數 — Gemini function declaration 對 Optional[list](anyOf/無 items)
+        # 會回 400 INVALID_ARGUMENT(E2E 抓到)。對齊 sandbox_tools.ask_user 的 gemma-safe schema。
+
+    outlook_tools = [run_python, done, ask_user]
+    name_to_tool = {t.name: t for t in outlook_tools}
+
+    try:
+        llm_with_tools = llm.bind_tools(outlook_tools)
+    except Exception as _be:
+        logger.error(f"[{step_name}] Outlook bind_tools 失敗：{_be}")
+        return ExecResult(
+            exit_code=-1, stdout="\n".join(all_stdout) or "",
+            stderr=f"Outlook bind_tools 失敗：{_be}",
+        )
+
+    consecutive_empty = 0  # 連續空回應守門：gemma native-FC config 下可能 tool_calls + content 皆空 → 早退、別空轉
+
     try:
         for iteration in range(OUTLOOK_AGENT_MAX_ITERATIONS):
-            logger.info(f"[{step_name}] Outlook 迭代 {iteration + 1}/{OUTLOOK_AGENT_MAX_ITERATIONS}")
+            logger.info(f"[{step_name}] Outlook 迭代 {iteration + 1}/{OUTLOOK_AGENT_MAX_ITERATIONS} [NATIVE]")
             if _time.time() - start_time > timeout:
                 logger.warning(f"[{step_name}] Outlook agent 整體 timeout（{timeout}s）達到")
                 return ExecResult(
@@ -3567,118 +4983,155 @@ async def execute_step_with_outlook(
             if iteration > 0:
                 await asyncio.sleep(OUTLOOK_AGENT_REQUEST_INTERVAL)
 
-            reply = (await invoke_with_streaming(
-                llm, messages, label=step_name, timeout=180.0, logger=logger,
-            )).strip()
-            logger.debug(f"[{step_name}] LLM 回覆：{reply[:1500]}")
+            response: AIMessage = await asyncio.wait_for(
+                llm_with_tools.ainvoke(messages), timeout=180.0
+            )
+            tool_calls = list(getattr(response, "tool_calls", []) or [])
+            content_str = response.content if isinstance(response.content, str) else ""
+            logger.info(
+                f"[{step_name}] LLM 回覆（content {len(content_str)} 字, tool_calls={len(tool_calls)}）"
+            )
+            if content_str:
+                logger.debug(f"[{step_name}] LLM content：{content_str[:1500]}")
 
-            tool_calls = _parse_skill_tool_calls(reply)
+            # AIMessage 進歷史（含 tool_calls、維持 tool_call/tool_result 配對）
+            messages.append(response)
+
             if not tool_calls:
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content="請使用 <tool>run_python</tool> 或 <tool>done</tool> 工具。"))
-                continue
-
-            call = tool_calls[0]
-            tool_name = call["tool"]
-            tool_input = call["input"]
-            logger.info(f"[{step_name}] tool={tool_name}, input_len={len(tool_input)}")
-
-            if tool_name == "done":
-                try:
-                    data = json.loads(tool_input)
-                    success = bool(data.get("success", False))
-                    summary = data.get("summary", data.get("error", ""))
-
-                    # 守門：宣稱成功但最近 run_python 失敗 → 拒絕
-                    if success and last_run_python_ok is False:
-                        logger.warning(f"[{step_name}] 在 run_python 失敗後送 done(success=true)，拒絕")
-                        messages.append(HumanMessage(content=reply))
-                        messages.append(HumanMessage(content=
-                            "[系統] 拒絕 done：上一次 run_python 失敗。先修錯再 done。"))
-                        continue
-                    # 守門：宣稱成功但 output 檔不存在
-                    if success and output_path and not Path(output_path).exists():
-                        logger.warning(f"[{step_name}] done 宣稱成功但 {output_path} 不存在，拒絕")
-                        messages.append(HumanMessage(content=reply))
-                        messages.append(HumanMessage(content=
-                            f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在。請用 run_python 實際寫入後再 done。"))
-                        continue
-
-                    all_stdout.append(f"[Outlook 完成] {summary}")
-                    logger.info(f"[{step_name}] {'成功' if success else '失敗'}：{summary}")
-                    final_stdout = (_build_clean_success_stdout(all_stdout, "[Outlook 完成]")
-                                    if success else "\n".join(all_stdout))
-                    return ExecResult(
-                        exit_code=0 if success else 1,
-                        stdout=final_stdout,
-                        stderr="" if success else summary,
+                # 連續空回應守門：tool_calls + content 皆空（content<5 字）→ streak++、連 2 次中止。
+                # gemma 在 native-FC config 下若不吐 tool 也不吐字會卡住，別空轉到上限。
+                if len(content_str.strip()) < 5:
+                    consecutive_empty += 1
+                    logger.warning(
+                        f"[{step_name}] ⚠ 第 {iteration + 1} 輪空回應"
+                        f"（tool_calls + content 皆空）、累計 {consecutive_empty}/2"
                     )
-                except json.JSONDecodeError:
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=
-                        '[系統] done 的 input 不是合法 JSON。格式：{"success": true/false, "summary": "..."}'))
-                    continue
-
-            if tool_name == "run_python":
-                # AST 檢查 — disallowed import 直接擋
-                try:
-                    errs = check_imports(tool_input)
-                except SyntaxError as e:
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=f"[系統] 你提交的 Python 有語法錯誤：{e}"))
-                    last_run_python_ok = False
-                    continue
-                if errs:
-                    err_msg = format_errors_for_agent(errs)
-                    logger.warning(f"[{step_name}] 偵測到 disallowed imports：{[e.module for e in errs]}")
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=err_msg))
-                    last_run_python_ok = False
-                    continue
-
-                # 執行（強制 host）
-                # 注入 sys.path 讓 subprocess 找得到 backend dir 裡的 win32_helpers / pipeline 套件
-                # （_skill_run_python 寫到 Windows temp 目錄後 spawn subprocess，預設 sys.path
-                # 沒有 backend dir → import win32_helpers / from pipeline.X 會 ModuleNotFoundError）
-                _injected_code = (
-                    f"import sys\n"
-                    f"sys.path.insert(0, r{repr(_backend_dir_for_outlook)})\n"
-                    + tool_input
-                )
-                tool_result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda ti=_injected_code, lg=logger, tt=_compute_tool_timeout(timeout): _execute_skill_tool(
-                        "run_python", ti, cwd=working_dir, run_id=run_id,
-                        logger=lg, force_host=True, tool_timeout=tt,
-                    ),
-                )
-                logger.debug(f"[{step_name}] 執行結果：{tool_result[:1500]}")
-                all_stdout.append(f"[run_python] {tool_result}")
-                last_run_python_ok = "[exit code:" not in tool_result
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=f"[工具結果 — run_python]\n{tool_result}"))
+                    if consecutive_empty >= 2:
+                        err_msg = (
+                            "Outlook agent 連續 2 輪空回應（tool_calls + content 皆空、"
+                            "疑似模型不相容 native function calling）、判定卡住、中止。"
+                        )
+                        logger.error(f"[{step_name}] ✗ {err_msg}")
+                        return ExecResult(
+                            exit_code=1, stdout="\n".join(all_stdout), stderr=err_msg,
+                        )
+                else:
+                    consecutive_empty = 0
+                messages.append(HumanMessage(content=
+                    "請使用工具（原生 function calling）呼叫 run_python / done / ask_user。"
+                    "不要用文字描述工具呼叫。"))
                 continue
 
-            if tool_name == "ask_user":
-                try:
-                    aq = json.loads(tool_input)
-                    question = aq.get("question", "")
-                    options = aq.get("options", [])
-                    context = aq.get("context", "")
-                except Exception:
-                    question, options, context = tool_input, [], ""
-                answer = await _wait_for_ask_user(
-                    run_id, question, options, context, logger, step_name,
-                )
-                all_stdout.append(f"[ask_user] {question} → {answer}")
-                messages.append(HumanMessage(content=reply))
-                messages.append(HumanMessage(content=f"[ask_user 答案] {answer}"))
-                continue
+            consecutive_empty = 0
 
-            # 不支援的工具
-            messages.append(HumanMessage(content=reply))
-            messages.append(HumanMessage(content=
-                f"[系統] 工具 {tool_name} 不在 Outlook 節點允許清單。可用：run_python / done / ask_user。"))
+            # 掃出 done（若有）、其餘工具先執行；done 在最後處理
+            done_call: Optional[dict] = None
+            regular_calls = []
+            for tc in tool_calls:
+                if tc.get("name") == "done":
+                    done_call = tc  # 多個 done 取最後一個
+                else:
+                    regular_calls.append(tc)
+
+            for tc in regular_calls:
+                tool_name = tc.get("name", "")
+                tc_id = tc.get("id") or ""
+                tc_args = tc.get("args", {}) or {}
+                logger.info(f"[{step_name}] tool={tool_name} [NATIVE]")
+
+                if tool_name == "run_python":
+                    tool_input = str(tc_args.get("code", "") or "")
+                    logger.info(f"[{step_name}] run_python input_len={len(tool_input)}")
+                    # AST 檢查 — disallowed import 直接擋
+                    try:
+                        errs = check_imports(tool_input)
+                    except SyntaxError as e:
+                        messages.append(ToolMessage(
+                            content=f"[系統] 你提交的 Python 有語法錯誤：{e}", tool_call_id=tc_id,
+                        ))
+                        last_run_python_ok = False
+                        continue
+                    if errs:
+                        err_msg = format_errors_for_agent(errs)
+                        logger.warning(f"[{step_name}] 偵測到 disallowed imports：{[e.module for e in errs]}")
+                        messages.append(ToolMessage(content=err_msg, tool_call_id=tc_id))
+                        last_run_python_ok = False
+                        continue
+
+                    # 執行（強制 host）
+                    # 注入 sys.path 讓 subprocess 找得到 backend dir 裡的 win32_helpers / pipeline 套件
+                    # （_skill_run_python 寫到 Windows temp 目錄後 spawn subprocess，預設 sys.path
+                    # 沒有 backend dir → import win32_helpers / from pipeline.X 會 ModuleNotFoundError）
+                    _injected_code = (
+                        f"import sys\n"
+                        f"sys.path.insert(0, r{repr(_backend_dir_for_outlook)})\n"
+                        + tool_input
+                    )
+                    tool_result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda ti=_injected_code, lg=logger, tt=_compute_tool_timeout(timeout): _execute_skill_tool(
+                            "run_python", ti, cwd=working_dir, run_id=run_id,
+                            logger=lg, force_host=True, tool_timeout=tt,
+                        ),
+                    )
+                    logger.debug(f"[{step_name}] 執行結果：{tool_result[:1500]}")
+                    all_stdout.append(f"[run_python] {tool_result}")
+                    last_run_python_ok = "[exit code:" not in tool_result
+                    messages.append(ToolMessage(content=tool_result, tool_call_id=tc_id))
+                    continue
+
+                if tool_name == "ask_user":
+                    question = str(tc_args.get("question", "") or "")
+                    options = tc_args.get("options") or []
+                    context = str(tc_args.get("context", "") or "")
+                    answer = await _wait_for_ask_user(
+                        run_id, question, options, context, logger, step_name,
+                    )
+                    all_stdout.append(f"[ask_user] {question} → {answer}")
+                    messages.append(ToolMessage(content=f"[ask_user 答案] {answer}", tool_call_id=tc_id))
+                    continue
+
+                # 不支援的工具（理論上 bind_tools 後不會發生）
+                messages.append(ToolMessage(
+                    content=(f"[系統] 工具 {tool_name} 不在 Outlook 節點允許清單。"
+                             f"可用：run_python / done / ask_user。"),
+                    tool_call_id=tc_id,
+                ))
+
+            # done 工具（在 regular_calls 全跑完後處理）
+            if done_call is not None:
+                tc_id = done_call.get("id") or ""
+                tc_args = done_call.get("args", {}) or {}
+                success = bool(tc_args.get("success", False))
+                summary = tc_args.get("summary") or tc_args.get("error") or ""
+
+                # 守門：宣稱成功但最近 run_python 失敗 → 拒絕
+                if success and last_run_python_ok is False:
+                    logger.warning(f"[{step_name}] 在 run_python 失敗後送 done(success=true)，拒絕")
+                    messages.append(ToolMessage(
+                        content="[系統] 拒絕 done：上一次 run_python 失敗。先修錯再 done。",
+                        tool_call_id=tc_id,
+                    ))
+                    continue
+                # 守門：宣稱成功但 output 檔不存在
+                if success and output_path and not Path(output_path).exists():
+                    logger.warning(f"[{step_name}] done 宣稱成功但 {output_path} 不存在，拒絕")
+                    messages.append(ToolMessage(
+                        content=(f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在。"
+                                 f"請用 run_python 實際寫入後再 done。"),
+                        tool_call_id=tc_id,
+                    ))
+                    continue
+
+                all_stdout.append(f"[Outlook 完成] {summary}")
+                logger.info(f"[{step_name}] {'成功' if success else '失敗'}：{summary}")
+                final_stdout = (_build_clean_success_stdout(all_stdout, "[Outlook 完成]")
+                                if success else "\n".join(all_stdout))
+                return ExecResult(
+                    exit_code=0 if success else 1,
+                    stdout=final_stdout,
+                    stderr="" if success else summary,
+                )
 
         # 達到迭代上限
         logger.warning(f"[{step_name}] Outlook agent 達迭代上限 {OUTLOOK_AGENT_MAX_ITERATIONS}")
@@ -3883,9 +5336,23 @@ async def execute_step_with_web_crawler(
         return ExecResult(exit_code=1, stdout="",
                           stderr=f"爬取失敗（tier={result.tier}）：{result.error}")
 
+    # 404 fail-fast:crawl 本身「成功」回傳、但抓到的是 HTTP 4xx/5xx 錯誤頁 或 內容過短的空殼
+    # (JS 未渲染 / 反爬擋頁)→ 直接判 fail,別把錯誤頁當成功往下傳、害下游 parser 解析空殼才爆。
+    # (對齊 crawl_empty_diagnosis:先看 status + word_count;404 頁/空殼不是有效內容)
+    _wc = len(result.markdown.split())
+    _sc = getattr(result, "status_code", None)
+    if isinstance(_sc, int) and _sc >= 400:
+        return ExecResult(exit_code=1, stdout="",
+            stderr=(f"爬到 HTTP {_sc} 錯誤頁（tier={result.tier}、字數={_wc}）→ "
+                    f"URL 可能失效 / 改版 / 反爬,請確認網址正確。不把錯誤頁當成功往下傳。"))
+    if _wc < 30:
+        return ExecResult(exit_code=1, stdout="",
+            stderr=(f"爬取內容過少（僅 {_wc} 字、status={_sc}、tier={result.tier}）→ "
+                    f"可能是空殼 / JS 未渲染 / 反爬擋頁,非有效內容,無法供下游解析。"))
+
     summary = (
         f"[爬蟲完成] tier={result.tier} status={result.status_code} "
-        f"title={result.title!r} 字數={len(result.markdown.split())} "
+        f"title={result.title!r} 字數={_wc} "
         f"耗時={result.duration_ms}ms → {output_path}"
     )
     return ExecResult(exit_code=0, stdout=summary, stderr="")

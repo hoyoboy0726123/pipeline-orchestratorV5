@@ -230,7 +230,13 @@ def _build_graph(steps: list[dict]) -> tuple[list[list[int]], list[dict]]:
             elif i + 1 < n:
                 targets.append((i + 1, None))
 
+        # 同一目標去重:default 與某個 case 指向同一節點時(如 default 與「評價分歧」
+        # 都指「產生分歧分析」)只畫一條邊、避免畫面上重複箭頭。先處理的 case 標籤較有意義、保留它。
+        seen_j: set[int] = set()
         for j, handle in targets:
+            if j in seen_j:
+                continue
+            seen_j.add(j)
             out[i].append(j)
             edges.append({"i": i, "j": j, "handle": handle})
 

@@ -146,7 +146,15 @@ chmod +x start.sh && ./start.sh
 
 開瀏覽器到 **http://localhost:3002**,完成。
 
+> **第一次想確認跑得起來?** 直接跑內建範例 **「Q1 財務報表（純腳本串接）」** —— 它只串幾支 Python 腳本、**不需 API Key、不需 Skill、不需沙盒**,是零前置的最短驗證路徑。需要 AI 功能(AI 助手 / skill 節點)才要在 `backend/.env` 填一把 LLM Key。
+
 > Skill 沙盒(選用,讓 AI 生成的 code 跑在容器內)的安裝見下方「安裝步驟」第 5 步。
+
+### Skills(技能套件)前置
+
+部分範例(如「爬蟲→摘要」「報告產生」)會掛載 Claude Code skill:
+- **內建 skill**(`default_skills/`,如 `scraped-content-parser`、`python-cli-extractor`)會在**後端首次啟動時自動複製**到你的 skill 目錄(`~/.agents/skills/`,可用環境變數 `SKILLS_DIR` 改),已存在則不覆蓋,無須手動安裝。
+- **`docx` / `pptx` 等 Anthropic 官方 skill** 不隨本專案散布;若要跑用到它們的範例,請自行從 [anthropics/skills](https://github.com/anthropics/skills) 取得,放進同一個 skill 目錄即可。
 
 ---
 

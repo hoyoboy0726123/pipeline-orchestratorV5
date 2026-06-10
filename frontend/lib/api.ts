@@ -138,6 +138,34 @@ export async function fsCheckVenv(dir: string): Promise<{ has_venv: boolean; pyt
   return res.json()
 }
 
+// 在本機檔案總管開啟某工作流的輸出資料夾(OUTPUT_BASE_PATH/<工作流名稱>/)。
+// 後端與使用者同機才有意義;找不到該資料夾 → 後端退回開 ai_output 根並回 existed=false。
+export async function openOutputFolder(name: string): Promise<{ opened: string; existed: boolean }> {
+  const res = await fetch(`${BASE}/fs/open-output?name=${encodeURIComponent(name)}`)
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({} as { detail?: string }))
+    throw new Error(e.detail || '開啟輸出資料夾失敗')
+  }
+  return res.json()
+}
+
+// 開 OS 原生檔案對話框(本機部署、後端與使用者同一台)。mode: open/save/dir。
+// 回 { path }(取消或無法開啟 → path=null,呼叫端可 fallback 到內建瀏覽 modal)。
+export async function fsNativePick(opts: {
+  mode?: 'open' | 'save' | 'dir'
+  initial_dir?: string
+  default_name?: string
+  py_only?: boolean
+} = {}): Promise<{ path: string | null; error?: string }> {
+  const res = await fetch(`${BASE}/fs/native-pick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  })
+  if (!res.ok) return { path: null, error: `HTTP ${res.status}` }
+  return res.json()
+}
+
 // ── Claude Code Skills ──────────────────────────────────────
 export interface AvailableSkill {
   name: string
@@ -180,6 +208,76 @@ export interface SkillDependencies {
 export async function scanSkillDependencies(displayName: string): Promise<SkillDependencies> {
   const res = await fetchWithRetry(`${BASE}/skills/${encodeURIComponent(displayName)}/dependencies`)
   if (!res.ok) throw new Error('掃描依賴失敗')
+  return res.json()
+}
+
+// ── Subagent role CRUD ────────────────────────────────────────────
+export interface SubagentRole {
+  role_id: string
+  label: string
+  description: string
+  tools: string[]
+  system_prompt: string
+  source: 'builtin' | 'custom'
+  is_builtin: boolean
+}
+export interface SelectableTool {
+  id: string
+  description: string
+}
+export interface SubagentRolesResponse {
+  roles: SubagentRole[]
+  selectable_tools: SelectableTool[]
+  builtin_ids: string[]
+}
+export interface SubagentRolePayload {
+  role_id: string
+  label: string
+  description: string
+  tools: string[]
+  system_prompt: string
+}
+
+export async function listSubagentRoles(): Promise<SubagentRolesResponse> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles`)
+  if (!res.ok) throw new Error('載入 subagent role 清單失敗')
+  return res.json()
+}
+
+async function _readErrorDetail(res: Response): Promise<string> {
+  try {
+    const data = await res.json()
+    return data?.detail || `HTTP ${res.status}`
+  } catch {
+    return `HTTP ${res.status}`
+  }
+}
+
+export async function createSubagentRole(payload: SubagentRolePayload): Promise<{ ok: boolean; role_id: string; total_custom: number }> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await _readErrorDetail(res))
+  return res.json()
+}
+
+export async function updateSubagentRole(roleId: string, payload: SubagentRolePayload): Promise<{ ok: boolean; role_id: string }> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles/${encodeURIComponent(roleId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await _readErrorDetail(res))
+  return res.json()
+}
+
+export async function deleteSubagentRole(roleId: string): Promise<{ ok: boolean; deleted: string; remaining_custom: number }> {
+  const res = await fetchWithRetry(`${BASE}/subagent/roles/${encodeURIComponent(roleId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await _readErrorDetail(res))
   return res.json()
 }
 
@@ -262,7 +360,7 @@ export async function deletePipelineRun(runId: string): Promise<void> {
   if (!res.ok) throw new Error('刪除失敗')
 }
 
-export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev', hint?: string): Promise<{ message: string }> {
+export async function resumePipeline(runId: string, decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev' | 'self_heal_now', hint?: string): Promise<{ message: string }> {
   const body: Record<string, string> = { decision }
   if (hint) body.hint = hint
   const res = await fetch(`${BASE}/pipeline/runs/${runId}/resume`, {
@@ -929,6 +1027,7 @@ export interface WebSearchSettingsStatus {
   has_key: boolean
   web_search_enabled: boolean
   web_search_full_content_default: boolean
+  web_search_deep_default: boolean
 }
 
 export interface WebSearchSettingsInput {
@@ -936,6 +1035,7 @@ export interface WebSearchSettingsInput {
   tavily_api_key?: string
   web_search_enabled?: boolean
   web_search_full_content_default?: boolean
+  web_search_deep_default?: boolean
 }
 
 export async function getWebSearchSettings(): Promise<WebSearchSettingsStatus> {
@@ -982,6 +1082,37 @@ export async function setSandboxMode(mode: 'host' | 'wsl_docker'): Promise<Sandb
   })
   if (!res.ok) throw new Error('切換沙盒模式失敗')
   return res.json()
+}
+
+// ── AI 助手長期記憶 ───────────────────────────────────────
+export interface MemorySettings { enabled: boolean; aggressive: boolean; fact_count?: number }
+export interface MemoryFact { key: string; value: string; category: string; source: string; confidence: number; updated_at: number }
+
+export async function getMemorySettings(): Promise<MemorySettings> {
+  const res = await fetchWithRetry(`${BASE}/settings/memory`)
+  if (!res.ok) throw new Error('讀取記憶設定失敗')
+  return res.json()
+}
+
+export async function setMemorySettings(payload: { enabled?: boolean; aggressive?: boolean }): Promise<MemorySettings> {
+  const res = await fetch(`${BASE}/settings/memory`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error('切換記憶設定失敗')
+  return res.json()
+}
+
+export async function listMemoryFacts(): Promise<MemoryFact[]> {
+  const res = await fetchWithRetry(`${BASE}/memory/facts`)
+  if (!res.ok) throw new Error('讀取記憶清單失敗')
+  return (await res.json()).facts || []
+}
+
+export async function deleteMemoryFact(key: string): Promise<void> {
+  const res = await fetch(`${BASE}/memory/facts/${encodeURIComponent(key)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('刪除記憶失敗')
 }
 
 // ── Skill 檔案目錄 ────────────────────────────────────────

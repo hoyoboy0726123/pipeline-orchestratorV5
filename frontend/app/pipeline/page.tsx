@@ -41,6 +41,7 @@ import SubagentConfigPanel          from './_subagentPanel'
 import ConditionPanel               from './_conditionPanel'
 import HoverScrollRow               from './_hoverScrollRow'
 import Sidebar                from './_sidebar'
+import AtlasChat, { NodeGuideModal } from './_atlasChat'
 import {
   type AppNode, type StepData, type SkillData, type AiValidationData, type HumanConfirmData,
   type ComputerUseData, type VisualValidationData, type OutlookData, type WebCrawlerData, type SubagentData,
@@ -58,6 +59,7 @@ import {
   getPipelineRuns,
   getRecipeStatus, type RecipeStatus,
   deleteComputerUseAssets,
+  openOutputFolder,
 } from '@/lib/api'
 import type { PipelineRun } from '@/lib/types'
 import { computeCostUsd, formatCostUsd } from '@/lib/cost'
@@ -359,6 +361,13 @@ function YamlPanel({ yaml, onImport, onClose }: { yaml: string; onImport: (y: st
           <span className="font-semibold text-sm text-gray-300 font-mono">YAML</span>
         </div>
         <div className="flex gap-2">
+          <button onClick={async () => {
+              try { await navigator.clipboard.writeText(draft); toast.success('已複製 YAML') }
+              catch { toast.error('複製失敗，請手動選取') }
+            }}
+            className="px-3 py-1 text-xs border border-gray-600 text-gray-300 rounded-lg hover:bg-gray-800 transition-colors font-mono">
+            複製
+          </button>
           <button onClick={() => { onImport(draft); toast.success('已從 YAML 更新流程') }}
             className="px-3 py-1 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-mono">
             套用
@@ -421,6 +430,7 @@ export default function PipelinePage() {
   }, [cancelHoverClear])
   const [pipelineName, setPipelineName] = useState('my-pipeline')
   const [showYaml, setShowYaml]   = useState(false)
+  const [showNodeGuide, setShowNodeGuide] = useState(false)
   const [showDryRun, setShowDryRun] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
   const [showRunDialog, setShowRunDialog] = useState(false)
@@ -430,7 +440,9 @@ export default function PipelinePage() {
   const runStatusRef = useRef(runStatus)
   const setRunStatus = (v: typeof runStatus) => { runStatusRef.current = v; _setRunStatus(v) }
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
-  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval'>('failure')
+  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval' | 'self_heal'>('failure')
+  // Phase 3 自我修復回寫:修復成功跑完後,問是否把修好的 YAML 存回存檔工作流
+  const [healWriteback, setHealWriteback] = useState<{ runId: string; workflowId: string } | null>(null)
   const [askUserOptions, setAskUserOptions] = useState<string[]>([])
   const [askUserContext, setAskUserContext] = useState('')
   const [askUserAnswer, setAskUserAnswer] = useState('')
@@ -490,6 +502,8 @@ export default function PipelinePage() {
 
   // ── Workflow Store ────────────────────────────────────────────────────────
   const { activeId, workflows, updateWorkflow, saveCanvas, createWorkflow } = useWorkflowStore()
+  // Hero UX 重塑(Phase 2/3):chatUIState='hero' 時在最上層 render 全螢幕 Hero 浮層
+  const chatUIState = useWorkflowStore(s => s.chatUIState)
 
   // 當 activeId 改變時，載入對應工作流（defer 避免 render-time setState）
   useEffect(() => {
@@ -512,13 +526,20 @@ export default function PipelinePage() {
       setTimeout(() => {
         savingRef.current = false
         rfInstanceRef.current?.fitView({ padding: 0.3, duration: 300 })
-        // 一次性 yaml backfill — 對舊工作流（DB yaml 欄位空）很關鍵，
-        // 因為單純點開不修改不會觸發 auto-save。idempotent，重複載入也只會覆寫成相同值。
+        // 一次性 yaml backfill — 對舊工作流(DB yaml 欄位空)很關鍵、
+        // 因為單純點開不修改不會觸發 auto-save。idempotent、重複載入也只會覆寫成相同值。
         // 這也是 TG 遠端遙控能讀到 yaml 的最後一道保險。
+        //
+        // ⚠ 跳過 nodes 為空的 workflow:capture 的 `wf` 是 1 秒前的 snapshot。
+        // 若這 1 秒內有 importYaml('new') 寫入 reddit canvas、backfill 用舊 capture
+        // 會用「空 nodes」蓋掉 backend 已存的好資料。導致 user 從 hero 套用 YAML 後、
+        // 切回工作流發現 canvas 變空。empty workflow 也沒 yaml 可 backfill、skip 安全。
         try {
-          const yaml = stepsToYaml(wf.name, flowToSteps(wf.nodes as AppNode[], wf.edges))
-          saveCanvas(activeId, wf.nodes as AppNode[], wf.edges, yaml)
-        } catch { /* 解析失敗就放過，下次編輯時 auto-save 會補 */ }
+          if (wf.nodes && wf.nodes.length > 0) {
+            const yaml = stepsToYaml(wf.name, flowToSteps(wf.nodes as AppNode[], wf.edges))
+            saveCanvas(activeId, wf.nodes as AppNode[], wf.edges, yaml)
+          }
+        } catch { /* 解析失敗就放過、下次編輯時 auto-save 會補 */ }
       }, 1000)
     }, 30)
     return () => clearTimeout(timer)
@@ -555,7 +576,7 @@ export default function PipelinePage() {
             setRunStatus('awaiting')
             setAwaitingRunId(active.run_id)
             const at = (active as any).awaiting_type
-            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
+            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
             setAwaitingType(mapped)
             setAwaitingMessage((active as any).awaiting_message || '')
             setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1132,7 +1153,15 @@ export default function PipelinePage() {
   }, [nodes, edges, setNodes, setEdges, pipelineName])
 
   // ── Update step data (works for both scriptStep and skillStep) ─────────────
+  // 步驟名稱不能有空白:`{{ steps.<名稱>.output }}` 點號語法遇空白會 Jinja 語法錯而崩。
+  // 在中央更新點即時把名稱空白轉底線 → 使用者手動改名打空白也會自動變底線、無法殘留。
   const updateStep = useCallback((id: string, patch: Partial<StepData> | Partial<SkillData> | Partial<ConditionData>) => {
+    const p = patch as { name?: unknown }
+    if (typeof p.name === 'string' && /\s/.test(p.name)) {
+      patch = { ...patch, name: p.name.replace(/\s+/g, '_') } as typeof patch
+      // 固定 id → 連打空白時只刷新同一則、不會疊一堆
+      toast.info('名稱的空白已自動改為底線（變數引用 {{ steps.名稱 }} 不允許空白）', { id: 'name-space-fix' })
+    }
     setNodes(ns => ns.map(n =>
       n.id === id ? ({ ...n, data: { ...n.data, ...patch } } as AppNode) : n
     ))
@@ -1140,6 +1169,11 @@ export default function PipelinePage() {
 
   // ── Update AI validation node data ─────────────────────────────────────
   const updateAiNode = useCallback((id: string, patch: Partial<AiValidationData>) => {
+    const p = patch as { name?: unknown }
+    if (typeof p.name === 'string' && /\s/.test(p.name)) {
+      patch = { ...patch, name: p.name.replace(/\s+/g, '_') }
+      toast.info('名稱的空白已自動改為底線（變數引用 {{ steps.名稱 }} 不允許空白）', { id: 'name-space-fix' })
+    }
     setNodes(ns => ns.map(n =>
       n.id === id ? { ...n, data: { ...n.data, ...patch } } : n
     ))
@@ -1441,7 +1475,7 @@ export default function PipelinePage() {
                 setRunStatus('awaiting')
                 setAwaitingRunId(active.run_id)
                 const at = (active as any).awaiting_type
-                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
+                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
                 setAwaitingType(mapped)
                 setAwaitingMessage((active as any).awaiting_message || '')
                 setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1532,7 +1566,7 @@ export default function PipelinePage() {
           setRunStatus('awaiting')
           setAwaitingRunId(runId)
           const at = data.awaiting_type
-          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : 'failure'
+          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
           setAwaitingType(mapped)
           setAwaitingMessage(data.awaiting_message || '')
           setAwaitingSuggestion(data.awaiting_suggestion || '')
@@ -1580,6 +1614,10 @@ export default function PipelinePage() {
         setRunStatus(success ? 'success' : 'failed')
         setAwaitingRunId(null)
         toast[success ? 'success' : 'error'](success ? 'Pipeline 執行完成 ✓' : data.status === 'aborted' ? 'Pipeline 已中止' : 'Pipeline 執行失敗')
+        // Phase 3:自我修復成功跑完 → 提示是否把修好的 YAML 回寫存檔工作流(否則下次跑同工作流仍踩同錯)
+        if (success && (data.self_heal_count || 0) > 0 && data.workflow_id) {
+          setHealWriteback({ runId: data.run_id, workflowId: data.workflow_id })
+        }
         // 成功且有待確認的 recipes → 顯示確認對話框
         if (success && data.pending_recipes && data.pending_recipes.length > 0) {
           setPendingRecipeRunId(data.run_id)
@@ -1614,7 +1652,7 @@ export default function PipelinePage() {
   const [hintText, setHintText] = useState('')
   const [showHintInput, setShowHintInput] = useState(false)
 
-  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev', hint?: string) => {
+  const handleDecision = async (decision: 'retry' | 'skip' | 'abort' | 'continue' | 'retry_with_hint' | 'answer' | 'install_dep' | 'approve_command' | 'deny_command' | 'hint_command' | 'redo_prev' | 'self_heal_now', hint?: string) => {
     if (!awaitingRunId) return
     const rid = awaitingRunId
 
@@ -1702,6 +1740,12 @@ export default function PipelinePage() {
     <div className="h-screen flex overflow-hidden bg-gray-50" style={{ fontFamily: "'Inter', 'Noto Sans TC', sans-serif" }}>
       <Toaster richColors position="top-right" />
 
+      {/* ── Hero overlay(Phase 3、chatUIState='hero' 時最上層全螢幕)──
+          z-50;Atlas 首頁中央大畫面。送出 / ESC / CTA → 切 'sidebar' 由元件內處理 */}
+      {chatUIState === 'hero' && (
+        <AtlasChat mode="hero" onYamlApply={importYaml} />
+      )}
+
       {/* ── Left Sidebar ── */}
       <Sidebar onYamlApply={importYaml} />
 
@@ -1733,6 +1777,22 @@ export default function PipelinePage() {
         {RunStatusIcon && <span>{RunStatusIcon}</span>}
         <div className="flex-1" />
 
+        {/* 輸出資料夾 — 在本機檔案總管開啟此工作流的輸出資料夾 */}
+        <button
+          onClick={async () => {
+            try {
+              const r = await openOutputFolder(pipelineName)
+              if (!r.existed) alert('此工作流尚無輸出,已開啟 ai_output 根目錄。')
+            } catch (e) {
+              alert('開啟輸出資料夾失敗:' + (e as Error).message)
+            }
+          }}
+          title="在檔案總管開啟此工作流的輸出資料夾,方便查看產出結果"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+        >
+          📂 輸出資料夾
+        </button>
+
         {/* 預覽指令 (dry-run) — 不執行、只渲染每個 step 變數展開後的指令文字 */}
         <button
           onClick={() => setShowDryRun(true)}
@@ -1740,6 +1800,15 @@ export default function PipelinePage() {
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
         >
           👁️ 預覽指令
+        </button>
+
+        {/* 節點介紹 — 看有哪些節點、各自適合什麼(中央彈窗)*/}
+        <button
+          onClick={() => setShowNodeGuide(true)}
+          title="看有哪些節點、各自適合什麼"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+        >
+          📖 節點介紹
         </button>
 
         {/* YAML */}
@@ -1943,6 +2012,50 @@ export default function PipelinePage() {
           </Panel>
         </ReactFlow>
 
+        {/* Phase 3:自我修復成功跑完 → 問是否回寫存檔工作流 */}
+        {healWriteback && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-emerald-50 border border-emerald-300 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
+            <span className="text-emerald-700 font-medium text-sm">✅ 這條工作流是 AI 自動修復後跑成功的</span>
+            <p className="text-xs text-emerald-800 leading-relaxed">
+              要把 AI 修好的版本<b>存回這個工作流</b>嗎?存回後下次跑就不會再踩同樣的錯;不存的話這次的修正只用於本次執行。
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/backend/pipeline/runs/${healWriteback.runId}/heal-writeback`, { method: 'POST' })
+                    if (!res.ok) throw new Error()
+                    toast.success('已把修好的版本存回工作流 ✓')
+                    setHealWriteback(null)
+                  } catch { toast.error('回寫失敗') }
+                }}
+                className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 whitespace-nowrap"
+              >💾 存回工作流</button>
+              <button
+                onClick={() => setHealWriteback(null)}
+                className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-xs font-medium hover:bg-gray-300 whitespace-nowrap"
+              >不用,這次就好</button>
+            </div>
+          </div>
+        )}
+
+        {/* AI 自我修復中(唯讀過渡狀態)*/}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'self_heal' && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-cyan-50 border border-cyan-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+              <span className="text-cyan-700 font-medium text-sm">🔧 AI 正在自我修復…</span>
+              <button onClick={() => handleDecision('abort')} className="ml-auto px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
+            </div>
+            {awaitingMessage && (
+              <div className="bg-cyan-100 border border-cyan-200 rounded-lg px-3 py-2">
+                <p className="text-xs text-cyan-800 leading-relaxed">{awaitingMessage}</p>
+              </div>
+            )}
+            <p className="text-[11px] text-cyan-600">AI 會讀 log、比對自己寫的 YAML、找錯改好後自動重跑。修不好會自動轉人工決策。</p>
+          </div>
+        )}
+
         {/* Awaiting human decision banner */}
         {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'failure' && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-amber-50 border border-amber-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
@@ -1962,6 +2075,11 @@ export default function PipelinePage() {
                   title="認為失敗是因為上一步沒做好;清掉上一步 + 當前步結果、從上一步重跑"
                   className="px-3 py-1.5 bg-teal-600 text-white rounded-lg text-xs font-medium hover:bg-teal-700 whitespace-nowrap"
                 >↩ 重做上一步</button>
+                <button
+                  onClick={() => handleDecision('self_heal_now')}
+                  title="讓 AI 讀執行 log + 比對自己寫的 YAML、自動找錯改好後重跑"
+                  className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg text-xs font-medium hover:bg-cyan-700 whitespace-nowrap"
+                >🔧 讓 AI 試修</button>
                 <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
               </div>
             </div>
@@ -2263,6 +2381,9 @@ export default function PipelinePage() {
           />
         ) : null}
 
+        {/* 節點介紹 中央彈窗(按鈕在上方工具列、YAML 左側)*/}
+        {showNodeGuide && <NodeGuideModal onClose={() => setShowNodeGuide(false)} />}
+
         {/* YAML panel */}
         {showYaml && (
           <YamlPanel
@@ -2318,6 +2439,15 @@ export default function PipelinePage() {
                 className={`text-xs px-2 py-0.5 rounded transition-colors ${showTrace ? 'bg-indigo-700 text-white hover:bg-indigo-600' : 'border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500'}`}
                 title={showTrace ? '切回 Log 視圖（時序文字流）' : '切到 Trace 視圖（每步驟 tool 呼叫與 token 用量）'}
               >{showTrace ? '📜 Log' : '📊 Trace'}</button>
+              <button
+                onClick={async () => {
+                  if (!logLines.length) { toast.info('目前沒有 log 可複製'); return }
+                  try { await navigator.clipboard.writeText(logLines.join('\n')); toast.success(`已複製 ${logLines.length} 行 log`) }
+                  catch { toast.error('複製失敗，請手動選取') }
+                }}
+                className="text-xs text-gray-500 hover:text-gray-300 px-2"
+                title="複製完整 log 內容到剪貼簿"
+              >複製</button>
               <button onClick={() => setLogLines([])} className="text-xs text-gray-500 hover:text-gray-300 px-2">清除</button>
               <button onClick={() => setShowLog(false)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-3.5 h-3.5" />
@@ -2413,8 +2543,8 @@ export default function PipelinePage() {
               )}
               {logLines.map((line, i) => (
                 <div key={i} className={
-                  /error|fail|錯誤|失敗/i.test(line) ? 'text-red-400' :
-                  /warn|warning/i.test(line) ? 'text-yellow-400' :
+                  /\[ERROR\s*\]|Traceback|exit code: [1-9]/i.test(line) ? 'text-red-400' :
+                  /\[WARN/i.test(line) ? 'text-yellow-400' :
                   /success|完成|✓/i.test(line) ? 'text-green-400' :
                   'text-gray-300'
                 }>{line || '\u00a0'}</div>

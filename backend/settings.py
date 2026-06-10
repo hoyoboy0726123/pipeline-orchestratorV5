@@ -16,7 +16,7 @@ _DEFAULT = {
     "model": GROQ_MODEL_MAIN,      # e.g. "meta-llama/llama-4-scout-17b-16e-instruct" or "qwen3:8b"
     "ollama_base_url": "http://localhost:11434",
     "ollama_thinking": "off",      # "auto" | "on" | "off" — 預設關閉，避免 thinking 模式 rambling 卡住
-    "ollama_num_ctx": 16384,       # Ollama context window tokens（僅 Ollama）
+    "ollama_num_ctx": 32768,       # Ollama context window tokens（僅 Ollama）；本應用 system prompt 約 17~22k，低於 32768 會截斷
     "gemini_thinking": "off",      # "off" | "auto" | "low" | "medium" | "high"
     "anthropic_thinking": "off",   # "off" | "on" — Claude Opus 4 系列 extended thinking
     # ── 副模型(節點可在 panel 選 llm_role: secondary 切到這個)──
@@ -49,6 +49,31 @@ _DEFAULT = {
     # 完整內容模式：ON 時 Tavily 直接回文章原文（Agent 不用寫爬蟲）
     # 代價：一次回傳 ~15000 字，需要雲端大 context 模型；本地 Ollama 8B 小 context 會爆
     "web_search_full_content_default": False,
+    # 搜尋深度預設:advanced 模式比 basic 貴 2x、但研究品質好 5-10x。
+    # Atlas 定位深度研究 → 預設 ON。chat 助手 / skill / subagent 全部受影響。
+    # 帳單失控時可從設定頁關掉、改成 LLM 個別 input 才走 advanced。
+    "web_search_deep_default": True,
+    # 含 computer_use 節點的工作流啟動時自動縮小前景視窗(通常是 V5 瀏覽器)、
+    # 結束後自動還原。避免 V5 視窗擋住要自動化的目標 app。
+    # 預設 OFF — 使用者自己決定要不要打擾桌面。並發 workflow 用 ref-count 處理。
+    "auto_minimize_for_computer_use": False,
+    # AI 助手長期記憶(facts 語意記憶):記得使用者偏好 / 事實、跨對話「越用越懂」。
+    # 開 → 提供 remember/recall 等記憶工具 + 每輪注入記憶快照進 system prompt。
+    # 關 → 完全不載入記憶工具、不注入快照(已存的記憶保留、不刪)。預設 ON。
+    "memory_enabled": True,
+    # 激進學習:對話結束自動「推斷」使用者偏好存成低信心 inferred fact(不必明說「記下」)。
+    # 開 → 越用越懂最快,但 AI 可能過度推斷 / 記錯(都標(推測)、可改可刪)。
+    # 關 → 只記使用者明確說「記下」的事(保守、零誤記)。預設 OFF — 要積極才開。
+    # 依賴 memory_enabled;memory_enabled 關時此項無效。
+    "memory_aggressive": False,
+    # 工作流自我修復:某步驟失敗(重試耗盡)時,讓 AI 助手讀 log + 比對自己寫的 YAML、
+    # 找出錯誤、改 YAML、從失敗步重跑,循環到成功或達上限才轉人工決策。
+    # 開 → 失敗自動背景修復(前端/TG 看得到「AI 修復中 N/M」)。
+    # 關(預設)→ 維持現狀:失敗即轉 awaiting_human 等人工。預設 OFF — 自動改 YAML 有風險、要明確開。
+    "self_heal_enabled": False,
+    # 單次 run 最多自動修復幾次(每次 = 一輪「讀 log → 改 YAML → 重跑」)。
+    # 2 是安全預設:夠救「路徑錯/參數錯/缺前置步驟」這類一兩次能修好的、又不會無限燒 token。硬 cap 5。
+    "self_heal_max_attempts": 2,
 }
 
 _cache: Optional[dict] = None
@@ -179,6 +204,40 @@ def set_skill_sandbox_mode(mode: str) -> dict:
     return dict(existing)
 
 
+# ── computer_use 啟動時自動縮視窗 (獨立 setter) ───────────────────
+def set_auto_minimize_for_computer_use(enabled: bool) -> dict:
+    """切換 computer_use workflow 啟動時、自動縮小前景視窗。"""
+    global _cache
+    enabled = bool(enabled)
+    with _lock:
+        existing = _cache if _cache else _load_from_disk()
+        existing["auto_minimize_for_computer_use"] = enabled
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
+
+
+# ── AI 助手記憶開關（獨立 setter） ────────────────────────────────
+def set_memory_settings(enabled: Optional[bool] = None,
+                        aggressive: Optional[bool] = None) -> dict:
+    """切換長期記憶開關。enabled=主開關;aggressive=激進自動萃取(依賴 enabled)。
+    傳 None 的欄位保持原值。"""
+    global _cache
+    with _lock:
+        existing = _cache if _cache else _load_from_disk()
+        if enabled is not None:
+            existing["memory_enabled"] = bool(enabled)
+        if aggressive is not None:
+            existing["memory_aggressive"] = bool(aggressive)
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
+
+
 # ── Skill 檔案目錄（獨立 setter） ──────────────────────────────────
 def set_skills_dir(path: str) -> dict:
     """設定 Skill 檔案目錄。空字串 = 用預設 ~/.agents/skills/。"""
@@ -187,6 +246,27 @@ def set_skills_dir(path: str) -> dict:
     with _lock:
         existing = _cache if _cache else _load_from_disk()
         existing["skills_dir"] = path
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _cache = existing
+    return dict(existing)
+
+
+# ── 工作流自我修復開關（獨立 setter） ─────────────────────────────
+def set_self_heal_settings(enabled: Optional[bool] = None,
+                           max_attempts: Optional[int] = None) -> dict:
+    """切換自我修復開關 / 次數上限。傳 None 的欄位保持原值。max_attempts 限 1~5。"""
+    global _cache
+    with _lock:
+        existing = _cache if _cache else _load_from_disk()
+        if enabled is not None:
+            existing["self_heal_enabled"] = bool(enabled)
+        if max_attempts is not None:
+            n = int(max_attempts)
+            if n < 1 or n > 5:
+                raise ValueError("self_heal_max_attempts 需介於 1~5")
+            existing["self_heal_max_attempts"] = n
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)

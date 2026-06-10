@@ -210,13 +210,18 @@ def _df_to_format(df: pd.DataFrame, fmt: str, output_path: Path, *,
     return output_path
 
 
-def _to_dt(s: Any) -> Optional[datetime]:
-    """str / datetime / None → datetime；空回 None。"""
+def _to_dt(s: Any, end_of_day: bool = False) -> Optional[datetime]:
+    """str / datetime / None → datetime；空回 None。
+    end_of_day=True 時:若解析結果剛好是午夜(00:00:00,表示只給了日期沒給時間),
+    補到當天 23:59:59.999999 —— 讓 `until=某日` 涵蓋「整天」。否則 since=until=同一天
+    會變成 0 秒區間、抓 0 封信(實測 daily_todo 踩過)。"""
     if not s:
         return None
-    if isinstance(s, datetime):
-        return s
-    return pd.to_datetime(s).to_pydatetime()
+    dt = s if isinstance(s, datetime) else pd.to_datetime(s).to_pydatetime()
+    if (end_of_day and dt.hour == 0 and dt.minute == 0
+            and dt.second == 0 and dt.microsecond == 0):
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return dt
 
 
 # ── Handler 定義（每個對應一個前端 template ID）──────────────────────
@@ -236,7 +241,7 @@ def _h_daily_todo(*, params: dict, output_path: Path,
     sender = _split_keywords(params.get("sender"))
     exact = bool(params.get("exact_match"))
     since = _to_dt(params.get("since"))
-    until = _to_dt(params.get("until"))
+    until = _to_dt(params.get("until"), end_of_day=True)
     unread_only = bool(params.get("unread_only"))
     fmt = (params.get("output_format") or "md").lower()
 
@@ -289,7 +294,7 @@ def _h_download_attachments(*, params: dict, output_path: Path,
         subject=_split_keywords(params.get("subject")),
         sender=_split_keywords(params.get("sender")),
         since=_to_dt(params.get("since")),
-        until=_to_dt(params.get("until")),
+        until=_to_dt(params.get("until"), end_of_day=True),
         has_attachment=True,  # 強制有附件才有意義
         limit=500,
         logger=logger_obj,
@@ -521,7 +526,7 @@ def _search_for_bulk(params: dict, *, default_folder: str = "inbox",
         sender=_split_keywords(params.get("sender")),
         folder=(params.get("folder") or default_folder).strip() or default_folder,
         since=_to_dt(params.get("since")),
-        until=_to_dt(params.get("until")),
+        until=_to_dt(params.get("until"), end_of_day=True),
         limit=int(params.get("limit") or 500),
         logger=logger_obj,
     )
@@ -685,7 +690,7 @@ def _prefetch_search_summary(params: dict, prev_outputs: Optional[list],
     search_in = (params.get("search_in") or "subject").strip().lower()
     folder = (params.get("folder") or "inbox").strip() or "inbox"
     since = _to_dt(params.get("since"))
-    until = _to_dt(params.get("until"))
+    until = _to_dt(params.get("until"), end_of_day=True)
 
     try:
         if search_in == "subject":

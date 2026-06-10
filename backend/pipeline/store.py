@@ -57,12 +57,16 @@ class PipelineRun:
     ended_at: Optional[str] = None
     workflow_id: Optional[str] = None
     pending_recipes: list = field(default_factory=list)  # list[dict] — 延遲儲存的 recipes
-    awaiting_type: str = ""       # "" | "failure" | "human_confirm"
+    awaiting_type: str = ""       # "" | "failure" | "human_confirm" | "self_heal"(AI 修復中過渡狀態)
     awaiting_message: str = ""    # 人工確認節點的自訂訊息 / 失敗原因
     awaiting_suggestion: str = "" # 失敗時的解決建議（套件安裝、工具選擇等）
     # 啟動 workflow 時傳入的參數（POST /pipeline/run 的 input_params body）。
     # 在 Jinja2 render 階段以 `{{ input.<key> }}` 引用。沒傳就空 dict、舊 workflow 不受影響。
     input_params: dict = field(default_factory=dict)
+    # 自我修復:這次 run 已自動修復幾次(跨重跑持久化、達上限就轉人工)、每次修復的診斷歷史
+    # (回灌進下次修復 prompt 避免越改越糟)。舊 run 反序列化缺這兩欄 → 靠 default 補、不會壞。
+    self_heal_count: int = 0
+    self_heal_history: list = field(default_factory=list)  # [{attempt, diagnosis, old_yaml_hash}]
 
 
 class RunStore:

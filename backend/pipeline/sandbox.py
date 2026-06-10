@@ -383,16 +383,52 @@ class SandboxResult:
     timed_out: bool = False
 
 
+# 偵測過的真實 npm global 路徑(image 可能用 nvm、apt、Dockerfile 不同安裝、各家路徑不一致)
+# 第一次呼 _docker_exec_cmd 時抓 `npm root -g`、後續用 cache。
+_DETECTED_NODE_PATH: Optional[str] = None
+_NODE_PATH_DEFAULT = "/usr/local/lib/node_modules"  # Dockerfile 寫死的、apt-get install 後預期位置
+_NODE_PATH_LOCK = threading.Lock()
+
+
+def _detect_npm_root_g() -> str:
+    """跑容器內 `npm root -g` 抓真實 global node_modules 位置、cache 起來。
+    image 用 nvm 安裝 Node 時實際路徑 = /root/.nvm/versions/node/vX.Y.Z/lib/node_modules,
+    跟 Dockerfile 寫死的 /usr/local/lib/node_modules 不同 → require('pptxgenjs') 找不到。
+    偵測失敗回 default,不擋路。"""
+    global _DETECTED_NODE_PATH
+    with _NODE_PATH_LOCK:
+        if _DETECTED_NODE_PATH is not None:
+            return _DETECTED_NODE_PATH
+        try:
+            docker_prefix = _detect_docker_prefix()
+            rc, out, err = _run_wsl(
+                [*docker_prefix, "exec", CONTAINER_NAME, "npm", "root", "-g"],
+                timeout=10.0,
+            )
+            path = (out or "").strip()
+            if rc == 0 and path.startswith("/"):
+                _DETECTED_NODE_PATH = path
+                log.info(f"[sandbox] 偵測到 npm global path: {path}(此後 docker exec 用此值)")
+            else:
+                _DETECTED_NODE_PATH = _NODE_PATH_DEFAULT
+                log.info(f"[sandbox] npm root -g 失敗(rc={rc} err={err[:80]!r})、回 default {_NODE_PATH_DEFAULT}")
+        except Exception as e:
+            _DETECTED_NODE_PATH = _NODE_PATH_DEFAULT
+            log.warning(f"[sandbox] 偵測 NODE_PATH 例外({e})、回 default {_NODE_PATH_DEFAULT}")
+        return _DETECTED_NODE_PATH
+
+
 def _docker_exec_cmd(workdir_wsl: Optional[str], runner: list[str]) -> list[str]:
     """組 `wsl <docker_prefix> exec [-w ...] pipeline-sandbox-v5 <runner...>`
 
     NODE_PATH：讓 LLM 跑 `subprocess.run(["node", ...])` 時、`require('docx')` /
-    `require('pptxgenjs')` 等全域 npm 套件能直接 resolve、不用每次 `npm install` 到 working_dir
-    （之前 LLM 寫 .docx 報告會在輸出資料夾留 node_modules/、~9 MB 殘檔）
+    `require('pptxgenjs')` 等全域 npm 套件能直接 resolve、不用每次 `npm install` 到 working_dir。
+    動態偵測(image 可能用 nvm、apt、不同 setup),避免 Dockerfile 寫死路徑跟實際不符。
     """
     docker_prefix = _detect_docker_prefix()
+    node_path = _detect_npm_root_g()
     cmd = ["wsl", "-e", *docker_prefix, "exec",
-           "-e", "NODE_PATH=/usr/local/lib/node_modules"]
+           "-e", f"NODE_PATH={node_path}"]
     if workdir_wsl:
         cmd += ["-w", workdir_wsl]
     cmd += [CONTAINER_NAME, *runner]

@@ -8,7 +8,7 @@
       Tier 1 = Crawl4AI（容器內）→ 95% 網站
       Tier 2 = FlareSolverr（獨立 container、port 8191）→ +4% Cloudflare 站
     Tier 2 由 host 直接打 HTTP（FlareSolverr 內部用 Puppeteer 解 CF challenge），
-    拿到 HTML 後 host 用 html2text 轉 markdown。
+    拿到 HTML 後 host 用 markdownify 轉 markdown。
   - **輸出格式**：Markdown + YAML frontmatter（適合 LLM 餵入）
     單頁直接寫到 output.path；多頁時 output.path 是資料夾，pages/*.md + index.json
 
@@ -46,6 +46,43 @@ log = logging.getLogger(__name__)
 
 # ── 常數 ───────────────────────────────────────────────────────────
 FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
+# Windows + WSL2 docker:backend 跑在 Windows host、FlareSolverr 容器在 WSL 裡。
+# host 連 docker-published port 走 localhost 常不穩(localhost→::1 / 轉發間歇掉),
+# 但走 WSL IP 直連穩定。故候選 URL 順序:env 覆寫 > WSL IP > localhost > 127.0.0.1。
+# 實測:同一刻 localhost POST /v1 連不上、WSL-IP POST /v1 = ok。
+_FLARE_IP_CACHE = {"ip": "", "ts": 0.0}
+
+
+def _wsl_host_ip() -> str:
+    """取 WSL2 的 IP(`wsl hostname -I` 第一個);快取 5 分鐘。非 Windows / 無 wsl → ""。"""
+    import sys as _sys
+    if not _sys.platform.startswith("win"):
+        return ""
+    now = time.time()
+    if _FLARE_IP_CACHE["ip"] and now - _FLARE_IP_CACHE["ts"] < 300:
+        return _FLARE_IP_CACHE["ip"]
+    try:
+        out = subprocess.run(["wsl", "hostname", "-I"], capture_output=True,
+                             text=True, timeout=8)
+        ip = (out.stdout or "").strip().split()[0] if (out.stdout or "").strip() else ""
+    except Exception:
+        ip = ""
+    _FLARE_IP_CACHE["ip"], _FLARE_IP_CACHE["ts"] = ip, now
+    return ip
+
+
+def _flaresolverr_candidates() -> list[str]:
+    """回傳要嘗試的 FlareSolverr /v1 URL 候選(依可靠度排序)。"""
+    env = os.environ.get("FLARESOLVERR_URL")
+    if env:
+        return [env]
+    cands: list[str] = []
+    ip = _wsl_host_ip()
+    if ip:
+        cands.append(f"http://{ip}:8191/v1")
+    cands.append("http://localhost:8191/v1")
+    cands.append("http://127.0.0.1:8191/v1")
+    return cands
 DEFAULT_TIMEOUT_SEC = 180
 # Cloudflare 偵測訊號（回應裡出現任一即視為被擋）
 _CF_MARKERS = (
@@ -98,6 +135,94 @@ _SMART_SCROLL_MAX_SECONDS = 60
 _THIN_MARKDOWN_BYTES = 2000
 _THIN_MEDIUM_BYTES = 5000
 _THIN_MEDIUM_LINKS = 3
+
+# ── Per-host 能力註冊表 ──────────────────────────────────────────────
+# 把「我們特別認識的站」的爬取提示集中一處。**沒列在這裡的站 → 全走通用路徑、
+# 行為完全不變**(零副作用)。命中的站只會多兩件事、都只可能變好、不會變差:
+#   1. SPA 智慧重試時、用本站專屬 wait_selector(例電商等「價格元素」render)取代通用 selector
+#      —— 只在「第一輪結果太瘦、本來就要重試」時生效,不影響第一輪、不會新增 timeout。
+#   2. 抓到殼 / 失敗且本站標 known_hard 時、把「為什麼難爬 + 該怎麼辦」誠實附進錯誤訊息
+#      —— 讓使用者/驗證看到「momo 需登入 cookie」而不是一句籠統失敗。
+#
+# 電商商品頁常見「價格靠 JS 後載」、通用 SPA selector(/p/、/comments/)等不到價格元素,
+# 補一組價格錨點讓重試等得到真內容。
+_SHOP_PRICE_SELECTOR = (
+    '[itemprop="price"], meta[itemprop="price"], '
+    '[class*="price"], [class*="Price"], [class*="amount"], '
+    '[data-price], .prdPrice, .priceArea, .price-now, .o-prdPrice__price'
+)
+
+# 每筆欄位都可選:
+#   match         : hostname 子字串清單(任一命中即套用)
+#   wait_selector : 本站「內容真的 render 出來」的 selector(餵 SPA 重試)
+#   known_hard    : True = 已知難爬(自家反爬 / 重 SPA),抓到殼時主動誠實警告
+#   needs_cookie  : True = 通常要登入 cookie 才有完整內容
+#   note          : 警告訊息附的人話說明(known_hard 時用)
+HOST_REGISTRY: list[dict] = [
+    # ── 台灣電商(自家反爬 + 重 SPA;有商品 URL pattern 但內容常只拿到殼)──
+    {"match": ["momoshop.com.tw", "momo.com.tw"], "wait_selector": _SHOP_PRICE_SELECTOR,
+     "known_hard": True, "needs_cookie": False,
+     "note": "momo 是重 SPA、價格靠 JS 後載、又有自家反爬;匿名常只拿到導覽殼。"
+             "建議改用官方 App / 搜尋頁 API,或在進階設定貼登入 cookie。"},
+    {"match": ["shopee.tw", "shopee.com"], "wait_selector": _SHOP_PRICE_SELECTOR,
+     "known_hard": True, "needs_cookie": True,
+     "note": "蝦皮自家反爬強、且多數內容要登入;沒 cookie 幾乎抓不到商品內容。"},
+    {"match": ["24h.pchome.com.tw", "pchome.com.tw", "ecshweb.pchome.com.tw"],
+     "wait_selector": _SHOP_PRICE_SELECTOR, "known_hard": False, "needs_cookie": False,
+     "note": "PChome 商品頁價格靠 JS 後載,等價格元素 render 即可。"},
+    {"match": ["ruten.com.tw"], "wait_selector": _SHOP_PRICE_SELECTOR,
+     "known_hard": True, "needs_cookie": False, "note": "露天有反爬、商品頁多為 SPA。"},
+    # ── 中國電商(強反爬、普遍需登入)──
+    {"match": ["taobao.com", "tmall.com"], "known_hard": True, "needs_cookie": True,
+     "note": "淘寶/天貓自家反爬極強、需登入 cookie;匿名抓不到。"},
+    {"match": ["jd.com"], "known_hard": True, "needs_cookie": True,
+     "note": "京東自家反爬、商品頁需登入 cookie 才完整。"},
+    # ── 國際電商(相對好爬、補價格錨點即可)──
+    {"match": ["amazon."], "wait_selector": '#corePrice_feature_div, .a-price, #priceblock_ourprice, [class*="price"]',
+     "known_hard": False, "needs_cookie": False, "note": "Amazon 商品頁等價格元素 render。"},
+    # BestBuy:非美國 IP / headless 常被導到「Select your Country」國家選擇頁、拿不到商品。
+    {"match": ["bestbuy.com"], "known_hard": True, "needs_cookie": False,
+     "note": "BestBuy 會依地區 / 偵測 headless 導到國家選擇頁;非美國 IP 匿名常拿到空殼。"
+             "需美國出口 IP / cookie,或改用其他來源。"},
+    # ── 重 SPA 社群(子頁 pattern 已涵蓋、這裡補 render 等待 + needs_cookie 提示)──
+    {"match": ["shopee"], "known_hard": True, "needs_cookie": True},  # shopee 其他 TLD 兜底
+]
+
+
+def _lookup_host_registry(url: str) -> Optional[dict]:
+    """回傳該 URL host 命中的 registry entry(第一個 match);沒命中 → None(走通用路徑)。"""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+    for entry in HOST_REGISTRY:
+        if any(m.lower() in host for m in entry.get("match", [])):
+            return entry
+    return None
+
+
+# 失敗 / 需登入時給使用者的友善、可操作 cookie 指引(一條龍步驟)。
+_COOKIE_HELP = (
+    "👉 要抓需登入的站,請設 cookie:① 用瀏覽器登入該網站 → "
+    "② 裝 Chrome 擴充「Cookie-Editor」匯出(或 DevTools→Network→複製 Cookie: 那行)→ "
+    "③ 貼到本爬蟲節點面板「進階設定 → 登入 Cookies」欄(建議填 ${VAR} 把真值放 backend/.env、不明文存)。"
+    "面板裡有完整圖文教學「教學:怎麼從瀏覽器抓 cookies?」。"
+)
+
+# 登入牆 / 攔截頁訊號(thin 時用來判斷「是不是因為要登入才拿不到」)。
+_LOGIN_WALL_MARKERS = (
+    "請先登入", "請登入", "會員登入", "登入後", "歡迎登录", "请登录", "請登錄",
+    "sign in to", "please log in", "please sign in", "log in to continue",
+    "select your country", "您被攔截", "access denied", "verify you are human",
+)
+
+
+def _looks_like_login_wall(result: "CrawlResult") -> bool:
+    """thin 結果是不是「登入 / 國家選擇 / 攔截頁」(→ 需 cookie 才看得到真內容)。"""
+    blob = ((result.title or "") + " " + (result.markdown or "")[:1500]).lower()
+    return any(m.lower() in blob for m in _LOGIN_WALL_MARKERS)
 
 
 def url_to_filename(url: str, ext: str = ".md") -> str:
@@ -384,11 +509,32 @@ async def crawl_single_url(
     )
     is_upstream_error = (not result.ok) and result.status_code not in (0, None)
     is_thin = md_len < 200 and result.ok  # 只在「成功但內容薄」時算反爬空殼
+    # crawl4ai 自己偵測到反爬 / captcha(Amazon 等)→ 訊息含這些字。
+    # 這類 status=0 + ok=False 之前被當「內部錯誤」跳過 fallback,但其實該讓
+    # Tier 2 FlareSolverr(真瀏覽器 Puppeteer)試一次 — 它常能過 headless 過不了的反爬。
+    _errlow = (result.error or "").lower()
+    is_antibot = (not result.ok) and any(
+        k in _errlow for k in ("anti-bot", "antibot", "bot protection",
+                                "captcha", "blocked by", "access denied", "verify you are human")
+    )
 
-    needs_fallback = cloudflare_fallback and (is_cf_signal or is_upstream_error or is_thin)
+    # 快速失敗優化:known_hard + 需 cookie 的站、使用者又沒給 cookie →
+    # FlareSolverr(無 session)和 SPA 重試(內容鎖在登入後)都救不了,
+    # 不要白等(蝦皮實測省 ~110s)。直接跳過兩段重試、走後面的 cookie 指引失敗。
+    _reg_hard = _lookup_host_registry(url)
+    _no_cookie_hardwall = bool(_reg_hard and _reg_hard.get("needs_cookie")) and not _parse_cookies(cookies)
+
+    needs_fallback = (cloudflare_fallback and not _no_cookie_hardwall
+                      and (is_cf_signal or is_upstream_error or is_thin or is_antibot))
+
+    if _no_cookie_hardwall and (not result.ok or is_thin):
+        logger.info(
+            f"[{step_name}] 此站需登入 cookie、但沒提供 → 跳過 FlareSolverr / SPA 重試"
+            f"(都救不了)、直接給 cookie 設定指引"
+        )
 
     # 跳過 fallback 但有失敗跡象 → 紀錄為 Crawl4AI 內部問題,讓 user 知道不是 CF
-    if cloudflare_fallback and not needs_fallback and not result.ok:
+    if cloudflare_fallback and not needs_fallback and not result.ok and not _no_cookie_hardwall:
         logger.info(
             f"[{step_name}] Tier 1 抓取失敗（status={result.status_code}, ok={result.ok}）"
             f" — 判定為 Crawl4AI 內部錯誤而非 Cloudflare,不 fallback FlareSolverr"
@@ -397,6 +543,8 @@ async def crawl_single_url(
     if needs_fallback:
         if is_cf_signal:
             reason = "結果像被 Cloudflare 擋"
+        elif is_antibot:
+            reason = "Crawl4AI 偵測到反爬 / captcha"
         elif is_upstream_error:
             reason = f"上游回非 2xx（status={result.status_code}）"
         else:
@@ -427,19 +575,23 @@ async def crawl_single_url(
     #   3. 不是被 CF 擋（CF fallback 已處理）
     user_set_overrides = bool(wait_for_selector) or bool(interactions)
     if (result.ok and not user_set_overrides and _looks_thin(result)
-            and result.tier == "crawl4ai"):
+            and result.tier == "crawl4ai" and not _no_cookie_hardwall):
         md_len = len(result.markdown or "")
         link_n = len((result.extra or {}).get("links_internal") or [])
+        # 本站若在 registry 有專屬 wait_selector(例電商價格錨點)→ 重試用它、否則用通用
+        _reg = _lookup_host_registry(url)
+        _retry_selector = (_reg or {}).get("wait_selector") or _SPA_FALLBACK_WAIT_SELECTOR
         logger.warning(
             f"[{step_name}] 第一輪結果偏瘦（{md_len} bytes / {link_n} 內部連結），"
             f"很可能是 SPA 沒 hydrate 完 → 啟用 SPA 智慧重試（自動加 wait_for + 滾動）"
+            + (f"、套用 {_reg['match'][0]} 專屬 selector" if _reg and _reg.get("wait_selector") else "")
         )
         retry = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: _run_crawl4ai_in_sandbox(
                 url=url, output_path=output_path,
                 js_render=True,                                 # SPA 必開
-                wait_for_selector=_SPA_FALLBACK_WAIT_SELECTOR,
+                wait_for_selector=_retry_selector,
                 cookies=_parse_cookies(cookies),
                 interactions=[],                                # 走智慧滾動、不再用寫死序列
                 download_assets=download_assets,
@@ -465,6 +617,33 @@ async def crawl_single_url(
         else:
             logger.warning(f"[{step_name}] SPA 重試失敗（保留原本）：{retry.error}")
 
+    # ── known_hard 站誠實告知 ─────────────────────────────────────
+    # 本站在 registry 標 known_hard、而最終結果失敗或仍偏瘦(只拿到殼)→
+    # 把「為什麼難爬 + 該怎麼辦(多半是貼 cookie / 換來源)」附進訊息,
+    # 讓使用者 / output.expect 驗證看到具體原因、不是一句籠統失敗。純訊息、不改流程。
+    _reg_final = _lookup_host_registry(url)
+    _thin_or_fail = (not result.ok) or _looks_thin(result)
+    _login_wall = _looks_like_login_wall(result)
+    _needs_cookie = bool(_reg_final and _reg_final.get("needs_cookie")) or _login_wall
+    if _thin_or_fail and ((_reg_final and _reg_final.get("known_hard")) or _login_wall):
+        _parts = []
+        if _reg_final and _reg_final.get("note"):
+            _parts.append(_reg_final["note"])
+        elif _login_wall:
+            _parts.append("這個頁面看起來需要先登入才看得到完整內容(回到登入 / 國家選擇 / 攔截頁)。")
+        else:
+            _parts.append("此站已知難爬(自家反爬 / 重 SPA)、匿名常只拿到殼。")
+        if _needs_cookie:
+            _parts.append(_COOKIE_HELP)
+        _hint = " ".join(_parts)
+        logger.warning(f"[{step_name}] ⚠ {_hint}")
+        # 即使 Tier1 回 200 但其實是殼(登入牆 / known_hard 需 cookie + thin)→ 視為失敗,
+        # 否則會把「登入頁 / 空殼」當成功內容往下傳。需 cookie 才看得到 → 明確 fail + 友善指引。
+        _shell_needs_cookie = _needs_cookie and _looks_thin(result)
+        if (not result.ok) or (_login_wall and _looks_thin(result)) or _shell_needs_cookie:
+            result.ok = False
+            result.error = (result.error or "只拿到登入 / 攔截頁 / 空殼、沒有目標內容").rstrip("。") + "。\n" + _hint
+
     if not result.ok:
         result.duration_ms = int((time.time() - t0) * 1000)
         return result
@@ -487,7 +666,7 @@ _AUTO_CHILD_LINK_PATTERNS = [
     r'/comments/[a-z0-9]+/[\w-]+',     # Reddit
     r'/p/\d+',                          # Dcard
     r'/post/[a-z0-9-]+',                # Tumblr / wordpress.com / Threads
-    r'/posts/\d+',                      # ProductHunt
+    r'/posts/[\w-]+',                   # ProductHunt / Indie Hackers(slug、非純數字)
     r'/article/[\w-]+',                 # 新聞站常見
     r'/articles/[\w-]+',
     r'/status/\d+',                     # Twitter / X
@@ -502,10 +681,11 @@ _AUTO_CHILD_LINK_PATTERNS = [
     r'-i\.\d+\.\d+',                    # 蝦皮 Shopee (name-i.shopid.itemid)
     r'GoodsDetail\.jsp\?i_code=\d+',    # momo 購物網
     r'/prod/[A-Z0-9]+',                 # PChome 24h
-    r'/item/\d{10,}',                   # 露天拍賣 Ruten (/item/長數字/)
+    r'/item/(?:show\?)?\d{8,}',         # 露天拍賣 Ruten:/item/show?<id> 或 /item/<id>(實測確認)
     r'/dp/[A-Z0-9]{10}',                # Amazon (/dp/ASIN)
     r'/gp/product/[A-Z0-9]{10}',        # Amazon (/gp/product/ASIN)
     r'/itm/\d+',                        # eBay
+    r'/\d{6,}\.p(?:\?|$|/)',            # BestBuy:/site/<slug>/<skuId>.p?skuId=…(實測格式)
     r'/ip/[\w-]+/\d+',                  # Walmart
     r'item\.htm\?.*\bid=\d+',           # 淘寶 / 天貓
     r'item\.jd\.com/\d+\.html',         # 京東 JD
@@ -1715,7 +1895,7 @@ async def _run_flaresolverr(
     logger: logging.Logger,
     step_name: str,
 ) -> CrawlResult:
-    """打 FlareSolverr 的 /v1 endpoint 拿 HTML，用 html2text 轉 markdown。"""
+    """打 FlareSolverr 的 /v1 endpoint 拿 HTML，用 markdownify 轉 markdown。"""
     try:
         import httpx  # host venv 已有
     except ImportError:
@@ -1725,19 +1905,38 @@ async def _run_flaresolverr(
     if cookies:
         body["cookies"] = cookies
 
-    try:
-        with httpx.Client(timeout=timeout + 10) as client:
-            resp = client.post(FLARESOLVERR_URL, json=body)
-        if resp.status_code != 200:
-            return _err(url, f"FlareSolverr 回 {resp.status_code}：{resp.text[:400]}",
-                        tier="flaresolverr")
-        data = resp.json()
-    except httpx.ConnectError:
-        return _err(url,
-                    f"FlareSolverr 連不上（{FLARESOLVERR_URL}）；確認 sandbox setup 已起這個 container",
-                    tier="flaresolverr")
-    except Exception as e:
-        return _err(url, f"FlareSolverr 呼叫失敗：{e}", tier="flaresolverr")
+    # 依序試候選 URL(WSL IP > localhost > 127.0.0.1):Windows host 連 WSL docker port
+    # 走 localhost 常不穩、WSL IP 直連穩。連不上(ConnectError)就換下一個。
+    candidates = _flaresolverr_candidates()
+    data = None
+    last_err = ""
+    for cand in candidates:
+        try:
+            with httpx.Client(timeout=timeout + 10) as client:
+                resp = client.post(cand, json=body)
+            if resp.status_code != 200:
+                last_err = f"FlareSolverr 回 {resp.status_code}：{resp.text[:300]}"
+                continue
+            data = resp.json()
+            if cand != candidates[0]:
+                logger.info(f"[{step_name}] FlareSolverr 改用 {cand} 成功(localhost 不通)")
+            break
+        except httpx.ConnectError:
+            last_err = f"連不上 {cand}"
+            continue
+        except Exception as e:
+            last_err = f"{cand} 呼叫失敗：{e}"
+            continue
+    if data is None:
+        # WSL IP 若快取過期(WSL 重啟換 IP)→ 清快取讓下次重抓
+        _FLARE_IP_CACHE["ip"] = ""
+        return _err(
+            url,
+            f"FlareSolverr 連不上(試過 {candidates};最後錯誤:{last_err})。"
+            f"確認 sandbox/docker-compose.yml 的 flaresolverr 容器有起來"
+            f"(sandbox 內跑 `docker compose up -d flaresolverr`)。",
+            tier="flaresolverr",
+        )
 
     if data.get("status") != "ok":
         return _err(url, f"FlareSolverr 回非 ok：{data.get('message') or data}",
@@ -1837,7 +2036,7 @@ def _extract_last_json_line(s: str) -> Optional[dict]:
 
 def _html_to_markdown(html: str) -> str:
     """Tier 2 的 HTML → Markdown 轉換。host 端跑、不依賴沙盒。
-    優先 trafilatura（語意保留好）、退 html2text、再退純文字。"""
+    優先 trafilatura（語意保留好）、退 markdownify、再退純文字。"""
     if not html:
         return ""
     try:
@@ -1849,12 +2048,10 @@ def _html_to_markdown(html: str) -> str:
     except ImportError:
         pass
     try:
-        import html2text
-        h = html2text.HTML2Text()
-        h.body_width = 0      # 不要強制換行
-        h.ignore_images = False
-        h.ignore_links = False
-        return h.handle(html)
+        from markdownify import markdownify as _markdownify
+        # markdownify（MIT 授權）取代 html2text（GPL）；同樣保留連結與圖片，
+        # heading_style=ATX 產生「# 標題」（對下游 LLM 較友善、不換行）
+        return _markdownify(html, heading_style="ATX")
     except ImportError:
         pass
     # 最差只剩去 HTML tag

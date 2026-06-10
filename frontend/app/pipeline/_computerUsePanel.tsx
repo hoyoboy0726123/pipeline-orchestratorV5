@@ -77,6 +77,18 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // VLM 把關 Phase 1 摺疊（預設收折、進階功能）
   const [vlmOpen, setVlmOpen] = useState(false)
   // 4 種 VLM 功能決策樹摺疊（預設收折、給混淆的人查）
+  // 進階選項顯示開關 — 預設關、用 localStorage 記住使用者偏好
+  // 關閉時:藏「Pixel/UIA 模式切換」按鈕(強制 Pixel 模式、錄製會自動抓 UIA + CV 三層 fallback)
+  // 開啟時:顯示模式切換、使用者可手動切到 UIA Inspector 進階功能
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem('computer_use_show_advanced') === '1'
+  })
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('computer_use_show_advanced', showAdvanced ? '1' : '0')
+    }
+  }, [showAdvanced])
 
   // 預設錄製輸出目錄
   const defaultAssetsDir = data.assetsDir ||
@@ -118,6 +130,22 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
       }
     }
   }, [armed])
+
+  // 攔掉 F7 / F9 的瀏覽器預設行為:
+  //   F7 = Chrome/Edge「鍵盤瀏覽 Caret Browsing」確認框
+  //   F9 = 部分瀏覽器的閱讀模式 / reader view
+  // 這兩個都是我們的錄製熱鍵(F7 待命開錄、F9 結束),後端 OS 層級全域熱鍵在收、跟瀏覽器無關,
+  // 所以這裡 preventDefault 不影響錄製、只是不讓瀏覽器搶這兩個鍵。panel 開著就生效。
+  useEffect(() => {
+    const blockFnKeys = (e: KeyboardEvent) => {
+      if (e.key === 'F7' || e.key === 'F9' || e.keyCode === 118 || e.keyCode === 120) {
+        e.preventDefault()
+        e.stopPropagation()
+      }
+    }
+    window.addEventListener('keydown', blockFnKeys, true)
+    return () => window.removeEventListener('keydown', blockFnKeys, true)
+  }, [])
 
   const handleArmHotkey = async () => {
     if (armed || recording) return
@@ -248,15 +276,24 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     saveCustomTemplates(next)
   }
 
-  const toggleUseCoord = (i: number) => {
+  // 三層 fallback (UIA / CV / 座標) 各自獨立 toggle, 預設全 True
+  // 對應 backend ComputerUseAction.{use_uia, use_cv, use_coord}
+  // 全勾 = UIA → CV → 強制座標 (預設); 取消某層改變鏈, 全關 = 該 action 失敗
+  const toggleLayer = (i: number, field: 'use_uia' | 'use_cv' | 'use_coord') => {
     const next = [...(data.actions || [])]
-    const cur = { ...next[i] }
-    // 預設視為 true（座標模式）；toggle 後：true → false（圖像）、false → true（座標）
-    // 三個 primary mode 獨立不互斥：use_ocr 跟 ocr_text 保留著，下次再切回 OCR 勾選
-    // 文字就還在，不用重打
-    const currentlyUsingCoord = cur.use_coord !== false
-    cur.use_coord = !currentlyUsingCoord
+    const cur: any = { ...next[i] }
+    // 預設視為 True (所有欄位都是預設 true)
+    const currentlyOn = cur[field] !== false
+    cur[field] = !currentlyOn
     next[i] = cur
+    onUpdate({ actions: next })
+  }
+
+  // Preset 一鍵設好 3 個 toggle (對應 4 個常見模式:全 / 純UIA / 純CV / 純座標)
+  // 舊「圖像比對」單鍵的等價回歸:點「🔍 純 CV」一鍵切到純 CV 模式
+  const applyLayerPreset = (i: number, uia: boolean, cv: boolean, coord: boolean) => {
+    const next = [...(data.actions || [])]
+    next[i] = { ...next[i], use_uia: uia, use_cv: cv, use_coord: coord } as any
     onUpdate({ actions: next })
   }
 
@@ -286,43 +323,55 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           <input value={data.name} onChange={e => onUpdate({ name: e.target.value })} className={`${inputCls} font-mono`} />
         </div>
 
-        {/* 模式切換:Pixel(錄製座標) vs UIA(讀 GUI 結構) */}
-        <div className="rounded-xl border border-gray-200 overflow-hidden flex">
-          <button
-            type="button"
-            onClick={() => onUpdate({ cuMode: 'pixel' })}
-            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
-              (data.cuMode || 'pixel') === 'pixel'
-                ? 'bg-purple-600 text-white'
-                : 'bg-white text-gray-600 hover:bg-purple-50'
-            }`}
-          >
-            🎯 Pixel 模式<span className="text-[10px] block mt-0.5 opacity-80">錄製座標 + CV/OCR/VLM</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onUpdate({ cuMode: 'uia' })}
-            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
-              data.cuMode === 'uia'
-                ? 'bg-purple-600 text-white'
-                : 'bg-white text-gray-600 hover:bg-purple-50'
-            }`}
-          >
-            🪟 UIA 模式<span className="text-[10px] block mt-0.5 opacity-80">讀 GUI 結構、座標漂免疫</span>
-          </button>
-        </div>
+        {/* 模式切換:Pixel(錄製座標) vs UIA(讀 GUI 結構) — 進階選項、預設藏起來
+            預設只顯示 Pixel 模式(自動三層 fallback:UIA→CV→座標、無腦用)。
+            想用獨立 UIA Inspector 才需要打開「顯示進階選項」。 */}
+        {showAdvanced ? (
+          <>
+            <div className="rounded-xl border border-gray-200 overflow-hidden flex">
+              <button
+                type="button"
+                onClick={() => onUpdate({ cuMode: 'pixel' })}
+                className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                  (data.cuMode || 'pixel') === 'pixel'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white text-gray-600 hover:bg-purple-50'
+                }`}
+              >
+                🎯 Pixel 模式<span className="text-[10px] block mt-0.5 opacity-80">錄製座標 + CV/OCR/VLM</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdate({ cuMode: 'uia' })}
+                className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                  data.cuMode === 'uia'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white text-gray-600 hover:bg-purple-50'
+                }`}
+              >
+                🪟 UIA 模式<span className="text-[10px] block mt-0.5 opacity-80">讀 GUI 結構、座標漂免疫</span>
+              </button>
+            </div>
 
-        {/* UIA 模式:走 inspector 抓元素、選元素、加動作 */}
-        {data.cuMode === 'uia' && (
-          <UiaInspectorPanel
-            uiaWindow={data.uiaWindow || ''}
-            onUpdateWindow={(w) => onUpdate({ uiaWindow: w })}
-            onAddAction={(action) => {
-              const next = [...(data.actions || []), action]
-              onUpdate({ actions: next })
-            }}
-            workflowId={workflowId}
-          />
+            {/* UIA 模式:走 inspector 抓元素、選元素、加動作 */}
+            {data.cuMode === 'uia' && (
+              <UiaInspectorPanel
+                uiaWindow={data.uiaWindow || ''}
+                onUpdateWindow={(w) => onUpdate({ uiaWindow: w })}
+                onAddAction={(action) => {
+                  const next = [...(data.actions || []), action]
+                  onUpdate({ actions: next })
+                }}
+                workflowId={workflowId}
+              />
+            )}
+          </>
+        ) : (
+          // 隱藏進階模式時、確保 cuMode 是 pixel(避免進階關閉但 cuMode 還停在 uia 導致面板亂)
+          (() => {
+            if (data.cuMode === 'uia') onUpdate({ cuMode: 'pixel' })
+            return null
+          })()
         )}
 
         {/* 錄製按鈕 — 只 Pixel 模式才顯示 */}
@@ -370,14 +419,23 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               {statusText}
             </p>
           )}
-          <p className="text-[11px] text-gray-500 leading-relaxed">
-            按下開始後切換到要自動化的應用操作即可。點擊時會擷取周圍 240×80 的錨點 + 整個螢幕截圖（存在 <code className="font-mono text-purple-700">assets_dir</code> 中，日後可點「✏️ 編輯錨點」手動調整範圍）。按 F9 或這個按鈕可停止。
-          </p>
         </div>
         )}
 
         {/* 動作列表 */}
         <div>
+          {/* 顯示進階選項 toggle — 從上面挪過來、放動作序列上方,跟列表視覺上一組 */}
+          <div className="flex items-center justify-end mb-1.5">
+            <label className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showAdvanced}
+                onChange={e => setShowAdvanced(e.target.checked)}
+                className="w-3 h-3 accent-purple-500"
+              />
+              顯示進階選項(UIA Inspector、模式切換)
+            </label>
+          </div>
           <div className="flex items-center justify-between mb-2">
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
               動作序列（{data.actions?.length ?? 0}）
@@ -448,29 +506,113 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         {a.type}
                       </span>
                       {a.image && <span className="text-[11px] text-gray-500 truncate">{a.image}</span>}
-                      {/* 圖像比對 toggle。OCR 啟用時不管 use_coord 是 true/false 都顯示為 dimmed
-                          —— primary method 是 OCR，圖像比對是「可選 fallback」by 步驟層級 ocr_cv_fallback 控制 */}
-                      {a.type === 'click_image' && (() => {
-                        const usingCoord = a.use_coord !== false
+                      {/* 三層 fallback toggle (UIA / CV / 強制座標)
+                          預設全勾 = UIA → CV → 強制座標(使用者零學習成本、最高命中率)
+                          OCR 或 VLM 啟用時整組 disabled——那兩個自帶 primary 邏輯、三層不適用
+                          只勾單一 = 嚴格模式(沒中就 fail)、組合 = 自定義 fallback 鏈 */}
+                      {(a.type === 'click_image' || a.type === 'click_at') && (() => {
                         const ocrActive = a.use_ocr === true
-                        return (
-                          <button onClick={() => toggleUseCoord(i)}
-                            disabled={ocrActive}
-                            title={ocrActive
-                              ? 'OCR 啟用中；圖像比對是否作為 OCR 失敗後的 fallback，由步驟層級「OCR 比對設定」的 ocr_cv_fallback 決定'
-                              : (usingCoord
-                                ? '目前用絕對座標點擊（預設、快速）；按一下切到圖像比對（視窗位置會變時用）'
-                                : '目前用圖像比對；按一下切回絕對座標')}
+                        const vlmActive = (a.vlm_mode || 'off') !== 'off'
+                        const explicitPrimary = ocrActive || vlmActive
+                        const useUia = (a as any).use_uia !== false
+                        const useCv = (a as any).use_cv !== false
+                        const useCoord = (a as any).use_coord !== false
+                        const layerBtn = (label: string, field: 'use_uia' | 'use_cv' | 'use_coord', on: boolean, hint: string) => (
+                          <button
+                            key={field}
+                            type="button"
+                            onClick={() => toggleLayer(i, field)}
+                            disabled={explicitPrimary}
+                            title={explicitPrimary
+                              ? `${ocrActive ? 'OCR' : 'VLM'} 啟用中、三層 fallback 不適用`
+                              : hint}
                             className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
-                              ocrActive
+                              explicitPrimary
                                 ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
-                                : (!usingCoord
-                                  ? 'bg-amber-100 border-amber-300 text-amber-800'
-                                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400')
+                                : on
+                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400'
                             }`}
                           >
-                            {ocrActive ? '圖像比對（OCR 接管中）' : (!usingCoord ? '🔍 圖像比對' : '圖像比對')}
+                            <span className="font-mono mr-0.5">{on ? '☑' : '☐'}</span>{label}
                           </button>
+                        )
+                        // Preset chip:常見模式一鍵切到對應的 3-toggle 組合
+                        // 純 CV preset 設 use_coord=T (action 層級開), 真正座標 fallback 開關走 step-level cvCoordFallback
+                        // 純 UIA / 純 座標 preset 嚴格、其他層 toggle 設 F → 沒中立即 fail
+                        const isAll = useUia && useCv && useCoord
+                        const isUiaOnly = useUia && !useCv && !useCoord
+                        const isCvOnly = !useUia && useCv && useCoord
+                        const isCoordOnly = !useUia && !useCv && useCoord
+                        const currentMode: 'all' | 'uia-only' | 'cv-only' | 'coord-only' | 'custom' =
+                          isAll ? 'all'
+                            : isUiaOnly ? 'uia-only'
+                            : isCvOnly ? 'cv-only'
+                            : isCoordOnly ? 'coord-only'
+                            : 'custom'
+                        // step-level cvCoordFallback (預設 False) → 純 CV 模式下『座標 fallback 是否啟用』的真正 gate
+                        // 純 CV 模式下 座標 checkbox 顯示 = cvCoordFallback、點擊 → toggle cvCoordFallback (而不是 action use_coord)
+                        const cvCoordFallback = data.cvCoordFallback === true
+                        const presetBtn = (label: string, active: boolean, onClick: () => void, hint: string) => (
+                          <button
+                            type="button"
+                            onClick={onClick}
+                            disabled={explicitPrimary}
+                            title={explicitPrimary
+                              ? `${ocrActive ? 'OCR' : 'VLM'} 啟用中、模式 preset 不適用`
+                              : hint}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                              explicitPrimary
+                                ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
+                                : active
+                                  ? 'bg-purple-500 text-white border-purple-500'
+                                  : 'bg-white text-gray-500 border-gray-200 hover:border-purple-300 hover:text-purple-600'
+                            }`}
+                          >{label}</button>
+                        )
+                        // 純 CV 模式下、座標 checkbox 的特製版:狀態 = cvCoordFallback、click = toggle cvCoordFallback
+                        const coordBoxCvOnly = (
+                          <button
+                            key="coord-cv-only"
+                            type="button"
+                            onClick={() => onUpdate({ cvCoordFallback: !cvCoordFallback })}
+                            disabled={explicitPrimary}
+                            title={`純 CV 模式下、CV 找不到時是否退到錄製座標。狀態跟『CV 詳細設定 → CV 失敗退回錄製座標』連動(目前 ${cvCoordFallback ? '啟用' : '關閉'})`}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                              explicitPrimary
+                                ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
+                                : cvCoordFallback
+                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400'
+                            }`}
+                          >
+                            <span className="font-mono mr-0.5">{cvCoordFallback ? '☑' : '☐'}</span>📍 座標 (fallback)
+                          </button>
+                        )
+                        // 顯示哪些 checkbox 依 currentMode(避免「純 UIA / 純 CV / 純 座標」preset 還顯示無關 layer 視覺重疊)
+                        const showUiaBox = currentMode === 'all' || currentMode === 'uia-only' || currentMode === 'custom'
+                        const showCvBox = (currentMode === 'all' || currentMode === 'cv-only' || currentMode === 'custom') && a.type === 'click_image'
+                        const showCoordBox = currentMode === 'all' || currentMode === 'cv-only' || currentMode === 'coord-only' || currentMode === 'custom'
+                        return (
+                          <>
+                            {/* 模式快速 preset(一鍵切常見組合) */}
+                            {presetBtn('全 (三層)', isAll, () => applyLayerPreset(i, true, true, true),
+                              '預設三層 fallback:UIA → CV → 強制座標,命中率最高。下方 3 個 checkbox 顯示全勾、可手動取消任一變組合模式')}
+                            {presetBtn('🪟 純 UIA', isUiaOnly, () => applyLayerPreset(i, true, false, false),
+                              '純 UIA 嚴格模式:只用 UI 結構定位、找不到立即 fail(適合自家程式 + 有 AutomationId)')}
+                            {a.type === 'click_image' && presetBtn('🔍 純 CV', isCvOnly, () => applyLayerPreset(i, false, true, true),
+                              '純圖像比對:UIA 跳過, CV 找不到時要不要退座標看『CV 詳細設定 → CV 失敗退回錄製座標』(下方座標 checkbox 動態反映此設定)')}
+                            {presetBtn('📍 純 座標', isCoordOnly, () => applyLayerPreset(i, false, false, true),
+                              '純座標模式:直接點錄製的 x/y、不嘗試任何識別(最快、視窗位置固定才安全)')}
+                            <span className="text-[10px] text-gray-300 select-none">|</span>
+                            {/* 細項 checkbox(依當前 preset 動態決定顯示哪幾個、避免跟 preset 視覺重疊) */}
+                            {showUiaBox && layerBtn('🪟 UIA', 'use_uia', useUia,
+                              '啟用 UIA element 結構定位(視窗位置變化最穩、自家程式有 AutomationId 命中率最高)。取消 = 跳過 UIA 直接走下一層')}
+                            {showCvBox && layerBtn('🔍 CV', 'use_cv', useCv,
+                              '啟用 CV 圖像比對(用錄製的錨點圖找)。取消 = 跳過 CV、UIA 沒中直接退強制座標')}
+                            {showCoordBox && (currentMode === 'cv-only' ? coordBoxCvOnly : layerBtn('📍 座標', 'use_coord', useCoord,
+                              '啟用強制座標(最終 fallback、直接點錄製的 x/y)。取消 = 前面層失敗就立即 fail、不退座標'))}
+                          </>
                         )
                       })()}
                       {/* 手動編輯錨點（click_image/drag 有 full_image 時才顯示） */}

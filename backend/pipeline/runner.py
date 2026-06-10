@@ -108,6 +108,8 @@ def _decision_keyboard(run_id: str, has_prev: bool = True) -> InlineKeyboardMark
     if has_prev:
         skip_row.append(InlineKeyboardButton("↩ 重做上一步", callback_data=f"pipe_redo_prev:{run_id}"))
     rows.append(skip_row)
+    # 讓 AI 試修(對齊 web 失敗卡片的「讓 AI 試修」)— 手動觸發一次自我修復、不看開關、受硬上限
+    rows.append([InlineKeyboardButton("🔧 讓 AI 試修", callback_data=f"pipe_self_heal_now:{run_id}")])
     rows.extend([
         [
             InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"),
@@ -340,6 +342,30 @@ async def _tg_send(chat_id: int, text: str, reply_markup=None):
         logger.error(f"[Telegram] ❌ 發送失敗：{e}")
 
 
+async def _tg_send_long(chat_id: int, text: str, reply_markup=None):
+    """發長訊息:超過 TG 單則上限(4096)就在換行處分段送、不截斷(自我修復報告等用)。
+    只有最後一段帶 reply_markup。呼叫端負責 HTML escape(因為用 parse_mode=HTML)。"""
+    CHUNK = 3500  # 留 HTML tag / 前綴餘裕
+    if len(text) <= CHUNK:
+        await _tg_send(chat_id, text, reply_markup)
+        return
+    parts: list[str] = []
+    rest = text
+    while rest:
+        if len(rest) <= CHUNK:
+            parts.append(rest)
+            break
+        cut = rest.rfind("\n", 0, CHUNK)
+        if cut < CHUNK // 2:   # 找不到合適換行就硬切
+            cut = CHUNK
+        parts.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n")
+    total = len(parts)
+    for i, p in enumerate(parts):
+        prefix = "" if i == 0 else f"<i>(續 {i + 1}/{total})</i>\n"
+        await _tg_send(chat_id, prefix + p, reply_markup if i == total - 1 else None)
+
+
 # 送 TG photo 的壓縮參數：一律壓縮（不看原檔大小），讓每張 traffic 一致、傳輸時間接近
 # → 避免「大的壓了變小、小的沒壓還是大」的不對稱上傳時間造成誤判 timeout + 重複訊息
 # 長寬上限：1920（TG 本來就會壓到 ~1280 顯示，1920 已經足夠清楚，肉眼看不出差）
@@ -487,12 +513,75 @@ _TG_DOC_MAX_BYTES = 50 * 1024 * 1024
 
 
 def _workflow_output_dir(workflow_name: str):
-    """回傳 ai_output/<workflow_name>/ 的絕對路徑（不存在也回，由呼叫端決定怎麼處理）。"""
-    from pathlib import Path as _P
+    """回傳 <OUTPUT_BASE_PATH>/<workflow_name>/ 的絕對路徑(不存在也回、由呼叫端處理)。
+
+    重要:統一用 config.OUTPUT_BASE_PATH、不再從 __file__ 推 proj_root + 'ai_output',
+    避免 chat_tools / send_file_to_tg 用 OUTPUT_BASE_PATH 找檔、workflow 卻寫到別處的 bug。
+    """
     if not workflow_name:
         return None
-    proj_root = _P(__file__).parent.parent.parent.absolute()
-    return proj_root / "ai_output" / workflow_name
+    from config import OUTPUT_BASE_PATH
+    return OUTPUT_BASE_PATH / workflow_name
+
+
+def _run_output_name(run) -> str:
+    """本次「執行」的實體輸出目錄名 = <顯示名>/run_<時間戳>。
+
+    為什麼存在:每次 run 的產物落進各自的 run_<ts>/ 子夾,彼此隔離 ——
+      1. 重跑不覆蓋上一輪、也不會去動「使用者正開著的舊檔」(零鎖檔風險)
+      2. 檔案總管進到工作流那層,就看到一排 run_時間戳/、各次清楚分隔
+    顯示名(run.pipeline_name)保持乾淨、不帶 run_ts;只有實體目錄名帶。
+
+    時間戳由 run.started_at 衍生(建立時設、persist 進 DB):
+      - resume 同一個 run → 載回同一個 started_at → 落「同一個」run 夾(不會每次 resume 開新夾)
+      - TG 按鈕回呼在 run 之後觸發、config 重建時不帶 run-scoping → 也能靠這函式從 run 自推同一夾
+    started_at 解析失敗時退用 run_id 前綴(仍穩定、唯一)。
+    """
+    base = (getattr(run, "pipeline_name", "") or "").strip()
+    try:
+        ts = datetime.fromisoformat(run.started_at).strftime("%Y%m%d_%H%M%S")
+    except Exception:
+        ts = (getattr(run, "run_id", "") or "run")[:8]
+    sub = f"run_{ts}"
+    return f"{base}/{sub}" if base else sub
+
+
+# 副檔名猜測:batch 含哪個關鍵字 → 推測該副檔名(沒填 step.output.path 時用)
+_EXT_KEYWORDS: list[tuple[str, str]] = [
+    (".pptx", "pptx"), (".pptx", "投影片"), (".pptx", "簡報"), (".pptx", "PPT"), (".pptx", "ppt"),
+    (".docx", "docx"), (".docx", "Word"), (".docx", "word"),
+    (".xlsx", "xlsx"), (".xlsx", "excel"), (".xlsx", "Excel"), (".xlsx", "表格"),
+    (".csv", "csv"), (".csv", "CSV"),
+    (".png", ".png"), (".png", "圖表"), (".png", "折線圖"), (".png", "長條圖"), (".png", "散佈"), (".png", "繪圖"),
+    (".pdf", ".pdf"), (".pdf", "PDF"),
+    (".json", "JSON"), (".json", ".json"),
+    (".html", ".html"), (".html", "HTML"),
+]
+
+
+def _safe_step_filename(step_name: str) -> str:
+    """把中文 / 空白 / 特殊字元的 step_name 轉成安全檔名 base(無副檔名)。"""
+    import re as _re
+    safe = _re.sub(r"[^\w一-鿿-]+", "_", (step_name or "").strip())
+    safe = safe.strip("_") or "step_output"
+    return safe[:60]   # 太長截掉
+
+
+def _derive_default_output_path(step, workflow_dir: str) -> tuple[str, str]:
+    """step.output.path 沒設時、自動推一個合理路徑給 LLM 知道存哪。
+
+    Returns: (resolved_abs_path, ext_used)
+    """
+    from pathlib import Path as _P
+    # 猜副檔名:掃 batch 找關鍵字、找不到預設 .md(skill 寫產物最常用 markdown)
+    batch_lower = (step.batch or "").lower()
+    ext = ".md"
+    for _ext, kw in _EXT_KEYWORDS:
+        if kw.lower() in batch_lower:
+            ext = _ext
+            break
+    fname = _safe_step_filename(step.name) + ext
+    return str(_P(workflow_dir).absolute() / fname), ext
 
 
 # 用來判斷哪些檔案是「真正的步驟產出」、哪些是雜訊（log / preview / 內部 DB 檔）
@@ -572,6 +661,45 @@ def _diff_snapshot_pick_main(before: dict, workflow_name: str):
     return candidates[0]
 
 
+def _crawl_looks_failed(output_path, logger):
+    """掃爬蟲輸出檔(crawler 寫的 .md 帶 frontmatter status_code / word_count / 子頁數)。
+    回失敗原因字串(明顯抓失敗)或 None(看起來 OK)。**保守**:只在明確壞掉時回原因、
+    避免誤殺正常爬蟲。給 web_crawler 沒填 expect 時的確定性把關用。"""
+    from pathlib import Path as _P
+    import re as _re
+    try:
+        p = _P(output_path) if output_path else None
+        if not p or not p.exists():
+            return None  # 沒檔由其他邏輯處理、這裡不擅自判失敗
+        texts = []
+        if p.is_dir():
+            for f in list(p.rglob("*.md"))[:30]:
+                try:
+                    texts.append(f.read_text(encoding="utf-8", errors="replace"))
+                except Exception:
+                    pass
+        else:
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+        blob = "\n".join(texts)
+        if not blob.strip():
+            return "爬蟲輸出為空"
+        # 子頁全失敗(多 URL 列表頁爬蟲會印「子頁數: N/M 成功」)
+        m = _re.search(r"子頁數[:：]\s*0\s*/\s*\d+", blob)
+        if m:
+            return "所有子頁抓取失敗(0 成功)"
+        # 所有抓取的 status_code 都是 4xx/5xx → 全失敗(部分成功就放行)
+        codes = _re.findall(r"status_code[:：]\s*(\d{3})", blob)
+        if codes and all(c[0] in ("4", "5") for c in codes):
+            return f"所有抓取都失敗(status_code={', '.join(sorted(set(codes)))})"
+        return None
+    except Exception as e:
+        try:
+            logger.warning(f"爬蟲輸出檢查失敗(略過、不擋):{e}")
+        except Exception:
+            pass
+        return None
+
+
 def _latest_workflow_output_file(workflow_name: str):
     """掃 ai_output/<workflow_name>/ 拿最新一個非雜訊檔（圖檔 / log / preview / 內部 db 檔過濾掉）。
     給「skill 節點 / 沒明確 output.path」這種「實際有產檔但 step 沒記錄」的場景兜底。
@@ -579,8 +707,7 @@ def _latest_workflow_output_file(workflow_name: str):
     from pathlib import Path as _P
     if not workflow_name:
         return None
-    proj_root = _P(__file__).parent.parent.parent.absolute()
-    wf_dir = proj_root / "ai_output" / workflow_name
+    wf_dir = _workflow_output_dir(workflow_name)
     if not wf_dir.exists() or not wf_dir.is_dir():
         return None
     skip_prefixes = ("screenshot_",)
@@ -749,6 +876,57 @@ def _resolve_step_output_for_tg(
     return None, None, f"不認識的路徑類型：{p}"
 
 
+#
+# UTF-8 BOM injection 共用 helper(給 runner + chat_tools 兩處 send_document 用)
+#
+# 為什麼要這層:iOS Telegram 文件預覽器若拿到沒 BOM 的純 UTF-8 文字檔,
+# 在繁中環境會被自動判定成 Big5 / CP950 → 顯示成 mojibake。
+# 桌面端、Web 端、Android 不受影響(都會猜 UTF-8)。為求一致、在送 .md / .txt /
+# .csv / .json / .yaml / .html / .log 時注入 BOM。
+# 寫到 system temp、原檔不污染。caller 負責 cleanup return 的 temp 路徑。
+#
+_TG_TEXT_EXTS_FOR_BOM = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".log"}
+
+
+def _prepare_tg_file_with_bom(file_path: str, log: logging.Logger | None = None,
+                               display: str | None = None) -> tuple[str, str | None]:
+    """檢查 file_path 副檔名是否為文字檔、是的話寫一個含 UTF-8 BOM 的 temp 給 TG send。
+
+    Args:
+        file_path: 來源檔絕對路徑
+        log: optional logger
+        display: 顯示給 log / caption 用的檔名(可選、預設 file_path 的 basename)
+
+    Returns:
+        (send_path, temp_to_cleanup)
+        - send_path:呼叫端 open() + send 用的路徑(可能是 file_path 本身、也可能是 temp)
+        - temp_to_cleanup:如果有產 temp 就回 path、caller send 完後 os.unlink();
+          沒產 temp 回 None
+    """
+    import tempfile as _tf
+    _ext = Path(file_path).suffix.lower()
+    if _ext not in _TG_TEXT_EXTS_FOR_BOM:
+        return file_path, None
+    _label = display or Path(file_path).name
+    try:
+        with open(file_path, "rb") as _f:
+            _bytes = _f.read()
+        # 已有 BOM 不重複加
+        if _bytes.startswith(b"\xef\xbb\xbf"):
+            return file_path, None
+        _fd, _tmp = _tf.mkstemp(suffix=_ext)
+        os.close(_fd)
+        with open(_tmp, "wb") as _wf:
+            _wf.write(b"\xef\xbb\xbf" + _bytes)
+        if log:
+            log.info(f"[Telegram] 文字檔加 UTF-8 BOM 避免 iOS 解碼成 Big5 亂碼:{_label}")
+        return _tmp, _tmp
+    except Exception as _e:
+        if log:
+            log.warning(f"[Telegram] 加 BOM 失敗、用原檔送:{_e}")
+        return file_path, None
+
+
 async def _send_step_output_to_tg(
     chat_id: int, step, step_label: str = "", *,
     workflow_name: str = "", logger=None, step_result=None,
@@ -779,29 +957,8 @@ async def _send_step_output_to_tg(
         return False, f"Telegram 設定不完整：chat_id={chat_id or '無'}, token={'有' if token else '無'}"
 
     try:
-        # 文字檔(.md / .txt / .csv / .json / .yaml / .html / .log)送 TG 前加 UTF-8 BOM ─
-        # 否則 iOS Telegram doc viewer 沒 BOM 時可能猜成 Big5/CP950、繁中變亂碼。
-        # 寫到 system temp、不污染原檔。
-        _text_exts = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".log"}
-        _ext = Path(file_path).suffix.lower()
-        _send_path = file_path
-        _temp_to_cleanup = None
-        if _ext in _text_exts:
-            try:
-                with open(file_path, "rb") as _f:
-                    _bytes = _f.read()
-                # 已經有 BOM 就不重複加
-                if not _bytes.startswith(b"\xef\xbb\xbf"):
-                    import tempfile
-                    _fd, _tmp = tempfile.mkstemp(suffix=_ext)
-                    os.close(_fd)
-                    with open(_tmp, "wb") as _wf:
-                        _wf.write(b"\xef\xbb\xbf" + _bytes)
-                    _send_path = _tmp
-                    _temp_to_cleanup = _tmp
-                    log.info(f"[Telegram] 文字檔加 UTF-8 BOM 避免 iOS 解碼成 Big5 亂碼:{display}")
-            except Exception as _e:
-                log.warning(f"[Telegram] 加 BOM 失敗、用原檔送:{_e}")
+        # 文字檔送 TG 前加 UTF-8 BOM 避免 iOS Telegram 解成 Big5 亂碼(共用 helper)
+        _send_path, _temp_to_cleanup = _prepare_tg_file_with_bom(file_path, log, display)
         # 用 async with:避免手動 bot.close()(那是 TG `close` API method、
         # 文件寫前 10 分鐘必回 429、嚴格 rate-limit、不該在 bot code 呼叫)。
         # 之前 user 報「每次手動點按鈕必出現速率限制警告」就是這個 bug。
@@ -852,9 +1009,9 @@ def _find_prev_output_file(run, config) -> Optional[str]:
     try:
         from pathlib import Path as _P
         import time as _t
+        from config import OUTPUT_BASE_PATH as _OUT_BASE
 
-        # 策略 1：看 step.output.path（同 _resolve_path / _deterministic_validate 規則）
-        proj_root = _P(__file__).parent.parent.parent.absolute()
+        # 策略 1:看 step.output.path(同 _resolve_path / _deterministic_validate 規則)
         idx = run.current_step - 1
         while idx >= 0:
             st = config.steps[idx]
@@ -866,17 +1023,18 @@ def _find_prev_output_file(run, config) -> Optional[str]:
                 if not p.is_absolute():
                     parts = p.parts
                     if parts and parts[0] == "ai_output":
-                        p = proj_root / p
+                        # 相容舊 YAML 寫法:ai_output/xxx 視為相對 OUTPUT_BASE_PATH 的父
+                        p = _OUT_BASE.parent / p
                     else:
-                        p = proj_root / "ai_output" / run.pipeline_name / p
+                        # 用 _run_output_name(run) 自推 run_<ts>/ 子夾,不靠 config.name ——
+                        # TG 按鈕回呼重建 config 時不帶 run-scoping,靠 run 物件才找得到本次產物
+                        p = _OUT_BASE / _run_output_name(run) / p
                 if p.exists() and p.is_file():
                     return str(p)
             idx -= 1
 
-        # 策略 2：預設目錄最新檔
-        # 規則跟 main.py / take_screenshots 一致：ai_output/<pipeline_name>/
-        proj_root = _P(__file__).parent.parent.parent.absolute()
-        wf_dir = proj_root / "ai_output" / run.pipeline_name
+        # 策略 2:預設目錄最新檔(同樣自推 run 夾)
+        wf_dir = _OUT_BASE / _run_output_name(run)
         if not wf_dir.exists() or not wf_dir.is_dir():
             return None
         # 過濾規則：
@@ -1036,7 +1194,8 @@ async def _notify_failure(run: PipelineRun, val: ValidationResult, step_name: st
         text += f"💡 建議：{val.suggestion}\n"
     text += "\n請選擇處理方式："
     has_prev = run.current_step > 0
-    await _tg_send(run.telegram_chat_id, text, _decision_keyboard(run.run_id, has_prev=has_prev))
+    # 失敗原因 / AI 建議可能很長 → 分段送、不截斷(鍵盤放最後一段)
+    await _tg_send_long(run.telegram_chat_id, text, _decision_keyboard(run.run_id, has_prev=has_prev))
 
 
 async def _notify_final(run: PipelineRun, config: PipelineConfig):
@@ -1081,6 +1240,26 @@ async def _notify_final(run: PipelineRun, config: PipelineConfig):
     )
     await _tg_send(run.telegram_chat_id, text)
 
+    # 自我修復成功 → 把「要不要存回工作流」的決策也推到 TG(對齊 web 完成卡片,
+    # 讓人在遠端時也能決定;不存則修正只用於本次執行)。callback 由 telegram_handler 接。
+    if run.status == "completed" and getattr(run, "self_heal_count", 0) > 0 and run.workflow_id:
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            _kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("💾 存回工作流", callback_data=f"pipe_heal_writeback:{run.run_id}"),
+                InlineKeyboardButton("不用，這次就好", callback_data=f"pipe_heal_dismiss:{run.run_id}"),
+            ]])
+            await _tg_send(
+                run.telegram_chat_id,
+                f"🔧 <b>{run.pipeline_name}</b> 剛剛是 AI 自動修復後跑成功的。\n\n"
+                f"要把 AI 修好的版本<b>存回這個工作流</b>嗎?\n"
+                f"• 存回 → 下次跑同工作流不會再踩同樣的錯\n"
+                f"• 不用 → 這次的修正只用於本次執行",
+                _kb,
+            )
+        except Exception as _e:
+            logging.getLogger("pipeline").warning(f"[Telegram] 自我修復存回提示發送失敗(忽略):{_e}")
+
 
 # ── Deterministic validation (fast recipe mode) ──────────────────────────────
 
@@ -1099,16 +1278,16 @@ def _deterministic_validate(step, exec_result, logger, workflow_name: str = "") 
             suggestion="Recipe 執行失敗，建議改用完整模式重跑",
         )
 
-    # 2. 輸出檔存在 + 大小（路徑用跟 run_pipeline _resolve_path 一致的規則）
+    # 2. 輸出檔存在 + 大小(路徑用跟 run_pipeline _resolve_path 一致的規則)
     if step.output and step.output.path:
         p = _Path(step.output.path).expanduser()
         if not p.is_absolute():
-            proj_root = _Path(__file__).parent.parent.parent.absolute()
+            from config import OUTPUT_BASE_PATH as _OUT_BASE
             parts = p.parts
             if parts and parts[0] == "ai_output":
-                p = proj_root / p
+                p = _OUT_BASE.parent / p
             elif workflow_name:
-                p = proj_root / "ai_output" / workflow_name / p
+                p = _OUT_BASE / workflow_name / p
         if not p.exists():
             return ValidationResult(
                 status="failed",
@@ -1121,6 +1300,18 @@ def _deterministic_validate(step, exec_result, logger, workflow_name: str = "") 
                 status="failed",
                 reason=f"輸出檔案 {step.output.path} 為空檔案（0 bytes）",
                 suggestion="Recipe 產生了空檔案，建議改用完整模式",
+            )
+        # M6: Office 假檔(副檔名 .docx/.xlsx/.pptx 但內容非 ZIP)→ 判失敗,與 _deterministic_precheck 對齊。
+        try:
+            from .validator import office_format_mismatch as _ofm_r
+            _ofb_r = _ofm_r(str(p))
+        except Exception:
+            _ofb_r = None
+        if _ofb_r:
+            return ValidationResult(
+                status="failed",
+                reason=_ofb_r,
+                suggestion="Recipe 快取的程式碼產出了假 Office 檔、建議改用完整模式重學。",
             )
         # CSV: 檢查有 header
         if p.suffix.lower() == ".csv":
@@ -1159,15 +1350,39 @@ def _deterministic_validate(step, exec_result, logger, workflow_name: str = "") 
     )
 
 
+def _resolve_legacy_log_path(stored_path: str):
+    """支援 #142 OUTPUT_BASE_PATH 統一前的舊 log_path。
+
+    舊版 .env 設 OUTPUT_BASE_PATH=./ai_output 的 user、DB 內 log_path 仍是
+    `D:\\...\\backend\\ai_output\\pipeline_logs\\xxx.log`。新版 ai_output 在 repo_root、
+    .log 檔已被 auto-migrate 搬到新位置、但 DB 內 path 沒改 → 找不到。
+
+    這層 fallback:原 path 不存在 → 嘗試把 backend/ai_output 換成 ai_output 再找一次。
+    """
+    from pathlib import Path as _P
+    if not stored_path:
+        return None
+    p = _P(stored_path)
+    if p.exists():
+        return p
+    s = str(p)
+    # 兩種斜線都試
+    for old, new in (("backend\\ai_output", "ai_output"), ("backend/ai_output", "ai_output")):
+        if old in s:
+            alt = _P(s.replace(old, new))
+            if alt.exists():
+                return alt
+    return None
+
+
 def get_run_log_tail(run_id: str, lines: int = 30) -> str:
     """取得 pipeline 執行 log 的最後 N 行（供 Telegram 查看）"""
     store = get_store()
     run = store.load(run_id)
     if not run or not run.log_path:
         return "（找不到 log）"
-    from pathlib import Path as _Path
-    log_file = _Path(run.log_path)
-    if not log_file.exists():
+    log_file = _resolve_legacy_log_path(run.log_path)
+    if not log_file:
         return "（log 檔案不存在）"
     try:
         all_lines = log_file.read_text(encoding="utf-8").splitlines()
@@ -1185,9 +1400,43 @@ async def run_pipeline(
     run_id: Optional[str] = None,
     start_from_step: int = 0,
 ) -> str:
+    """執行(或恢復)一個 pipeline 的對外入口。
+
+    包薄殼 wrapper、處理「computer_use workflow 啟動時自動縮小前景視窗」
+    的 setup/teardown(setting 開啟才生效),實際邏輯在 _run_pipeline_inner。
+
+    Wrapper 用 reference counting 處理並發:多個 workflow 同時跑時、
+    第一個 minimize、最後一個 restore;中間呼叫只是 +1/-1 ref count。
     """
-    執行（或恢復）一個 pipeline。
-    """
+    from . import window_helper
+    try:
+        from settings import get_settings
+        _s = get_settings()
+        _auto_min = bool(_s.get("auto_minimize_for_computer_use", False))
+    except Exception:
+        _auto_min = False
+    _do_minimize = _auto_min and window_helper.config_has_computer_use(config_dict)
+    if _do_minimize:
+        window_helper.request_minimize()
+    try:
+        return await _run_pipeline_inner(
+            config_dict=config_dict,
+            chat_id=chat_id,
+            run_id=run_id,
+            start_from_step=start_from_step,
+        )
+    finally:
+        if _do_minimize:
+            window_helper.request_restore()
+
+
+async def _run_pipeline_inner(
+    config_dict: dict,
+    chat_id: int,
+    run_id: Optional[str] = None,
+    start_from_step: int = 0,
+) -> str:
+    """執行(或恢復)一個 pipeline 的實作本體。對外請呼叫 run_pipeline。"""
     store = get_store()
 
     # 建立或恢復 run
@@ -1220,6 +1469,28 @@ async def run_pipeline(
     config = PipelineConfig.from_dict(run.config_dict)
     use_recipe = run.config_dict.get("_use_recipe", False)
     workflow_id = run.config_dict.get("_workflow_id") or run.workflow_id
+    # 輸出目錄 / 日誌一律用「使用者在側邊欄看到的工作流名稱」(DB),不要用 AI 在 YAML 自取的
+    # name → 否則檔案落到 AI 自取的資料夾(如 demo_sales_analysis)、使用者依工作流名找不到檔。
+    # config.name 只用於輸出資料夾 / 日誌 / pipeline_id fallback,不影響步驟變數參照(那用 step name),
+    # 所以單點覆寫即可全覆蓋 _workflow_output_dir / default_wd / _resolve_path。
+    if workflow_id:
+        try:
+            from db import get_workflow as _get_wf
+            _wf_name = (((_get_wf(workflow_id) or {}).get("name")) or "").strip()
+            if _wf_name and _wf_name != config.name:
+                logger.info(f"輸出目錄改用工作流名稱「{_wf_name}」(原 YAML name「{config.name}」)")
+                config.name = _wf_name
+                run.pipeline_name = _wf_name
+        except Exception as _e:
+            logger.warning(f"查工作流名稱失敗、沿用 YAML name「{config.name}」:{_e}")
+
+    # ── per-run 輸出子資料夾 ─────────────────────────────────────────
+    # 把本次執行的所有產物路由到 ai_output/<工作流>/run_<時間戳>/(見 _run_output_name)。
+    # 顯示名 run.pipeline_name 保持乾淨;只有實體輸出目錄名 config.name 帶 run_ts。
+    # config.name 在此之後才被用到(_resolve_path / default_wd / 快照 / _send_step_output_to_tg
+    # / _step_export 等),所以單點覆寫即全覆蓋。logger 已在覆寫前建立、不受影響。
+    config.name = _run_output_name(run)
+    logger.info(f"本次執行輸出目錄:ai_output/{config.name}/")
     store.save(run)
 
     # ── Step loop ────────────────────────────────────────────
@@ -1350,10 +1621,24 @@ async def run_pipeline(
                 run.step_results[run.current_step] = step_result
             else:
                 run.step_results.append(step_result)
-            run.status = "failed"
-            run.ended_at = datetime.now().isoformat()
+            # 變數展開失敗的根因幾乎都在「上游 step 沒 export 該變數 / 變數名拼錯 / 漏帶 input_params」——
+            # 跟 condition 求值失敗同一類、是 self_heal 改 YAML 能修的。
+            # 先嘗試自我修復;不可修才轉人工,不要直接 failed 終局(連人工決策都不給)。
+            _var_val = ValidationResult(
+                status="failed",
+                reason=f"變數展開失敗:{_var_exc}",
+                suggestion="檢查 {{ }} 內變數是否拼錯、上游是否用 export_var 匯出該變數、或啟動 workflow 時是否漏帶 input_params",
+            )
+            if _should_self_heal(run, step, _var_val, None):
+                await _enter_self_heal(run, _var_val, step, run.current_step + 1, None, logger)
+                unregister_task(run.run_id)
+                return run.run_id
+            run.status = "awaiting_human"
+            run.awaiting_type = "failure"
+            run.awaiting_message = f"變數展開失敗:{_var_exc}"
+            run.awaiting_suggestion = _var_val.suggestion
             store.save(run)
-            await _notify_final(run, config)
+            await _notify_failure(run, _var_val, step.name)
             unregister_task(run.run_id)
             return run.run_id
 
@@ -1409,13 +1694,18 @@ async def run_pipeline(
                     raise _CondError("condition 節點需填 expression(IF)或 switch(Switch)")
             except _CondError as _ce:
                 logger.error(f"[{step.name}] condition 求值失敗:{_ce}")
+                _cond_sugg = (
+                    "檢查 expression / switch 表達式語法、引用變數是否存在。"
+                    "Jinja2 判斷包含用 \"'關鍵字' in 變數\"、不是 .contains();"
+                    "字串相等用 ==;list/dict 取值用 []。"
+                )
                 step_result = StepResult(
                     step_index=run.current_step, step_name=step.name,
                     exit_code=1, stdout_tail="",
                     stderr_tail=str(_ce),
                     validation_status="failed",
                     validation_reason=f"condition 求值失敗:{_ce}",
-                    validation_suggestion="檢查 expression / switch 表達式是否合法、引用變數是否存在",
+                    validation_suggestion=_cond_sugg,
                     retries_used=0,
                     started_at=step_started_at,
                     ended_at=datetime.now().isoformat(),
@@ -1424,10 +1714,23 @@ async def run_pipeline(
                     run.step_results[run.current_step] = step_result
                 else:
                     run.step_results.append(step_result)
-                run.status = "failed"
-                run.ended_at = datetime.now().isoformat()
+                # condition 求值失敗多半是「上游 skill 沒 export 變數 / 表達式語法錯」——
+                # 是 self_heal 改 YAML(重寫上游步驟或表達式)能修的 → 先嘗試自我修復、再 fallback 人工。
+                _cond_val = ValidationResult(
+                    status="failed",
+                    reason=f"condition 求值失敗:{_ce}",
+                    suggestion=_cond_sugg,
+                )
+                if _should_self_heal(run, step, _cond_val, None):
+                    await _enter_self_heal(run, _cond_val, step, run.current_step + 1, None, logger)
+                    unregister_task(run.run_id)
+                    return run.run_id
+                run.status = "awaiting_human"
+                run.awaiting_type = "failure"
+                run.awaiting_message = f"condition 求值失敗:{_ce}"
+                run.awaiting_suggestion = _cond_sugg
                 store.save(run)
-                await _notify_final(run, config)
+                await _notify_failure(run, _cond_val, step.name)
                 unregister_task(run.run_id)
                 return run.run_id
 
@@ -1455,10 +1758,23 @@ async def run_pipeline(
                 step_result.validation_status = "failed"
                 step_result.validation_reason = f"跳轉目標 '{target_name}' 不存在於 workflow"
                 step_result.stderr_tail = step_result.validation_reason
-                run.status = "failed"
-                run.ended_at = datetime.now().isoformat()
+                # 跳轉目標不存在 = 純 YAML 拼字錯(on_true/on_false/cases 指到不存在的 step),
+                # 是 self_heal 改 YAML 最好修的一類 → 先試自我修復,不可修才轉人工。
+                _jt_val = ValidationResult(
+                    status="failed",
+                    reason=f"condition 跳轉目標 '{target_name}' 不存在於 workflow(YAML 拼字錯或漏建該 step)",
+                    suggestion="把 on_true/on_false/cases/default 的目標名改成實際存在的 step name,或補上缺的 step。",
+                )
+                if _should_self_heal(run, step, _jt_val, None):
+                    await _enter_self_heal(run, _jt_val, step, run.current_step + 1, None, logger)
+                    unregister_task(run.run_id)
+                    return run.run_id
+                run.status = "awaiting_human"
+                run.awaiting_type = "failure"
+                run.awaiting_message = _jt_val.reason
+                run.awaiting_suggestion = _jt_val.suggestion
                 store.save(run)
-                await _notify_final(run, config)
+                await _notify_failure(run, _jt_val, step.name)
                 unregister_task(run.run_id)
                 return run.run_id
             else:
@@ -1571,7 +1887,7 @@ async def run_pipeline(
                 # 逐螢幕送（雙螢幕 → 2 張，方便 TG 上直接看到上一步結果不用再按按鈕）
                 if step.screenshot:
                     try:
-                        ss_paths = take_screenshots(run.pipeline_name, step.name)
+                        ss_paths = take_screenshots(config.name, step.name)
                         if ss_paths:
                             await _tg_send_photos(
                                 run.telegram_chat_id,
@@ -1842,7 +2158,12 @@ async def run_pipeline(
                 # 跳過 recipe cache（多輪結果非確定性）、跳過 validator（loop 內已自我驗證）
                 from .subagent_runner import run_subagent
                 from .executor import ExecResult as _ExecResult
-                _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                if step.output and step.output.path:
+                    _resolved_out = str(_resolve_path(step.output.path))
+                else:
+                    # 沒設 output.path → 自動 derive 到 workflow_dir 下、給 LLM 明確存哪
+                    _resolved_out, _ext = _derive_default_output_path(step, wd)
+                    logger.info(f"[{step.name}] step.output.path 未設,自動 derive → {_resolved_out} (副檔名 {_ext} 由 batch 關鍵字推測)")
                 sub_result = await run_subagent(
                     role_name=step.subagent_role or "data_analyst",
                     task=step.batch,
@@ -1860,19 +2181,82 @@ async def run_pipeline(
                 # 把 subagent 的 token usage / tool 呼叫時間軸記到該 step、StepResult 結尾寫入
                 step_token_usage = sub_result.token_usage or {}
                 step_tool_calls = list(sub_result.tool_calls_made or [])
+
+                # ⛔ Hallucination 防護:subagent done(success=true) 但 output 檔不存在 → 強制 failed
+                #
+                # 真實案例:LLM 在 boss role 寫了 4000-6000 字計畫 reply、直接呼 done(success=true)、
+                # 從沒呼 run_python 寫檔。runner 看 sub_result.success=True 標 ✅ 通過、
+                # 但下個 step 找不到 final_report.md 才爆。修法:這層強制 check 檔在不在、
+                # 不在就 override 成 failed、訊息列「LLM 宣稱完成但 output 不存在」。
+                _hallucinated = False
+                if sub_result.success and _resolved_out:
+                    if not Path(_resolved_out).exists():
+                        _hallucinated = True
+                        logger.error(
+                            f"[{step.name}] ⛔ Subagent 宣稱 done(success=true) 但 output 檔不存在:{_resolved_out}\n"
+                            f"   LLM 可能寫了 reply 但跳過 run_python 寫檔的步驟、或寫到別處去了。"
+                        )
+                        sub_result.success = False
+                        sub_result.error = (
+                            f"hallucinated_done:LLM 主動 done(success=true) 但 output 檔 {_resolved_out} 不存在。"
+                            f"請改進 role 系統提示要求 done 前先 Path(output).exists() 自驗。"
+                        )
+                    else:
+                        # subagent 跳過 validator → 在這補兩道決定性檢查(skill 走 validator 都有、subagent 沒對齊):
+                        # (1) 新鮮度:檔案 mtime 早於本步開始 = 上一輪殘檔冒充本輪產出(重跑 / 自我修復重訪會踩)
+                        _stale = False
+                        try:
+                            _started_ts = datetime.fromisoformat(step_started_at).timestamp()
+                            if Path(_resolved_out).stat().st_mtime < _started_ts - 2:  # 2s 容錯時鐘粒度
+                                _stale = True
+                        except Exception:
+                            pass
+                        if _stale:
+                            _hallucinated = True
+                            logger.error(f"[{step.name}] ⛔ Subagent output 是舊檔(mtime 早於本步開始):{_resolved_out}")
+                            sub_result.success = False
+                            sub_result.error = (
+                                f"stale_output:output 檔 {_resolved_out} 修改時間早於本步開始、"
+                                f"是上一輪殘留舊檔、本輪沒真的寫檔。請用 run_python 實際重新產出。"
+                            )
+                        else:
+                            # (2) 假 Office 檔:副檔名 .docx/.xlsx/.pptx 但內容不是 ZIP(常見:研究型 role
+                            #     把 markdown 直接存成 .docx)。抓到就 override 失敗、走自我修復 / 人工。
+                            try:
+                                from .validator import office_format_mismatch as _ofm
+                                _fmt_bad = _ofm(_resolved_out)
+                            except Exception:
+                                _fmt_bad = None
+                            if _fmt_bad:
+                                _hallucinated = True
+                                logger.error(f"[{step.name}] ⛔ Subagent output 假 Office 檔:{_fmt_bad}")
+                                sub_result.success = False
+                                sub_result.error = (
+                                    f"fake_office_file:{_fmt_bad} "
+                                    f"請用 python-docx(Document().save())/ openpyxl / python-pptx 實際產生 Office 檔,"
+                                    f"不要把 markdown / 純文字改副檔名存成它。"
+                                )
+
                 exec_result = _ExecResult(
                     exit_code=0 if sub_result.success else 1,
                     stdout=(
                         f"[subagent/{step.subagent_role}] {sub_result.final_message}\n"
                         f"\n(iters={sub_result.iterations}, tools={_tools_used})"
+                        + (f"\n⚠ 偵測到 hallucinated done、已 override 為失敗" if _hallucinated else "")
                     ),
                     stderr="" if sub_result.success else (sub_result.error or "subagent 執行失敗"),
                 )
             elif step.skill_mode:
                 # recipe key 使用「索引:名稱」避免同名步驟互相覆蓋
                 recipe_step_key = f"{step_num}:{step.name}"
-                # 把 output_path 解析成絕對路徑傳給 LLM，避免 LLM 搞不清楚相對於哪個 cwd
-                _resolved_out = str(_resolve_path(step.output.path)) if (step.output and step.output.path) else None
+                # 把 output_path 解析成絕對路徑傳給 LLM、避免 LLM 搞不清楚相對於哪個 cwd
+                if step.output and step.output.path:
+                    _resolved_out = str(_resolve_path(step.output.path))
+                else:
+                    # 沒設 output.path → 自動 derive 到 workflow_dir 下、給 LLM 明確存哪
+                    # 對應「不指定輸出路徑 = 落在工作流資料夾」的核心設計精神
+                    _resolved_out, _ext = _derive_default_output_path(step, wd)
+                    logger.info(f"[{step.name}] step.output.path 未設、自動 derive → {_resolved_out} (副檔名 {_ext} 由 batch 關鍵字推測)")
                 # 判斷此 step 之後有沒有外部 AI validator 會跑、用於 skill loop 內 output-driven hint
                 # validator 跑的條件(對齊 validator 分派邏輯 line 1974/1993):
                 #   pipeline.validate=True AND (有 expect 描述 OR 此為 skill 節點)
@@ -1951,6 +2335,31 @@ async def run_pipeline(
             except Exception as _e:
                 logger.debug(f"[{step.name}] 預算 snapshot diff 失敗(略過):{_e}")
 
+            # ── 通用完成守門:步驟宣告了 output.path、exit_code=0(看似完成),卻沒產出任何檔
+            #    → 判 failed。抓「LLM 假完成 / docx 等格式產出失敗 / 寫錯路徑」這種「狀態完成
+            #    但沒交付承諾檔」(Hero 卡5-1 深度研究跑完卻沒生 Word 就是這種)。
+            #    排除:不產檔的節點(human_confirm/condition)、web_crawler(有自己的驗證 + 可能輸出
+            #    資料夾、_eff_output_path 對多 URL 會是 None)。_eff_output_path 已涵蓋「宣告檔存在
+            #    為檔」+「偵測到新檔」,為 None 代表兩者皆無;再補查宣告路徑是不是非空資料夾。
+            _missing_promised_output = False
+            if (
+                exec_result.exit_code == 0
+                and step.output and step.output.path
+                and not getattr(step, "human_confirm", False)
+                and not getattr(step, "condition", False)
+                and not getattr(step, "web_crawler", False)
+                and not _eff_output_path
+            ):
+                try:
+                    _decl = _resolve_path(step.output.path)
+                    _decl_ok = _decl.exists() and (
+                        (_decl.is_file() and _decl.stat().st_size > 0)
+                        or (_decl.is_dir() and any(_decl.iterdir()))
+                    )
+                except Exception:
+                    _decl_ok = False
+                _missing_promised_output = not _decl_ok
+
             # exit_code -429 = LLM 配額用盡（executor 標記），直接走 rate_limited 路徑、不再叫 validator（會再 429 一次）
             if exec_result.exit_code == -429:
                 val = ValidationResult(
@@ -1961,6 +2370,19 @@ async def run_pipeline(
             # outlook_automation 節點：agent 自己回 done(success) 就決定成敗了，不需 LLM 驗證
             elif step.outlook_automation:
                 _status = "ok" if exec_result.exit_code == 0 else "failed"
+                # H4: outlook 也補一道「假 Office 檔」決定性檢查(與 subagent 同類洞)。
+                # outlook 模板會引導 LLM 用 python-docx 寫 .docx 附件,但 LLM 可能把 markdown
+                # 直接存成 .docx → 只看 exit/done 會漏。僅在有設 output.path 時檢查、保守不誤判。
+                _ofb = None
+                if _status == "ok" and step.output and step.output.path:
+                    try:
+                        from .validator import office_format_mismatch as _ofm_o
+                        _ofb = _ofm_o(str(_resolve_path(step.output.path)))
+                    except Exception:
+                        _ofb = None
+                    if _ofb:
+                        _status = "failed"
+                        logger.error(f"[{step.name}] ⛔ Outlook output 假 Office 檔:{_ofb}")
                 # 從 stdout 抽 [Outlook 完成] 那行給使用者看
                 _summary = ""
                 for _ln in (exec_result.stdout or "").splitlines():
@@ -1969,8 +2391,8 @@ async def run_pipeline(
                         break
                 val = ValidationResult(
                     status=_status,
-                    reason=_summary or ("Outlook 任務成功" if _status == "ok" else (exec_result.stderr or "Outlook 任務失敗")),
-                    suggestion=exec_result.stderr if _status == "failed" else "",
+                    reason=(_ofb if _ofb else (_summary or ("Outlook 任務成功" if _status == "ok" else (exec_result.stderr or "Outlook 任務失敗")))),
+                    suggestion=("請用 python-docx(Document().save())/ openpyxl / python-pptx 實際產生 Office 檔、不要把純文字改副檔名。" if _ofb else (exec_result.stderr if _status == "failed" else "")),
                 )
             # visual_validation 節點：節點自己就是 VLM 判斷，不需要再跑一次 LLM 驗證
             elif step.visual_validation:
@@ -2011,14 +2433,43 @@ async def run_pipeline(
                     ),
                     suggestion=exec_result.stderr if _status == "failed" else "",
                 )
-            # web_crawler 節點：成敗已由 crawler tier 結果決定，不需 LLM 驗證
+            # web_crawler 節點:
+            #  「抓到頁面」≠「抓到真實目標資料」。爬蟲可能成功 fetch 一個 404 頁 / 反爬錯頁 /
+            #  空 SPA,exit_code 仍=0。所以:
+            #   (a) 有填 expect(AI 驗證節點/規則要求)→ 跑 AI 內容驗證、讀爬蟲輸出判斷是否
+            #       真的抓到目標資料(非 404/空頁/錯頁)→ 不真就 fail、別讓下游用 LLM 知識硬補。
+            #   (b) 沒填 expect → 至少掃輸出的 status_code / 子頁數,擋掉「全 404 / 全空」的假成功。
             elif step.web_crawler:
-                _status = "ok" if exec_result.exit_code == 0 else "failed"
-                val = ValidationResult(
-                    status=_status,
-                    reason=exec_result.stdout.replace("[爬蟲完成] ", "") or "網頁爬取",
-                    suggestion=exec_result.stderr if _status == "failed" else "",
-                )
+                if config.validate and has_expect:
+                    logger.info(f"[{step.name}] 🔍 爬蟲節點有 AI 驗證需求 → 驗證抓回的內容是否真實目標資料")
+                    val = await validate_step(
+                        step_name=step.name,
+                        command=step.batch,
+                        exit_code=exec_result.exit_code,
+                        stdout=exec_result.stdout,
+                        stderr=exec_result.stderr,
+                        output_path=_eff_output_path,
+                        output_expect=step.output.get_expect() if step.output else None,
+                        logger=logger,
+                        llm_role=getattr(step, "llm_role", "primary"),
+                        step_start_time=step_started_at,
+                    )
+                else:
+                    _crawl_fail = _crawl_looks_failed(_eff_output_path, logger)
+                    if exec_result.exit_code == 0 and _crawl_fail:
+                        val = ValidationResult(
+                            status="failed",
+                            reason=f"爬蟲表面成功、但內容無效:{_crawl_fail}",
+                            suggestion="目標 URL 可能錯誤 / 404 / 被反爬 / SPA 動態渲染抓不到。"
+                                       "請確認 URL 正確、或改用其他來源。",
+                        )
+                    else:
+                        _status = "ok" if exec_result.exit_code == 0 else "failed"
+                        val = ValidationResult(
+                            status=_status,
+                            reason=exec_result.stdout.replace("[爬蟲完成] ", "") or "網頁爬取",
+                            suggestion=exec_result.stderr if _status == "failed" else "",
+                        )
             # computer_use 節點：成敗已由 action 執行結果決定，不需 LLM 驗證
             elif step.computer_use:
                 _status = "ok" if exec_result.exit_code == 0 else "failed"
@@ -2098,6 +2549,19 @@ async def run_pipeline(
                 )
                 logger.info(f"[{step.name}] 驗證（僅 exit code）：{val.status}")
 
+            # 通用完成守門優先:宣告了 output.path 卻沒產出任何檔 → 覆寫成 failed
+            # (放最後覆寫,確保不被上面任何「看似 ok」的分支放行)
+            if _missing_promised_output and val.status == "ok":
+                logger.warning(
+                    f"[{step.name}] ⚠ 完成守門:宣告 output.path={step.output.path} 但實際沒產出任何檔 → 判 failed"
+                )
+                val = ValidationResult(
+                    status="failed",
+                    reason=f"步驟宣稱完成、但宣告的產出檔不存在:{step.output.path}",
+                    suggestion="這步沒有真的產出承諾的輸出檔(可能 LLM 假完成 / 寫檔失敗 / "
+                               "docx 等嚴格格式產出失敗)。請查 log 確認該步是否真的寫檔。",
+                )
+
             # ── 算這步真正寫到 workflow dir 的主要檔案 ─────────────────
             # 上面 validate 前已經算過 _eff_output_path、這邊直接重用、不要重複呼 snapshot diff
             actual_out = _eff_output_path or ""
@@ -2109,7 +2573,11 @@ async def run_pipeline(
             # runner 讀進該步的 step_vars(→ {{ steps.<name>.output.<key> }})後刪檔、
             # 避免洩漏到下一步。
             try:
-                _export_f = _workflow_output_dir(config.name) / "_step_export.json"
+                # 讀「這步的 working_dir」下的 _step_export.json —— 必須跟 export_var 寫入的位置
+                # 一致。export_var 寫到 cwd=working_dir(=wd);而 wd 在有 output.path 時是
+                # output.path.parent(母夾),不是 _workflow_output_dir(config.name)(可能含 per-run
+                # run_<ts> 子夾)。用 _workflow_output_dir 會讀錯夾、永遠 is_file=False、變數丟失。
+                _export_f = Path(wd) / "_step_export.json"
                 if _export_f.is_file():
                     import json as _json
                     _exported = _json.loads(_export_f.read_text(encoding="utf-8"))
@@ -2251,17 +2719,18 @@ async def run_pipeline(
                 # 收集延遲儲存的 recipe
                 if hasattr(exec_result, 'pending_recipe') and exec_result.pending_recipe:
                     run.pending_recipes.append(exec_result.pending_recipe)
-                # 收集此步驟的輸出資訊供後續步驟參考
-                # 優先：明確 output.path > snapshot 算出來的 actual_output_path
-                # 後者讓沒設 output.path 的 skill 步驟也能被後續 outlook send_with_attachment 自動抓到正確檔
+                # 收集此步驟的輸出資訊供後續步驟參考(供 outlook send_with_attachment 的
+                # 「上一步輸出」fallback、以及部分隱式參照用)。
+                # ⚠️ 優先用 actual_out(snapshot diff 算出的「檔案實際所在」絕對路徑)——
+                #    它含 per-run 的 run_<ts>/ 子夾、是檔案真正落地的位置。
+                #    _resolve_path(step.output.path) 只接到 ai_output/<wf>/、**沒有 run_<ts>/**,
+                #    會指到一個不存在的舊位置 → 下游 outlook 抓附件抓不到(已知 bug)。
+                #    只有在 snapshot 沒抓到實際檔時、才退回用設定的 output.path 解析。
                 _eff_path = ""
-                if step.output and step.output.path:
-                    # 一律存絕對路徑進 completed_outputs，下一步的 LLM agent 拿到
-                    # 純檔名也找不到、必須給它絕對路徑（_resolve_path 把純檔名接到
-                    # workflow dir、ai_output/... 接專案根、絕對路徑直接用）
-                    _eff_path = str(_resolve_path(step.output.path))
-                elif actual_out:  # 上面 snapshot diff 算出來的（已是絕對）
+                if actual_out:
                     _eff_path = actual_out
+                elif step.output and step.output.path:
+                    _eff_path = str(_resolve_path(step.output.path))
                 if _eff_path:
                     out_info = {"path": _eff_path, "schema": ""}
                     try:
@@ -2339,6 +2808,13 @@ async def run_pipeline(
                         f"步驟 {step_num} 缺套件 {missing_pkgs} → 等待用戶確認安裝"
                     )
                 else:
+                    # ── 自我修復攔截:開關開 + 次數未滿 + step 可修 → 背景 AI 修復、不轉人工 ──
+                    # (缺套件 missing_dependency / rate_limited 在前面的分支已 return、不會走到這、
+                    #  那些不該自動改 YAML。只有「一般 failure」才進自我修復。)
+                    if _should_self_heal(run, step, val, exec_result):
+                        await _enter_self_heal(run, val, step, step_num, exec_result, logger)
+                        unregister_task(run.run_id)
+                        return run.run_id  # 背景修復中、runner 先退出
                     run.awaiting_type = "failure"
                     run.awaiting_message = val.reason or ""
                     run.awaiting_suggestion = val.suggestion or ""
@@ -2365,6 +2841,364 @@ async def run_pipeline(
     logger.info(f"Pipeline {config.name} 全部完成！")
     await _notify_final(run, config)
     return run.run_id
+
+
+# ── 自我修復(Self-Healing)────────────────────────────────────────────────────
+# 某步驟失敗(重試耗盡)且使用者開啟自我修復:讓 AI 助手讀 log + 比對自己寫的 YAML、
+# 找 root cause、改 run.config_dict(這次 run 的暫存 YAML、**不碰存檔 workflow**)、從失敗步重跑。
+# 到 self_heal_max_attempts / AI 認輸 / 不收斂 → fallback 回 awaiting_type=failure 人工決策。
+# 設計與 retry_with_hint 同源(deepcopy/改/存回 run/重跑),差別是改整份 YAML 而非單步 batch。
+_SELF_HEAL_HARD_CAP = 5
+_SELF_HEAL_LOG_LINES = 160
+
+_SELF_HEAL_SYSTEM_HINT = (
+    "【自動修復模式】你正在背景自動修復一個失敗的工作流,沒有使用者在線回答問題。\n"
+    "鐵則:\n"
+    "1. 仔細讀 log 與目前 YAML、判斷失敗 root cause(YAML 規劃錯 / 路徑錯 / 步驟順序錯 / "
+    "缺前置步驟 / 參數錯 / batch 描述不清 / max_iter 太低 等)。\n"
+    "2. 只改必要處、輸出**完整**修正後 workflow YAML(用 ```yaml 區塊),不要省略任何步驟。\n"
+    "3. 用一兩句說明你改了什麼、為什麼。\n"
+    "4. 若判斷這**不是改 YAML 能修**的(外部服務 503 / 需使用者授權 / 缺套件)→ 明講"
+    "「無法自動修復」+ 原因,**不要硬改、不要輸出 YAML**。\n"
+    "5. 輸出格式跟你平常生成工作流給桌面 web 完全一樣:**先單獨寫一行 `YAML_READY`、"
+    "緊接著 ```yaml 區塊**(系統靠 YAML_READY 標記偵測並自動套用)。少了 YAML_READY 系統會抓不到、修復就失敗。\n"
+    "6. **絕對不要呼叫 save_workflow_yaml / start_workflow 或任何工具** —— 只要 emit YAML_READY + ```yaml``` 即可。"
+)
+
+
+def _step_is_healable(step) -> bool:
+    """只修 AI 靠改 YAML 能救的節點。human_confirm(人為)/ computer_use / visual_validation /
+    outlook(環境相關、改 YAML 沒用)不修。
+    condition 例外:它只會因「求值錯(上游沒 export 變數 / 表達式語法錯)」而失敗,
+    而那正是重寫整份 YAML(改上游 step 或表達式)能修的 → 允許自我修復。"""
+    for attr in ("human_confirm", "computer_use", "visual_validation",
+                 "outlook_automation"):
+        if getattr(step, attr, False):
+            return False
+    return True
+
+
+def _self_heal_max() -> int:
+    try:
+        from settings import get_settings
+        return min(_SELF_HEAL_HARD_CAP, int(get_settings().get("self_heal_max_attempts", 2) or 2))
+    except Exception:
+        return 2
+
+
+def _is_stuck_failure(val, exec_result) -> bool:
+    """卡死 / 不收斂型失敗(步驟跑很久才失敗:subagent 撞 max_iter、timeout、連續無 tool)。
+    這類重跑會再卡一次、改 YAML 也救不了根本問題 → 不修、直接轉人工,避免把時間放大數倍
+    (實測 H3 coder 撞 max_iter、self_heal 重跑 → 卡 50 分鐘)。對齊 [[non-convergence-guard]]。"""
+    # framework 產生的精確「卡死」訊號(這些 token 是程式產生的、不會出現在使用者程式 stderr)
+    blob = (
+        (getattr(val, "reason", "") or "") + " "
+        + (getattr(exec_result, "error", "") or "") + " "
+        + (getattr(exec_result, "stderr", "") or "")
+    ).lower()
+    for kw in ("reached_max_iter", "consecutive_no_tool", "prose_before_tool",
+               "不收斂", "非收斂"):
+        if kw in blob:
+            return True
+    # 「timeout / 逾時」太通用 —— 使用者程式自己處理 timeout(requests timeout 等)的 stderr
+    #  會誤判成卡死、害可修的失敗被擋在 self-heal 外。故只在 framework 的驗證判語(val.reason)
+    #  出現才算,不掃使用者程式 stderr。
+    _reason = (getattr(val, "reason", "") or "").lower()
+    for kw in ("timeout", "timed out", "逾時"):
+        if kw in _reason:
+            return True
+    return False
+
+
+def _should_self_heal(run, step, val=None, exec_result=None) -> bool:
+    try:
+        from settings import get_settings
+        s = get_settings()
+    except Exception:
+        return False
+    if not s.get("self_heal_enabled", False):
+        return False
+    if getattr(run, "self_heal_count", 0) >= _self_heal_max():
+        return False
+    if not _step_is_healable(step):
+        return False
+    # 卡死型失敗不重跑(重跑會再卡、放大時間)→ 交人工
+    if _is_stuck_failure(val, exec_result):
+        return False
+    return True
+
+
+def _ai_gave_up(reply: str) -> bool:
+    if not reply:
+        return False
+    low = reply.replace(" ", "")
+    # 只認「明確宣告放棄」的措辭。原本含 需要使用者 / 需要授權 / 外部服務 等通用詞,
+    # 會把「我移除了對外部服務的依賴」這類正面敘述誤判成認輸、害有效修復被丟掉 → 移除。
+    # _SELF_HEAL_SYSTEM_HINT 規則 4 已要求 AI 放棄時明說「無法自動修復」,以此為契約。
+    for kw in ("無法自動修復", "無法修復", "不是改YAML", "非YAML能修", "無法靠YAML",
+               "cannotfix", "cannotbefixed"):
+        if kw.replace(" ", "") in low:
+            return True
+    return False
+
+
+def _yaml_near_identical(a: str, b: str) -> bool:
+    """新舊 YAML 是否「沒有實質修改」→ 視為不收斂。
+    比 steps 的**完整正規化內容**(每個 step 整個 dict 排序 key 後序列化)—— 只要任一欄位變了
+    (含 expression/switch/cases/on_true/on_false/condition、wc_url/wc_*、outlook_params、
+    output.path/expect、retry/timeout 等節點專屬欄位)就算有實質改動、放行。
+    (舊版只比 name/batch/skill_mode/subagent_role/max_iter 5 欄,AI 只改其它欄位會被誤判沒改、
+     害修對了卻被當不收斂轉人工 —— 對 condition 只改 expression / 跳轉目標的場景特別致命。)"""
+    import yaml as _y
+    import json as _j
+
+    def _sig(s):
+        try:
+            d = _y.safe_load(s) or {}
+            d = d.get("pipeline", d) if isinstance(d, dict) else d
+            steps = d.get("steps", []) if isinstance(d, dict) else []
+            return [
+                _j.dumps(st, sort_keys=True, ensure_ascii=False)
+                for st in steps if isinstance(st, dict)
+            ]
+        except Exception:
+            return None
+
+    sa, sb = _sig(a), _sig(b)
+    if sa is None or sb is None:
+        # parse 失敗 → 退回字串完全相等比較(只有一字不差才算沒改)
+        return (a or "").strip() == (b or "").strip()
+    return sa == sb
+
+
+def _format_prior_attempts(prior: list) -> str:
+    if not prior:
+        return "(這是第一次修復、沒有先前嘗試)"
+    lines = []
+    for p in prior:
+        lines.append(f"- 第 {p.get('attempt', '?')} 次:{(p.get('diagnosis') or '')[:300]}")
+    return "\n".join(lines)
+
+
+async def _notify_self_heal(run: PipelineRun, text: str):
+    """自我修復進度通知(TG)。desktop run 沒 chat_id 時 _tg_send 自行略過。"""
+    try:
+        await _tg_send(run.telegram_chat_id, f"🔧 <b>{run.pipeline_name}</b>\n{text}")
+    except Exception:
+        pass
+
+
+async def _enter_self_heal(run, val, step, step_num, exec_result, logger) -> None:
+    """進入修復過渡狀態 + 背景啟動修復(不阻塞 runner)。"""
+    max_n = _self_heal_max()
+    run.self_heal_count = getattr(run, "self_heal_count", 0) + 1
+    run.status = "awaiting_human"
+    run.awaiting_type = "self_heal"
+    run.awaiting_message = f"AI 自我修復中(第 {run.self_heal_count}/{max_n} 次)…失敗步驟:{step.name}"
+    run.awaiting_suggestion = ""
+    get_store().save(run)
+    logger.warning(
+        f"步驟 {step_num}「{step.name}」失敗 → 啟動自我修復(第 {run.self_heal_count}/{max_n} 次)"
+    )
+    await _notify_self_heal(
+        run, f"步驟「{step.name}」失敗、AI 正在自動修復(第 {run.self_heal_count}/{max_n} 次)…"
+    )
+    _stderr_tail = ""
+    if exec_result is not None and getattr(exec_result, "stderr", ""):
+        _stderr_tail = (exec_result.stderr or "")[-1500:]
+    asyncio.create_task(_run_self_heal_then_resume(
+        run.run_id, step.name, run.current_step,
+        val.reason or "", val.suggestion or "", _stderr_tail,
+    ))
+
+
+def _strip_heal_yaml(text: str) -> str:
+    """自我修復「修了什麼」顯示用:砍掉 LLM reply 裡的 YAML_READY 標記與 ```yaml``` 區塊。
+    YAML 已由系統另行解析套用(new_yaml),不需在給人看的訊息裡重複列出整包展開欄位
+    (cu_mode / wc_* / outlook_* 等預設值),否則使用者只會看到一大坨雜訊。"""
+    import re as _re
+    if not text:
+        return text
+    # 砍掉 YAML_READY 標記(含)之後的所有內容 —— 說明都在標記之前
+    m = _re.search(r"\n?\s*YAML_READY\b", text)
+    if m:
+        text = text[:m.start()]
+    # 保險:沒有 YAML_READY 但有 ```yaml fenced block 時也一併移除
+    text = _re.sub(r"```ya?ml\b.*?```", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+    text = _re.sub(r"```\s*```", "", text)  # 殘留空 fence
+    return text.strip()
+
+
+async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index,
+                                     fail_reason, fail_suggestion, stderr_tail):
+    """背景:讀 log → AI 改 YAML → 套用 → 從失敗步重跑。失敗則 fallback 人工。"""
+    store_ = get_store()
+    run = store_.load(run_id)
+    if not run:
+        return
+    logger = resume_run_logger(run.run_id, run.log_path)
+
+    def _fallback(msg):
+        run.status = "awaiting_human"
+        run.awaiting_type = "failure"
+        run.awaiting_message = msg
+        run.awaiting_suggestion = fail_suggestion
+        store_.save(run)
+
+    try:
+        import yaml as _yaml
+        log_tail = get_run_log_tail(run_id, lines=_SELF_HEAL_LOG_LINES)
+        current_yaml = _yaml.safe_dump(run.config_dict, allow_unicode=True, sort_keys=False)
+        prior = getattr(run, "self_heal_history", []) or []
+
+        heal_instruction = (
+            "工作流「" + run.pipeline_name + "」執行到步驟「" + failed_step_name
+            + "」失敗,需要你修復。\n\n"
+            "=== 驗證判定 ===\n" + (fail_reason or "(無)") + "\n\n"
+            "=== 原建議 ===\n" + (fail_suggestion or "(無)") + "\n\n"
+            "=== 失敗步驟 stderr(末段)===\n" + (stderr_tail or "(無)") + "\n\n"
+            "=== 執行 log(末段、錯誤通常在這)===\n" + (log_tail or "(無)") + "\n\n"
+            "=== 目前完整 YAML ===\n```yaml\n" + current_yaml + "\n```\n\n"
+            "=== 之前的修復嘗試(別重蹈覆轍)===\n" + _format_prior_attempts(prior) + "\n\n"
+            "請判斷 root cause、輸出修正後的**完整** YAML(```yaml 區塊)、並用一兩句說明改了什麼。"
+            "若判斷非 YAML 能修(外部服務掛 / 需授權 / 缺套件)→ 明說「無法自動修復」+ 原因、不要輸出 YAML。"
+        )
+
+        from main import _chat_agent_loop, PipelineChatRequest
+        # 不帶 workflow_id:heal_instruction 已含完整 current YAML,再注入「現有工作流」context
+        # 會讓 AI 進入「改現有工作流」模式、傾向呼叫 save_workflow_yaml 工具(要兩步確認)
+        # 而非直接在回覆吐 ```yaml``` → 我們抓不到 yaml_content。實測這是修復失敗主因。
+        result = await _chat_agent_loop(PipelineChatRequest(
+            messages=[{"role": "user", "content": heal_instruction}],
+            workflow_id=None,
+            extra_system=_SELF_HEAL_SYSTEM_HINT,
+        )) or {}
+
+        new_yaml = result.get("yaml_content")
+        yaml_err = result.get("yaml_error")
+        reply = result.get("reply") or ""
+
+        if not new_yaml or yaml_err or _ai_gave_up(reply):
+            reason = yaml_err or (("AI 判定無法修復:" + reply[:200]) if _ai_gave_up(reply)
+                                  else "AI 未產出修正 YAML")
+            logger.warning("自我修復未產出可用 YAML → 轉人工:" + str(reason)[:200])
+            _fallback("AI 自我修復未解決(" + str(reason)[:200] + ")。原失敗:" + (fail_reason or ""))
+            # 轉人工:用帶決策鍵盤的失敗通知(重試/補指示/讓AI再試/中止…),而非純文字
+            # — 否則 TG 只看到「轉交人工決策」卻沒有任何可點的按鈕、使用者無法在手機上處置。
+            await _notify_failure(run, ValidationResult(
+                status="failed",
+                reason="🔧 AI 自我修復未能解決、轉交人工決策。\n" + str(reason)[:300],
+                suggestion=fail_suggestion or ""), failed_step_name)
+            return
+
+        if _yaml_near_identical(new_yaml, current_yaml):
+            logger.warning("自我修復新舊 YAML 幾乎相同(疑似不收斂)→ 轉人工")
+            _fallback("AI 自我修復未產生實質變更(疑似不收斂)。原失敗:" + (fail_reason or ""))
+            await _notify_failure(run, ValidationResult(
+                status="failed",
+                reason="🔧 AI 修復沒有實質變更(疑似不收斂)、轉交人工決策。\n原失敗:" + (fail_reason or "")[:300],
+                suggestion=fail_suggestion or ""), failed_step_name)
+            return
+
+        try:
+            new_dict = _yaml.safe_load(new_yaml)
+            if isinstance(new_dict, dict) and "pipeline" in new_dict:
+                new_dict = new_dict["pipeline"]
+            if not isinstance(new_dict, dict):
+                raise ValueError("YAML 頂層不是 mapping")
+            PipelineConfig.from_dict(new_dict)  # schema 驗、不合會 raise
+        except Exception as _e:
+            logger.warning("自我修復 YAML 不合 schema → 轉人工:" + str(_e)[:200])
+            _fallback("AI 修復的 YAML 不合格式:" + str(_e)[:200] + "。原失敗:" + (fail_reason or ""))
+            await _notify_failure(run, ValidationResult(
+                status="failed",
+                reason="🔧 AI 修復產生的 YAML 格式錯誤、轉交人工決策。\n" + str(_e)[:300],
+                suggestion=fail_suggestion or ""), failed_step_name)
+            return
+
+        # 保留內部旗標(_workflow_id 等),新 YAML 不會帶 → 從舊 config_dict 補回
+        for k, v in (run.config_dict or {}).items():
+            if k.startswith("_") and k not in new_dict:
+                new_dict[k] = v
+
+        clean_reply = _strip_heal_yaml(reply)  # 去掉整包 YAML、只留診斷說明
+        import hashlib as _hl
+        run.self_heal_history = list(prior) + [{
+            "attempt": run.self_heal_count,
+            "diagnosis": clean_reply[:600],
+            "old_yaml_hash": _hl.md5(current_yaml.encode("utf-8", "replace")).hexdigest()[:12],
+        }]
+        run.config_dict = new_dict
+
+        # 重定位失敗步(名稱對得到 → 回該步;對不到 → 從 0 重跑整條)
+        restart_idx = 0
+        _failed_is_condition = False
+        for i, st in enumerate(new_dict.get("steps", [])):
+            if isinstance(st, dict) and st.get("name") == failed_step_name:
+                restart_idx = i
+                _failed_is_condition = bool(st.get("condition"))
+                break
+        # 「下游失敗、根因在上游」通用處理:找出 AI 這次實際改動的最早一個 step,
+        # 從那裡重跑 —— 否則若 AI 修的是上游(web_crawler→skill、subagent→skill、skill→skill、
+        # 或上游沒 export 變數),只從失敗步重跑、上游不會重跑 → 改了也白改、必然再失敗。
+        try:
+            import json as _json3
+            import yaml as _y2
+            _old = _y2.safe_load(current_yaml) or {}
+            _old_steps = (_old.get("pipeline", _old) if isinstance(_old, dict) else {}).get("steps", []) or []
+            _new_steps = new_dict.get("steps", []) or []
+            _earliest_changed = None
+            for i in range(min(len(_old_steps), len(_new_steps))):
+                _a = _json3.dumps(_old_steps[i], sort_keys=True, ensure_ascii=False)
+                _b = _json3.dumps(_new_steps[i], sort_keys=True, ensure_ascii=False)
+                if _a != _b:
+                    _earliest_changed = i
+                    break
+            if _earliest_changed is None and len(_old_steps) != len(_new_steps):
+                _earliest_changed = min(len(_old_steps), len(_new_steps))  # 新增/刪除 step → 從分歧點起
+            if _earliest_changed is not None:
+                restart_idx = min(restart_idx, _earliest_changed)
+        except Exception as _rc_e:
+            logger.warning(f"自我修復:算最早改動步失敗(退回原 restart_idx):{_rc_e}")
+        # condition 失敗根因恆在上游 → 保底從頭重跑(即使 AI 只動了 condition 自己的表達式)
+        if _failed_is_condition:
+            restart_idx = 0
+        run.current_step = restart_idx
+        run.step_results = [sr for i, sr in enumerate(run.step_results) if i < restart_idx]
+        run.awaiting_type = ""
+        run.awaiting_message = ""
+        run.awaiting_suggestion = ""
+        run.status = "running"
+        store_.save(run)
+        logger.info(
+            "自我修復套用新 YAML、從步驟 " + str(restart_idx + 1) + " 重跑。診斷:" + clean_reply[:150]
+        )
+        import html as _html_heal
+        _heal_msg = (
+            f"🔧 <b>{_html_heal.escape(run.pipeline_name)}</b>\n"
+            f"✅ AI 已修復、從步驟 {restart_idx + 1} 重跑。\n\n"
+            f"修了什麼:\n{_html_heal.escape(clean_reply)}"
+        )
+        await _tg_send_long(run.telegram_chat_id, _heal_msg)
+
+        async def _delayed_heal_start():
+            await asyncio.sleep(0.3)
+            t = asyncio.create_task(run_pipeline(
+                config_dict=run.config_dict,
+                chat_id=run.telegram_chat_id,
+                run_id=run.run_id,
+                start_from_step=restart_idx,
+            ))
+            register_task(run.run_id, t)
+
+        asyncio.create_task(_delayed_heal_start())
+
+    except Exception as e:
+        logger.error("自我修復過程出錯:" + type(e).__name__ + ": " + str(e))
+        try:
+            _fallback("AI 自我修復過程出錯:" + str(e)[:200] + "。原失敗:" + (fail_reason or ""))
+        except Exception:
+            pass
 
 
 # ── Human-in-the-loop resume ─────────────────────────────────────────────────
@@ -2406,13 +3240,13 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             logger.info(f"[ask_user] 使用者答案已送達：{hint[:100]}")
             return f"✅ 答案已送出"
         elif decision == "abort":
-            # 先中止 skill agent 的等待（讓它收到 None），再把 pipeline 標為 aborted
-            deliver_ask_user_answer(run_id, "")  # 空字串讓 agent 繼續但不拿到答案
-            run.status = "aborted"
-            run.ended_at = datetime.now().isoformat()
-            store.save(run)
-            logger.info("[ask_user] 使用者選擇中止")
-            await _notify_final(run, config)
+            # ⚠️ 修正:ask_user 等待時 skill agent 仍是「活著的 asyncio task、卡在
+            # _wait_for_ask_user 的 await」。舊版只 deliver 空答案 → agent 拿到 "" 會
+            # 繼續迴圈(再問一次),根本沒停;只改 store.status 也不會中斷正在跑的 task。
+            # 正解:走跟右上角停止鈕同一套 force_abort —— kill 子進程 + cancel task
+            # (CancelledError 會在 _wait_for_ask_user 的 await 拋出、agent 真的中斷)+ 標 aborted。
+            logger.info("[ask_user] 使用者選擇中止 → force_abort(取消執行中的 task)")
+            await force_abort(run_id)
             return f"🛑 Pipeline 已中止"
         else:
             return f"⚠️ ask_user 只接受 answer 或 abort，收到 {decision}"
@@ -2688,5 +3522,30 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
 
         asyncio.create_task(_delayed_continue())
         return f"✅ 確認通過，繼續執行步驟 {next_step + 1}/{total}"
+
+    elif decision == "self_heal_now":
+        # 使用者在 failure 卡片手動點「讓 AI 試修」— 觸發一次自我修復(不看開關、仍受硬上限)
+        if run.awaiting_type not in ("failure", "self_heal"):
+            return "⚠️ 目前狀態無法觸發自我修復"
+        if getattr(run, "self_heal_count", 0) >= _SELF_HEAL_HARD_CAP:
+            return f"⚠️ 已達自我修復硬上限({_SELF_HEAL_HARD_CAP} 次)、請改用其他決策"
+        failed_idx = run.current_step
+        steps_ = run.config_dict.get("steps", []) if isinstance(run.config_dict, dict) else []
+        failed_name = steps_[failed_idx].get("name", "") if failed_idx < len(steps_) else ""
+        fr = run.awaiting_message or ""
+        fs = run.awaiting_suggestion or ""
+        stderr_tail = ""
+        if failed_idx < len(run.step_results):
+            stderr_tail = (getattr(run.step_results[failed_idx], "stderr_tail", "") or "")[-1500:]
+        run.self_heal_count = getattr(run, "self_heal_count", 0) + 1
+        run.status = "awaiting_human"
+        run.awaiting_type = "self_heal"
+        run.awaiting_message = f"AI 自我修復中(手動觸發、第 {run.self_heal_count} 次)…失敗步驟:{failed_name}"
+        run.awaiting_suggestion = ""
+        store.save(run)
+        asyncio.create_task(_run_self_heal_then_resume(
+            run.run_id, failed_name, failed_idx, fr, fs, stderr_tail,
+        ))
+        return f"🔧 已啟動 AI 自我修復(第 {run.self_heal_count} 次)、修好會自動重跑"
 
     return "❓ 未知決策"

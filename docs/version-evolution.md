@@ -7,7 +7,7 @@
 
 ## 一、五版同源
 
-使用者在 `C:\Users\GU605_PR_MZ\pipeline-orchestrator{V1..V5}\` 維護**五個平行 git repo**。每個都是完整工作版本，版號累加 — Vn ≈ Vn-1 + 一個新節點類型 / 大功能。
+使用者在 `C:\Users\<you>\pipeline-orchestrator{V1..V5}\` 維護**五個平行 git repo**。每個都是完整工作版本，版號累加 — Vn ≈ Vn-1 + 一個新節點類型 / 大功能。
 
 **V5 是當前主力開發版本。**
 

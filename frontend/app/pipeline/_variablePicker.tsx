@@ -606,7 +606,7 @@ const ChipTextarea = forwardRef<ChipTextareaHandle, {
         onBlur={saveRange}
         onPaste={handlePaste}
         className={baseCls}
-        style={{ minHeight: minH }}
+        style={{ minHeight: minH, overflowWrap: 'anywhere', wordBreak: 'break-word' }}
         spellCheck={false}
       />
       {isEmpty && placeholder && (

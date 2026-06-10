@@ -703,6 +703,70 @@ def execute_action(
             ocr_text = (action.get("ocr_text") or "").strip()
             ocr_will_run = use_ocr and bool(ocr_text)
 
+            # ── 三層 fallback toggle (UIA / CV / 強制座標) ────────────────────
+            # 預設三個 toggle 全 True、順序 UIA → CV → 強制座標。
+            # 使用者可在 panel 取消某層、組合自定義(細節見 ComputerUseAction schema 註解)。
+            # OCR / VLM 啟用時自帶 primary 邏輯、這三層不適用、UIA-first 跳過。
+            use_uia_layer = bool(action.get("use_uia", True))
+            use_cv_layer = bool(action.get("use_cv", True))
+            use_coord_layer = bool(action.get("use_coord", True))
+            user_chose_explicit = vlm_mode != "off" or use_ocr
+
+            # 全關 + 沒 OCR/VLM = 無方法可用、直接 fail
+            if (not use_uia_layer and not use_cv_layer and not use_coord_layer
+                    and not user_chose_explicit):
+                fail_msg = "UIA / CV / 強制座標 三個 toggle 全關、又沒啟用 OCR/VLM、無方法可用"
+                logger.error(f"[computer_use]   ✗ {fail_msg}")
+                return ActionResult(False, index, atype, fail_msg)
+
+            # ── Phase 0:UIA-first ────────────────────────────────────────────
+            ui_info = action.get("ui") if isinstance(action.get("ui"), dict) else None
+            uia_first_attempted = False
+            if ui_info and use_uia_layer and not user_chose_explicit:
+                logger.info(f"[computer_use]   [UIA-first] 嘗試定位: name='{ui_info.get('name', '')[:40]}' type='{ui_info.get('control_type', '')}' auto_id='{ui_info.get('automation_id', '')[:30]}'")
+                uia_first_attempted = True
+                find_click_point = None
+                try:
+                    from pipeline.uia_lookup import find_click_point as _fcp
+                    find_click_point = _fcp
+                except Exception as _e1:
+                    try:
+                        from .uia_lookup import find_click_point as _fcp  # type: ignore
+                        find_click_point = _fcp
+                    except Exception as _e2:
+                        logger.warning(f"[computer_use]   [UIA-first] 載入 uia_lookup 模組失敗:{type(_e2).__name__}: {_e2} (上游 {type(_e1).__name__}: {_e1})")
+                if find_click_point is None:
+                    logger.info(f"[computer_use]   [UIA-first] uia_lookup 不可用、退下層")
+                else:
+                    try:
+                        point = find_click_point(ui_info, timeout=2.0)
+                    except Exception as _e3:
+                        logger.warning(f"[computer_use]   [UIA-first] find_click_point 例外:{type(_e3).__name__}: {_e3}")
+                        point = None
+                    if point:
+                        cx, cy = point
+                        _do_click(pg, cx, cy, button, clicks, hold_sec, modifiers)
+                        hold_tag_u = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                        msg = (f"{mods_tag} UIA 命中 '{ui_info.get('name', '')[:40]}' "
+                               f"({ui_info.get('control_type', '')}) @ ({cx},{cy}){hold_tag_u}")
+                        duration = int((time.time() - t0) * 1000)
+                        logger.info(f"[computer_use]   ✓ {msg}(UIA-first、{duration}ms)")
+                        return ActionResult(True, index, atype, msg, duration)
+                    # UIA 沒中 — 看下層 toggle 決定 fall through 還是 strict fail
+                    if not use_cv_layer and not use_coord_layer:
+                        # 嚴格 UIA 模式(只勾 UIA, CV/座標都關)→ 找不到就死
+                        fail_msg = (f"嚴格 UIA 模式: 元素 '{ui_info.get('name', '')[:40]}' 找不到 "
+                                    f"(CV 與 強制座標 toggle 都關)")
+                        logger.error(f"[computer_use]   ✗ {fail_msg}")
+                        return ActionResult(False, index, atype, fail_msg)
+                    _next = ("CV 模板比對" if use_cv_layer else "強制座標")
+                    logger.info(f"[computer_use]   [UIA-first] 沒命中 '{ui_info.get('name', '')[:40]}' → 退 {_next}")
+            elif ui_info and not use_uia_layer:
+                logger.info(f"[computer_use]   [UIA-first] 跳過 — 使用者關了 UIA toggle")
+            elif ui_info and user_chose_explicit:
+                _chosen = "VLM" if vlm_mode != "off" else "OCR"
+                logger.info(f"[computer_use]   [UIA-first] 跳過 — 使用者顯式選了 {_chosen} primary, 尊重使用者")
+
             # ── VLM 模式 1：description → OCR ──
             # bug 修補：之前讀錯欄位（讀紅框 search_region），這個模式既然走 OCR，
             # 區域就應該讀使用者在編輯器拉的「藍框」（ocr_box_*），跟純 OCR 路徑一致
@@ -780,14 +844,18 @@ def execute_action(
                 # 不 return — 讓控制流繼續往下走 CV 路徑（vlm_mode 短路掉 OCR 模式）
                 ocr_will_run = False  # 確定要走 CV 不走 OCR
 
-            # 預設使用絕對座標（快速且穩定）；只有使用者主動切到圖像比對模式才跑 template matching
-            # 注意：get 第二引數 True 表示若 action 根本沒 use_coord 欄位，也視為座標模式
-            # OCR 有啟用就跳過座標短路，讓 OCR 先試（失敗再依 ocr_cv_fallback 決定退不退）
-            # vlm_mode=anchor_pick 要走 CV，必須跳過座標短路
-            if vlm_mode != "anchor_pick" and action.get("use_coord", True) and has_coord and not ocr_will_run:
+            # 短路到「強制座標」: 使用者顯式關了 CV toggle 但保留座標 toggle = 直接點記錄座標
+            # use_cv=False + use_coord=True 才走這裡, 預設(use_cv=True)永遠跑 CV 模板比對
+            # OCR / vlm_mode=anchor_pick / vlm_mode=description 各有自己路徑、不走這裡
+            if (vlm_mode != "anchor_pick"
+                and not use_cv_layer
+                and use_coord_layer
+                and has_coord
+                and not ocr_will_run):
                 _do_click(pg, int(fx), int(fy), button, clicks, hold_sec, modifiers)
                 hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
-                msg = f"[強制座標]{mods_tag} 點擊 ({fx},{fy}) button={button} clicks={clicks}{hold_tag}"
+                _src = "UIA 沒中" if uia_first_attempted else "CV toggle 關"
+                msg = f"[強制座標 ({_src})]{mods_tag} 點擊 ({fx},{fy}) button={button} clicks={clicks}{hold_tag}"
                 duration = int((time.time() - t0) * 1000)
                 logger.info(f"[computer_use]   ✓ {msg}（{duration}ms）")
                 return ActionResult(True, index, atype, msg, duration)
@@ -947,23 +1015,39 @@ def execute_action(
                     fail_msg = m.reason
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
-                # Fallback 判斷（三個條件皆需 True 才退回座標）：
-                #   1. 有錄製座標 (has_coord)
-                #   2. allow_coord_fallback：系統層級信心（螢幕解析度跟錄製時相同）
-                #   3. cv_coord_fallback：使用者層級意願（panel toggle，預設 On）
-                if has_coord and allow_coord_fallback and cv_coord_fallback:
-                    logger.warning(f"[computer_use]   ⚠ 圖像比對失敗（{m.reason}），退回錄製座標 ({fx},{fy})")
+                # Fallback 判斷(分三層 gate):
+                #   1. has_coord:有錄製座標(沒有就根本退不了)
+                #   2. allow_coord_fallback:系統層級信心(螢幕解析度跟錄製時相同)
+                #   3. use_coord_layer:action 層級「📍 強制座標」 toggle(三層 fallback 的最後一層)
+                #
+                # step-level cv_coord_fallback 只在「使用者顯式進入進階模式」時生效:
+                #   - OCR primary (use_ocr=True)
+                #   - CV-only 自定義 (use_uia=False)
+                # 預設三層 fallback (UIA ☑ + CV ☑ + 座標 ☑) 完全忽略 cv_coord_fallback、
+                # 避免 step-level 跟 action-level 兩個 toggle 互相干擾、使用者全勾預設卻退不到座標的 bug。
+                is_explicit_advanced = use_ocr or (not use_uia_layer)
+                step_level_blocks_fallback = is_explicit_advanced and not cv_coord_fallback
+
+                if (has_coord and allow_coord_fallback and use_coord_layer
+                        and not step_level_blocks_fallback):
+                    logger.warning(f"[computer_use]   ⚠ 圖像比對失敗({m.reason}),退回錄製座標 ({fx},{fy})")
                     _do_click(pg, int(fx), int(fy), button, clicks, hold_sec, modifiers)
                     hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
-                    msg = f"[fallback]{mods_tag} 點擊絕對座標 ({fx},{fy}){hold_tag}（原圖 {img_name} 找不到）"
+                    msg = f"[fallback]{mods_tag} 點擊絕對座標 ({fx},{fy}){hold_tag}(原圖 {img_name} 找不到)"
                 elif has_coord and not allow_coord_fallback:
-                    fail_msg = (f"找不到錨點圖 {img_name}（{m.reason}），且目前螢幕解析度與錄製時不同，"
-                        f"絕對座標 ({fx},{fy}) 不可信，請重錄或調整到原螢幕布局")
+                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且目前螢幕解析度與錄製時不同,"
+                        f"絕對座標 ({fx},{fy}) 不可信、請重錄或調整到原螢幕布局")
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
-                elif has_coord and not cv_coord_fallback:
-                    fail_msg = (f"找不到錨點圖 {img_name}（{m.reason}），且使用者關閉了「CV 失敗退回座標」。"
+                elif has_coord and not use_coord_layer:
+                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且使用者關閉了 action 的「📍 強制座標」 toggle。"
                         f"若要容錯請到 panel 打開該 toggle。")
+                    logger.error(f"[computer_use]   ✗ {fail_msg}")
+                    return ActionResult(False, index, atype, fail_msg)
+                elif has_coord and step_level_blocks_fallback:
+                    _mode = "OCR 進階模式" if use_ocr else "CV-only 模式"
+                    fail_msg = (f"找不到錨點圖 {img_name}({m.reason}),且在 {_mode} 下使用者關閉了步驟層級「CV 失敗退回座標」。"
+                        f"若要容錯請到 panel 的 CV 設定打開該 toggle。")
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
                 else:
@@ -982,6 +1066,45 @@ def execute_action(
             hold_sec = float(action.get("hold_sec", 0) or 0)
             modifiers = list(action.get("modifiers", []) or [])
             mods_tag = f"[{'+'.join(modifiers)}]" if modifiers else ""
+
+            # 三層 fallback toggle — click_at 沒有 CV 模板 (它就是純座標 action),
+            # 所以只有 UIA + 強制座標 兩層可用。CV toggle 在 click_at 沒效。
+            use_uia_layer = bool(action.get("use_uia", True))
+            use_coord_layer = bool(action.get("use_coord", True))
+            if not use_uia_layer and not use_coord_layer:
+                fail_msg = "click_at: UIA / 強制座標 兩個 toggle 都關、無方法可用"
+                logger.error(f"[computer_use]   ✗ {fail_msg}")
+                return ActionResult(False, index, atype, fail_msg)
+
+            # Phase 0: UIA-first — 有錄到 ui + use_uia=True 才跑
+            ui_info = action.get("ui") if isinstance(action.get("ui"), dict) else None
+            if ui_info and use_uia_layer:
+                try:
+                    from pipeline.uia_lookup import find_click_point as _uia_find
+                except Exception:
+                    try:
+                        from .uia_lookup import find_click_point as _uia_find  # type: ignore
+                    except Exception:
+                        _uia_find = None  # type: ignore
+                if _uia_find is not None:
+                    point = _uia_find(ui_info, timeout=2.0)
+                    if point:
+                        cx, cy = point
+                        _do_click(pg, cx, cy, button, clicks, hold_sec, modifiers)
+                        hold_tag_u = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                        msg = (f"{mods_tag} UIA 命中 '{ui_info.get('name', '')[:40]}' "
+                               f"@ ({cx},{cy}){hold_tag_u}")
+                        duration = int((time.time() - t0) * 1000)
+                        logger.info(f"[computer_use]   ✓ {msg}(UIA-first、{duration}ms)")
+                        return ActionResult(True, index, atype, msg, duration)
+                    if not use_coord_layer:
+                        # 嚴格 UIA: 沒命中 + 座標 toggle 關 = fail
+                        fail_msg = f"嚴格 UIA 模式: 元素 '{ui_info.get('name', '')[:40]}' 找不到 (強制座標 toggle 關)"
+                        logger.error(f"[computer_use]   ✗ {fail_msg}")
+                        return ActionResult(False, index, atype, fail_msg)
+                    logger.info(f"[computer_use]   UIA 沒命中 → 退到強制座標")
+            elif ui_info and not use_uia_layer:
+                logger.info(f"[computer_use]   UIA 跳過 — 使用者關了 UIA toggle, 直接走強制座標")
             _do_click(pg, x, y, button, clicks, hold_sec, modifiers)
             hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
             msg = f"{mods_tag} 點擊絕對座標 ({x}, {y}){hold_tag}"

@@ -14,15 +14,87 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TIMEZONE           = os.getenv("TIMEZONE", "Asia/Taipei")
-# 強制 absolute:.env 設相對路徑時(例如 OUTPUT_BASE_PATH=ai_output)、Path 會保留相對形式、
-# 之後傳到 sandbox docker exec -w 會炸「Cwd must be an absolute path (OCI runtime exec)」。
-# .resolve() 把相對 path 解到當下 cwd 後變 absolute、行為跟之前一致只是物件形式變了
-OUTPUT_BASE_PATH   = Path(os.getenv("OUTPUT_BASE_PATH", "~/ai_output")).expanduser().resolve()
+# OUTPUT_BASE_PATH 解析規則:
+#   1. .env 顯式設絕對路徑 → 用該路徑
+#   2. .env 設相對路徑 → 視為相對 repo_root(不是 backend cwd!)、解成 repo_root/<rel>
+#   3. .env 沒設 → 預設 repo_root/ai_output(對齊 pipeline/runner.py 內 _workflow_output_dir
+#      的 hardcoded 計算結果、避免 workflow runner 跟 chat_tools 兩條路徑解到不同地方)
+# 強制 absolute 確保之後傳到 sandbox docker exec -w 不會炸「Cwd must be an absolute path」。
+_REPO_ROOT = Path(__file__).parent.parent.resolve()   # backend/config.py → backend/ → repo_root/
+_OUTPUT_ENV = os.getenv("OUTPUT_BASE_PATH", "").strip()
+if _OUTPUT_ENV:
+    _p = Path(_OUTPUT_ENV).expanduser()
+    OUTPUT_BASE_PATH = _p if _p.is_absolute() else (_REPO_ROOT / _p).resolve()
+else:
+    OUTPUT_BASE_PATH = (_REPO_ROOT / "ai_output").resolve()
 SCHEDULER_DB_PATH  = OUTPUT_BASE_PATH / "pipeline_scheduler.db"
 PIPELINE_DIR       = Path(os.getenv("PIPELINE_DIR", "~/pipelines")).expanduser()
 
 OUTPUT_BASE_PATH.mkdir(parents=True, exist_ok=True)
 PIPELINE_DIR.mkdir(parents=True, exist_ok=True)
+
+# external_projects:使用者放自己的 Python 專案 / 腳本的標準位置(AI 助手會引導放這、再給路徑)。
+# 空資料夾 git 不追蹤、全新 clone 不會有 → 啟動時確保建立 + 放一份 README 說明用途。
+EXTERNAL_PROJECTS_DIR = _REPO_ROOT / "external_projects"
+EXTERNAL_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+_ext_readme = EXTERNAL_PROJECTS_DIR / "README.txt"
+if not _ext_readme.exists():
+    try:
+        _ext_readme.write_text(
+            "把你自己的 Python 專案 / 腳本放在這個資料夾底下\n"
+            "(例:external_projects\\my_tool\\main.py),再告訴 AI 助手腳本的路徑或檔名,\n"
+            "它就能把你的腳本接進工作流執行。\n\n"
+            "說明:AI 生成的程式碼在隔離沙盒容器內執行;放在這裡的專案,AI 技能才讀寫得到、能接進流程。\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+# ── Auto-migration:舊 backend/ai_output → 新 OUTPUT_BASE_PATH(僅一次) ──
+# 背景:V5 內部統一 OUTPUT_BASE_PATH 之前(commit 53ed100 / 2026-05-24 前)、
+# 設定 .env OUTPUT_BASE_PATH=./ai_output 的 user、實際 DB / 產物存到 backend/ai_output/。
+# 統一後新預設是 repo_root/ai_output/、舊資料變孤兒、user 看到 workflow 全消失。
+# 這層在啟動時主動偵測 + 搬遷,搬一次就放 .migrated 旗標、不會重跑。
+def _auto_migrate_legacy_ai_output():
+    legacy = (_REPO_ROOT / "backend" / "ai_output").resolve()
+    new = OUTPUT_BASE_PATH
+    if legacy == new:
+        return  # 路徑相同、不必搬
+    flag = new / ".migrated_from_backend"
+    if flag.exists():
+        return  # 已搬過
+    if not legacy.exists() or not legacy.is_dir():
+        return  # 沒舊資料、不必搬
+    # 舊位置有 pipeline.db 才視為「真有 user 資料」(避免 backend/ai_output 是空殼仍誤搬)
+    if not (legacy / "pipeline.db").exists():
+        return
+    # 新位置如果已有 pipeline.db 視為 user 已手動處理過、跳過避免覆寫
+    if (new / "pipeline.db").exists():
+        return
+    import shutil as _sh
+    print(f"\n{'='*60}")
+    print(f"[V5 auto-migrate] 偵測到舊 ai_output 在 {legacy}")
+    print(f"  搬遷到新位置 {new} ...")
+    print(f"{'='*60}\n")
+    try:
+        for item in legacy.iterdir():
+            target = new / item.name
+            if target.exists():
+                continue   # 同名跳過(優先保新 / seed)
+            try:
+                _sh.move(str(item), str(target))
+            except Exception as _e:
+                print(f"  ⚠ 搬 {item.name} 失敗: {_e}")
+        flag.write_text("migrated by config.py auto-migration")
+        print(f"\n[V5 auto-migrate] ✅ 搬遷完成、舊資料夾保留(只搬內容)、可手動刪 {legacy}\n")
+    except Exception as e:
+        print(f"\n[V5 auto-migrate] ⚠ 搬遷部分失敗:{e}、建議手動 robocopy。\n")
+
+try:
+    _auto_migrate_legacy_ai_output()
+except Exception as _e:
+    print(f"[V5 auto-migrate] ⚠ 略過(發生例外):{_e}")
 
 def check_config() -> list[str]:
     missing = []

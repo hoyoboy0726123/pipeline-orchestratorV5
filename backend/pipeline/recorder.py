@@ -245,9 +245,61 @@ _DRAG_MIN_SEC = 0.15              # 且持續 > 150ms → 視為拖曳（排除�
 _last_press: dict = {"x": 0, "y": 0, "t": 0.0, "button": "", "anchor": None}
 
 
+def _grab_uia_info(x: int, y: int) -> Optional[dict]:
+    """錄製時擷取滑鼠位置的 UIA 元素資訊 — 給回放時 UIA-first 三層 fallback 用。
+
+    回傳 dict 含:
+      name           — 元素 Name 屬性(可能空白)
+      control_type   — ControlType 名稱(Button / Edit / MenuItem 等)
+      automation_id  — AutomationId(程式設定的內部 ID,通常最穩、常空)
+      window_title   — 所屬頂層視窗 Name
+      rect           — 元素 bounding rect [left, top, right, bottom],fallback 比對用
+
+    任何例外(無 UIA 樹的 app、抓不到頂層、權限不足等)都吞掉、回 None。
+    錄製時這層失敗不影響 CV 跟座標的擷取。
+    """
+    try:
+        import uiautomation as uia
+        elem = uia.ControlFromPoint(x, y)
+        if elem is None:
+            return None
+        # 走到頂層視窗(parent.parent is None 就是 desktop)
+        top = elem
+        try:
+            while True:
+                p = top.GetParentControl()
+                if p is None or p.GetParentControl() is None:
+                    break
+                top = p
+        except Exception:
+            pass  # walk 失敗就用當下 top
+        # 抓 bounding rect — uia 給 BoundingRectangle 物件、轉 list
+        rect_list = None
+        try:
+            r = elem.BoundingRectangle
+            rect_list = [int(r.left), int(r.top), int(r.right), int(r.bottom)]
+        except Exception:
+            pass
+        info = {
+            "name": (elem.Name or "")[:200],
+            "control_type": (elem.ControlTypeName or "")[:80],
+            "automation_id": (getattr(elem, "AutomationId", None) or "")[:200],
+            "window_title": (top.Name or "")[:200],
+        }
+        if rect_list:
+            info["rect"] = rect_list
+        # 全空 = 沒抓到有意義的 — 回 None 讓上層判斷
+        if not info["name"] and not info["control_type"] and not info["automation_id"]:
+            return None
+        return info
+    except Exception as e:
+        log.debug(f"[recorder] UIA 抓取失敗(忽略、走 CV+座標):{type(e).__name__}: {e}")
+        return None
+
+
 def _on_click(x: int, y: int, button, pressed: bool) -> None:
     """滑鼠點擊事件 handler。
-    - 按下瞬間：擷取錨點、暫存 press 狀態，不立即 emit
+    - 按下瞬間：擷取錨點、UIA 元素資訊、暫存 press 狀態，不立即 emit
     - 放開瞬間：若位移/時間超過閾值 → emit 拖曳；否則 emit click（合併連點邏輯不變）
     """
     global _current, _last_press
@@ -260,10 +312,12 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
     if pressed:
         # 滑鼠點擊 = 修飾鍵已被搭配使用，取消獨立 solo 資格
         _disqualify_active_modifiers_as_solo()
-        # 記錄 press 狀態 + 先擷取錨點（被拖動的目標圖）
+        # 記錄 press 狀態 + 先擷取錨點（被拖動的目標圖）+ UIA 元素資訊
+        # 三層定位資訊一次拿完(座標 + CV anchor + UIA),回放時 UIA→CV→座標 fallback
         _last_press = {
             "x": x, "y": y, "t": now, "button": btn_name,
             "anchor": _grab_anchor(session, x, y),
+            "ui": _grab_uia_info(x, y),
         }
         return
 
@@ -272,6 +326,7 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
     pt = _last_press.get("t", 0.0)
     pbtn = _last_press.get("button", "")
     panchor = _last_press.get("anchor")
+    pui = _last_press.get("ui")  # press 時抓的 UIA 元素資訊(可能 None)
     dist = abs(x - px) + abs(y - py)   # L1 distance 就夠
     duration = now - pt
     is_drag = (pbtn == btn_name) and (dist > _DRAG_MIN_PX) and (duration > _DRAG_MIN_SEC)
@@ -296,6 +351,8 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
         if panchor:
             drag_action.update(panchor)  # image + anchor_off_x + anchor_off_y
             drag_action["description"] += f"（錨點 {panchor.get('image')}）"
+        if pui:
+            drag_action["ui"] = pui
         session.actions.append(drag_action)
         return
 
@@ -344,15 +401,20 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
             "description": f"{mods_desc}{btn_name} 點擊 @ {panchor.get('image')}{hold_desc}（錄製座標 {x},{y}）",
         }
         click_action.update(panchor)  # image + anchor_off_x + anchor_off_y
+        if pui:
+            click_action["ui"] = pui  # UIA-first 三層 fallback 用
         session.actions.append(click_action)
     else:
-        session.actions.append({
+        click_at_action = {
             "type": "click_at",
             "x": x, "y": y, "button": btn_name, "clicks": 1,
             "hold_sec": hold_sec,
             "modifiers": mods,
             "description": f"{mods_desc}{btn_name} 點擊絕對座標 ({x},{y}){hold_desc}",
-        })
+        }
+        if pui:
+            click_at_action["ui"] = pui  # 即使沒 CV anchor、UIA 也是好定位
+        session.actions.append(click_at_action)
 
 
 _SPECIAL_KEYS = {

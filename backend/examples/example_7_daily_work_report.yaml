@@ -1,0 +1,115 @@
+# 範例工作流:每日工作報告(Outlook)
+# ───────────────────────────────────────────────────────────────
+# 示範重點:很常見的「每天早上把今天收到的信整理成一份工作報告」需求 ——
+#   重點是「真正的分析」(萃取行動項 + 分級緊急度 + 合併同類),不是把信件主旨抄一遍。
+#
+# 🔑 大量信件的「標準三步拆法」(這條範例的核心、務必照抄):
+#   step 1  outlook   撈當天信 → 結構化 JSON(含內文)
+#   step 2  skill     用 pandas「預分組 / 去重 / 過濾系統信」→ 幾十個帶件數的桶
+#   step 3  subagent  report_writer 讀「已分組摘要」只做分級 + 寫人話
+#
+#   ⚠️ 為什麼要中間那個解析節點(不要硬上):
+#   一個收件匣一天可能 200~300 封,其中大量是同型號/同流水號的系統通知信
+#   (ECN 簽核、Bug Daily、設備歸還 Overdue、daily report…)。
+#   直接把 300 筆原始信丟給 LLM 又要它「邊分類邊合併邊寫報告」= 超出弱模型能力,
+#   結果就是「逐封抄主旨的流水帳 + 系統通知信混進緊急區」。
+#   把「分組 / 去重 / 過濾」交給確定性的 pandas 程式先做掉(可被 recipe 快取、穩定),
+#   LLM 只需面對「幾十個已分好組的桶」做分級 + 寫人話 —— 品質穩很多。
+#
+# ⚠️ 為什麼 Outlook 那步用「自由指令」而非 daily_todo 模板:
+#   「今天」要算到當天 00:00;daily_todo 的 since 是固定字串、填 today 會被當「現在」
+#   → 只撈到 0 封。改用自由指令讓 agent 每次執行時自己算當天 00:00,排程每天跑才準。
+#
+# ⚠️ 此範例需要:已設定 LLM + 已配好 Outlook(本機 + Outlook 桌面版)。
+#   想每天自動跑 → 用上方「排程」設 cron(例每天 08:30)觸發這條。
+# ───────────────────────────────────────────────────────────────
+name: 每日工作報告 (Outlook) (範例)
+validate: false
+steps:
+  # 1) Outlook:撈「今天」收到的所有信,輸出結構化 JSON(含內文)給下游分析
+  - name: 撈取今日信件
+    outlook_automation: true
+    batch: |
+      讀取我 Outlook 收件匣「今天」收到的所有信(起點 since = 系統當天 00:00、until = 現在)。
+      把每封的這些欄位輸出成結構化 JSON 至 today_mail.json:
+      寄件人、主旨、收件時間、內文(body_text 前 800 字即可)、是否未讀、是否標記重要。
+      ⚠️ today_mail.json 必須是「純 JSON 陣列」、不要 markdown 圍欄、不要說明文字;
+         今天若沒有任何信,輸出空陣列 []。
+    output:
+      path: today_mail.json
+    timeout: 360
+
+  # 2) skill(pandas):預分組 / 去重 / 過濾系統信 —— 把 N 封壓成幾十個帶件數的桶
+  #    這一步是「確定性程式」、不是讓 LLM 用腦判斷,所以穩、可被 recipe 快取。
+  - name: 信件分組解析
+    skill_mode: true
+    batch: |
+      讀取上一步的 today_mail.json(今天收到的信,每筆含 寄件人 / 主旨 / 收件時間 / 內文 / 是否未讀 / 是否重要)。
+      用 pandas 寫程式做「分組 + 去重 + 分類」,把幾百封壓成幾十個「帶件數的桶」,輸出 today_grouped.json。
+
+      做法:
+      1. 先算「家族鍵 family_key」(只拿來 groupby、不給人看):把主旨裡會讓同類信看起來不同的雜訊
+         全部洗掉 —— 用正規表示式移除:ECN 流水號(EN-\d+)、機種型號(像 GU605CP / FA608FM /
+         B5405CVA 這種字母+數字混合的料號型號)、版本號(V20、BIOS 314)、日期(2026/06/05、_0604)、
+         純數字串、人名(中文姓名 / xxx_yyy(中文) 帳號)。再把多餘空白 / 標點壓平。
+         ⚠️ 特別規則(這類最容易過度切分,務必照做):
+           - 主旨含「預計歸還設備通知」→ family_key 一律歸成「設備歸還逾期通知」,
+             **不要**因為 [系統-Commercial原料]/[系統-Consumer成品庫] 倉別或人名不同就拆成很多組。
+           - 主旨含「Bug未處理通知 (Daily)」→ 一律歸「Bug未處理通知(Daily)」,不分機種 / 廠商。
+           - 主旨含「daily report」/「日報」→ 同類歸一組,不分機種。
+           - 同語意只差料號 / 型號的(例同一句 ECN 變更套在不同機種)→ 收斂成同一 family_key。
+      2. 依 family_key groupby,算每組件數 count、收集前 3 筆原始主旨當 sample_subjects、收集不重複寄件人。
+      3. **另算一個給人看的乾淨 label**(不要用洗過頭、出現 `- & -`/`()`/空括號 的 family_key):
+         取該組「最具代表性的一筆原始主旨」、再把它精簡成一句可讀的中文描述
+         (例:family_key 洗成空殼,但 label 寫「N-KEY FW 變更 ECN 逾期待簽核」「設備歸還逾期通知」
+          「華勤 Bug 未處理日報」)。label 是報告會直接顯示的字、要乾淨好懂。
+      4. 分類每組 kind:
+         - 主旨/寄件人命中「Notification / Announcement / 公告 / Daily / daily report / 日報 /
+           Release / BIOS / Spam / Quarantine / 系統 / 代發」等純通知 → kind = "system_notice"。
+         - 需要本人回覆 / 簽核 / 處理 / 跟進的([Sign] 簽核、真人 RE:/回覆、approval request、
+           備料確認、需求統計等)→ kind = "action"。
+      5. 標 is_overdue(主旨含 Overdue / 逾期 / 截止 / Deadline 已過);標 is_important
+         (任一封 is_important 或寄件人是主管 / 客戶 / 外部 [External])。
+      輸出 today_grouped.json,結構(純 JSON、不要 markdown 圍欄):
+      {
+        "total": <總信數>,
+        "groups": [
+          {"label": "設備歸還逾期通知", "family": "<groupby 用的家族鍵>", "count": 13,
+           "kind": "system_notice", "is_overdue": true, "is_important": false,
+           "sample_subjects": ["...","...","..."], "senders": ["..."]},
+          ...
+        ]
+      }
+      groups 依 count 由大到小排序。today_mail.json 是空陣列時,輸出 {"total":0,"groups":[]}。
+    output:
+      path: today_grouped.json
+      expect: "一個含 total 與 groups 陣列的 JSON;groups 每筆有 family/count/kind/sample_subjects;同型號同流水號的系統信已被合併成同一組(不是一封一組)"
+    timeout: 360
+
+  # 3) report_writer:讀「已分組摘要」做分級 + 寫人話(只面對幾十個桶、不碰原始 300 封)
+  - name: 萃取待辦與優先
+    subagent: true
+    subagent_role: report_writer
+    batch: |
+      讀取上一步的 today_grouped.json(已把今天的信分好組、每組含 label / count / kind /
+      is_overdue / is_important / sample_subjects / senders)。
+      你的工作「只在這幾十個桶上做分級 + 寫人話」、不要自己再去逐封拆。
+      ⚠️ 每一條都用該桶的 **label**(乾淨可讀那個欄位)、後面標件數,**不要**貼 family / sample_subjects 原文,
+         **絕不**把 sample_subjects 逐封展開成多條。
+      分到三段的規則(照這個判斷、不要全丟同一段):
+      1. ## 🔴 緊急 / 優先處理 ← 放這兩種桶,排最前:
+         (a) is_important = true(主管 / 客戶 / 外部來信);
+         (b) kind = action 且 is_overdue = true(本人該處理、又逾期)。
+         每條:動作句 + 件數 + 一句「為什麼急」。
+      2. ## ✅ 今日待辦 ← 其餘需要本人動作的桶:
+         (a) kind = action 但沒逾期(例『簽核 5 件 NCM Battery 導入 ECN』『回覆 2 件週會討論串』);
+         (b) kind = system_notice 但 is_overdue = true 的「逾期系統提醒」也放這裡
+             (例『處理 12 件逾期 N-KEY FW 變更 ECN 待驗證』『清 7 件 NPD 逾期未完成項目』)——
+             它們是系統發的、但確實是該清的逾期工作。每條:動作句 + 件數。
+      3. ## 📎 僅供參考 ← kind = system_notice 且「沒逾期」的純通知
+         (Release / BIOS / Daily 日報 / Spam / 公告…),每組一行『<label> ×<件數>』。
+      產出 daily_work_report.md(三段如上)。若 total 是 0,報告就寫「今日收件匣無新信」。
+    output:
+      path: daily_work_report.md
+      expect: "一份分三段(緊急優先 / 今日待辦 / 僅供參考)的工作報告 Markdown;每條後面帶件數;沒有逐封抄主旨的流水帳"
+    timeout: 600
