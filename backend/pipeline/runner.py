@@ -1631,7 +1631,8 @@ async def _run_pipeline_inner(
             )
             if _should_self_heal(run, step, _var_val, None):
                 await _enter_self_heal(run, _var_val, step, run.current_step + 1, None, logger)
-                unregister_task(run.run_id)
+                # 不 unregister:_enter_self_heal 已把 heal task 註冊進同一格,
+                # pop 掉會讓 abort 取消不到進行中的修復(實測踩過)。
                 return run.run_id
             run.status = "awaiting_human"
             run.awaiting_type = "failure"
@@ -1723,7 +1724,7 @@ async def _run_pipeline_inner(
                 )
                 if _should_self_heal(run, step, _cond_val, None):
                     await _enter_self_heal(run, _cond_val, step, run.current_step + 1, None, logger)
-                    unregister_task(run.run_id)
+                    # 不 unregister:heal task 已佔同一格、pop 掉 abort 就取消不到修復
                     return run.run_id
                 run.status = "awaiting_human"
                 run.awaiting_type = "failure"
@@ -1767,7 +1768,7 @@ async def _run_pipeline_inner(
                 )
                 if _should_self_heal(run, step, _jt_val, None):
                     await _enter_self_heal(run, _jt_val, step, run.current_step + 1, None, logger)
-                    unregister_task(run.run_id)
+                    # 不 unregister:heal task 已佔同一格、pop 掉 abort 就取消不到修復
                     return run.run_id
                 run.status = "awaiting_human"
                 run.awaiting_type = "failure"
@@ -2813,7 +2814,7 @@ async def _run_pipeline_inner(
                     #  那些不該自動改 YAML。只有「一般 failure」才進自我修復。)
                     if _should_self_heal(run, step, val, exec_result):
                         await _enter_self_heal(run, val, step, step_num, exec_result, logger)
-                        unregister_task(run.run_id)
+                        # 不 unregister:heal task 已佔同一格、pop 掉 abort 就取消不到修復
                         return run.run_id  # 背景修復中、runner 先退出
                     run.awaiting_type = "failure"
                     run.awaiting_message = val.reason or ""
@@ -3006,10 +3007,13 @@ async def _enter_self_heal(run, val, step, step_num, exec_result, logger) -> Non
     _stderr_tail = ""
     if exec_result is not None and getattr(exec_result, "stderr", ""):
         _stderr_tail = (exec_result.stderr or "")[-1500:]
-    asyncio.create_task(_run_self_heal_then_resume(
+    # register_task:讓 abort 也能取消「進行中的自我修復」背景任務。
+    # 否則修復 LLM 呼叫期間 run 不在註冊表 → 使用者按中止後 heal 照樣套 YAML 重跑(實測踩過)。
+    _heal_task = asyncio.create_task(_run_self_heal_then_resume(
         run.run_id, step.name, run.current_step,
         val.reason or "", val.suggestion or "", _stderr_tail,
     ))
+    register_task(run.run_id, _heal_task)
 
 
 def _strip_heal_yaml(text: str) -> str:
@@ -3544,9 +3548,10 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
         run.awaiting_message = f"AI 自我修復中(手動觸發、第 {run.self_heal_count} 次)…失敗步驟:{failed_name}"
         run.awaiting_suggestion = ""
         store.save(run)
-        asyncio.create_task(_run_self_heal_then_resume(
+        _heal_task = asyncio.create_task(_run_self_heal_then_resume(
             run.run_id, failed_name, failed_idx, fr, fs, stderr_tail,
         ))
+        register_task(run.run_id, _heal_task)  # abort 才取消得到進行中的修復
         return f"🔧 已啟動 AI 自我修復(第 {run.self_heal_count} 次)、修好會自動重跑"
 
     return "❓ 未知決策"
