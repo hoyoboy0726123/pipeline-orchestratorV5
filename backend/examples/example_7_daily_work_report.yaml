@@ -3,18 +3,22 @@
 # 示範重點:很常見的「每天早上把今天收到的信整理成一份工作報告」需求 ——
 #   重點是「真正的分析」(萃取行動項 + 分級緊急度 + 合併同類),不是把信件主旨抄一遍。
 #
-# 🔑 大量信件的「標準三步拆法」(這條範例的核心、務必照抄):
+# 🔑 大量信件的「拆步驟」設計(這條範例的核心、務必照抄):
 #   step 1  outlook   撈當天信 → 結構化 JSON(含內文)
-#   step 2  skill     用 pandas「預分組 / 去重 / 過濾系統信」→ 幾十個帶件數的桶
-#   step 3  subagent  report_writer 讀「已分組摘要」只做分級 + 寫人話
+#   step 2  skill     用 pandas「預分組 / 去重 / 過濾系統信」→ 幾十個帶件數的桶(確定性、不產標題)
+#   step 3  subagent  report_writer【只洗標題】把每組碎片主旨重寫成乾淨標題 + 合併同名組
+#   step 4  subagent  report_writer【只分級排版】用乾淨標題分三段(🔴緊急 / ✅待辦 / 📎參考)→ md
+#   step 5  skill     docx 把 md 排版成正式 Word 日報
 #
-#   ⚠️ 為什麼要中間那個解析節點(不要硬上):
+#   ⚠️ 為什麼這樣拆(不要硬上):
 #   一個收件匣一天可能 200~300 封,其中大量是同型號/同流水號的系統通知信
 #   (ECN 簽核、Bug Daily、設備歸還 Overdue、daily report…)。
-#   直接把 300 筆原始信丟給 LLM 又要它「邊分類邊合併邊寫報告」= 超出弱模型能力,
-#   結果就是「逐封抄主旨的流水帳 + 系統通知信混進緊急區」。
-#   把「分組 / 去重 / 過濾」交給確定性的 pandas 程式先做掉(可被 recipe 快取、穩定),
-#   LLM 只需面對「幾十個已分好組的桶」做分級 + 寫人話 —— 品質穩很多。
+#   直接把 300 筆原始信丟給 LLM 又要它「邊分類邊合併邊重寫標題邊分級邊排版」= 超出弱模型能力,
+#   結果就是「逐封抄主旨的流水帳 / 標題殘留料號 / 時好時壞」。
+#   → 確定性的「分組 / 去重 / 計數」交給 pandas(可被 recipe 快取、穩定);
+#     需要語言判斷的「重寫乾淨標題」與「分級排版」**各自獨立成一個 subagent 步驟**,
+#     一步只做一件事、弱模型成功率明顯提高(這正是「複雜任務拆多步」原則的實作)。
+#   ⚠️ 註:標題重寫品質在弱模型(gemma)上仍會「跑與跑之間略有浮動」,要穩定精緻請搭較強模型。
 #
 # ⚠️ 為什麼 Outlook 那步用「自由指令」而非 daily_todo 模板:
 #   「今天」要算到當天 00:00;daily_todo 的 since 是固定字串、填 today 會被當「現在」
@@ -58,11 +62,17 @@ steps:
            - 主旨含「Bug未處理通知 (Daily)」→ 一律歸「Bug未處理通知(Daily)」,不分機種 / 廠商。
            - 主旨含「daily report」/「日報」→ 同類歸一組,不分機種。
            - 同語意只差料號 / 型號的(例同一句 ECN 變更套在不同機種)→ 收斂成同一 family_key。
+           - **ECN 信務必大力收斂**:把主旨開頭的「ECN」後面所有料號 / 型號 / 2nd source 供應商名 /
+             零件號(像 60NR0MD0-MB3010、03B03-00239500、VPNB1730)/ phase in/out 對象全部洗掉,
+             只留「動作語意」當 family(例:都歸「ECN Battery 2nd source 導入」「ECN SSD phase in/out」
+             「ECN BIOS release」「ECN Driver CD release」「ECN TOP CASE/PCB 變更」)。
       2. 依 family_key groupby,算每組件數 count、收集前 3 筆原始主旨當 sample_subjects、收集不重複寄件人。
-      3. **另算一個給人看的乾淨 label**(不要用洗過頭、出現 `- & -`/`()`/空括號 的 family_key):
-         取該組「最具代表性的一筆原始主旨」、再把它精簡成一句可讀的中文描述
-         (例:family_key 洗成空殼,但 label 寫「N-KEY FW 變更 ECN 逾期待簽核」「設備歸還逾期通知」
-          「華勤 Bug 未處理日報」)。label 是報告會直接顯示的字、要乾淨好懂。
+         ⚠️ **合併力度自我檢查**:groupby 後若「單封一組(count==1)的組數 > 總組數的一半」,代表 family_key
+            洗得不夠、切太細 → 回頭把 regex 加強、再 groupby 一次,直到單封組明顯變少。目標:N 封壓到組數遠小於 N。
+      3. ⚠️ **這一步不要自己產「label」/ 標題** —— 寫乾淨可讀的標題是下一步 report_writer(語言模型)的事。
+         你(pandas 程式)寫不出乾淨人話、只會切出破碎片段。你只要把每組的 `sample_subjects`
+         (前 3 筆原始主旨「原文」)帶過去,讓下游有素材可重寫。
+         (確定性的 groupby / 計數 / 分類交給你的程式;把「讀原文寫人話」留給語言模型。)
       4. 分類每組 kind:
          - 主旨/寄件人命中「Notification / Announcement / 公告 / Daily / daily report / 日報 /
            Release / BIOS / Spam / Quarantine / 系統 / 代發」等純通知 → kind = "system_notice"。
@@ -74,9 +84,9 @@ steps:
       {
         "total": <總信數>,
         "groups": [
-          {"label": "設備歸還逾期通知", "family": "<groupby 用的家族鍵>", "count": 13,
+          {"family": "<groupby 用的家族鍵>", "count": 13,
            "kind": "system_notice", "is_overdue": true, "is_important": false,
-           "sample_subjects": ["...","...","..."], "senders": ["..."]},
+           "sample_subjects": ["原始主旨原文1","原始主旨原文2","原始主旨原文3"], "senders": ["..."]},
           ...
         ]
       }
@@ -86,30 +96,69 @@ steps:
       expect: "一個含 total 與 groups 陣列的 JSON;groups 每筆有 family/count/kind/sample_subjects;同型號同流水號的系統信已被合併成同一組(不是一封一組)"
     timeout: 360
 
-  # 3) report_writer:讀「已分組摘要」做分級 + 寫人話(只面對幾十個桶、不碰原始 300 封)
+  # 3) report_writer【拆步驟 A:只洗標題】—— 弱模型一步做「重寫+分級+排版」會時好時壞,
+  #    故拆開。這步只專心一件事:把每組碎片化的 sample_subjects 重寫成乾淨標題 + 合併同名組。
+  - name: 清洗組標題
+    subagent: true
+    subagent_role: report_writer
+    batch: |
+      讀取上一步的 today_grouped.json(groups 每組含 family / count / kind / is_overdue /
+      is_important / sample_subjects / senders)。
+      你只做一件事:**把每組重寫成一個乾淨可讀的標題**。不要分級、不要排版、不要寫報告(那是下一步)。
+      規則:
+      1. 讀該組 sample_subjects(原始主旨原文、常含料號/型號/流水號),濃縮重寫成**一句 ≤20 字的乾淨中文標題**:
+         例 原文「ECN FX608JMR.JHR.JPR_ MP90W Battery…」→「FX608 系列 90W 電池導入 ECN」;
+            原文「預計歸還設備通知 [系統-Commercial原料]」→「設備歸還逾期通知」。
+         ⚠️ **絕不可保留料號 / 型號 / 流水號、不可出現 `...` 截斷、不可直接貼 family 或原始主旨、不可出現「ECN ECN」這種重複字**。
+      2. **重寫後標題相同的組要合併**成一筆、count 相加;但別為了合併把標題寫得太籠統而失去資訊
+         (「逾期 ECN 韌體驗證」vs「逾期 ECN 電池驗證」要分開)。
+      3. kind / is_overdue / is_important 沿用原組(合併時:任一組為 true 就 true)。
+      輸出 today_labeled.json(純 JSON、不要 markdown 圍欄):
+      {"total": <沿用上一步 total>,
+       "groups": [{"title": "FX608 系列 90W 電池導入 ECN", "count": 6,
+                   "kind": "action", "is_overdue": true, "is_important": false}, ...]}
+      groups 依 count 由大到小排序。total 為 0 時輸出 {"total":0,"groups":[]}。
+    output:
+      path: today_labeled.json
+      expect: "JSON;每組有乾淨 title(無料號 / 無 ... 截斷 / 無重複字)、count、kind、is_overdue、is_important;無兩筆 title 相同"
+    timeout: 600
+
+  # 4) report_writer【拆步驟 B:只分級排版】—— 標題上一步已洗乾淨,這步直接用、專心分三段。
   - name: 萃取待辦與優先
     subagent: true
     subagent_role: report_writer
     batch: |
-      讀取上一步的 today_grouped.json(已把今天的信分好組、每組含 label / count / kind /
-      is_overdue / is_important / sample_subjects / senders)。
-      你的工作「只在這幾十個桶上做分級 + 寫人話」、不要自己再去逐封拆。
-      ⚠️ 每一條都用該桶的 **label**(乾淨可讀那個欄位)、後面標件數,**不要**貼 family / sample_subjects 原文,
-         **絕不**把 sample_subjects 逐封展開成多條。
-      分到三段的規則(照這個判斷、不要全丟同一段):
-      1. ## 🔴 緊急 / 優先處理 ← 放這兩種桶,排最前:
-         (a) is_important = true(主管 / 客戶 / 外部來信);
-         (b) kind = action 且 is_overdue = true(本人該處理、又逾期)。
-         每條:動作句 + 件數 + 一句「為什麼急」。
-      2. ## ✅ 今日待辦 ← 其餘需要本人動作的桶:
-         (a) kind = action 但沒逾期(例『簽核 5 件 NCM Battery 導入 ECN』『回覆 2 件週會討論串』);
-         (b) kind = system_notice 但 is_overdue = true 的「逾期系統提醒」也放這裡
-             (例『處理 12 件逾期 N-KEY FW 變更 ECN 待驗證』『清 7 件 NPD 逾期未完成項目』)——
-             它們是系統發的、但確實是該清的逾期工作。每條:動作句 + 件數。
-      3. ## 📎 僅供參考 ← kind = system_notice 且「沒逾期」的純通知
-         (Release / BIOS / Daily 日報 / Spam / 公告…),每組一行『<label> ×<件數>』。
-      產出 daily_work_report.md(三段如上)。若 total 是 0,報告就寫「今日收件匣無新信」。
+      讀取上一步的 today_labeled.json(每組已有乾淨 title / count / kind / is_overdue / is_important)。
+      你只做「分級 + 排版」,**直接用每組的 title、絕不要再改寫或加料號**。分三段:
+      1. ## 🔴 緊急 / 優先處理 ← (a) is_important=true(主管/客戶/外部);(b) kind=action 且 is_overdue=true。
+         每條:title + 件數 + 一句「為什麼急」。
+      2. ## ✅ 今日待辦 ← (a) kind=action 沒逾期;(b) kind=system_notice 但 is_overdue=true 的逾期提醒。
+         每條:title + 件數。
+      3. ## 📎 僅供參考 ← kind=system_notice 且沒逾期的純通知。每條:title + 件數。
+      輸出規格:
+      - 第一行寫文件標題:# 每日工作報告
+      - 接著一行總覽:『今日共 <total> 封信、<組數> 類』。
+      - **三段標題(## 🔴 / ## ✅ / ## 📎)一律都要出現**,某段無項目就寫一行「本日無」、不可省略整段。
+      - 「📎 僅供參考」若超過 15 條,挑件數最多前 15 條、最後加一行『…其餘 N 類略』。
+      - total 為 0 → 報告寫「今日收件匣無新信」。
+      產出 daily_work_report.md。
     output:
       path: daily_work_report.md
-      expect: "一份分三段(緊急優先 / 今日待辦 / 僅供參考)的工作報告 Markdown;每條後面帶件數;沒有逐封抄主旨的流水帳"
+      expect: "分三段(🔴/✅/📎)的工作報告 Markdown;每條帶件數;標題乾淨無料號;第一行是 # 每日工作報告"
+    timeout: 600
+
+  # 5) docx 技能【補上最終 Word 產出】—— 把 report.md 排版成正式 Word 日報。
+  - name: 產出Word日報
+    skill_mode: true
+    skill: docx
+    batch: |
+      讀取 daily_work_report.md 的內容,排版成一份正式的 Word 日報,輸出至 每日工作報告.docx。
+      文件標題沿用 report.md 第一行(去掉開頭的「# 」),標題下方加上產出日期,內文沿用後續段落。
+      ⚠️ 務必把 markdown 轉成 Word 原生格式、不要把符號當文字印出來:
+        - 「#」「##」→ Word 標題樣式(Heading 1 / Heading 2)
+        - 「**粗體**」→ 真正的粗體 run、把 ** 去掉
+        - 行首「- 」→ 項目符號清單(List Bullet style)、把 - 去掉
+      最終 Word 裡不可出現 *、開頭的 -、#、這類殘留的 markdown 符號。
+    output:
+      path: 每日工作報告.docx
     timeout: 600

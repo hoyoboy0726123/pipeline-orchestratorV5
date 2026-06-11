@@ -3272,6 +3272,9 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
     `run_python` + python-docx(`from docx import Document`)穩很多。**內容多的報告**:先讓
     report_writer 產 markdown,再用 python-docx 把 md 套版轉成 .docx(內容與排版分離、最不靠
     模型硬撐 docx API)。簡報 .pptx 則相反 —— `pptxgenjs` / `skill: pptx` 可靠、照用。
+  - ⚠️ **md → Word 一律轉成原生格式、不可把 markdown 符號當文字印進檔案**(實測踩過、會出現殘留符號):
+    把 md 轉 .docx 時,`#`/`##` → Word 標題樣式、`**粗體**` → 真正粗體 run(去掉 `**`)、行首 `- ` → 項目符號清單(去掉 `- `)、`[文字](網址)` → 超連結(至少顯示「文字(網址)」)。
+    **最終 Word 內不可出現 `*`、開頭的 `-`、`#`、`[]()` 這類殘留 markdown 符號** —— 產 docx 步驟的指令一定要明寫這條,否則弱模型會把符號原樣印出來。
 - `readonly: true` — 只讀不寫，適合做深度資料驗證
 - `ask_mode: true` — LLM 遇不確定時主動問使用者
 
