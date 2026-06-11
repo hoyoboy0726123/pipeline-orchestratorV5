@@ -1,67 +1,85 @@
 # 範例工作流:Reddit r/ASUS 產品口碑日報
 # ───────────────────────────────────────────────────────────────
 # 示範重點:一條「長工作流」如何把多種節點 + 專用技能充分結合 ——
-#   網頁爬蟲 → scraped-content-parser 技能 → AI 技能 → script
-#   → condition 判斷 → AI 技能(分支)→ 匯流產出 Word 日報
+#   網頁爬蟲 → scraped-content-parser → 過濾廣告(subagent)→ 情緒判斷(subagent)
+#   → 統計(skill)→ condition 判斷 → 報告(report_writer 分支)→ 匯流產出 Word 日報
 # 情境:抓 Reddit r/ASUS 版的熱門討論(標題+內文+留言),解析成結構化
-#   貼文清單,用 AI 判斷每篇對 ASUS 產品的情緒,依「負評比例」決定報告
-#   走「負評警示」還是「一般口碑摘要」,最後排版成 Word 日報。
+#   貼文清單,先濾掉官方促銷/抽獎/廣告文,再判斷每篇情緒,依「負評比例」
+#   決定報告走「負評警示」還是「一般口碑摘要」,最後排版成 Word 日報。
 #
-# 流程亮點:
-#   - 爬蟲開 wc_with_children,連子頁內文+留言一起抓 —— 內容夠厚才分析得準
-#   - 解析交給專用技能 scraped-content-parser:它讓 LLM 只看樣本寫確定性
-#     parser、不逐筆吞整包內容 —— 大內容也不會讓 LLM 退化
-#   - condition 節點是轉折點:把真實討論變成一個數字,由它決定走哪條分支
-#   - 兩條分支跑完都用 next 匯流回「產出 Word 日報」(分支收斂)
-#   - 統計交給 script(確定性),skill 只負責寫文字 —— 不讓 LLM 自己數數
-#   - 標題由分支自己寫進 report.md 第一行,共用的 Word 節點「沿用」第一行 ——
-#     共用一個節點、又不必讓 Word 那步的 LLM 重判一次口碑(分支早就判好了)
+# 🔑 品質拆法(與「Reddit ASUS 口碑分級報告」範例同一套、務必照抄):
+#   - 抓 15 篇 —— 量夠,過濾掉廣告後仍有足夠素材分析。
+#   - 解析步驟保留每篇的 url(來源連結),一路帶到報告,讀者才點得回原文。
+#   - 「過濾廣告」獨立成一步(語言判斷 → subagent):官方促銷 / 抽獎 / 純公告
+#     不該混進口碑分析;一步只做一件事、弱模型成功率高。
+#   - 情緒判斷是「語言理解」→ subagent(不要用 python 數關鍵字)。
+#   - 統計交給 skill(確定性),不讓 LLM 自己數數。
+#   - 報告用 report_writer,同時讀 sentiment.json(分類)+ real_posts.json(真實
+#     內文與 url),逐篇寫 2-3 句「詳細摘要」+ 貼出 URL —— 不是覆述標題的套話。
 #
 # ⚠️ 此範例需要:
-#   - 已設定 LLM(skill 節點要用)—— 到設定頁選一個 model
+#   - 已設定 LLM(skill / subagent 節點要用)—— 到設定頁選一個 model
 #   - 可連網(爬蟲節點要抓 Reddit)
 #   範例 1、2 是純 script、任何環境都能跑;這條是進階示範。
 # ───────────────────────────────────────────────────────────────
 name: Reddit ASUS 版口碑日報 (範例)
 validate: false
 steps:
-  # 1) 網頁爬蟲:抓 r/ASUS 列表 + 前 6 篇貼文的內文與留言
+  # 1) 網頁爬蟲:抓 r/ASUS 列表 + 前 15 篇貼文的內文與留言(量足夠、濾掉廣告後仍夠分析)
   - name: 抓取ASUS版討論
     web_crawler: true
     wc_url: "https://www.reddit.com/r/ASUS/"
     wc_with_children: true
-    wc_max_children: 6
+    wc_max_children: 15
     timeout: 600
 
-  # 2) scraped-content-parser 技能:把爬回的原始內容解析成結構化貼文清單
-  #    這支專用技能讓 LLM 只看樣本、寫一支確定性 parser 跑完整檔 —— 穩、快
+  # 2) scraped-content-parser 技能:解析成結構化貼文清單 —— 一定要保留 url
   - name: 解析貼文清單
     skill_mode: true
     skill: scraped-content-parser
     batch: |
-      解析上一步爬蟲抓回的 Reddit r/ASUS 討論內容,
-      抽出每一篇貼文的標題與內文,輸出結構化 JSON 至 posts.json。
+      解析上一步爬蟲抓回的 Reddit r/ASUS 討論內容,每篇貼文抽出三個欄位、輸出 JSON 陣列至 posts.json:
+        - title:貼文標題
+        - url:該貼文的來源連結(從內容的 URL/url 欄位取、必須是真實的 reddit.com 連結、不可留空)
+        - content:貼文內文 + 主要留言(前 800 字即可,給下游寫摘要用)
+      posts.json 必須是純 JSON 陣列、不要說明文字。
     output:
       path: posts.json
     timeout: 600
 
-  # 3) AI 技能:讀「已結構化」的貼文清單,每篇判斷對 ASUS 產品的情緒
-  - name: 判斷貼文情緒
-    skill_mode: true
+  # 3) 過濾廣告推銷文(語言判斷 → subagent;獨立一步、不跟情緒判斷混在一起)
+  - name: 過濾廣告推銷文
+    subagent: true
+    subagent_role: data_analyst
     batch: |
-      讀取 posts.json(已結構化的貼文清單),為每一篇貼文判斷使用者對
-      ASUS 產品的整體情緒,輸出 JSON 陣列至 sentiment.json,每篇含三個欄位:
-      - title(貼文標題)
-      - sentiment(只能是 positive / negative / neutral 三者之一)
-      - summary(一句話中文摘要)
+      讀取 posts.json,逐篇「閱讀 title 與 content 的實際內容」判斷它是不是廣告 / 推銷文:
+      官方促銷活動(Sale / Deal / 折扣)、抽獎(Giveaway)、預購宣傳、純新品發佈公告
+      (Announcing... 這類官方 PR)都算廣告推銷文,**剔除**;
+      真實使用者的討論、提問、抱怨、心得、比較文都**保留**。拿不準的一律保留。
+      把「保留下來的貼文」原欄位(title / url / content)原封不動輸出 JSON 陣列至 real_posts.json,
+      純 JSON 陣列、不要說明文字。
+    output:
+      path: real_posts.json
+      expect: "JSON 陣列;只剩真實使用者討論;每篇仍有 title/url/content 三欄位、url 未遺失"
+    timeout: 600
+
+  # 4) 情緒判斷(語言理解 → subagent,不用 python 數關鍵字;url 原樣帶過)
+  - name: 判斷貼文情緒
+    subagent: true
+    subagent_role: data_analyst
+    batch: |
+      讀取 real_posts.json(已濾掉廣告的真實討論)。逐篇「閱讀 content 的實際內容」
+      判斷使用者對 ASUS 產品的情緒,不要只看標題、不要用關鍵字硬套。
+      輸出 JSON 陣列至 sentiment.json,每篇三欄:
+        - title:沿用該篇標題
+        - url:沿用該篇 url(原樣帶過來、不可遺漏)
+        - sentiment:只能是 positive / negative / neutral 三者之一(小寫)
+      sentiment.json 必須是純 JSON 陣列、不要說明文字。
     output:
       path: sentiment.json
     timeout: 600
 
-  # 4) AI 技能:統計情緒分佈,把數字存成 stats.json。
-  #    skill 把 JSON 存好後,runner 會自動把 stats.json 裡的數字欄位開放給下游 ——
-  #    所以下一步 condition 能直接 {{ steps.統計情緒分佈.output.負評百分比 }} 引用。
-  #    這個 skill 的提示詞完全不用提任何系統術語、就是一般人講資料處理的話。
+  # 5) 統計情緒分佈(確定性計數 → skill;算好的數字會自動開放給下一步 condition 引用)
   - name: 統計情緒分佈
     skill_mode: true
     batch: |
@@ -70,43 +88,63 @@ steps:
       並算出負評佔比(負面篇數 ÷ 總篇數 × 100,四捨五入到整數)。
       把這五個數字存成 stats.json,欄位名稱用:
       正面、負面、中立、總數、負評百分比。
+      寫出合法的 stats.json 即完成、立刻 done,不要回頭再改。
     output:
       path: stats.json
     timeout: 600
 
-  # 5) 條件節點(IF):負評佔比 > 40% → 負評警示;否則 → 一般口碑摘要
-  #    負評百分比 是上一步 stats.json 裡的欄位,runner 自動開放、這裡直接引用
+  # 6) 條件節點(IF):負評佔比 > 40% → 負評警示;否則 → 一般口碑摘要
   - name: 判斷產品口碑
     condition: true
     expression: "{{ steps.統計情緒分佈.output.負評百分比 | int > 40 }}"
     on_true: 產生負評警示
     on_false: 產生口碑摘要
 
-  # 6) true 分支:AI 技能產出負評警示內容 → report.md,再 next 跳到產出日報
+  # ── 兩條分支共同品質規格(這是門面範例、務必做到):
+  #    讀 sentiment.json(分類與 url)+ real_posts.json(真實內文 content),逐篇列出:
+  #      ・標題  ・來源連結(把該篇 url 直接貼出)  ・詳細摘要(2-3 句、根據 content
+  #        實際內容寫,不可只覆述標題、不可套話、不可過於簡短)  ・重點(問題或亮點)
+  #    絕不可多行寫同一句話。
+
+  # 7) true 分支:負評警示(report_writer)→ next 跳到產出日報
   - name: 產生負評警示
-    skill_mode: true
+    subagent: true
+    subagent_role: report_writer
     batch: |
-      根據前面步驟分析出來的貼文情緒結果,寫一份「ASUS 產品負評警示」中文報告至 report.md。
+      讀取 sentiment.json(每篇的 sentiment 分類與 url)與 real_posts.json(每篇真實內文 content),
+      寫一份「ASUS 產品負評警示」中文報告至 report.md。
       report.md 的第一行就是這個標題:# ASUS 產品負評警示報告
-      內容包含:整體情緒分佈的數字、逐篇列出負評的貼文(標題與摘要)、
-      以及建議留意的產品問題。
+      接著:整體情緒分佈數字一行,然後「負面貼文」放最前、逐篇列出(正面 / 中立也要列、放後面):
+        - **標題**
+        - 來源連結:<該篇 url,直接貼出網址>
+        - 詳細摘要:2-3 句,根據 real_posts.json 的 content 實際內容寫,不可只覆述標題、不可套話
+        - 問題 / 亮點:負面寫具體問題、正面寫亮點、中立寫重點
+      最後一段「建議留意的產品問題」。正式繁體中文、絕不可多行重複同一句。
     output:
       path: report.md
     next: 產出Word日報
-    timeout: 600
+    timeout: 900
 
-  # 7) false 分支:AI 技能產出一般口碑摘要內容 → report.md
+  # 8) false 分支:一般口碑摘要(report_writer)
   - name: 產生口碑摘要
-    skill_mode: true
+    subagent: true
+    subagent_role: report_writer
     batch: |
-      根據前面步驟分析出來的貼文情緒結果,寫一份中性的 Reddit r/ASUS 每日口碑摘要至 report.md。
+      讀取 sentiment.json(每篇的 sentiment 分類與 url)與 real_posts.json(每篇真實內文 content),
+      寫一份中性的 Reddit r/ASUS 每日口碑摘要至 report.md。
       report.md 的第一行就是這個標題:# Reddit r/ASUS 產品口碑日報
-      內容包含:整體情緒分佈的數字、幾個主要討論話題、一段綜合分析。
+      接著:整體情緒分佈數字一行,然後「主要討論話題」逐篇列出:
+        - **標題**
+        - 來源連結:<該篇 url,直接貼出網址>
+        - 詳細摘要:2-3 句,根據 real_posts.json 的 content 實際內容寫,不可只覆述標題、
+          不可寫「關於 XXX 的討論,情緒傾向為 positive」這種套話、不可過於簡短
+        - 重點:該篇對 ASUS 產品的具體評價或資訊
+      最後一段綜合分析。正式繁體中文、絕不可多行重複同一句。
     output:
       path: report.md
-    timeout: 600
+    timeout: 900
 
-  # 8) 匯流點:兩條分支都會走到這 —— 把 report.md 排版成正式的 Word 日報
+  # 9) 匯流點:兩條分支都會走到這 —— 把 report.md 排版成正式的 Word 日報
   - name: 產出Word日報
     skill_mode: true
     skill: docx
@@ -114,7 +152,18 @@ steps:
       讀取 report.md 的內容,排版成一份正式的 Word 日報,輸出至 日報.docx。
       文件標題直接沿用 report.md 第一行的標題(去掉開頭的「# 」符號),
       不要自己重新判斷或改寫標題。標題下方加上產出日期,
-      內文沿用 report.md 第一行之後的段落。
+      內文沿用 report.md 第一行之後的段落(保留逐篇分組與來源連結)。
+      ⚠️ 務必把 markdown 轉成 Word 原生格式、不要把符號當文字印出來:
+        - 「#」「##」→ Word 標題樣式(Heading 1 / Heading 2)
+        - 「**粗體**」→ 真正的粗體 run、把 ** 去掉
+        - 行首「- 」→ 項目符號清單(List Bullet style)、把 - 去掉
+        - ⚠️ report.md 是**兩層嵌套清單**(「- **標題**」下面有縮排的「  - 來源連結:…」子項):
+          第一層 → List Bullet、第二層(縮排的 - )→ List Bullet 2(次層項目符號)。
+          **縮排子項的「- 」「**」一樣要轉換、一樣不可當文字印出來** —— 處理時對「每一行」
+          先 strip 縮排再判斷行首是不是「- 」,不要只比對開頭頂格的行。
+        - 「[文字](網址)」→ 超連結(做不到至少顯示「文字(網址)」、不要留 []() 符號)
+      最終 Word 裡不可出現 *、開頭的 -、#、[]() 這類殘留的 markdown 符號(**包含縮排行**)。
+      寫完後自我檢查:重新讀產出的 docx 任一段落,若仍含「**」或行首「- 」就修正轉換程式再產一次。
     output:
       path: 日報.docx
     timeout: 600
