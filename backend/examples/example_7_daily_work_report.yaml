@@ -67,8 +67,10 @@ steps:
              只留「動作語意」當 family(例:都歸「ECN Battery 2nd source 導入」「ECN SSD phase in/out」
              「ECN BIOS release」「ECN Driver CD release」「ECN TOP CASE/PCB 變更」)。
       2. 依 family_key groupby,算每組件數 count、收集前 3 筆原始主旨當 sample_subjects、收集不重複寄件人。
-         ⚠️ **合併力度自我檢查**:groupby 後若「單封一組(count==1)的組數 > 總組數的一半」,代表 family_key
-            洗得不夠、切太細 → 回頭把 regex 加強、再 groupby 一次,直到單封組明顯變少。目標:N 封壓到組數遠小於 N。
+         ⚠️ **合併力度自我檢查(最多修一次、有硬上限)**:groupby 後若「單封一組(count==1)的組數 > 總組數的一半」,
+            代表 regex 切太細 → **允許回頭加強 regex 重 groupby「一次」**;修完這一次**無論結果如何都接受、直接往下走**。
+            **絕對不要**反覆迭代追求「單封組最少」—— 主旨本來就雜、零單封組是不可能的目標,部分單封組是正常結果。
+            (寫好程式 → 跑出 today_grouped.json → 確認檔案格式正確 → **立刻 done**;不要回頭再「優化」分組。)
       3. ⚠️ **這一步不要自己產「label」/ 標題** —— 寫乾淨可讀的標題是下一步 report_writer(語言模型)的事。
          你(pandas 程式)寫不出乾淨人話、只會切出破碎片段。你只要把每組的 `sample_subjects`
          (前 3 筆原始主旨「原文」)帶過去,讓下游有素材可重寫。
@@ -91,6 +93,8 @@ steps:
         ]
       }
       groups 依 count 由大到小排序。today_mail.json 是空陣列時,輸出 {"total":0,"groups":[]}。
+      ⚠️ **終點明確**:today_grouped.json 成功寫出且為合法 JSON = 任務完成,**立刻呼叫 done**。
+         分組結果「夠用就好」,不要為了更漂亮的分組反覆重寫程式 —— 那會無限燒 LLM 呼叫、永遠到不了完美。
     output:
       path: today_grouped.json
       expect: "一個含 total 與 groups 陣列的 JSON;groups 每筆有 family/count/kind/sample_subjects;同型號同流水號的系統信已被合併成同一組(不是一封一組)"
