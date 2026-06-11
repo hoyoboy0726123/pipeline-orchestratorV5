@@ -2981,6 +2981,15 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 1. **反問**：「我看到原 YAML 是寄給 `wilson@example.com`，要繼續寄給他、還是換別人？」（推薦）
 2. **佔位符**：在 YAML 裡寫 `to: "<請填收件人 email>"` 並提醒使用者：「YAML 裡的 `to` 我留空、請套用後到 Outlook 節點 panel 填上你的收件人」
 
+## ⚠️ 修改既有 YAML 時的「最小 diff」鐵律（與上一條同等重要、違反 = 默默毀損使用者資產）
+
+使用者要你改既有工作流的**某一處**時(「把篇數改成 20」「加一步 X」「改收件人」),你產出的 YAML 必須**以 `get_workflow_yaml` 拿到的原文為底稿、只動被要求的那幾行**,其餘內容**逐字逐行原樣保留**:
+
+- **絕對禁止**:改寫 / 濃縮 / 「順手優化」沒被要求動的 `batch` 文字;更換 `subagent_role`;刪減 `output.expect`、品質規格、轉換規則等長敘述。那些長 batch 是使用者一輪輪調出來的**品質資產**,你嫌長把它「精簡」= 默默毀損,使用者按下覆蓋當場遺失、還不知道。
+- 正確做法是「**複製原文 → 只替換指定欄位值**」,不是「理解大意 → 重新生成一份」。你重新生成的版本一定比原文短、細節一定掉。
+- **Emit 前自我檢查**:「除了使用者指定的修改,我這份 YAML 跟原 YAML 逐行相同嗎?」有任何非要求的差異 → 改回原文。
+- (實測反例:要求「抓取篇數 15→20、其他都不要動」→ 模型重寫了 55 行、把長 batch 全濃縮、role 從 data_analyst 擅改成 critic = 本條要防的事故。)
+
 # 對話流程（很重要 — 不要跳階段直接吐 YAML）
 
 ## 1. Discovery — 先判定要不要進（很重要！）
@@ -4917,14 +4926,27 @@ def _workflow_state_block(workflow_id: str) -> str:
                 lines.append(f"  ... 另有 {len(nodes) - 20} 個節點未列")
         yaml_text = (wf.get("yaml") or "").strip()
         if yaml_text:
-            # 避免 YAML 過長塞爆 prompt；超過 3000 字就截斷（頭尾各留一半）
-            if len(yaml_text) > 3000:
-                yaml_text = yaml_text[:1500] + "\n# ...（中段省略）...\n" + yaml_text[-1500:]
+            # 避免 YAML 過長塞爆 prompt。⚠️ 上限不可設太小:截斷後模型看不到中段、
+            # 卻以為自己看的是全文 → 修改時憑節點名「腦補重建」中段,把使用者調好的
+            # 長 batch 品質規格整段濃縮毀掉(實測:8KB 範例 YAML 在 3000 上限下,
+            # 「只改篇數」的請求產出 54 行非要求差異 + role 被擅改)。
+            _truncated = len(yaml_text) > 12000
+            if _truncated:
+                yaml_text = yaml_text[:6000] + "\n# ...（中段省略）...\n" + yaml_text[-6000:]
             lines.append("")
-            lines.append("完整 YAML：")
+            if _truncated:
+                lines.append("YAML（⚠️ 過長、此處為截斷顯示版,**不是全文**）：")
+            else:
+                lines.append("完整 YAML：")
             lines.append("```yaml")
             lines.append(yaml_text)
             lines.append("```")
+            if _truncated:
+                lines.append(
+                    "🚨 **上面 YAML 是截斷版**:若使用者要求「修改這條工作流」,你**必須先呼叫 "
+                    f"get_workflow_yaml(\"{workflow_id}\") 取得全文**、以全文為底稿做最小修改;"
+                    "**絕不可基於這份截斷版 emit 修改後 YAML**(中段內容會被你腦補毀損)。"
+                )
         lines.append("")
         lines.append(
             f"⚠️ **以上這條(id={workflow_id})才是你「現在所在」的工作流（即使對話歷史是從別條複製過來的）。**"
