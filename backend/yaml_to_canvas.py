@@ -72,7 +72,9 @@ def _step_to_node(step: dict, idx: int) -> dict:
         return {**common, "type": "outlookAutomation", "data": {
             **base_data,
             "template": step.get("outlook_template", ""),
-            "freeText": step.get("outlook_free_text", ""),
+            # 自由指令的正規欄位是 batch(runner 讀 step.batch);outlook_free_text 只是畫布別名。
+            # 沒模板、只用 batch 寫自由需求時要 fallback,否則畫布 freeText 空 → 前端誤判「沒選模板也沒描述」。
+            "freeText": step.get("outlook_free_text") or step.get("batch", ""),
             "params": step.get("outlook_params", {}),
             "outputPath": output_path,
         }}
