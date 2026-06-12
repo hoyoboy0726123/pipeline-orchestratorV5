@@ -24,7 +24,9 @@ if [ ! -d ".venv" ]; then
   fi
 fi
 
-.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8004 &
+# 後端預設只綁 127.0.0.1(本機可連、區網連不到)。API 無認證且能跑 AI 生成程式碼,
+# 綁 0.0.0.0 = 對區網開放可執行後門。需區網存取(自負風險)再: export PO_HOST=0.0.0.0
+.venv/bin/uvicorn main:app --host "${PO_HOST:-127.0.0.1}" --port 8004 &
 BACKEND_PID=$!
 echo "  後端 PID: $BACKEND_PID"
 

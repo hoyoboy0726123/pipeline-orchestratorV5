@@ -1016,7 +1016,8 @@ async def _run_subagent_native(
                     llm_with_tools.ainvoke(messages), timeout=600.0,
                 )
                 _elapsed = asyncio.get_event_loop().time() - _t0
-                _content_str = (getattr(response, "content", "") or "") if isinstance(getattr(response, "content", ""), str) else ""
+                from pipeline.executor import _extract_text as _xt
+                _content_str = _xt(getattr(response, "content", ""))
                 _tc_count = len(getattr(response, 'tool_calls', []) or [])
                 # Cache stats(Anthropic / OpenAI 有,Gemini / Groq / Ollama 沒)
                 _um_this = getattr(response, "usage_metadata", None) or {}
@@ -1046,6 +1047,17 @@ async def _run_subagent_native(
                         f"  response.tool_calls (raw) = {getattr(response, 'tool_calls', None)!r}\n"
                         f"  response.invalid_tool_calls = {getattr(response, 'invalid_tool_calls', None)!r}"
                     )
+                # MALFORMED_FUNCTION_CALL = 壞生成、可重試(非模型不肯呼叫工具),用既有重試預算重試。
+                from pipeline.executor import _is_malformed_empty as _malformed
+                if _malformed(response) and _attempt < 2:
+                    _wait = 2 ** _attempt
+                    log.warning(
+                        f"[{step_name}] finish_reason=MALFORMED_FUNCTION_CALL(壞生成、非不呼叫工具)"
+                        f"→ {_wait}s retry({_attempt + 1}/2)"
+                    )
+                    response = None
+                    await asyncio.sleep(_wait)
+                    continue
                 last_llm_err = None
                 break
             except asyncio.TimeoutError as e:
@@ -1099,7 +1111,8 @@ async def _run_subagent_native(
         messages.append(response)
 
         tool_calls = list(getattr(response, "tool_calls", []) or [])
-        content_str = response.content if isinstance(response.content, str) else ""
+        from pipeline.executor import _extract_text as _xt2  # 正規化 str / list-of-blocks(gemini-3 content 是 list)
+        content_str = _xt2(response.content)
 
         # ── 沒 tool_calls → Claude 原生 end_turn(想結束)─────
         # 對齊 Anthropic 官方:Claude 完成時就「不呼叫工具、回純文字」(end_turn),
