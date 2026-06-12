@@ -1206,8 +1206,9 @@ async def _run_subagent_native(
                 try:
                     from pipeline.executor import detect_missing_module as _dmm_sa
                 except Exception:
-                    _dmm_sa = lambda r: []
-                _miss_sa = _dmm_sa(result)
+                    _dmm_sa = lambda r, td="": []
+                # 傳 task:讓 import 名→pip 名 能用任務文字當線索(如任務寫 openai-whisper)
+                _miss_sa = _dmm_sa(result, task)
                 if _miss_sa:
                     log.warning(f"[{step_name}] 🛑 subagent 偵測 ModuleNotFoundError: {_miss_sa}")
                     result += (f"\n[系統] 偵測到缺套件 {_miss_sa}。不允許自行安裝、"
