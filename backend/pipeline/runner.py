@@ -3233,7 +3233,8 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
             ))
             register_task(run.run_id, t)
 
-        asyncio.create_task(_delayed_heal_start())
+        _w = asyncio.create_task(_delayed_heal_start())
+        register_task(run.run_id, _w)  # 註冊 wrapper:abort 落在 sleep 延遲窗也取消得到
 
     except Exception as e:
         logger.error("自我修復過程出錯:" + type(e).__name__ + ": " + str(e))
@@ -3328,7 +3329,8 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             ))
             register_task(run.run_id, t)
 
-        asyncio.create_task(_delayed_skip())
+        _w = asyncio.create_task(_delayed_skip())
+        register_task(run.run_id, _w)  # 註冊 wrapper:abort 落在 sleep 延遲窗也取消得到
         return f"⏩ 跳過步驟 {step_num}，繼續執行步驟 {step_num + 1}/{total}"
 
     elif decision == "retry":
@@ -3349,7 +3351,8 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             ))
             register_task(run.run_id, t)
 
-        asyncio.create_task(_delayed_retry())
+        _w = asyncio.create_task(_delayed_retry())
+        register_task(run.run_id, _w)  # 註冊 wrapper:abort 落在 sleep 延遲窗也取消得到
         return f"🔄 重試步驟 {step_num}/{total}"
 
     elif decision == "redo_prev":
@@ -3378,7 +3381,8 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             ))
             register_task(run.run_id, t)
 
-        asyncio.create_task(_delayed_redo_prev())
+        _w = asyncio.create_task(_delayed_redo_prev())
+        register_task(run.run_id, _w)  # 註冊 wrapper:abort 落在 sleep 延遲窗也取消得到
         return f"↩ 重做上一步({prev_step + 1}/{total}),完成後再次推進到原步驟"
 
     elif decision == "install_dep":
@@ -3465,7 +3469,8 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             ))
             register_task(run.run_id, t)
 
-        asyncio.create_task(_delayed_install_retry())
+        _w = asyncio.create_task(_delayed_install_retry())
+        register_task(run.run_id, _w)  # 註冊 wrapper:abort 落在 sleep 延遲窗也取消得到
         installed = ", ".join(p for p, _, _ in results)
         return f"✅ 已在 {target} 安裝：{installed}\n🔄 重試步驟 {step_num}/{total}"
 
@@ -3540,7 +3545,8 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             ))
             register_task(run.run_id, t)
 
-        asyncio.create_task(_delayed_start())
+        _w = asyncio.create_task(_delayed_start())
+        register_task(run.run_id, _w)  # 註冊 wrapper:abort 落在 sleep 延遲窗也取消得到
         
         if is_confirm:
             return f"💬 已附加指示，重做步驟 {target + 1}/{total}"
@@ -3587,7 +3593,8 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
             ))
             register_task(run.run_id, t)
 
-        asyncio.create_task(_delayed_continue())
+        _w = asyncio.create_task(_delayed_continue())
+        register_task(run.run_id, _w)  # 註冊 wrapper:abort 落在 sleep 延遲窗也取消得到
         return f"✅ 確認通過，繼續執行步驟 {next_step + 1}/{total}"
 
     elif decision == "self_heal_now":
