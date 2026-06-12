@@ -14,6 +14,51 @@ LOG_DIR = OUTPUT_BASE_PATH / "pipeline_logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def resolve_log_dirs() -> list[Path]:
+    """回傳要搜尋 run log 的目錄候選(只回存在的、去重)。
+
+    讀 log 的各處(AI 助手 get_run_log、TG /log、TG 最近 run 摘要)必須用這個、
+    不可自己寫死路徑 —— 之前多處寫死 `backend/ai_output/pipeline_logs`,但 logger
+    實際寫到 OUTPUT_BASE_PATH/pipeline_logs(搬遷後 = 專案根/ai_output),導致新 run
+    一律找不到、甚至「log 目錄不存在」。
+
+    優先序:
+    1. LOG_DIR(= OUTPUT_BASE_PATH/pipeline_logs,logger 真正寫入處)
+    2. backend/ai_output/pipeline_logs(搬遷前舊 run 的 fallback)
+    """
+    cands = [
+        LOG_DIR,
+        Path(__file__).resolve().parent.parent / "ai_output" / "pipeline_logs",  # backend/ai_output(舊)
+    ]
+    seen: set[str] = set()
+    out: list[Path] = []
+    for d in cands:
+        try:
+            key = str(d.resolve())
+        except Exception:
+            key = str(d)
+        if key not in seen and d.exists():
+            seen.add(key)
+            out.append(d)
+    return out
+
+
+def find_run_log(run_id: str):
+    """依 run_id(完整或前 8 字前綴)跨所有 log 目錄找最新符合的 log 檔。
+    回 Path 或 None(目錄不存在/找不到都回 None,由 caller 區分訊息)。"""
+    dirs = resolve_log_dirs()
+    if not dirs or not run_id or not run_id.strip():
+        return None
+    rid_short = run_id.strip().split("-")[0][:8]
+    matches = []
+    for d in dirs:
+        matches.extend(d.glob(f"*{rid_short}*.log"))
+    if not matches:
+        return None
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0]
+
+
 def create_run_logger(run_id: str, pipeline_name: str) -> tuple[logging.Logger, str]:
     """
     建立此 run 的 file logger。

@@ -502,16 +502,15 @@ async def _cmd_log(chat_id: int, args: str) -> None:
         )
         return
     try:
-        log_dir = Path(__file__).parent / "ai_output" / "pipeline_logs"
-        if not log_dir.exists():
+        # log 目錄解析集中在 pipeline.logger(優先 OUTPUT_BASE_PATH/pipeline_logs、fallback
+        # 舊 backend/ai_output);不可寫死路徑(之前寫死 → 搬遷後找不到新 run)。
+        from pipeline.logger import resolve_log_dirs as _rld, find_run_log as _frl
+        if not _rld():
             await _bot_instance.send_message(chat_id=chat_id, text="❌ log 目錄不存在")
             return
-        # 找最相近的 log 檔（filename 含 run_id 前綴）
-        rid_short = rid_query.split("-")[0][:8]
-        matches = sorted(
-            log_dir.glob(f"*{rid_short}*.log"),
-            key=lambda p: p.stat().st_mtime, reverse=True,
-        )
+        # 找最相近的 log 檔（filename 含 run_id 前綴、跨新舊目錄取最新）
+        hit = _frl(rid_query)
+        matches = [hit] if hit else []
         if not matches:
             await _bot_instance.send_message(
                 chat_id=chat_id,
@@ -1053,16 +1052,14 @@ def _build_tg_state_digest() -> str:
         lines.append(f"- run_id: `{run_id}`")
         # 找對應 log 檔(filename 含 run_id 後 8 字)
         try:
-            log_dir = Path(__file__).parent / "ai_output" / "pipeline_logs"
+            # log 目錄集中解析(優先 OUTPUT_BASE_PATH/pipeline_logs、fallback 舊 backend/ai_output)
+            from pipeline.logger import find_run_log as _frl
             tail_text = ""
-            if log_dir.exists() and run_id:
-                rid_short = run_id.split("-")[0][:8]
-                matches = sorted(log_dir.glob(f"*{rid_short}*.log"),
-                                 key=lambda p: p.stat().st_mtime, reverse=True)
-                if matches:
-                    log_text = matches[0].read_text(encoding="utf-8", errors="replace")
-                    tail_lines = log_text.splitlines()[-30:]
-                    tail_text = "\n".join(tail_lines)
+            hit = _frl(run_id) if run_id else None
+            if hit is not None:
+                log_text = hit.read_text(encoding="utf-8", errors="replace")
+                tail_lines = log_text.splitlines()[-30:]
+                tail_text = "\n".join(tail_lines)
             if tail_text:
                 lines.append("- log 末尾 30 行:")
                 lines.append("```")
