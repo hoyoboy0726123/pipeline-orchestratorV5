@@ -1016,7 +1016,8 @@ async def _run_subagent_native(
                     llm_with_tools.ainvoke(messages), timeout=600.0,
                 )
                 _elapsed = asyncio.get_event_loop().time() - _t0
-                _content_str = (getattr(response, "content", "") or "") if isinstance(getattr(response, "content", ""), str) else ""
+                from pipeline.executor import _extract_text as _xt
+                _content_str = _xt(getattr(response, "content", ""))
                 _tc_count = len(getattr(response, 'tool_calls', []) or [])
                 # Cache stats(Anthropic / OpenAI 有,Gemini / Groq / Ollama 沒)
                 _um_this = getattr(response, "usage_metadata", None) or {}
@@ -1110,7 +1111,8 @@ async def _run_subagent_native(
         messages.append(response)
 
         tool_calls = list(getattr(response, "tool_calls", []) or [])
-        content_str = response.content if isinstance(response.content, str) else ""
+        from pipeline.executor import _extract_text as _xt2  # 正規化 str / list-of-blocks(gemini-3 content 是 list)
+        content_str = _xt2(response.content)
 
         # ── 沒 tool_calls → Claude 原生 end_turn(想結束)─────
         # 對齊 Anthropic 官方:Claude 完成時就「不呼叫工具、回純文字」(end_turn),

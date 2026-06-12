@@ -1661,13 +1661,35 @@ def _extract_code_block(text: str) -> Optional[str]:
     return blocks[0].group(1).strip() if blocks else None
 
 
+def _extract_text(content) -> str:
+    """把 LLM 回應的 content 正規化成純文字(稽查 D / bug 家族 5)。
+    - str → 原樣
+    - list-of-blocks(Gemini-3 / Anthropic 回 [{'type':'text','text':..},{'type':'thinking',..}])
+      → 只串接 text 區塊(thinking / 其他類型不收)
+    - 其他 → ''
+    取代散落各處的 `response.content if isinstance(.,str) else ""` —— 那會把 list 內容整個丟成空字串,
+    害 gemini-3 的文字回答被當『模型什麼都沒說』(實測 gemini-3-flash content 就是 list)。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") == "text" and isinstance(b.get("text"), str):
+                    parts.append(b["text"])
+            elif isinstance(b, str):
+                parts.append(b)
+        return "".join(parts)
+    return ""
+
+
 def _is_malformed_empty(response) -> bool:
     """稽查 D / bug 家族 5:Gemini 偶發 MALFORMED_FUNCTION_CALL ——
     回應的 content 與 tool_calls 都空、finish_reason 標 MALFORMED。
     這是『模型這次生成壞了、重試常會過』的暫時性錯誤,不是『模型不肯呼叫工具』。
     用來在 native FC 迴圈裡把它當可重試、而非當成 no-tool 直接放棄。"""
     try:
-        content = response.content if isinstance(response.content, str) else ""
+        content = _extract_text(response.content)
         tc = len(getattr(response, "tool_calls", []) or [])
         if content or tc:
             return False
@@ -4194,7 +4216,7 @@ async def _execute_skill_native_loop(
                     llm_with_tools.ainvoke(messages), timeout=600.0,
                 )
                 _el = asyncio.get_event_loop().time() - _t0
-                _content_str = response.content if isinstance(response.content, str) else ""
+                _content_str = _extract_text(response.content)
                 _tc_count = len(getattr(response, 'tool_calls', []) or [])
                 # Cache stats(Anthropic / OpenAI 有,Gemini / Groq / Ollama 沒)
                 _um_this = getattr(response, "usage_metadata", None) or {}
@@ -4286,7 +4308,7 @@ async def _execute_skill_native_loop(
         messages.append(response)
 
         tool_calls = list(getattr(response, "tool_calls", []) or [])
-        content_str = response.content if isinstance(response.content, str) else ""
+        content_str = _extract_text(response.content)
 
         # 沒 tool_calls → Claude 原生 end_turn(想結束)。對齊 Anthropic 官方:
         # 完成時就不呼叫工具、回純文字,這是天生的結束信號、不是異常。
@@ -5143,7 +5165,7 @@ async def execute_step_with_outlook(
                 llm_with_tools.ainvoke(messages), timeout=180.0
             )
             tool_calls = list(getattr(response, "tool_calls", []) or [])
-            content_str = response.content if isinstance(response.content, str) else ""
+            content_str = _extract_text(response.content)
             logger.info(
                 f"[{step_name}] LLM 回覆（content {len(content_str)} 字, tool_calls={len(tool_calls)}）"
             )
