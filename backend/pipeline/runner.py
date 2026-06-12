@@ -1220,11 +1220,13 @@ async def _notify_final(run: PipelineRun, config: PipelineConfig):
         except Exception:
             pass
 
-    # Step 摘要
+    # Step 摘要(稽查 A:按 step_index 查、不按 list 位置 —— condition 跳轉會讓位置≠索引、
+    # 用位置會把跳過的步顯示成別步的結果、把實際跑過的步顯示成「未執行」)
     step_lines = []
+    _by_idx = {sr.step_index: sr for sr in run.step_results}
     for i, step in enumerate(config.steps):
-        if i < len(run.step_results):
-            r = run.step_results[i]
+        r = _by_idx.get(i)
+        if r is not None:
             icon = {"ok": "✅", "warning": "⚠️", "failed": "❌"}.get(r.validation_status, "❓")
             step_lines.append(f"  {icon} {step.name}")
         else:
@@ -3206,7 +3208,9 @@ async def _run_self_heal_then_resume(run_id, failed_step_name, failed_step_index
         if _failed_is_condition:
             restart_idx = 0
         run.current_step = restart_idx
-        run.step_results = [sr for i, sr in enumerate(run.step_results) if i < restart_idx]
+        # 稽查 A:按 step_index 截、不按 list 位置(對齊 redo_prev 的正確寫法;condition
+        # 跳轉造成位置≠索引時,位置截斷會留錯筆數、害重跑從錯的狀態起)
+        run.step_results = [sr for sr in run.step_results if sr.step_index < restart_idx]
         run.awaiting_type = ""
         run.awaiting_message = ""
         run.awaiting_suggestion = ""
@@ -3557,10 +3561,11 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
         # 人工確認通過 → 繼續下一步
         logger.info(f"用戶確認通過步驟 {step_num}，繼續執行")
 
-        # 更新確認步驟結果
-        if run.current_step < len(run.step_results):
-            run.step_results[run.current_step].validation_reason = "人工確認 — 已通過"
-            run.step_results[run.current_step].stdout_tail = "已確認通過"
+        # 更新確認步驟結果(稽查 A:按 step_index 找這個確認步的結果、不按 list 位置)
+        _cur_sr = next((sr for sr in run.step_results if sr.step_index == run.current_step), None)
+        if _cur_sr is not None:
+            _cur_sr.validation_reason = "人工確認 — 已通過"
+            _cur_sr.stdout_tail = "已確認通過"
 
         run.awaiting_type = ""
         run.awaiting_message = ""
