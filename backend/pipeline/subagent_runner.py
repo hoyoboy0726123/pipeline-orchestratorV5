@@ -364,6 +364,18 @@ def _inject_run_python_stateless(system_prompt: str) -> str:
     return _block + system_prompt
 
 
+def _inject_no_latex(system_prompt: str) -> str:
+    """禁 LaTeX 數學語法。寫報告/markdown 時用 `$\\rightarrow$` 等 LaTeX,markdown 與
+    python-docx 都不渲染、會原樣印成 `$ightarrow$` 之類亂碼進 Word(實測踩過、競品報告)。"""
+    _block = (
+        "【✍️ 文字/報告禁用 LaTeX、用純文字 Unicode 符號(常踩、會進 Word 變亂碼)】\n"
+        "  **不要**寫 `$...$` LaTeX 數學語法(如 `$\\rightarrow$`、`$\\times$`、`$\\leq$`)——\n"
+        "  markdown 與 docx 都不渲染、會原樣顯示成 `$ightarrow$` 之類垃圾。\n"
+        "  一律改用純文字符號:→ × ÷ ≤ ≥ ± ≈ ,需要箭頭就直接打「→」。\n\n"
+    )
+    return _block + system_prompt
+
+
 def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
     """若 settings.skill_sandbox_mode='wsl_docker'、追加沙盒環境提示（共用 skill 的格式）。"""
     try:
@@ -476,7 +488,7 @@ async def run_subagent(
 
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
 
-    system_prompt = _inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))))
+    system_prompt = _inject_no_latex(_inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
 
     tool_timeout = _compute_tool_timeout(timeout)
@@ -925,7 +937,7 @@ async def _run_subagent_native(
         f"max_iter={max_iter}, tools={sorted(allowed_tools)})"
     )
 
-    system_prompt = _inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))))
+    system_prompt = _inject_no_latex(_inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
     tool_timeout = _compute_tool_timeout(timeout)
 
