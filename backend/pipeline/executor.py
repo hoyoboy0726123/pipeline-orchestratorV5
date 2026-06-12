@@ -4183,6 +4183,17 @@ async def _execute_skill_native_loop(
             continue
         consecutive_no_tool = 0
 
+        # 把 LLM 這一輪的決策旁白(content)記進 log。native FC 下這段原本只計字數、
+        # 看不到內容,長任務無法回溯「它在想什麼 / 為什麼這樣做」。實測 tool 輪的 content
+        # 一定 < 3000 字(prose-before-tool 守門在 1000+ log 從沒觸發),8000 字寬鬆上限
+        # 只擋病態案例、並保留誠實截斷標記。注意:深層 reasoning(thinking token)由
+        # llm_factory 消耗後丟棄、不在 content 內,這裡顯示的是「簡短決策旁白」。
+        _prose = (content_str or "").strip()
+        if _prose:
+            _pl = len(_prose)
+            _shown = _prose if _pl <= 8000 else _prose[:8000] + f"\n…[截斷、完整 {_pl} 字]"
+            logger.info(f"[{step_name}] 💬 {_shown}")
+
         # ── Prose-before-tool 守門(task #160、backport 自 subagent)──
         # 有 tool_calls 但伴隨超長 content(Sonnet 4.6 寫 5 萬字 parser 案例)→ 燒 output token、
         # 拖斷長連線。soft 只 log、enforce 連 _LIMIT 輪違規才中止。
