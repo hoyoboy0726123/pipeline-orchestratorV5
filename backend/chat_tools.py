@@ -146,16 +146,36 @@ def get_run_log(run_id: str, max_chars: int = 12000) -> str:
 
     回傳：log 文字。內容超過 max_chars 時保留末段 + 「(前面 N 字截掉)」前綴。
     """
-    log_dir = Path(__file__).parent / "ai_output" / "pipeline_logs"
-    if not log_dir.exists():
-        return "log 目錄不存在"
+    # log 目錄優先用 logger 實際寫入的 OUTPUT_BASE_PATH/pipeline_logs(搬遷後的新位置),
+    # 再 fallback 舊的 backend/ai_output/pipeline_logs(搬遷前的舊 run)。
+    # 之前寫死 backend/ai_output → 搬遷後新 run 全找不到、甚至整個「目錄不存在」。
+    log_dirs: list[Path] = []
+    try:
+        from config import OUTPUT_BASE_PATH as _OBP
+        log_dirs.append(Path(_OBP) / "pipeline_logs")
+    except Exception:
+        pass
+    log_dirs.append(Path(__file__).parent / "ai_output" / "pipeline_logs")  # 舊位置 fallback
+    # 去重(可能解析到同一夾)、只留存在的
+    _seen: set[str] = set()
+    existing_dirs: list[Path] = []
+    for d in log_dirs:
+        try:
+            key = str(d.resolve())
+        except Exception:
+            key = str(d)
+        if key not in _seen and d.exists():
+            _seen.add(key)
+            existing_dirs.append(d)
+    if not existing_dirs:
+        return "log 目錄不存在(已找 OUTPUT_BASE_PATH/pipeline_logs 與 backend/ai_output/pipeline_logs)"
     if not run_id or not run_id.strip():
         return "請提供 run_id（前 8 字也行）"
     rid_short = run_id.strip().split("-")[0][:8]
-    matches = sorted(
-        log_dir.glob(f"*{rid_short}*.log"),
-        key=lambda p: p.stat().st_mtime, reverse=True,
-    )
+    matches = []
+    for d in existing_dirs:
+        matches.extend(d.glob(f"*{rid_short}*.log"))
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     if not matches:
         return f"找不到 run_id 含 '{run_id}' 的 log 檔"
     cap = max(2000, min(int(max_chars or 12000), 30000))
