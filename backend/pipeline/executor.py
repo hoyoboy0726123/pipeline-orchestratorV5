@@ -1661,6 +1661,22 @@ def _extract_code_block(text: str) -> Optional[str]:
     return blocks[0].group(1).strip() if blocks else None
 
 
+def _is_malformed_empty(response) -> bool:
+    """稽查 D / bug 家族 5:Gemini 偶發 MALFORMED_FUNCTION_CALL ——
+    回應的 content 與 tool_calls 都空、finish_reason 標 MALFORMED。
+    這是『模型這次生成壞了、重試常會過』的暫時性錯誤,不是『模型不肯呼叫工具』。
+    用來在 native FC 迴圈裡把它當可重試、而非當成 no-tool 直接放棄。"""
+    try:
+        content = response.content if isinstance(response.content, str) else ""
+        tc = len(getattr(response, "tool_calls", []) or [])
+        if content or tc:
+            return False
+        fr = str((getattr(response, "response_metadata", None) or {}).get("finish_reason") or "").upper()
+        return "MALFORMED" in fr
+    except Exception:
+        return False
+
+
 def _sanitize_code(code: str) -> str:
     """清除混入程式碼中的 LLM 解釋文字（非 Python/Shell 語法的行）。"""
     lines = code.split('\n')
@@ -4206,6 +4222,17 @@ async def _execute_skill_native_loop(
                         f"  response.tool_calls (raw) = {getattr(response, 'tool_calls', None)!r}\n"
                         f"  response.invalid_tool_calls = {getattr(response, 'invalid_tool_calls', None)!r}"
                     )
+                # MALFORMED_FUNCTION_CALL = 壞生成、可重試(不是模型不肯呼叫工具)。
+                # 用既有 3 次預算重試;耗盡才落回下游 no-tool 處理(不比修前差)。
+                if _is_malformed_empty(response) and _attempt < 2:
+                    _w = 2 ** _attempt
+                    logger.warning(
+                        f"[{step_name}] finish_reason=MALFORMED_FUNCTION_CALL(壞生成、非不呼叫工具)"
+                        f"→ {_w}s retry({_attempt + 1}/2)"
+                    )
+                    response = None
+                    await asyncio.sleep(_w)
+                    continue
                 last_err = None
                 break
             except asyncio.TimeoutError as e:

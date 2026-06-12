@@ -1046,6 +1046,17 @@ async def _run_subagent_native(
                         f"  response.tool_calls (raw) = {getattr(response, 'tool_calls', None)!r}\n"
                         f"  response.invalid_tool_calls = {getattr(response, 'invalid_tool_calls', None)!r}"
                     )
+                # MALFORMED_FUNCTION_CALL = 壞生成、可重試(非模型不肯呼叫工具),用既有重試預算重試。
+                from pipeline.executor import _is_malformed_empty as _malformed
+                if _malformed(response) and _attempt < 2:
+                    _wait = 2 ** _attempt
+                    log.warning(
+                        f"[{step_name}] finish_reason=MALFORMED_FUNCTION_CALL(壞生成、非不呼叫工具)"
+                        f"→ {_wait}s retry({_attempt + 1}/2)"
+                    )
+                    response = None
+                    await asyncio.sleep(_wait)
+                    continue
                 last_llm_err = None
                 break
             except asyncio.TimeoutError as e:
