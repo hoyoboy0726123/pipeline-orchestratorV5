@@ -1016,13 +1016,77 @@ def detect_pip_install(tc_name: str, tc_args) -> list:
     return []
 
 
-def detect_missing_module(result: str) -> list:
-    """共用:從 tool result 偵測 ModuleNotFoundError、回缺的套件名 list(或空)。"""
+# import 名 ≠ PyPI 安裝名 的知名套件。key=程式碼裡 import 的名字、value=pip install 的名字。
+# 缺套件偵測抓到的是 import 名(ModuleNotFoundError 給的),直接拿去裝會裝錯/裝不到
+# (例:pip install whisper 裝到的是另一個不相干的套件,真正要的是 openai-whisper)。
+_IMPORT_TO_PKG = {
+    "whisper": "openai-whisper",
+    "cv2": "opencv-python",
+    "PIL": "Pillow",
+    "bs4": "beautifulsoup4",
+    "sklearn": "scikit-learn",
+    "skimage": "scikit-image",
+    "yaml": "PyYAML",
+    "docx": "python-docx",
+    "pptx": "python-pptx",
+    "fitz": "PyMuPDF",
+    "dotenv": "python-dotenv",
+    "dateutil": "python-dateutil",
+    "git": "GitPython",
+    "Crypto": "pycryptodome",
+    "OpenSSL": "pyOpenSSL",
+    "serial": "pyserial",
+    "usb": "pyusb",
+    "win32com": "pywin32",
+    "win32api": "pywin32",
+    "win32con": "pywin32",
+    "speech_recognition": "SpeechRecognition",
+    "telebot": "pyTelegramBotAPI",
+    "Xlib": "python-xlib",
+    "attr": "attrs",
+    "jose": "python-jose",
+    "magic": "python-magic",
+    "slugify": "python-slugify",
+}
+
+
+def _resolve_pkg_name(import_name: str, task_description: str = "") -> str:
+    """把 import 名解析成真實 pip 安裝名。優先序:
+    1) 靜態別名表(知名 import≠package、零誤判)
+    2) 任務描述線索(保守):任務文字裡有帶連字號/底線的 token、且其「最後一段」
+       剛好等於 import 名 → 採用(openai-whisper 末段=whisper ✓;
+       pandas-profiling 末段=profiling≠pandas → 不採用、避免亂猜)
+    3) 退回 import 名本身
+    """
+    import re as _re
+    base = (import_name or "").split(".")[0]
+    if not base:
+        return import_name
+    # 1) 靜態表優先(最確定)
+    if base in _IMPORT_TO_PKG:
+        return _IMPORT_TO_PKG[base]
+    # 2) 任務描述線索(嚴格末段比對、低誤判)
+    if task_description:
+        for tok in _re.findall(r"[A-Za-z][A-Za-z0-9_.-]+", task_description):
+            t = tok.strip(" .,，。、)(」「")
+            if ("-" in t or "_" in t) and t.lower() != base.lower():
+                last = _re.split(r"[-_]", t)[-1]
+                if last.lower() == base.lower():
+                    return t
+    # 3) 退回 import 名
+    return base
+
+
+def detect_missing_module(result: str, task_description: str = "") -> list:
+    """共用:從 tool result 偵測 ModuleNotFoundError、回缺的套件名 list(或空)。
+    回傳的是「真實 pip 安裝名」(已經過 import 名→package 名解析)、不是 import 名。"""
     import re
     if not result:
         return []
     m = re.search(r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]", result)
-    return [m.group(1).split(".")[0]] if m else []
+    if not m:
+        return []
+    return [_resolve_pkg_name(m.group(1), task_description)]
 
 
 def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "",
@@ -4352,7 +4416,8 @@ async def _execute_skill_native_loop(
                 was_interactive = True  # 用過人工問答 → recipe 標記(replay 時提醒可能要再問)
 
             # ── ModuleNotFoundError 早期攔截(共用 helper detect_missing_module)──
-            _miss = detect_missing_module(result)
+            # 傳 task_description:讓 import 名→pip 名 能用任務文字當線索(如任務寫 openai-whisper)
+            _miss = detect_missing_module(result, task_description)
             if _miss:
                 logger.warning(f"[{step_name}] 🛑 native 偵測 ModuleNotFoundError: {_miss} → 轉 missing_dependency 使用者確認")
                 return ExecResult(
