@@ -49,10 +49,14 @@ if not exist "%~dp0frontend\node_modules" (
 )
 
 echo.
-echo [1/2] 啟動後端 (Port 8004) ...
+REM 後端綁定位址:預設只綁 127.0.0.1(只有本機連得到),安全。
+REM 後端 API 無認證、又能執行 AI 生成的程式碼,綁 0.0.0.0 等於對整個區網開放可執行後門。
+REM 若你確實需要從區網其他裝置連(自負風險),啟動前設環境變數:  set PO_HOST=0.0.0.0
+if not defined PO_HOST set "PO_HOST=127.0.0.1"
+echo [1/2] 啟動後端 (Port 8004, host %PO_HOST%) ...
 REM /k 讓視窗在 uvicorn 崩潰時保持開啟、方便看錯誤
 REM 顯式清掉可能從父 process 繼承的 PYTHONUTF8（main.py 自己會設 stdout 編碼）
-start "PO_Backend" cmd /k "cd /d "%~dp0backend" && set "PYTHONUTF8=" && .venv\Scripts\uvicorn.exe main:app --host 0.0.0.0 --port 8004"
+start "PO_Backend" cmd /k "cd /d "%~dp0backend" && set "PYTHONUTF8=" && .venv\Scripts\uvicorn.exe main:app --host %PO_HOST% --port 8004"
 
 echo [2/2] 啟動前端 (Port 3002) ...
 start "PO_Frontend" cmd /k "cd /d "%~dp0frontend" && npx next dev --port 3002"

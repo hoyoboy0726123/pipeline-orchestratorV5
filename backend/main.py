@@ -190,10 +190,29 @@ _GEMINI_EXCLUDE_KEYWORDS = ("tts", "audio", "embedding", "robotics", "image", "l
 _GEMINI_THINKING_PREFIXES = ("gemini-2.5-", "gemini-3-", "gemini-3.")
 
 
+# 設定回應裡的敏感欄位:不可明文外洩(開源 + 0.0.0.0 + 無 auth 下任何 LAN 裝置都讀得到)。
+# /settings/model 是給「模型下拉選單」用的、前端完全不從這裡讀金鑰(notifications token 走
+# /settings/notifications、tavily 走 /settings/web-search 的 has_key 模式),故這裡一律 redact 成
+# has_<key> 布林旗標。實測:redact 前此端點會吐出 tavily_api_key / telegram_bot_token 明文。
+_SENSITIVE_SETTING_KEYS = (
+    "telegram_bot_token", "telegram_chat_id", "line_notify_token", "tavily_api_key",
+)
+
+
+def _redact_settings(d: dict) -> dict:
+    """回傳副本:敏感欄位的明文值換成 has_<key> 旗標(true/false),不洩漏實際值。"""
+    out = dict(d or {})
+    for k in _SENSITIVE_SETTING_KEYS:
+        if k in out:
+            out["has_" + k] = bool(str(out.get(k) or "").strip())
+            out.pop(k, None)
+    return out
+
+
 @app.get("/settings/model")
 async def get_model_settings():
     from settings import get_settings
-    return get_settings()
+    return _redact_settings(get_settings())
 
 
 class ModelSettingsRequest(BaseModel):
@@ -217,7 +236,7 @@ class ModelSettingsRequest(BaseModel):
 async def put_model_settings(req: ModelSettingsRequest):
     from settings import update_settings
     try:
-        return update_settings(
+        return _redact_settings(update_settings(
             req.provider, req.model, req.ollama_base_url, req.ollama_thinking, req.ollama_num_ctx,
             req.gemini_thinking, req.anthropic_thinking,
             secondary_provider=req.secondary_provider,
@@ -226,7 +245,7 @@ async def put_model_settings(req: ModelSettingsRequest):
             secondary_ollama_num_ctx=req.secondary_ollama_num_ctx,
             secondary_gemini_thinking=req.secondary_gemini_thinking,
             secondary_anthropic_thinking=req.secondary_anthropic_thinking,
-        )
+        ))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
