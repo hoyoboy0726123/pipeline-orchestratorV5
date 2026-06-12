@@ -1701,6 +1701,55 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
           const obj = JSON.parse(t.replace(/^-\s*/, ''))
           cur.wcInteractions.push(obj)
         } catch { /* ignore */ }
+      // ── computer_use 節點回讀(稽查 F)──────────────────────────────
+      // stepsToYaml 會寫出這些欄位、但 parseYaml 原本一個都沒讀回 → 在 YAML 編輯器
+      // 手改 computer_use 節點後按「套用」會把 17 個欄位(含 actions)全靜默丟掉。
+      // 以下逐欄回讀,鏡像對應 stepsToYaml 的 computer_use 區塊。
+      } else if (/^computer_use:/.test(t) && cur) {
+        cur.computerUse = /true/.test(t)
+      } else if (/^assets_dir:/.test(t) && cur) {
+        cur.computerUseAssetsDir = t.replace(/^assets_dir:\s*/, '').replace(/^"|"$/g, '').trim()
+      } else if (/^fail_fast:/.test(t) && cur) {
+        cur.computerUseFailFast = /true/.test(t)
+      } else if (/^cv_threshold:/.test(t) && cur) {
+        const v = parseFloat(t.replace(/^cv_threshold:\s*/, '')); if (!isNaN(v)) cur.cvThreshold = v
+      } else if (/^cv_search_only_near:/.test(t) && cur) {
+        cur.cvSearchOnlyNear = /true/.test(t)
+      } else if (/^cv_search_radius:/.test(t) && cur) {
+        const v = parseInt(t.replace(/^cv_search_radius:\s*/, '')); if (!isNaN(v)) cur.cvSearchRadius = v
+      } else if (/^cv_trigger_hover:/.test(t) && cur) {
+        cur.cvTriggerHover = /true/.test(t)
+      } else if (/^cv_hover_wait_ms:/.test(t) && cur) {
+        const v = parseInt(t.replace(/^cv_hover_wait_ms:\s*/, '')); if (!isNaN(v)) cur.cvHoverWaitMs = v
+      } else if (/^cv_coord_fallback:/.test(t) && cur) {
+        cur.cvCoordFallback = /true/.test(t)
+      } else if (/^ocr_threshold:/.test(t) && cur) {
+        const v = parseFloat(t.replace(/^ocr_threshold:\s*/, '')); if (!isNaN(v)) cur.ocrThreshold = v
+      } else if (/^ocr_cv_fallback:/.test(t) && cur) {
+        cur.ocrCvFallback = /true/.test(t)
+      } else if (/^cu_vlm_check_strategy:/.test(t) && cur) {
+        const v = t.replace(/^cu_vlm_check_strategy:\s*/, '').replace(/^"|"$/g, '').trim()
+        if (v === 'off' || v === 'after_each' || v === 'critical_only') cur.cuVlmCheckStrategy = v
+      } else if (/^cu_on_mismatch:/.test(t) && cur) {
+        const v = t.replace(/^cu_on_mismatch:\s*/, '').replace(/^"|"$/g, '').trim()
+        if (v === 'stop_notify' || v === 'retry_once' || v === 'skip_and_continue') cur.cuOnMismatch = v
+      } else if (/^cu_vlm_max_retries:/.test(t) && cur) {
+        const v = parseInt(t.replace(/^cu_vlm_max_retries:\s*/, '')); if (!isNaN(v)) cur.cuVlmMaxRetries = v
+      } else if (/^cu_mode:/.test(t) && cur) {
+        const v = t.replace(/^cu_mode:\s*/, '').replace(/^"|"$/g, '').trim()
+        cur.cuMode = (v === 'uia' ? 'uia' : 'pixel')
+      } else if (/^uia_window:/.test(t) && cur) {
+        const raw = t.replace(/^uia_window:\s*/, '').trim()
+        // 寫出端用 JSON.stringify → 多半帶引號,剝掉;也容忍裸字串
+        try { cur.uiaWindow = JSON.parse(raw) } catch { cur.uiaWindow = raw.replace(/^"|"$/g, '') }
+      } else if (/^actions:/.test(t) && cur) {
+        cur.computerUseActions = []
+      } else if (/^- \{/.test(t) && cur && Array.isArray(cur.computerUseActions)) {
+        // actions 的 JSON 陣列項目(一行一動作)
+        try {
+          const obj = JSON.parse(t.replace(/^-\s*/, ''))
+          cur.computerUseActions.push(obj)
+        } catch { /* ignore */ }
       } else if (/^visual_validation:/.test(t) && cur) {
         cur.visualValidation = /true/.test(t)
       } else if (/^vv_source:/.test(t) && cur) {
@@ -1893,6 +1942,26 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     subagent: partial.subagent ?? false,
     subagentRole: partial.subagentRole ?? 'data_analyst',
     subagentMaxIter: partial.subagentMaxIter ?? 5,
+    // computer_use 節點(稽查 F)— 跟 condition 一樣的漏洞:buildStep 原本完全沒列這些欄位,
+    // parseYaml 設好 cur.computerUse=true 等、進 buildStep 後全被丟掉 → YAML round-trip 丟失桌面自動化節點。
+    // 預設值對齊 newComputerUseData。
+    computerUse: partial.computerUse ?? false,
+    computerUseActions: partial.computerUseActions ?? [],
+    computerUseAssetsDir: partial.computerUseAssetsDir ?? '',
+    computerUseFailFast: partial.computerUseFailFast ?? true,
+    cvThreshold: partial.cvThreshold ?? 0.5,
+    cvSearchOnlyNear: partial.cvSearchOnlyNear ?? false,
+    cvSearchRadius: partial.cvSearchRadius ?? 400,
+    cvTriggerHover: partial.cvTriggerHover ?? true,
+    cvHoverWaitMs: partial.cvHoverWaitMs ?? 200,
+    cvCoordFallback: partial.cvCoordFallback ?? false,
+    ocrThreshold: partial.ocrThreshold ?? 0.6,
+    ocrCvFallback: partial.ocrCvFallback ?? false,
+    cuVlmCheckStrategy: partial.cuVlmCheckStrategy ?? 'off',
+    cuOnMismatch: partial.cuOnMismatch ?? 'stop_notify',
+    cuVlmMaxRetries: partial.cuVlmMaxRetries ?? 1,
+    cuMode: partial.cuMode ?? 'pixel',
+    uiaWindow: partial.uiaWindow ?? '',
     // condition / 分支控制(YAML 來源:condition: true + expression+on_true/on_false 或 switch+cases)
     // 之前 buildStep 漏寫這 8 個欄位 → parseYaml 設好 cur.condition=true 等、進 buildStep 後全被丟掉、
     // stepsToYaml 一看 s.condition===undefined 就完全不寫 condition 區塊 → YAML round-trip 丟失條件節點
