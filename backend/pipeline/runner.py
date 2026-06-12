@@ -3384,34 +3384,38 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
 
         all_ok = all(ok for _, ok, _ in results)
         if not all_ok:
-            # 安裝失敗 → 回 awaiting_human。大型依賴 / 逾時 → 給「終端機手動安裝」指引,
-            # 而不是只丟「安裝失敗」(避免使用者卡住、不知道下一步)。
+            # 安裝未成功 → 一律給「終端機手動安裝」指引(通用,不只大型/逾時;
+            # 大型表只是快捷判斷、逾時是安全網,任何失敗都導向手動安裝才是治本)。
             import json as _json
             from skill_pkg_manager import manual_install_instructions as _mii, is_large_pkg as _ilp
             failed = [(p, m) for p, ok, m in results if not ok]
             failed_pkgs = [p for p, _ in failed]
             any_large = any(_ilp(p) for p in failed_pkgs)
             timed_out = any(("逾時" in m) or ("timeout" in m.lower()) for _, m in failed)
-            if any_large or timed_out:
-                # 大型 / 逾時:統一給終端機手動安裝指引(含 sandbox/host 正確指令與路徑)
-                manual_hint = _mii(failed_pkgs, target)
-                run.awaiting_message = f"需要在終端機手動安裝：{', '.join(failed_pkgs)}"
-                _ret = f"📋 需在終端機手動安裝：{', '.join(failed_pkgs)}"
-            else:
-                # 一般失敗:顯示原始錯誤
-                manual_hint = "\n".join(f"• {p}: {m[:300]}" for p, m in failed)
-                run.awaiting_message = f"安裝失敗：{', '.join(failed_pkgs)}"
-                _ret = f"❌ 安裝失敗：{', '.join(failed_pkgs)}"
-            # 保持 awaiting_suggestion 為 JSON(前端 modal 靠它 parse packages),加 manual_hint 欄位
+            big_or_slow = any_large or timed_out   # 大型 or 裝太久 → UI 走「請到終端機」模式
+            # 通用:任何失敗都附終端機指引;非大型/逾時的失敗再附 app 內安裝的原始錯誤幫 debug
+            manual_hint = _mii(failed_pkgs, target)
+            if not big_or_slow:
+                manual_hint += ("\n\n（app 內安裝的原始錯誤,供參考）\n"
+                                + "\n".join(f"• {p}: {m[:300]}" for p, m in failed))
+            run.awaiting_message = (f"需要在終端機手動安裝：{', '.join(failed_pkgs)}" if big_or_slow
+                                    else f"安裝失敗,請改在終端機安裝：{', '.join(failed_pkgs)}")
+            # awaiting_suggestion 保持 JSON(前端 modal 靠它 parse);is_large=big_or_slow 控制 UI 模式
             run.awaiting_suggestion = _json.dumps({
                 "packages": failed_pkgs,
                 "manual_hint": manual_hint,
-                "is_large": any_large,
+                "is_large": big_or_slow,
                 "install_failed": True,
             }, ensure_ascii=False)
+            # 使用者要求:手動安裝指引也要寫進 log(不只彈窗)、方便事後回查
+            logger.warning(
+                f"[install_dep] {target} 安裝未成功 {failed_pkgs}"
+                f"(large={any_large}, timeout={timed_out})→ 終端機手動安裝指引:\n{manual_hint}"
+            )
             # awaiting_type 維持 missing_dependency（讓用戶可以「改任務」或重試）
             store.save(run)
-            return _ret
+            return (f"📋 需在終端機手動安裝：{', '.join(failed_pkgs)}" if big_or_slow
+                    else f"❌ 安裝失敗(已附終端機安裝指引):{', '.join(failed_pkgs)}")
 
         # 全部 ok → retry 該步驟
         run.awaiting_type = ""

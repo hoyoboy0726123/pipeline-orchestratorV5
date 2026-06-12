@@ -2209,8 +2209,9 @@ export default function PipelinePage() {
           try { meta = awaitingSuggestion ? JSON.parse(awaitingSuggestion) : {} } catch { /* ignore */ }
           const pkgs = meta.packages || []
           const manualHint = meta.manual_hint || ''
-          // 大型依賴 or 已試裝失敗 → 走「終端機手動安裝」流程(不在 app 內裝、避免靜默逾時)
-          const manualMode = !!(meta.is_large || (meta.install_failed && manualHint))
+          // 大型/裝太久(is_large=big_or_slow)→ 走「終端機手動安裝」模式(改按鈕文案、隱藏去設定頁)。
+          // 一般失敗保留 app 內重試/去設定頁,但下方仍會顯示 manual_hint 指令框當額外幫助。
+          const manualMode = !!meta.is_large
           const installLabel = installing ? '⏳ 安裝中…' : (manualMode ? '✅ 我已裝好，繼續' : '✅ 安裝並繼續')
           return (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-blue-50 border border-blue-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[640px] w-[95%]">

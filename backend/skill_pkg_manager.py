@@ -9,6 +9,7 @@ UI 一次只操作一邊，跟著 skill_sandbox_mode toggle 走。target 參數�
   "auto" → 讀 settings.skill_sandbox_mode 決定（預設）
   "host" / "sandbox" → 明確指定
 """
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,13 @@ import time
 import json as _json
 from pathlib import Path
 from threading import Lock
+
+# in-app pip install 逾時(秒)。超過視為「裝太久 → 多半是大型依賴」,中止並回終端機
+# 手動安裝指引(通用機制、不只靠 _LARGE_PKGS 硬編碼表)。可用 env 調整。
+try:
+    SKILL_INSTALL_TIMEOUT_SEC = int(os.environ.get("SKILL_INSTALL_TIMEOUT_SEC", "180") or 180)
+except ValueError:
+    SKILL_INSTALL_TIMEOUT_SEC = 180
 
 
 # ── 套件名 PEP 503 正規化 — 整個模組唯一的「相同套件」比對基準 ────────────
@@ -205,7 +213,7 @@ def _pip_install(pkg_name: str) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", pkg_name, "-q"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=SKILL_INSTALL_TIMEOUT_SEC,
         )
         if result.returncode == 0:
             msg = f"✅ {pkg_name} 安裝成功"
@@ -458,7 +466,7 @@ def _sandbox_pip_install(pkg_name: str) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["wsl", "-e", *prefix, "exec", _SANDBOX_CONTAINER, "pip", "install", "--no-cache-dir", pkg_name],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=SKILL_INSTALL_TIMEOUT_SEC,
         )
         if result.returncode == 0:
             msg = f"✅ {pkg_name} 已安裝到沙盒容器"
