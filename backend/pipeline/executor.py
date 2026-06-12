@@ -2428,6 +2428,16 @@ async def execute_step_with_skill(
                 logger.debug(f"[{step_name}] 📖 無 Recipe 紀錄")
             _fp = {p: _recipe_fp(p) for p in input_paths}
             cached = match_recipe(pipeline_id, _rkey, _recipe_sha1(task_description), _fp)
+            # 互動式 recipe(過程用過 ask_user)不直接重播:快取碼把上次的人工選擇寫死在裡面,
+            # 直接 replay 等於拿舊答案、永遠不再問使用者 → 使用者這次的選擇「沒被記錄/沒被使用」。
+            # 退回 LLM 重跑,讓 ask_user 重新觸發、收這次的回答。was_interactive 一直有存、
+            # 但 replay 從來沒檢查它(稽查 ask_user/recipe 問題的 root cause)。
+            if cached and cached.get("was_interactive"):
+                logger.info(
+                    f"[{step_name}] 📖 命中互動式 recipe(含 ask_user 回答),不直接重播 → "
+                    f"退回 LLM 重跑以重新詢問使用者"
+                )
+                cached = None
             if cached:
                 logger.info(
                     f"[{step_name}] 📖 找到快取 recipe (成功 {cached['success_count']} 次, "
