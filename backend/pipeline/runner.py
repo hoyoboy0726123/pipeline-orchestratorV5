@@ -2424,14 +2424,17 @@ async def _run_pipeline_inner(
                     reason=exec_result.stdout.replace("[visual_validation] ", "") or "視覺驗證",
                     suggestion=_vv_suggestion,
                 )
-            # subagent 節點:比照 skill 節點跑 LLM 內容驗證。
-            # (舊版這裡只看 exit_code、不驗內容,理由「loop 內已自驗」—— 但 loop 內自驗只檢查
-            #  「有沒有產出檔」,不檢查「做完整沒」。結果 subagent 把『校正全部文字』做一半就 done、
-            #  檔案在、exit 0 → 直接過。對齊 skill 的驗證階梯堵這個洞:
-            #    exit≠0(hallucinated/stale/假Office)→ 直接失敗、不浪費 LLM
-            #    有 expect → 深度驗證(validator agent 會讀檔查完整性/遺漏)
-            #    沒 expect 但有實際產出檔 → 淺層 LLM 驗證(擋明顯 silent fail / 半成品)
-            #    沒 expect 又沒產出檔(planner/critic 純推理 role)→ 只看 exit code、不誤殺
+            # subagent 節點驗證:偷懶防護「靠 expect 觸發」,沒填就維持原本不誤殺的行為。
+            #   exit≠0(hallucinated/stale/假Office)→ 直接失敗、不浪費 LLM
+            #   有填 expect → 深度驗證(validator agent 讀檔查完整性/遺漏)→ 抓「做一半就 done」
+            #   沒填 expect → 直接過(只看 exit code)
+            #
+            # ⚠ 為什麼沒 expect 就過、不比照 skill 跑淺驗:
+            #   研究/規劃/評論型 role 常無明確產出檔、或產出是判斷性 prose,「完整=多少」沒有
+            #   客觀基準。沒 expect 還硬驗 = 在沒標準下猜、會誤殺正常研究輸出(歷史踩過、見
+            #   commit #164「撤強邊界引入誤判」、原始設計刻意讓 subagent 不填就過)。
+            #   所以偷懶防護改成 opt-in:AI 助手 prompt 已要求「全量任務(全部/所有/逐一/完整)
+            #   必填 output.expect」→ 那條路徑才深驗抓偷懶;研究型不填 → 維持不誤殺。
             elif step.subagent:
                 if exec_result.exit_code != 0:
                     val = ValidationResult(
@@ -2439,27 +2442,24 @@ async def _run_pipeline_inner(
                         reason=(exec_result.stderr or "subagent 失敗"),
                         suggestion=exec_result.stderr or "",
                     )
-                elif config.validate and (has_expect or _eff_output_path):
-                    _use_deep = bool(has_expect)
-                    _vfn = validate_step_with_skill if _use_deep else validate_step
+                elif config.validate and has_expect:
                     logger.info(
-                        f"[{step.name}] 🔍 Subagent {'深度' if _use_deep else '淺層'} LLM 驗證"
-                        f"(比照 skill 節點、防『做一半就 done』)"
+                        f"[{step.name}] 🔍 Subagent 深度驗證(有 expect、讀檔查完整性、防『做一半就 done』)"
                     )
-                    val = await _vfn(
+                    val = await validate_step_with_skill(
                         step_name=step.name,
                         command=step.batch,
                         exit_code=exec_result.exit_code,
                         stdout=exec_result.stdout,
                         stderr=exec_result.stderr,
                         output_path=_eff_output_path,
-                        output_expect=step.output.get_expect() if (step.output and has_expect) else None,
+                        output_expect=step.output.get_expect() if step.output else None,
                         logger=logger,
                         llm_role=getattr(step, "llm_role", "primary"),
                         step_start_time=step_started_at,
                     )
                 else:
-                    # 純推理 role(無 expect、無產出檔)或 validate=off → 只看 exit code
+                    # 沒填 expect → 維持原設計「直接過」(避免誤殺無明確產出基準的研究型 role)
                     val = ValidationResult(
                         status="ok",
                         reason=(exec_result.stdout or "").splitlines()[0] if exec_result.stdout else "subagent 完成",
