@@ -3384,13 +3384,34 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
 
         all_ok = all(ok for _, ok, _ in results)
         if not all_ok:
-            # 安裝失敗 → 回到 awaiting_human、訊息更新（讓用戶看到失敗原因）
+            # 安裝失敗 → 回 awaiting_human。大型依賴 / 逾時 → 給「終端機手動安裝」指引,
+            # 而不是只丟「安裝失敗」(避免使用者卡住、不知道下一步)。
+            import json as _json
+            from skill_pkg_manager import manual_install_instructions as _mii, is_large_pkg as _ilp
             failed = [(p, m) for p, ok, m in results if not ok]
-            run.awaiting_message = f"安裝失敗：{', '.join(p for p, _ in failed)}"
-            run.awaiting_suggestion = "\n".join(f"• {p}: {m[:200]}" for p, m in failed)
+            failed_pkgs = [p for p, _ in failed]
+            any_large = any(_ilp(p) for p in failed_pkgs)
+            timed_out = any(("逾時" in m) or ("timeout" in m.lower()) for _, m in failed)
+            if any_large or timed_out:
+                # 大型 / 逾時:統一給終端機手動安裝指引(含 sandbox/host 正確指令與路徑)
+                manual_hint = _mii(failed_pkgs, target)
+                run.awaiting_message = f"需要在終端機手動安裝：{', '.join(failed_pkgs)}"
+                _ret = f"📋 需在終端機手動安裝：{', '.join(failed_pkgs)}"
+            else:
+                # 一般失敗:顯示原始錯誤
+                manual_hint = "\n".join(f"• {p}: {m[:300]}" for p, m in failed)
+                run.awaiting_message = f"安裝失敗：{', '.join(failed_pkgs)}"
+                _ret = f"❌ 安裝失敗：{', '.join(failed_pkgs)}"
+            # 保持 awaiting_suggestion 為 JSON(前端 modal 靠它 parse packages),加 manual_hint 欄位
+            run.awaiting_suggestion = _json.dumps({
+                "packages": failed_pkgs,
+                "manual_hint": manual_hint,
+                "is_large": any_large,
+                "install_failed": True,
+            }, ensure_ascii=False)
             # awaiting_type 維持 missing_dependency（讓用戶可以「改任務」或重試）
             store.save(run)
-            return f"❌ 安裝失敗：{', '.join(p for p, _ in failed)}"
+            return _ret
 
         # 全部 ok → retry 該步驟
         run.awaiting_type = ""

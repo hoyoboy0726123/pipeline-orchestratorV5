@@ -448,6 +448,7 @@ export default function PipelinePage() {
   const [askUserAnswer, setAskUserAnswer] = useState('')
   const [awaitingMessage, setAwaitingMessage] = useState('')
   const [awaitingSuggestion, setAwaitingSuggestion] = useState('')
+  const [installing, setInstalling] = useState(false)   // 缺套件「安裝並繼續」進行中（顯示安裝中、disable 按鈕）
   const [showRecipeConfirm, setShowRecipeConfirm] = useState(false)
   const [pendingRecipeRunId, setPendingRecipeRunId] = useState<string | null>(null)
   const [pendingRecipeCount, setPendingRecipeCount] = useState(0)
@@ -1678,8 +1679,17 @@ export default function PipelinePage() {
       return
     }
 
+    // 缺套件「安裝並繼續」會同步阻塞整個 pip install（大依賴可能數分鐘）→ 期間顯示「安裝中」、
+    // disable 按鈕,避免使用者以為當機。大型依賴後端會秒回手動指引、不會真的卡住。
+    if (decision === 'install_dep') setInstalling(true)
     try {
       await resumePipeline(rid, decision, hint)
+      // 安裝可能失敗並停在 missing_dependency（大型依賴 → 回手動指引）→ 讓 poll 重新同步、
+      // 由後端狀態決定 modal 是消失(成功往下跑)還是更新成手動指引,不在這裡硬清。
+      if (decision === 'install_dep') {
+        setTimeout(() => pollStatus(rid), 300)
+        return
+      }
       // Guard：poll 可能在 await 期間已完成 pipeline（例如最後一步是人工確認）
       // 此時 runIdRef.current 已被 poll 的 done 分支清空，不可再覆寫狀態
       setAwaitingRunId(null)
@@ -1694,6 +1704,8 @@ export default function PipelinePage() {
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '操作失敗')
+    } finally {
+      if (decision === 'install_dep') setInstalling(false)
     }
   }
 
@@ -2193,28 +2205,35 @@ export default function PipelinePage() {
 
         {/* missing_dependency banner — skill 跑到一半發現缺套件 */}
         {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'missing_dep' && (() => {
-          let meta: { packages?: string[]; stderr_tail?: string } = {}
+          let meta: { packages?: string[]; stderr_tail?: string; manual_hint?: string; is_large?: boolean; install_failed?: boolean } = {}
           try { meta = awaitingSuggestion ? JSON.parse(awaitingSuggestion) : {} } catch { /* ignore */ }
           const pkgs = meta.packages || []
+          const manualHint = meta.manual_hint || ''
+          // 大型依賴 or 已試裝失敗 → 走「終端機手動安裝」流程(不在 app 內裝、避免靜默逾時)
+          const manualMode = !!(meta.is_large || (meta.install_failed && manualHint))
+          const installLabel = installing ? '⏳ 安裝中…' : (manualMode ? '✅ 我已裝好，繼續' : '✅ 安裝並繼續')
           return (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-blue-50 border border-blue-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[95%]">
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-blue-50 border border-blue-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[640px] w-[95%]">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-blue-700 font-medium text-sm whitespace-nowrap">📦 需要安裝套件</span>
+                <span className="text-blue-700 font-medium text-sm whitespace-nowrap">{manualMode ? '📦 需在終端機安裝大型套件' : '📦 需要安裝套件'}</span>
                 {awaitingMessage && <span className="text-blue-600 text-xs max-w-[260px] truncate">{awaitingMessage}</span>}
                 <div className="flex items-center gap-2 ml-auto">
                   <button
                     onClick={() => handleDecision('install_dep', pkgs.join(','))}
-                    disabled={pkgs.length === 0}
-                    className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
-                  >✅ 安裝並繼續</button>
-                  <a
-                    href="/settings"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="去設定頁手動安裝"
-                    className="px-3 py-1.5 bg-white border border-blue-200 text-blue-700 rounded-lg text-xs font-medium hover:bg-blue-100 whitespace-nowrap"
-                  >⚙️ 去設定頁</a>
-                  <button onClick={() => handleDecision('abort')} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap">🛑 中止</button>
+                    disabled={pkgs.length === 0 || installing}
+                    title={manualMode ? '在終端機裝好後按這裡，系統會偵測到已安裝並往下跑' : '在 app 內安裝後自動繼續'}
+                    className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap flex items-center gap-1"
+                  >{installing && <span className="inline-block w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}{installLabel}</button>
+                  {!manualMode && (
+                    <a
+                      href="/settings"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="去設定頁手動安裝"
+                      className="px-3 py-1.5 bg-white border border-blue-200 text-blue-700 rounded-lg text-xs font-medium hover:bg-blue-100 whitespace-nowrap"
+                    >⚙️ 去設定頁</a>
+                  )}
+                  <button onClick={() => handleDecision('abort')} disabled={installing} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 disabled:opacity-50 whitespace-nowrap">🛑 中止</button>
                 </div>
               </div>
               {pkgs.length > 0 && (
@@ -2225,6 +2244,13 @@ export default function PipelinePage() {
                       <code key={p} className="text-xs bg-white border border-blue-200 text-blue-800 rounded px-1.5 py-0.5 font-mono">{p}</code>
                     ))}
                   </div>
+                </div>
+              )}
+              {/* 大型依賴 / 安裝失敗 → 顯示終端機手動安裝指令(可選取複製) */}
+              {manualHint && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  <p className="text-xs font-semibold text-amber-800 mb-1">⚠️ 請到終端機手動安裝</p>
+                  <pre className="bg-white/80 rounded p-2 overflow-auto max-h-48 text-[11px] text-gray-800 whitespace-pre-wrap select-text font-mono leading-relaxed">{manualHint}</pre>
                 </div>
               )}
               {meta.stderr_tail && (
