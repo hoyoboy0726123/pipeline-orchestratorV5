@@ -1612,10 +1612,53 @@ def _skill_web_search(tool_input: str, call_count: int = 0,
     return output
 
 
+# 抽 code block 的兩條 regex(稽查 B / bug 家族 1:行內 ``` 腰斬):
+# OWNLINE 要求「閉合 ``` 自成一行(前有換行)」→ LLM 程式碼字串內的行內 ``` 不會被誤判成結束
+# (與 main.py YAML 抽取同一招、已驗證)。找不到才退回 LEGACY 非貪婪(保證不比修前差)。
+_CODE_FENCE_OWNLINE = re.compile(r'```(?:python|json|bash|sh)?[ \t]*\n([\s\S]*?)\n[ \t]*```')
+_CODE_FENCE_LEGACY = re.compile(r'```(?:python|json|bash|sh)?\s*\n(.*?)```', re.DOTALL)
+
+
+def _find_code_blocks(text: str) -> list:
+    """回傳所有 code block 的 match;優先用「閉合自成一行」、抓不到才退回舊式。"""
+    blocks = list(_CODE_FENCE_OWNLINE.finditer(text))
+    return blocks if blocks else list(_CODE_FENCE_LEGACY.finditer(text))
+
+
+def _balanced_json(s: str) -> Optional[str]:
+    """從字串第一個 '{' 起,做「字串感知的大括號平衡掃描」抽出完整 JSON 物件。
+    取代 re.search(r'{.*?}') —— 非貪婪會在第一個 '}' 截斷、巢狀 JSON 必壞(稽查 B)。"""
+    start = s.find('{')
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(start, len(s)):
+        c = s[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == '\\':
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return s[start:j + 1]
+    return None
+
+
 def _extract_code_block(text: str) -> Optional[str]:
     """從 markdown code block 中提取程式碼內容。"""
-    m = re.search(r'```(?:python|json|bash|sh)?\s*\n(.*?)```', text, re.DOTALL)
-    return m.group(1).strip() if m else None
+    blocks = _find_code_blocks(text)
+    return blocks[0].group(1).strip() if blocks else None
 
 
 def _sanitize_code(code: str) -> str:
@@ -1674,8 +1717,8 @@ def _parse_skill_tool_calls(text: str) -> list[dict]:
         return calls
 
     # ── Step 2：找所有 code blocks，再找離 <tool> 最近的那個 ──
-    # 先提取所有 code blocks 及其位置
-    code_blocks = list(re.finditer(r'```(?:python|json|bash|sh)?\s*\n(.*?)```', text, re.DOTALL))
+    # 先提取所有 code blocks 及其位置(用「閉合自成一行」抽取、避免行內 ``` 腰斬)
+    code_blocks = _find_code_blocks(text)
     # 找所有 <tool> 標籤
     tool_tags = list(re.finditer(r'<tool>(.*?)</tool>', text))
 
@@ -1710,11 +1753,11 @@ def _parse_skill_tool_calls(text: str) -> list[dict]:
     # ── Step 3：done 工具 — 找 JSON ──
     done_match = re.search(r'<tool>done</tool>', text)
     if done_match:
-        # 在 done 標籤後找 JSON
+        # 在 done 標籤後找 JSON(大括號平衡掃描、避免巢狀 JSON 被第一個 '}' 截斷)
         after_done = text[done_match.end():]
-        json_match = re.search(r'\{.*?\}', after_done, re.DOTALL)
-        if json_match:
-            return [{"tool": "done", "input": json_match.group(0).strip()}]
+        json_str = _balanced_json(after_done)
+        if json_str:
+            return [{"tool": "done", "input": json_str.strip()}]
 
     # ── Step 4：沒有 <tool> 標籤，但有 code block（LLM 忘記加標籤）──
     if not tool_tags and code_blocks:
