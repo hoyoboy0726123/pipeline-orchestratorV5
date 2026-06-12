@@ -1561,22 +1561,31 @@ export default function PipelinePage() {
 
       // 等待人工決策（繼續 polling，這樣 Telegram 確認後前端也能偵測到）
       if (data.status === 'awaiting_human') {
-        if (runStatusRef.current !== 'awaiting') {
-          // 首次進入 awaiting 才顯示 toast
+        const firstEntry = runStatusRef.current !== 'awaiting'
+        const at = data.awaiting_type
+        const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
+        if (firstEntry) {
           setRunning(false)
           setRunStatus('awaiting')
           setAwaitingRunId(runId)
-          const at = data.awaiting_type
-          const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
-          setAwaitingType(mapped)
-          setAwaitingMessage(data.awaiting_message || '')
-          setAwaitingSuggestion(data.awaiting_suggestion || '')
+        }
+        // 內容(type/message/suggestion)每次輪詢都同步 — 不只首次。
+        // 否則「已在 awaiting 期間 awaiting_suggestion 變了」(例:按安裝後 missing_dep
+        // 仍是 awaiting、但 suggestion 換成帶 manual_hint 的新 JSON)不會反映、要重整才出現。
+        // setState 傳相同值 React 會自動跳過 re-render,連續輪詢同值無成本。
+        setAwaitingType(mapped)
+        setAwaitingMessage(data.awaiting_message || '')
+        setAwaitingSuggestion(data.awaiting_suggestion || '')
+        if (mapped === 'ask_user') {
+          try {
+            const meta = JSON.parse(data.awaiting_suggestion || '{}')
+            setAskUserOptions(meta.options || [])
+            setAskUserContext(meta.context || '')
+          } catch { setAskUserOptions([]); setAskUserContext('') }
+        }
+        if (firstEntry) {
+          // toast 只在首次進入 awaiting 顯示、避免每次輪詢洗版
           if (mapped === 'ask_user') {
-            try {
-              const meta = JSON.parse(data.awaiting_suggestion || '{}')
-              setAskUserOptions(meta.options || [])
-              setAskUserContext(meta.context || '')
-            } catch { setAskUserOptions([]); setAskUserContext('') }
             toast.info('❓ AI 請求人工回答', { duration: 0, id: 'awaiting' })
           } else {
             toast[mapped === 'confirm' ? 'info' : 'warning'](
