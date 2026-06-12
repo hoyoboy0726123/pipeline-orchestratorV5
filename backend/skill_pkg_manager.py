@@ -68,6 +68,49 @@ def is_host_only(pkg_name: str) -> bool:
     return normalize_pkg_name(pkg_name) in HOST_ONLY_PACKAGES
 
 
+# ── 大型依賴（在 app 內裝必逾時、靜默失敗）────────────────────────────────
+# 這些套件會拉進巨大相依(torch / CUDA / 模型框架,動輒數百 MB~數 GB),
+# in-app 安裝(對話框「安裝並繼續」或設定頁)會超過安裝逾時 → 靜默失敗、
+# 使用者以為當機。一律不在 app 內裝,直接給終端機手動安裝指引。
+# 偵測用 normalize 後的名字比對(底線/連字號/大小寫不敏感)。
+_LARGE_PKGS: frozenset[str] = frozenset(normalize_pkg_name(p) for p in {
+    "openai-whisper", "whisper", "faster-whisper", "whisperx",
+    "torch", "torchvision", "torchaudio",
+    "tensorflow", "tensorflow-cpu", "tensorflow-gpu", "keras",
+    "transformers", "sentence-transformers", "accelerate", "diffusers",
+    "spacy", "stanza", "flair",
+    "paddlepaddle", "paddleocr", "easyocr", "rapidocr-onnxruntime",
+    "ultralytics", "detectron2", "mmcv", "mmdet",
+    "onnxruntime-gpu", "faiss-gpu",
+    "llama-cpp-python", "vllm", "ctransformers",
+})
+
+
+def is_large_pkg(pkg_name: str) -> bool:
+    """套件是否屬「大型依賴」（in-app 安裝必逾時、應改終端機手動裝）。"""
+    return normalize_pkg_name(pkg_name) in _LARGE_PKGS
+
+
+def manual_install_instructions(pkgs: list[str], target: str) -> str:
+    """組「請到終端機手動安裝」指引,含正確指令 + 路徑(sandbox 與 host 不同)。"""
+    joined = " ".join(pkgs)
+    if target == "sandbox":
+        return (
+            f"這是大型依賴(會拉進 torch/CUDA 等,數百 MB~數 GB),app 內安裝會逾時。\n"
+            f"請開「終端機」手動安裝到沙盒容器(會跑數分鐘,請耐心等到出現 Successfully installed):\n"
+            f"  wsl sudo docker exec {_SANDBOX_CONTAINER} pip install {joined}\n"
+            f"裝完回到這裡按「安裝並繼續」—— 系統會偵測到已安裝、直接往下跑。"
+        )
+    # host:用實際的 venv python,確保裝到對的環境
+    py = sys.executable
+    return (
+        f"這是大型依賴(會拉進 torch/CUDA 等,數百 MB~數 GB),app 內安裝會逾時。\n"
+        f"請開「終端機」手動安裝到後端 venv(會跑數分鐘,請耐心等到出現 Successfully installed):\n"
+        f"  \"{py}\" -m pip install {joined}\n"
+        f"裝完回到這裡按「安裝並繼續」—— 系統會偵測到已安裝、直接往下跑。"
+    )
+
+
 def _resolve_target(target: str) -> str:
     """把 'auto' 解析成實際的 'host' 或 'sandbox'（讀 settings）。"""
     t = (target or "auto").strip().lower()
@@ -250,6 +293,10 @@ def add_package(pkg_name: str) -> tuple[bool, str]:
             packages.append(pkg_name)
             _write_packages(packages)
         return True, f"✅ {pkg_name} 已安裝（{snapshot[base].get('version', '')}）"
+
+    # 1.5 大型依賴 → 不在 app 內裝(必逾時),回終端機手動安裝指引
+    if is_large_pkg(pkg_name):
+        return False, manual_install_instructions([pkg_name], "host")
 
     # 2. 沒安裝 → 跑 pip install
     ok, msg = _pip_install(pkg_name)
@@ -522,6 +569,10 @@ def add_package_sandbox(pkg_name: str) -> tuple[bool, str]:
             declared.append(pkg_name)
             _write_sandbox_packages(declared)
         return True, f"✅ {pkg_name} 已安裝在沙盒容器（{snapshot[base].get('version', '')}）"
+
+    # 1.5 大型依賴 → 不在 app 內裝(必逾時),回終端機手動安裝指引
+    if is_large_pkg(pkg_name):
+        return False, manual_install_instructions([pkg_name], "sandbox")
 
     # 2. 沒裝 → 跑 pip install
     ok, msg = _sandbox_pip_install(pkg_name)
