@@ -888,6 +888,20 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
         child_env = _clean_env()
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"  # Python 3.7+ 強制 UTF-8 模式
+        # skill_llm helper:host 模式也注入 SKILL_LLM_* + PYTHONPATH(Windows 路徑),
+        # 讓 `from skill_llm import llm` 走系統當前模型、不必 import openai。
+        try:
+            from pipeline.skill_llm_env import runtime_env, HELPERS_DIR_WIN
+            _renv = runtime_env()
+            if _renv:
+                child_env.update(_renv)
+                _pp = str(HELPERS_DIR_WIN)
+                child_env["PYTHONPATH"] = (
+                    _pp + os.pathsep + child_env["PYTHONPATH"]
+                    if child_env.get("PYTHONPATH") else _pp
+                )
+        except Exception:
+            pass
         proc = subprocess.Popen(
             [_SKILL_PYTHON, tmp_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2717,6 +2731,12 @@ async def execute_step_with_skill(
   正確:`subprocess.run([sys.executable, "script.py"], ...)`
 - 隨機資料須唯一(姓名等):先用集合生成不重複組合再 random.sample、不要迴圈內 random.choice 累積
 - ❌ 禁止 hardcode 結果(摘要 / 情緒 / 分類):必須讀實際資料 + 程式邏輯處理、不可在原始碼寫死答案 dict / list、會被驗證階段抓
+- 🧠 **你自己就是 LLM**:任務說「用 LLM 校對 / 翻譯 / 分類 / 摘要 / 改寫」時,那個 LLM 就是你。
+  **預設自己做**(read_file 讀進來 → 你直接產出處理後內容 → write_file 寫出、逐段逐筆做),
+  **絕不要** `import openai` / `import anthropic` / `from google ... genai` 呼叫外部 LLM API
+  (沒金鑰、會 rc=1 卡死、繞過防呆)。真的有幾十~幾百筆要在程式裡跑同一種 LLM 轉換、自己做太慢,
+  才用內建 helper(走系統現在這顆模型、免金鑰、已在 PYTHONPATH):`from skill_llm import llm` →
+  `out = llm("提示詞" + text)`(可加 `system=...`);失敗會 raise。**仍然不要 import openai**。
 - 嚴禁 input() / getpass() / sys.stdin.read() — pipeline 非互動環境、會永久卡死
 - 任務需選擇:優先用任務指定;無指定 → 最合理預設值 + summary 註明假設;只有「會嚴重影響結果(覆蓋重要檔、無法回復)」才用 done(success=false)
 - 讀別的步驟產出的檔(csv / xlsx / json / md 等)第一步先 run_python 看前幾行,確認實際的欄位名、值的格式(大小寫、引號、數字或字串),或文字檔的結構(例:第一行是不是標題)、不要憑空假設
