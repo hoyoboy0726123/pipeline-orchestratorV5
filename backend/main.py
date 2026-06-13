@@ -3054,7 +3054,7 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 - 一個步驟同時要「**取得資料 + 大量處理/分組/清洗 + 產出對外格式**」→ 拆成 取得 / 整理 / 產出 三步。
 - 一個 LLM 步驟要「**對幾十~幾百筆做歸納 / 分類 / 合併 / 去重**」→ 把**確定性的部分(分組 / 去重 / 過濾 / 排序 / 統計)抽成獨立 `skill_mode` pandas 步驟**,只把**真的需要語言判斷的**留給 subagent。(實測:Outlook 一天 284 封信直接丟給 LLM 分類+寫報告 → 流水帳;中間插一個 pandas 分組步 → 品質大躍進)
 - **語言任務之間也要拆 — 一個 LLM 步驟只做「一種」判斷**:又要重寫標題、又要分級排版 → 兩步;又要過濾廣告、又要判情緒 → 兩步。(實測:弱模型一步做兩種語言判斷會「這次做好 A 漏 B、下次做好 B 漏 A」;一步一事後 3 連跑全過)
-- **「每一筆都要 LLM 處理」(逐段校對 / 逐句翻譯 / 逐則改寫)→ 用 skill / subagent 步驟讓它「自己」做,或先 script 拆批再每批一個 subagent**。⚠️ **絕不要把它設計成「一個 skill 節點寫 Python 迴圈呼叫 LLM API」** —— skill/subagent runtime 本身就是 LLM,但它在沙盒裡常會 `import openai` 呼叫外部 API、沒金鑰直接 rc=1 卡死(實測:whisper_srt 的「分段校正」步驟整步卡在要 OpenAI key)。資料量大就「script 拆成 N 個 chunk 檔 → 每個 chunk 一個 subagent 翻 / 校 → script 合併」,把語言處理交給 agent 自己、把拆合交給確定性程式。
+- **「每一筆都要 LLM 處理」(逐段校對 / 逐句翻譯 / 逐則改寫)→ 用 skill / subagent 步驟讓它「自己」做,或先 script 拆批再每批一個 subagent**。**拆不拆在設計時就決定、別賭 runtime 當場猜大小**:輸入在數十筆內、且預估輸出 < 約 8000 字(模型單次輸出上限)→ **一個 step 讓 agent 自己整批做完**即可;**輸入上看百筆 / 預估輸出會超過約 8000 字 → 一律設計成「script 拆成固定大小 chunk → 每個 chunk 一個 subagent → script 合併」**(批量大小由 Python 確定性公式決定、不靠 LLM 判斷,這才是它穩的原因)。⚠️ **絕不要把它設計成「一個 skill 節點寫 Python 迴圈呼叫 LLM API」** —— skill/subagent runtime 本身就是 LLM,但它在沙盒裡常會 `import openai` 呼叫外部 API、沒金鑰直接 rc=1 卡死(實測:whisper_srt 的「分段校正」步驟整步卡在要 OpenAI key)。把語言處理交給 agent 自己、把拆合交給確定性程式。
 - 需要「**給人看的乾淨標題 / 名稱 / 一句摘要**」→ **絕不要叫 pandas / regex 步驟去產**(程式只會切出「ECN .JHR.JPR_ MP加導90」這種碎片);程式步只負責把「原文樣本」原樣帶下去,**重寫成人話交給下游的 subagent 步驟**。
 - 一個步驟的 `output.expect` 得寫成「**而且…而且…而且…**」三個以上條件 → 那其實是三個步驟。
 - 「**先 X、再根據結果決定 Y**」→ X 一步、Y 一步,中間用 condition / 驗證閘接。

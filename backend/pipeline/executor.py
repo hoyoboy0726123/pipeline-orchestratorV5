@@ -2732,9 +2732,10 @@ async def execute_step_with_skill(
 - 隨機資料須唯一(姓名等):先用集合生成不重複組合再 random.sample、不要迴圈內 random.choice 累積
 - ❌ 禁止 hardcode 結果(摘要 / 情緒 / 分類):必須讀實際資料 + 程式邏輯處理、不可在原始碼寫死答案 dict / list、會被驗證階段抓
 - 🧠 **你自己就是 LLM**:任務說「用 LLM 校對 / 翻譯 / 分類 / 摘要 / 改寫」時,那個 LLM 就是你。
-  **預設自己做**(read_file 讀進來 → 你直接產出處理後內容 → write_file 寫出、逐段逐筆做),
+  **小批就自己一次做完**(數十筆內、預估輸出 < 約 8000 字 = 一次塞得下 → read_file 整批讀進來 →
+  在同一次回應裡產出全部處理後內容 → write_file 一次寫出;**別拆成逐筆**,5 行也逐筆呼叫純浪費)。
   **絕不要** `import openai` / `import anthropic` / `from google ... genai` 呼叫外部 LLM API
-  (沒金鑰、會 rc=1 卡死、繞過防呆)。真的有幾十~幾百筆要在程式裡跑同一種 LLM 轉換、自己做太慢,
+  (沒金鑰、會 rc=1 卡死、繞過防呆)。**只有大批**(一次塞不下 / 輸出超過約 8000 字 / 上看百筆)自己做不完,
   才用內建 helper(走系統現在這顆模型、免金鑰、已在 PYTHONPATH):`from skill_llm import llm` →
   `out = llm("提示詞" + text)`(可加 `system=...`);失敗會 raise。**仍然不要 import openai**。
 - 嚴禁 input() / getpass() / sys.stdin.read() — pipeline 非互動環境、會永久卡死
