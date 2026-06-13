@@ -376,6 +376,28 @@ def _inject_no_latex(system_prompt: str) -> str:
     return _block + system_prompt
 
 
+def _inject_self_is_llm(system_prompt: str) -> str:
+    """你自己就是 LLM — 別在 run_python 裡 import openai 呼叫外部 LLM API。
+    實測(另一台機器 whisper_srt「分段校正」步驟):任務寫「用 LLM 校對每段」,
+    skill runtime 竟寫出 `from openai import OpenAI; gpt-4o`、沒金鑰 rc=1、然後 ask_user
+    要 API key 卡死。根因:它不知道寫 code 的「我」跟任務要的「LLM」是同一個。"""
+    _block = (
+        "【🧠 你自己就是 LLM — 別呼叫外部 LLM API(極常踩、會直接卡死)】\n"
+        "  任務若要求「用 LLM 校對 / 翻譯 / 分類 / 摘要 / 抽取 / 改寫」,那個「LLM」**就是你自己**。\n"
+        "  ✅ **預設自己做**:read_file 讀進來 → 你直接產出處理後的內容 → write_file 寫出;"
+        "逐段 / 逐筆就一段一段做,別找捷徑。\n"
+        "  ❌ **絕不要**在 run_python 裡 `import openai` / `import anthropic` / "
+        "`from google ... genai` 去呼叫外部 LLM API:沙盒沒有那些金鑰、會 rc=1 卡死,"
+        "就算有也是繞過系統防呆、花冤枉錢。看到自己要寫 `OpenAI()` 就停下來、改用上面的做法。\n"
+        "  ✅ 真的有幾十~幾百筆要在程式裡跑同一種 LLM 轉換(例:每個 chunk 都要翻譯)、自己逐段做太慢,"
+        "才用系統內建 helper(走你現在這顆模型、免金鑰、已在 PYTHONPATH):\n"
+        "        from skill_llm import llm\n"
+        "        out = llm(\"把這段校對成通順中文,只回正文:\\n\" + text)   # 可加 system=...\n"
+        "     它只在 run_python 內可用;失敗會 raise(不會悄悄回空字串)。**仍然不要 import openai**。\n\n"
+    )
+    return _block + system_prompt
+
+
 def _maybe_inject_sandbox_hint(system_prompt: str) -> str:
     """若 settings.skill_sandbox_mode='wsl_docker'、追加沙盒環境提示（共用 skill 的格式）。"""
     try:
@@ -488,7 +510,7 @@ async def run_subagent(
 
     log.info(f"[{step_name}] 🤖 Subagent 啟動（role={role_name}, max_iter={max_iter}, tools={sorted(allowed_tools)}）")
 
-    system_prompt = _inject_no_latex(_inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))))
+    system_prompt = _inject_self_is_llm(_inject_no_latex(_inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
 
     tool_timeout = _compute_tool_timeout(timeout)
@@ -937,7 +959,7 @@ async def _run_subagent_native(
         f"max_iter={max_iter}, tools={sorted(allowed_tools)})"
     )
 
-    system_prompt = _inject_no_latex(_inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", "")))))))
+    system_prompt = _inject_self_is_llm(_inject_no_latex(_inject_run_python_stateless(_inject_research_integrity(_inject_upstream_schema_hint(_inject_today_date(_maybe_inject_sandbox_hint(role.get("system_prompt", ""))))))))
     user_prompt = _build_user_prompt(task, output_path, prev_outputs, allowed_tools)
     tool_timeout = _compute_tool_timeout(timeout)
 

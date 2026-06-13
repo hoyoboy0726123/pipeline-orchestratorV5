@@ -418,7 +418,8 @@ def _detect_npm_root_g() -> str:
         return _DETECTED_NODE_PATH
 
 
-def _docker_exec_cmd(workdir_wsl: Optional[str], runner: list[str]) -> list[str]:
+def _docker_exec_cmd(workdir_wsl: Optional[str], runner: list[str],
+                     extra_env: Optional[dict] = None) -> list[str]:
     """組 `wsl <docker_prefix> exec [-w ...] pipeline-sandbox-v5 <runner...>`
 
     NODE_PATH：讓 LLM 跑 `subprocess.run(["node", ...])` 時、`require('docx')` /
@@ -429,6 +430,13 @@ def _docker_exec_cmd(workdir_wsl: Optional[str], runner: list[str]) -> list[str]
     node_path = _detect_npm_root_g()
     cmd = ["wsl", "-e", *docker_prefix, "exec",
            "-e", f"NODE_PATH={node_path}"]
+    # 額外環境變數(例 skill_llm helper 的 SKILL_LLM_* + PYTHONPATH);
+    # 注意:值會出現在程序 arg list,沙盒本就是執行 LLM 程式碼的信任邊界,僅單機本地用。
+    if extra_env:
+        for k, v in extra_env.items():
+            if v is None or v == "":
+                continue
+            cmd += ["-e", f"{k}={v}"]
     if workdir_wsl:
         cmd += ["-w", workdir_wsl]
     cmd += [CONTAINER_NAME, *runner]
@@ -551,7 +559,18 @@ def run_python(
     try:
         script_wsl = windows_to_wsl_path(tmp_win)
         cwd_wsl = windows_to_wsl_path(cwd) if cwd else None
-        cmd = _docker_exec_cmd(cwd_wsl, ["python", script_wsl])
+        # skill_llm helper:注入 SKILL_LLM_* + PYTHONPATH(指向 bind-mount 的 helper 目錄的 WSL 路徑)
+        # 讓容器內 `from skill_llm import llm` 能走「系統現在這顆模型」、不必 import openai。
+        extra_env = {}
+        try:
+            from pipeline.skill_llm_env import runtime_env, HELPERS_DIR_WIN
+            _renv = runtime_env()
+            if _renv:
+                extra_env = dict(_renv)
+                extra_env["PYTHONPATH"] = windows_to_wsl_path(str(HELPERS_DIR_WIN))
+        except Exception:
+            extra_env = {}
+        cmd = _docker_exec_cmd(cwd_wsl, ["python", script_wsl], extra_env=extra_env)
         return _run_subprocess(cmd, timeout, run_id, register_cb, unregister_cb)
     finally:
         try:
