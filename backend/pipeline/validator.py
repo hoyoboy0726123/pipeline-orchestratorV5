@@ -500,6 +500,67 @@ def _leftover_placeholder_result(found: list[str]) -> "ValidationResult":
     )
 
 
+# ── 反佔位填充偵測(通用、所有驗證共用)──────────────────────────────
+# 模型做不到時常用「假佔位文字」騙過完整性檢查(實測:翻譯 133 條 SRT,108 條填成
+# "Translated content for block N" → 通過「無中文 + 條數一致」驗證、self_heal 還主動這樣作弊)。
+# 設計成保守、近零誤殺:只抓「無歧義的佔位措辭」+「大比例完全相同的編號模板行」。
+# 合法的重複性輸出(資料表每列、設定檔)變化不只一個遞增數字、不會誤觸。
+_FILLER_MARKER_RE = re.compile(
+    r"translated content for block|lorem ipsum|your text here|content goes here|"
+    r"placeholder text|\bto be translated\b|\bto be filled\b|insert (?:your )?content|"
+    r"待翻譯|待補(?:充|入|齊)?|待填(?:入|寫)?|內容待(?:補|填|譯)|此處省略|內容省略|翻譯內容待",
+    re.IGNORECASE,
+)
+# 讀純文字輸出(office 走 _office_texts;其餘文字類副檔名直接讀)。回單一字串、讀不出回 ""。
+def _read_output_text(p: "Path") -> str:
+    ext = p.suffix.lower()
+    if ext in {".docx", ".pptx", ".xlsx"}:
+        try:
+            return "\n".join(_office_texts(p))
+        except Exception:
+            return ""
+    if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".zip", ".mp4", ".mp3", ".wav"}:
+        return ""  # 二進位、跳過
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _scan_filler_placeholders(path: Optional[str]) -> "Optional[str]":
+    """掃輸出檔有沒有「假佔位填充」。回傳 reason 字串(判 failed)或 None(放行)。
+    只用「無歧義佔位措辭」比對(Translated content for block N / lorem ipsum / 待補 …),
+    near-zero 誤殺。**刻意不做**「同模板只差數字」的啟發式 —— 那會誤殺 SRT 時間軸、log、
+    序號 CSV 等合法結構化資料(實測踩過、對齊 #164 不過度拒絕原則)。"""
+    if not path:
+        return None
+    try:
+        p = _resolve_user_path(path)
+    except Exception:
+        return None
+    if not p.exists() or p.is_dir():
+        return None
+    text = _read_output_text(p)
+    if not text or len(text) < 20:
+        return None
+    m = _FILLER_MARKER_RE.search(text)
+    if m:
+        return f"輸出含佔位/填充文字「{m.group(0)}」—— 這是做不到時填的假內容、不是真實產出。"
+    return None
+
+
+def _filler_placeholder_result(reason: str) -> "ValidationResult":
+    return ValidationResult(
+        status="failed",
+        reason=reason,
+        suggestion=(
+            "做不到的部分**不可填佔位/模板字串**(如 Translated content for block N、TODO、待補)"
+            "來騙過檢查。請真的產出實質內容;若某些部分確實做不到(模型能力 / 資料不足),"
+            "就 done(success=false) 誠實說明哪些沒做、為什麼,不要假填。"
+        ),
+    )
+
+
 # 任務是否「預期要有圖片」(看 batch 指令 + expect 描述)。命中才會強制要求輸出有圖。
 _IMAGE_INTENT_RE = re.compile(
     r"圖片|插圖|貼圖|配圖|照片|相片|圖表|截圖|logo|image|picture|photo|chart|\{\{\s*圖",
@@ -627,6 +688,12 @@ def _deterministic_precheck(
     if leftover:
         logger.warning(f"[{step_name}] 確定性檢查:輸出檔殘留佔位標籤 {leftover} → 判 failed")
         return _leftover_placeholder_result(leftover)
+    # 1.5) 假佔位填充(Translated content for block N / lorem ipsum / 待補 / 同模板編號行)→ 作弊、判 failed
+    #      通用所有驗證步驟:模型做不到時用佔位騙過完整性檢查(實測 self_heal 會這樣作弊)。
+    _filler = _scan_filler_placeholders(output_path)
+    if _filler:
+        logger.warning(f"[{step_name}] 確定性檢查:偵測到假佔位填充 → 判 failed:{_filler}")
+        return _filler_placeholder_result(_filler)
     try:
         p = _resolve_user_path(output_path)
     except Exception:
