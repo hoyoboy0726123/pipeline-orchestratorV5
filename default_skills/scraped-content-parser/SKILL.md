@@ -141,6 +141,32 @@ parser 抽 content 時要清掉:
 
 做法:抽出子頁區塊後、用簡單規則修掉明顯 chrome 行(例:一行內連結數 ≥ 3 視為導覽列、跳過;`分享至` / `facebook` / `plurk` 開頭跳過)。不用做到完美、把最明顯的雜訊去掉即可 — 下游 LLM 能容忍少量雜訊、但整段導覽列會稀釋分析品質。
 
+### 🛡️ 反爬挑戰 / 未渲染殼:整段沒正文 → 標記失敗、別當正文(必做)
+
+有些站(Reddit、Cloudflare 防護站、重 JS 的 SPA)被爬時,子頁抓回來的**根本不是貼文正文、而是「反爬挑戰頁 / 未渲染的導覽殼」** —— 整段都是 `跳至主要內容` / `開啟選單` / `?js_challenge=1&token=...#main-content` / `Just a moment` / `請啟用 JavaScript` 這類字串(實測 Reddit r/ASUS 衝 100 子頁,48/48 內文全是這種殼)。
+
+這跟上面「濾 chrome」**不同**:chrome 是**夾雜**在正文裡的雜訊行(濾掉就好);這裡是**整頁都沒正文**(來源就沒給、**重抽 parser 也救不回**)。處理方式 = **保留 title / url,把該筆 content 標成失敗哨符**,別讓殼字串當摘要流到下游報告(否則報告會變成「跳至主要內容 開啟選單…」這種垃圾)。
+
+```python
+import re
+_SHELL_MARKERS = (
+    "跳至主要內容", "skip to main content", "js_challenge", "jsc_orig_r", "#main-content",
+    "開啟選單", "開啟導覽列", "open navigation menu",
+    "just a moment", "checking your browser", "enable javascript",
+    "請啟用 javascript", "需要啟用 javascript", "javascript is required",
+    "前往 reddit 首頁", "go to reddit",
+)
+SHELL_FAILED = "[內文抓取失敗:頁面為反爬挑戰/未渲染殼,僅取得標題與連結]"
+def mark_shell_failed(content: str) -> str:
+    """content 是反爬挑戰/未渲染殼 → 回失敗哨符(呼叫端保留 title/url 不動)。
+    只看前 500 字 + 強訊號,避免誤判正常正文裡偶然提到的字。"""
+    head = (content or "")[:500].lower()
+    return SHELL_FAILED if any(m in head for m in _SHELL_MARKERS) else content
+# 用法:每筆抽完 content 後 → rec["content"] = mark_shell_failed(rec["content"])
+```
+
+⚠️ 即使**所有筆都被標失敗**(全站被反爬擋),也是**誠實 `done(success=true)`** —— parser 沒做錯、是來源沒給正文;summary 要註明「N/M 筆內文因反爬/未渲染無法取得、僅保留標題與連結」。**絕不可**把殼字串當正文 / 摘要交出去、也不要因此無限重抽。
+
 ### 📦 巨大 + 信號稀疏的檔案(購物站常見)
 
 有些站(尤其購物網:momo、PChome 等)的列表頁**又大又雜** — 檔案上看 1MB、7000 行、90% 是促銷橫幅 / 0 利率分期文字 / 「相關搜尋」連結 / 廣告。真正的商品只是大海裡的針。
