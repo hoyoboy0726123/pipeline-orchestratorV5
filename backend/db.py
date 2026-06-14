@@ -376,13 +376,24 @@ def get_recipe(workflow_id: str, step_name: str) -> Optional[dict]:
 
 def match_recipe(workflow_id: str, step_name: str, task_hash: str,
                  input_fingerprints: dict) -> Optional[dict]:
-    """檢查是否有可重用 recipe：task_hash + input_fingerprints 吻合且未停用。"""
+    """檢查是否有可重用 recipe：task_hash 吻合、輸入指紋吻合、且未停用。
+
+    輸入指紋比對「只比指紋值的多重集合、忽略路徑 key」(sorted(values))：
+    runner 執行時的輸入路徑來自上游步驟輸出(prev_outputs);相對路徑的輸出會被 reroute 進
+    per-run 夾 `ai_output/<wf>/run_<時間戳>/`,使指紋 dict 的 key(路徑)帶有 recipe 灌入時
+    無法預知的 run 時間戳。若用「含 key 的整個 dict」精確比對,下游步驟的 recipe 會永遠 miss、
+    退回弱模型重學。recipe 重播只在乎「輸入的 schema/內容指紋是否一致」,路徑 key 屬附帶資訊,
+    故改比對 sorted(values)。(同時修正舊版 `A if cond else B != x` 三元運算子優先序 bug。)
+    """
     r = get_recipe(workflow_id, step_name)
     if not r or r["disabled"]:
         return None
     if r["task_hash"] != task_hash:
         return None
-    if json.loads(r["input_fingerprints"]) if isinstance(r["input_fingerprints"], str) else r["input_fingerprints"] != input_fingerprints:
+    saved = r["input_fingerprints"]
+    if isinstance(saved, str):
+        saved = json.loads(saved)
+    if sorted((saved or {}).values()) != sorted((input_fingerprints or {}).values()):
         return None
     return r
 

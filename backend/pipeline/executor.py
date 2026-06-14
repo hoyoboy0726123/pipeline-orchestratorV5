@@ -2576,13 +2576,13 @@ async def execute_step_with_skill(
                     logger.info(f"[{step_name}] 📖 Recipe 存在但已停用")
                 elif _raw["task_hash"] != _cur_hash:
                     logger.info(f"[{step_name}] 📖 Recipe 存在但 task_hash 不符（saved={_raw['task_hash']}, current={_cur_hash}）")
-                elif _cur_fps != saved_fps:
-                    logger.info(f"[{step_name}] 📖 Recipe 存在但輸入指紋不符")
-                    for k in set(list(_cur_fps.keys()) + list(saved_fps.keys())):
-                        sv = saved_fps.get(k, '(無)')
-                        cv = _cur_fps.get(k, '(無)')
-                        if sv != cv:
-                            logger.info(f"[{step_name}]   {k}: saved={sv} → current={cv}")
+                elif sorted((saved_fps or {}).values()) != sorted((_cur_fps or {}).values()):
+                    # 比對值多重集合(忽略路徑 key,與 db.match_recipe 一致;見其 docstring)
+                    logger.info(
+                        f"[{step_name}] 📖 Recipe 存在但輸入指紋值不符 "
+                        f"(saved={sorted((saved_fps or {}).values())} → "
+                        f"current={sorted((_cur_fps or {}).values())})"
+                    )
             else:
                 logger.debug(f"[{step_name}] 📖 無 Recipe 紀錄")
             _fp = {p: _recipe_fp(p) for p in input_paths}
