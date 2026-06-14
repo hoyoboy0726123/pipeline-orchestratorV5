@@ -262,6 +262,32 @@ def _looks_thin(result: "CrawlResult") -> bool:
     return False
 
 
+# 反爬挑戰頁 / 未渲染導覽殼 的強訊號(子頁抓回的不是正文、是殼)。
+# 實測 Reddit r/ASUS 衝 100 子頁:子頁全回傳這種殼(js_challenge / 跳至主要內容 / 開啟選單)。
+# 這裡在「爬蟲層」確定性判定、不靠下游 LLM,殼內文一律標失敗、只留標題與連結。
+_RENDER_SHELL_MARKERS = (
+    "跳至主要內容", "skip to main content", "js_challenge", "jsc_orig_r",
+    "開啟選單", "開啟導覽列", "open navigation menu",
+    "just a moment", "checking your browser", "enable javascript",
+    "請啟用 javascript", "需要啟用 javascript", "javascript is required",
+    "前往 reddit 首頁", "go to reddit",
+)
+_SHELL_STRONG = ("js_challenge", "jsc_orig_r", "just a moment", "checking your browser")
+CHILD_SHELL_FAILED = "（內文抓取失敗:此子頁回傳反爬挑戰頁/未渲染殼,僅保留標題與連結）"
+
+
+def _looks_like_render_shell(md: Optional[str]) -> bool:
+    """子頁 markdown 是反爬挑戰頁 / 未渲染導覽殼(沒抓到正文)→ True。
+    保守:命中唯一強訊號(js_challenge / Just a moment …)即判;否則需 ≥ 2 個弱訊號,
+    避免誤判正常正文裡偶然提到「Enable JavaScript」之類的字。"""
+    if not md:
+        return False
+    low = md.lower()
+    if any(s in low for s in _SHELL_STRONG):
+        return True
+    return sum(1 for m in _RENDER_SHELL_MARKERS if m in low) >= 2
+
+
 @dataclass
 class CrawlResult:
     """單次爬取的回傳。"""
@@ -913,7 +939,20 @@ async def crawl_list_with_children(
         child_results = await asyncio.gather(*[_crawl_one(u) for u in child_urls])
 
         # 4. 合併成單一 markdown
-        ok_count = sum(1 for _, md, _ in child_results if md)
+        #    先確定性判每個子頁是否為反爬殼:殼 → 內文標失敗、保留標題與連結(不靠下游 LLM)。
+        processed: list[tuple[str, str, str, str]] = []  # (url, title, body, status: ok|shell|fail)
+        for (url, md, title) in child_results:
+            if md and _looks_like_render_shell(md):
+                processed.append((url, title, CHILD_SHELL_FAILED, "shell"))
+            elif md:
+                processed.append((url, title, md.strip(), "ok"))
+            else:
+                processed.append((url, title, "（抓取失敗）", "fail"))
+        ok_count = sum(1 for *_, s in processed if s == "ok")
+        shell_count = sum(1 for *_, s in processed if s == "shell")
+        _summary = f"子頁數: {ok_count}/{len(child_urls)} 取得正文"
+        if shell_count:
+            _summary += f"、{shell_count} 反爬殼(僅標題與連結)"
         # 結構標記都用半形冒號 ":"（不是全形「：」），跟一般 prompt / 下游
         # skill 寫的 regex 對齊。之前用全形時，LLM 看 prompt 寫 `# 子頁 N/M:`
         # regex 抓不到全形 → 多繞 5 分鐘做 debug。
@@ -922,14 +961,14 @@ async def crawl_list_with_children(
             "",
             f"來源 URL: {list_url}",
             f"抓取時間: {datetime.now().isoformat(timespec='seconds')}",
-            f"子頁數: {ok_count}/{len(child_urls)} 成功",
+            _summary,
             "",
             "---",
             "",
             list_md.strip(),
             "",
         ]
-        for i, (url, md, title) in enumerate(child_results, 1):
+        for i, (url, title, body, _status) in enumerate(processed, 1):
             parts.extend([
                 "",
                 "---",
@@ -938,14 +977,15 @@ async def crawl_list_with_children(
                 f"# 子頁 {i}/{len(child_urls)}: {title or '(無標題)'}",
                 f"URL: {url}",
                 "",
-                (md.strip() if md else "（抓取失敗）"),
+                body,
                 "",
             ])
         combined = "\n".join(parts)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(combined)
         logger.info(f"[{step_name}] ✓ 合併寫入 {output_path}（{len(combined):,} bytes、"
-                    f"列表 + {ok_count}/{len(child_urls)} 子頁）")
+                    f"列表 + {ok_count}/{len(child_urls)} 子頁取得正文"
+                    + (f"、{shell_count} 反爬殼" if shell_count else "") + "）")
 
         # 用 list_result 當 base、改 markdown / duration / title
         list_result.markdown = combined
