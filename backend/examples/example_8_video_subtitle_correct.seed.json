@@ -1,0 +1,37 @@
+{
+ "recipes": [
+  {
+   "step_name": "1:transcribe",
+   "input_fingerprints": {},
+   "output_path": "raw.srt",
+   "python_version": "3.13",
+   "code": "import os\n\ndef _find_source():\n    names = (\"source.mp3\", \"source.wav\", \"source.m4a\", \"source.mp4\", \"source.flac\", \"source.ogg\")\n    d = os.getcwd()\n    for _ in range(6):\n        for n in names:\n            p = os.path.join(d, n)\n            if os.path.isfile(p):\n                return p\n        # also scan any source.* in this dir\n        try:\n            for f in os.listdir(d):\n                low = f.lower()\n                if low.startswith(\"source.\") and low.rsplit(\".\", 1)[-1] in (\n                    \"mp3\", \"wav\", \"m4a\", \"mp4\", \"flac\", \"ogg\", \"aac\", \"webm\"):\n                    return os.path.join(d, f)\n        except OSError:\n            pass\n        nd = os.path.dirname(d)\n        if nd == d:\n            break\n        d = nd\n    raise FileNotFoundError(\"找不到 source.* 影音檔(已向上層搜尋)\")\n\ndef _fmt(t):\n    if t is None or t < 0:\n        t = 0.0\n    h = int(t // 3600)\n    m = int((t % 3600) // 60)\n    s = int(t % 60)\n    ms = int(round((t - int(t)) * 1000))\n    if ms == 1000:\n        ms = 0\n        s += 1\n    return \"%02d:%02d:%02d,%03d\" % (h, m, s, ms)\n\nsrc = _find_source()\nfrom faster_whisper import WhisperModel\nmodel = WhisperModel(\"small\", device=\"cpu\", compute_type=\"int8\")\nsegments, info = model.transcribe(src, language=\"zh\", beam_size=5)\n\nlines = []\nidx = 1\nfor seg in segments:\n    text = (seg.text or \"\").strip()\n    lines.append(str(idx))\n    lines.append(\"%s --> %s\" % (_fmt(seg.start), _fmt(seg.end)))\n    lines.append(text)\n    lines.append(\"\")\n    idx += 1\n\nwith open(\"raw.srt\", \"w\", encoding=\"utf-8\") as f:\n    f.write(\"\\n\".join(lines))\nprint(\"wrote raw.srt with %d segments from %s\" % (idx - 1, os.path.basename(src)))\n"
+  },
+  {
+   "step_name": "2:split_srt",
+   "input_fingerprints": {
+    "raw.srt": "srt:exists"
+   },
+   "output_path": "chunks.json",
+   "python_version": "3.13",
+   "code": "import json, re\n\nwith open(\"raw.srt\", \"r\", encoding=\"utf-8\") as f:\n    content = f.read()\n\n# split into blocks separated by blank lines\nblocks = re.split(r\"\\n\\s*\\n\", content.strip())\nitems = []\nfor b in blocks:\n    lines = [ln for ln in b.splitlines() if ln.strip() != \"\" or True]\n    lines = b.splitlines()\n    if len(lines) < 2:\n        continue\n    # find index line (first all-digit line)\n    i0 = 0\n    while i0 < len(lines) and not lines[i0].strip().isdigit():\n        i0 += 1\n    if i0 >= len(lines) - 1:\n        continue\n    try:\n        idx = int(lines[i0].strip())\n    except ValueError:\n        continue\n    time_line = lines[i0 + 1].strip()\n    if \"-->\" not in time_line:\n        continue\n    text = \"\\n\".join(lines[i0 + 2:]).strip()\n    items.append({\"index\": idx, \"time\": time_line, \"text\": text})\n\nCHUNK = 20\nchunks = []\nfor ci, start in enumerate(range(0, len(items), CHUNK)):\n    chunks.append({\"id\": ci, \"items\": items[start:start + CHUNK]})\n\nwith open(\"chunks.json\", \"w\", encoding=\"utf-8\") as f:\n    json.dump({\"chunks\": chunks}, f, ensure_ascii=False, indent=2)\nprint(\"wrote chunks.json: %d items in %d chunks\" % (len(items), len(chunks)))\n"
+  },
+  {
+   "step_name": "4:merge_srt",
+   "input_fingerprints": {
+    "raw.srt": "srt:exists",
+    "chunks.json": "json:obj:7e078c9876ccabef",
+    "chunks_corrected.json": "json:obj:7e078c9876ccabef"
+   },
+   "output_path": "corrected.srt",
+   "python_version": "3.13",
+   "code": "import json\n\nwith open(\"chunks_corrected.json\", \"r\", encoding=\"utf-8\") as f:\n    data = json.load(f)\n\nitems = []\nfor ch in data.get(\"chunks\", []):\n    for it in ch.get(\"items\", []):\n        items.append({\n            \"index\": int(it[\"index\"]),\n            \"time\": str(it[\"time\"]),\n            \"text\": str(it.get(\"text\", \"\")),\n        })\n\nitems.sort(key=lambda x: x[\"index\"])\n\nlines = []\nfor it in items:\n    lines.append(str(it[\"index\"]))\n    lines.append(it[\"time\"])\n    lines.append(it[\"text\"])\n    lines.append(\"\")\n\nwith open(\"corrected.srt\", \"w\", encoding=\"utf-8\") as f:\n    f.write(\"\\n\".join(lines))\nprint(\"wrote corrected.srt: %d subtitles\" % len(items))\n"
+  }
+ ],
+ "assets": [
+  {
+   "src": "assets/example_8_source.mp3",
+   "dest": "source.mp3"
+  }
+ ]
+}
