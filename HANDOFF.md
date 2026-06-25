@@ -106,6 +106,19 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 
 ---
 
+## 協作 agent 交辦 — install_dep 自癒裝錯環境修正(給主審 review)
+
+- **分支**:`fix/install-dep-target-step-interpreter`(只動 `backend/pipeline/runner.py`)
+- **bug**:`install_dep`(缺套件自癒)只看 `skill_sandbox_mode` 決定裝沙盒/後端 venv。但 **script 節點是在 host 跑、且刻意走「自己的直譯器」**(見 `executor._script_env`:沒勾 venv→系統全域、勾了→專案 venv,刻意不污染後端 venv)。所以 **wsl_docker 模式下 script 步驟缺套件時,自癒把套件裝進 Docker 沙盒容器 → script 根本碰不到 → 自癒鬼打牆**(實測連按 9 次 install 都修不好)。
+- **修法(對齊 `_script_env` 的設計精神)**:自癒改成裝進「**該失敗 step 實際執行的直譯器**」——
+  - **script step** → 解析 batch 的 python(裸 `python`→依 `_script_env` PATH 的全域;帶路徑→該 venv)→ `<該直譯器> -m pip install`。**不碰後端 venv、不裝沙盒**。
+  - **skill step** → 維持原邏輯(看 `skill_sandbox_mode` 裝沙盒/後端 venv)。
+  - 新增兩個 helper:`_resolve_script_interpreter(step)`、`_pip_install_into(py, pkg)`。
+- **實測(都在 wsl_docker 模式)**:① Q1 財務報表(venv 直譯器)移除 openpyxl → 自癒裝回 **venv** → completed 4/4;② 裸 `python` 工作流缺 humanize → 自癒裝進 **全域 python** → completed。兩者都不再誤裝沙盒。
+- **請主審判斷**:① 這個分流(script→自身直譯器、skill→沙盒設定)對不對你的設計;② 是否要 backport V3/V4。
+
+---
+
 ## 當下狀態快照(每次更新此份請同步刷新)
 
 > 更新時把這段內容覆寫掉、寫上你看到的當下狀態。日期填 commit 推上去那刻。

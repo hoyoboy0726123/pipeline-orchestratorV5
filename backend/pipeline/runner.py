@@ -122,6 +122,55 @@ def _decision_keyboard(run_id: str, has_prev: bool = True) -> InlineKeyboardMark
     return InlineKeyboardMarkup(rows)
 
 
+def _resolve_script_interpreter(step):
+    """從 script step 的 batch 解析它執行時用的 python 直譯器。
+
+    與 executor._script_env() 的設計一致:script 節點刻意與後端 venv 脫鉤
+    —— 沒勾「使用虛擬環境」→ 裸 python 走系統全域;勾了 → 該專案 venv。
+    自癒(install_dep)要裝進「這一步真正執行的直譯器」,而不是沙盒 / 後端 venv,
+    才打得到、又不污染編排器自己的環境。
+
+    回傳直譯器路徑字串;非 python 指令(node 等)或無法判定 → None(退回原邏輯)。
+    """
+    import os, re, shutil
+    batch = (getattr(step, "batch", "") or "").strip()
+    if not batch:
+        return None
+    m = re.match(r'\s*"([^"]+)"|\s*(\S+)', batch)   # 取第一個 token(支援引號路徑)
+    tok = ((m.group(1) or m.group(2)) if m else "").strip()
+    if not tok or not os.path.basename(tok).lower().startswith("python"):
+        return None
+    if ("/" in tok) or ("\\" in tok):              # 帶路徑(venv 等)→ 直接用
+        p = tok if os.path.isabs(tok) else os.path.join(getattr(step, "working_dir", "") or os.getcwd(), tok)
+        return os.path.normpath(p)
+    # 裸 python / python3 → 用 script 執行環境的 PATH 解析(= 它實際吃到的全域 python)
+    try:
+        from pipeline.executor import _script_env
+        return shutil.which(tok, path=_script_env().get("PATH"))
+    except Exception:
+        return shutil.which(tok)
+
+
+def _pip_install_into(python_exe, pkg):
+    """用指定 python 直譯器 pip install 單一套件。回傳 (ok, msg)。"""
+    import subprocess
+    try:
+        from pipeline.executor import _script_env
+        env = _script_env()
+    except Exception:
+        env = None
+    try:
+        r = subprocess.run([python_exe, "-m", "pip", "install", pkg],
+                           capture_output=True, text=True, timeout=600, env=env)
+        if r.returncode == 0:
+            return True, (r.stdout or "")[-300:]
+        return False, (r.stderr or r.stdout or "")[-500:]
+    except subprocess.TimeoutExpired:
+        return False, "逾時(install timeout)"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 def _missing_dep_keyboard(run_id: str, packages: list[str]) -> InlineKeyboardMarkup:
     """缺套件時的決策鍵盤。每個套件一行『允許安裝』按鈕；最下方拒絕 / 改任務 / 中止。
     callback_data: pipe_install_dep:{run_id}:{pkg_name}
@@ -3400,26 +3449,54 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
         if not pkgs_to_install:
             return "⚠️ 沒有有效套件名"
 
-        # 判斷裝到哪：sandbox 模式裝容器、否則裝 host venv
-        try:
-            import sys as _sys
-            from pathlib import Path as _PI
-            _backend = str(_PI(__file__).parent.parent.absolute())
-            if _backend not in _sys.path:
-                _sys.path.insert(0, _backend)
-            from settings import get_settings as _gs
-            sandbox_mode = _gs().get("skill_sandbox_mode", "host") == "wsl_docker"
-        except Exception:
-            sandbox_mode = False
+        import sys as _sys
+        from pathlib import Path as _PI
+        _backend = str(_PI(__file__).parent.parent.absolute())
+        if _backend not in _sys.path:
+            _sys.path.insert(0, _backend)
 
-        from skill_pkg_manager import add_package, add_package_sandbox
-        installer = add_package_sandbox if sandbox_mode else add_package
-        target = "sandbox" if sandbox_mode else "host"
+        # 判斷裝到哪:
+        #   1. 失敗的是 *script step* → 裝進「該 step 實際執行的 python 直譯器」
+        #      (沒勾 venv = 全域;勾了 = 該專案 venv)。script 節點刻意與後端 venv 脫鉤
+        #      (見 executor._script_env),自癒也要裝到它真正用的環境、不污染後端 venv、
+        #      更不能裝去八竿子打不著的沙盒容器(script 不在沙盒跑)。
+        #   2. 否則(skill step 等)→ 依 skill_sandbox_mode 裝沙盒 / 後端 venv host(原邏輯)。
+        _script_py = None
+        try:
+            import json as _jd
+            _sug = _jd.loads(run.awaiting_suggestion or "{}")
+            _sname = _sug.get("step_name")
+            _fstep = next((s for s in config.steps if s.name == _sname), None) if _sname else None
+            _is_script = bool(_fstep) and bool(getattr(_fstep, "batch", "")) and not (
+                _fstep.skill_mode or _fstep.subagent or _fstep.computer_use
+                or _fstep.outlook_automation or _fstep.web_crawler
+                or _fstep.condition or _fstep.human_confirm
+            )
+            if _is_script:
+                _script_py = _resolve_script_interpreter(_fstep)
+        except Exception as _e:
+            logger.warning(f"[install_dep] 判斷 script 直譯器失敗、退回原邏輯:{_e}")
+
         results = []
-        for pkg in pkgs_to_install:
-            ok, msg = installer(pkg)
-            results.append((pkg, ok, msg))
-            logger.info(f"[install_dep] {target} pip install {pkg}: ok={ok}, msg={msg}")
+        if _script_py:
+            target = f"script 直譯器（{_script_py}）"
+            for pkg in pkgs_to_install:
+                ok, msg = _pip_install_into(_script_py, pkg)
+                results.append((pkg, ok, msg))
+                logger.info(f"[install_dep] {target} pip install {pkg}: ok={ok}, msg={str(msg)[:200]}")
+        else:
+            try:
+                from settings import get_settings as _gs
+                sandbox_mode = _gs().get("skill_sandbox_mode", "host") == "wsl_docker"
+            except Exception:
+                sandbox_mode = False
+            from skill_pkg_manager import add_package, add_package_sandbox
+            installer = add_package_sandbox if sandbox_mode else add_package
+            target = "sandbox" if sandbox_mode else "host"
+            for pkg in pkgs_to_install:
+                ok, msg = installer(pkg)
+                results.append((pkg, ok, msg))
+                logger.info(f"[install_dep] {target} pip install {pkg}: ok={ok}, msg={msg}")
 
         all_ok = all(ok for _, ok, _ in results)
         if not all_ok:
