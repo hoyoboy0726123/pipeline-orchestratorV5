@@ -106,12 +106,35 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 
 ---
 
+## 協作 agent 交辦(2026-06-17~24,給主審 agent review)
+
+### 1. 待 review 的 PR — 爬蟲反爬殼誤殺修正
+- **分支**:`fix/web-crawler-shell-false-positive`(commit `2e0557c`,只動 `backend/pipeline/web_crawler.py`,+14/-1)
+- **bug**:`_looks_like_render_shell` 只要 markdown 出現 `js_challenge` / `jsc_orig_r` / `跳至主要內容` 就整頁判反爬殼丟掉。但這些字串出現在 **www.reddit 每個正常頁面**的 skip-link 網址與導覽列裡 → 27KB 含完整 PO 文的頁面被整頁誤殺、子頁全 0 成功。近期 commit(`68b5105`/`2b8bbaf`)加這偵測後才開始誤殺。
+- **修法**:加長度閘 `_SHELL_MAX_BYTES=6000` —— markdown ≥ 6000 bytes 視為有實質正文、不當殼;真正的 CF/SPA 短挑戰頁(<2KB)仍被擋。
+- **實測**:www.reddit r/ASUS `list_with_children` 由 **0/3 → 3/3 取得正文**;短 CF 頁仍正確判殼。
+- **請主審判斷**:① 閾值 6000 是否 OK(會不會有「真殼但 >6KB」的情況);② 是否偏好更語意化做法(把 `js_challenge`/`jsc_orig_r` 這種「正常 skip-link 也有」的訊號跟 `just a moment`/`checking your browser` 這種「真 CF 頁才有」的分開處理)。我選最小改動的長度閘。
+
+### 2. 本機 DB 狀態已偏離乾淨 seed(不在 git、提醒避免誤會)
+協作期間為了錄製 demo,動了本機 SQLite(這些**不會**進 git):
+- **新增工作流**:`PTT MobileComm 口碑摘要 (錄製)`(我自建的 5 步:爬蟲→解析→report_writer→human_confirm→docx)。
+- **改過範例 URL**:`Reddit ASUS 版口碑日報`、`Reddit ASUS 口碑分級報告` 的 `wc_url` 已從 `www.reddit.com` →(中途試過 old.reddit)→ 改回 `www.reddit.com`(配合上面爬蟲修正)。
+- **灌了 recipe**(強模型手寫 code 灌 DB):PTT 的解析+docx 兩步、兩支 Reddit 的「解析貼文清單」step2。都是確定性步、replay 零 LLM。
+
+### 3. 過程中發現的 recipe 命中陷阱(寫給未來省事)
+- **batch 含 `{{ steps.X.output.path }}` → runtime 展開成帶 run 時間戳的絕對路徑 → task_hash 每次變、recipe 永不命中**。給「要灌 recipe 的確定性步」的 batch 改用純檔名(code 自己從 cwd 找檔)。
+- **human_confirm 後的步驟算輸入指紋時 cwd 不在 per-run 夾 → 輸入檔被算成 `missing:檔名`**。該步 recipe 的 fingerprint 要對齊 runtime 實際的 `missing:` 值才命中。
+- **`seed_recipe.py` 在 Windows cp1252 console 印中文會 crash** → 跑前設 `PYTHONUTF8=1`。
+
+---
+
 ## 當下狀態快照(每次更新此份請同步刷新)
 
 > 更新時把這段內容覆寫掉、寫上你看到的當下狀態。日期填 commit 推上去那刻。
 
-- **HANDOFF 最後更新**:2026-05-20 by 主審 agent
+- **HANDOFF 最後更新**:2026-06-24 by 協作 agent(交辦上面 3 點)
 - **main 在**:`d27aeaf`(或更新,請 pull)
+- **待 review 分支**:`fix/web-crawler-shell-false-positive`
 - **4 個範例工作流已 seed**:財務純串接、財務健診進化版、Reddit IF、Reddit Switch
 - **模糊提示詞 + skill 自動注入樣本** 機制已驗證通過
 - **已知開放任務**:由 user 直接交辦,或見 GitHub Issues(若有)

@@ -273,14 +273,27 @@ _RENDER_SHELL_MARKERS = (
     "前往 reddit 首頁", "go to reddit",
 )
 _SHELL_STRONG = ("js_challenge", "jsc_orig_r", "just a moment", "checking your browser")
+# 已渲染內容頁的長度下限:≥ 此值即視為「有實質正文」、不當殼(避免 skip-link/導覽列字串誤殺)。
+# 真正的挑戰頁 / 未 hydrate 殼遠小於此(CF interstitial 多 < 2KB)。
+_SHELL_MAX_BYTES = 6000
 CHILD_SHELL_FAILED = "（內文抓取失敗:此子頁回傳反爬挑戰頁/未渲染殼,僅保留標題與連結）"
 
 
 def _looks_like_render_shell(md: Optional[str]) -> bool:
     """子頁 markdown 是反爬挑戰頁 / 未渲染導覽殼(沒抓到正文)→ True。
     保守:命中唯一強訊號(js_challenge / Just a moment …)即判;否則需 ≥ 2 個弱訊號,
-    避免誤判正常正文裡偶然提到「Enable JavaScript」之類的字。"""
+    避免誤判正常正文裡偶然提到「Enable JavaScript」之類的字。
+
+    ⚠️ 長度閘(重要、修誤殺):真正的挑戰頁 / 未渲染殼**內容很短**(CF「Just a moment」
+    interstitial、未 hydrate 的 SPA 殼通常 < 數 KB)。而**已成功渲染的內容頁**即使在
+    導覽列 / skip-link 網址裡帶有 js_challenge / jsc_orig_r / 跳至主要內容 等字串
+    (Reddit 正常頁每頁都有),也是完整正文。所以先看長度:有實質內容(≥ SHELL_MAX_BYTES)
+    就不是殼,避免把正常 Reddit 貼文頁(28KB、含 PO 文+留言)整頁誤判丟掉。
+    (實測:www.reddit 單篇貼文 status=200、len≈27KB、含完整正文,卻因 skip-link 的
+     ?js_challenge=1 被舊版判成殼 → 子頁全 0 成功;加長度閘後正常通過。)"""
     if not md:
+        return False
+    if len(md) >= _SHELL_MAX_BYTES:
         return False
     low = md.lower()
     if any(s in low for s in _SHELL_STRONG):
