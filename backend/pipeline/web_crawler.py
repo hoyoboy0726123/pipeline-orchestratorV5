@@ -553,11 +553,29 @@ async def _fetch_static_http(*, fetch_url: str, requested_url: str, output_path:
     except Exception:
         pass
 
+    # 內文清洗:優先 trafilatura(乾淨抽正文 + 留言、去掉 share/save/vote/loading 等 chrome),
+    # 對「列表頁」這種非文章常抽不到 → 退回 markdownify(全頁、較雜但保底)。
+    md = ""
     try:
-        from markdownify import markdownify as _md
-        md = _md(html, heading_style="ATX")  # 全頁保留連結(別用 trafilatura,它會砍掉列表連結)
+        import trafilatura
+        md = trafilatura.extract(html, output_format="markdown",
+                                 include_links=True, include_comments=True) or ""
     except Exception:
-        md = re.sub(r"<[^>]+>", "", html)
+        md = ""
+    if len((md or "").strip()) < 200:
+        try:
+            from markdownify import markdownify as _md
+            md = _md(html, heading_style="ATX")
+        except Exception:
+            md = re.sub(r"<[^>]+>", "", html)
+    # trafilatura 會砍掉連結 → 末尾補一段「同站 permalink 連結」(只留貼文/項目類、不附導覽 chrome),
+    # 讓下游 crawl_list_with_children 仍從列表頁 markdown 抽得到子頁;對內文摘要的雜訊極小。
+    _ITEM_MARKERS = ("/comments/", "/item", "/p/", "/post", "/article",
+                     "/status/", "/threads/", "/video/")
+    _perma = [u for u in links_internal if any(m in u for m in _ITEM_MARKERS)]
+    if _perma:
+        tail = "\n\n## 連結\n" + "\n".join(f"- [{i + 1}]({u})" for i, u in enumerate(_perma[:80]))
+        md = (md or "") + tail
 
     res = CrawlResult(
         ok=True, tier="http", url=requested_url, final_url=base,

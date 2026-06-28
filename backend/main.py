@@ -3472,10 +3472,20 @@ exit_code 仍是 0。若不驗證就往下,下游 skill / report_writer 會**用
     path: parsed.json
 ```
 
-**何時掛 / 不掛**：
-- 掛 → 輸出含**大量重複記錄**、要逐筆資料（論壇留言、購物商品、搜尋結果、新聞**列表頁**）
+**何時掛 / 不掛（判斷點是「來源形態」、不是「輸出格式」）**：
+- 掛 → 來源是**論壇 / 列表 / 多篇貼文 / 商品列表 / 搜尋結果**這種「**大量重複記錄**」的頁面
+  （論壇留言、購物商品、搜尋結果、新聞**列表頁**、Reddit / PTT 等社群)。
 - 不掛 → **單一頁面**（一篇新聞內文、一篇部落格、維基條目）→ 爬蟲 markdown 本身就是內容、
-  直接餵下游、再掛 parser 是多餘的 LLM 步驟
+  直接餵下游、再掛 parser 是多餘的 LLM 步驟。
+
+⚠️ **常見規劃錯誤（務必避免）：下游只是「AI 摘要 / 寫報告」就以為不用掛 parser。錯。**
+判斷掛不掛**只看來源形態、不看下游要不要 JSON**：只要來源是上面那種「大量重複記錄 / 論壇 /
+列表」，**即使下游是 summarizer / report_writer 做摘要,中間也一定要先掛 `scraped-content-parser`
+（或 web_parser subagent）把原始 HTML 整理成乾淨的逐筆記錄再餵**。否則爬蟲的原始 markdown 夾帶
+導覽列 / 分享按鈕 / 投票數 / 「loading…」/ 圖片 URL 等 **chrome 雜訊**,summarizer 會被淹沒、
+把雜訊當內容寫進摘要(實測:Reddit 抓回後直接餵 summarizer → 摘要標題變成「1 comment」、
+內文變成 share/save/hide 連結垃圾)。正確骨架:**web_crawler → scraped-content-parser(清成乾淨記錄)
+→ summarizer / report_writer → (docx)**。
 
 **多站比較場景**（如「比較 3 個購物站的 X 價格」）：
 - N 個**不同站**結構不同 → 要 **N 組「爬蟲 + 解析」**、各站各一支(解析用 web_parser subagent 或 scraped-content-parser skill 皆可)
