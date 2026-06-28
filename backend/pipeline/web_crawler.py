@@ -273,14 +273,27 @@ _RENDER_SHELL_MARKERS = (
     "前往 reddit 首頁", "go to reddit",
 )
 _SHELL_STRONG = ("js_challenge", "jsc_orig_r", "just a moment", "checking your browser")
+# 已渲染內容頁的長度下限:≥ 此值即視為「有實質正文」、不當殼(避免 skip-link/導覽列字串誤殺)。
+# 真正的挑戰頁 / 未 hydrate 殼遠小於此(CF interstitial 多 < 2KB)。
+_SHELL_MAX_BYTES = 6000
 CHILD_SHELL_FAILED = "（內文抓取失敗:此子頁回傳反爬挑戰頁/未渲染殼,僅保留標題與連結）"
 
 
 def _looks_like_render_shell(md: Optional[str]) -> bool:
     """子頁 markdown 是反爬挑戰頁 / 未渲染導覽殼(沒抓到正文)→ True。
     保守:命中唯一強訊號(js_challenge / Just a moment …)即判;否則需 ≥ 2 個弱訊號,
-    避免誤判正常正文裡偶然提到「Enable JavaScript」之類的字。"""
+    避免誤判正常正文裡偶然提到「Enable JavaScript」之類的字。
+
+    ⚠️ 長度閘(重要、修誤殺):真正的挑戰頁 / 未渲染殼**內容很短**(CF「Just a moment」
+    interstitial、未 hydrate 的 SPA 殼通常 < 數 KB)。而**已成功渲染的內容頁**即使在
+    導覽列 / skip-link 網址裡帶有 js_challenge / jsc_orig_r / 跳至主要內容 等字串
+    (Reddit 正常頁每頁都有),也是完整正文。所以先看長度:有實質內容(≥ SHELL_MAX_BYTES)
+    就不是殼,避免把正常 Reddit 貼文頁(28KB、含 PO 文+留言)整頁誤判丟掉。
+    (實測:www.reddit 單篇貼文 status=200、len≈27KB、含完整正文,卻因 skip-link 的
+     ?js_challenge=1 被舊版判成殼 → 子頁全 0 成功;加長度閘後正常通過。)"""
     if not md:
+        return False
+    if len(md) >= _SHELL_MAX_BYTES:
         return False
     low = md.lower()
     if any(s in low for s in _SHELL_STRONG):
@@ -471,6 +484,114 @@ async def crawl_urls(
     return manifest
 
 
+# ── Reddit 特例:站方反爬路由 ──────────────────────────────────────────
+# 2026-06 起 www.reddit.com(shreddit)全站貼文/列表前面擋一層「Please wait for
+# verification」JS 驗證牆 → headless 瀏覽器(crawl4ai / FlareSolverr 都是瀏覽器)
+# 過不了貼文頁(status=0)。實測:
+#   - www.reddit.com 任何頁 → 8KB「Please wait for verification」interstitial
+#   - old.reddit.com      → 完整靜態 HTML、**但**擋 headless 瀏覽器指紋(回 403)
+#   - 純 httpx + 瀏覽器 UA 打 old.reddit → 200、完整內容(57KB+)
+# 所以 reddit 一律改寫成 old.reddit + 走純 HTTP 抓取(繞過會被擋的瀏覽器)。
+_REDDIT_STATIC_HOSTS = {
+    "reddit.com", "www.reddit.com", "new.reddit.com",
+    "np.reddit.com", "m.reddit.com", "old.reddit.com",
+}
+
+
+def _maybe_reddit_static_url(url: str) -> Optional[str]:
+    """reddit 系網域 → 回改寫成 old.reddit.com 的 URL(該走純 HTTP);非 reddit 回 None。
+    media 子網域(i.redd.it / v.redd.it)不是 reddit.com、回 None 照常走瀏覽器。"""
+    from urllib.parse import urlunparse
+    try:
+        p = urlparse(url)
+    except Exception:
+        return None
+    if (p.hostname or "").lower() in _REDDIT_STATIC_HOSTS:
+        return urlunparse(p._replace(netloc="old.reddit.com"))
+    return None
+
+
+async def _fetch_static_http(*, fetch_url: str, requested_url: str, output_path: str,
+                             timeout: int, logger: logging.Logger, step_name: str,
+                             started_at: float) -> "CrawlResult":
+    """純 HTTP(httpx + 瀏覽器 UA)抓靜態頁 → markdown,繞過 headless 瀏覽器。
+    用於 old.reddit 這種「放行 HTTP、擋瀏覽器指紋」的站。連結轉絕對、用 markdownify
+    保留全部連結(下游 crawl_list_with_children 要靠列表頁 markdown 抽子頁連結)。"""
+    import httpx
+    from urllib.parse import urljoin
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=timeout,
+                                     follow_redirects=True) as c:
+            resp = await c.get(fetch_url)
+    except Exception as e:
+        logger.warning(f"[{step_name}] 純 HTTP 抓取失敗:{e}")
+        return _err(requested_url, f"純 HTTP 抓取失敗:{e}", tier="http")
+
+    html = resp.text or ""
+    if resp.status_code != 200 or len(html) < 500:
+        return _err(requested_url,
+                    f"純 HTTP 回 status={resp.status_code}、內容過薄({len(html)} bytes)",
+                    tier="http")
+
+    base = str(resp.url)
+    links_internal: list = []
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        host = (urlparse(base).hostname or "")
+        for a in soup.find_all("a", href=True):
+            a["href"] = urljoin(base, a["href"])  # 相對 → 絕對,下游才抽得到子頁
+        links_internal = sorted({a["href"] for a in soup.find_all("a", href=True)
+                                 if (urlparse(a["href"]).hostname or "") == host})
+        html = str(soup)
+    except Exception:
+        pass
+
+    # 內文清洗:優先 trafilatura(乾淨抽正文 + 留言、去掉 share/save/vote/loading 等 chrome),
+    # 對「列表頁」這種非文章常抽不到 → 退回 markdownify(全頁、較雜但保底)。
+    md = ""
+    try:
+        import trafilatura
+        md = trafilatura.extract(html, output_format="markdown",
+                                 include_links=True, include_comments=True) or ""
+    except Exception:
+        md = ""
+    if len((md or "").strip()) < 200:
+        try:
+            from markdownify import markdownify as _md
+            md = _md(html, heading_style="ATX")
+        except Exception:
+            md = re.sub(r"<[^>]+>", "", html)
+    # trafilatura 會砍掉連結 → 末尾補一段「同站 permalink 連結」(只留貼文/項目類、不附導覽 chrome),
+    # 讓下游 crawl_list_with_children 仍從列表頁 markdown 抽得到子頁;對內文摘要的雜訊極小。
+    _ITEM_MARKERS = ("/comments/", "/item", "/p/", "/post", "/article",
+                     "/status/", "/threads/", "/video/")
+    _perma = [u for u in links_internal if any(m in u for m in _ITEM_MARKERS)]
+    if _perma:
+        tail = "\n\n## 連結\n" + "\n".join(f"- [{i + 1}]({u})" for i, u in enumerate(_perma[:80]))
+        md = (md or "") + tail
+
+    res = CrawlResult(
+        ok=True, tier="http", url=requested_url, final_url=base,
+        status_code=resp.status_code, markdown=md, html="", title=_extract_title(html, md),
+        error="", duration_ms=0, extra={"links_internal": links_internal},
+    )
+    wrapped = _wrap_with_frontmatter(res, requested_url=requested_url,
+                                     started_at=started_at, tier_used="http")
+    Path(output_path).write_text(wrapped, encoding="utf-8")
+    res.markdown = wrapped
+    res.duration_ms = int((time.time() - started_at) * 1000)
+    logger.info(f"[{step_name}] ✓ 純 HTTP 抓取(old.reddit/靜態):{output_path}"
+                f"({len(wrapped):,} bytes、{len(links_internal)} 同站連結)")
+    return res
+
+
 async def crawl_single_url(
     *,
     url: str,
@@ -501,6 +622,15 @@ async def crawl_single_url(
         )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # ── Reddit 特例:改寫 old.reddit + 純 HTTP 抓取(繞過 www JS 驗證牆 / 瀏覽器指紋封鎖)──
+    _reddit_url = _maybe_reddit_static_url(url)
+    if _reddit_url:
+        logger.info(f"[{step_name}] Reddit → 改用 old.reddit + 純 HTTP 抓取:{_reddit_url}")
+        return await _fetch_static_http(
+            fetch_url=_reddit_url, requested_url=url, output_path=output_path,
+            timeout=timeout, logger=logger, step_name=step_name, started_at=t0,
+        )
 
     # ── Tier 1：Crawl4AI in sandbox ────────────────────────────────
     # 在 thread pool 跑（_run_crawl4ai_in_sandbox 是 sync + 內部會即時 print log），
@@ -858,6 +988,12 @@ async def crawl_list_with_children(
     import tempfile
     t0 = time.time()
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Reddit:先把列表 URL 統一成 old.reddit,讓 parent_host 與抽出的子頁同網域(否則
+    # 子頁連結是 old.reddit.com、parent_host 卻是 www.reddit.com → 同網域過濾會誤殺)。
+    _rr = _maybe_reddit_static_url(list_url)
+    if _rr:
+        list_url = _rr
 
     # 1. 抓列表頁（用臨時檔，最後不留下）
     list_tmp = tempfile.NamedTemporaryFile(suffix="_list.md", delete=False)
