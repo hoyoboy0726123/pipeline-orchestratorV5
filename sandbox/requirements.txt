@@ -21,6 +21,7 @@ matplotlib
 opencv-python-headless
 python-pptx
 pdfplumber
+markdown
 newspaper3k
 cloudscraper
 feedparser
