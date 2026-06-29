@@ -221,6 +221,27 @@ def build_context(*, step_results=None, input_params=None,
                 # 不覆寫上面的固定 key(stdout / path 等)
                 if k not in out:
                     out[k] = v
+            # 自動把該步「JSON 輸出檔」的 top-level 欄位攤平進 output namespace
+            # → 讓 condition / switch 能直接讀 {{ steps.<step>.output.<json欄位> }}
+            #   (原本 output 只有 path + save_as 變數,JSON 欄位讀不到 → AI 助手常寫
+            #    `output.口碑` 之類而報 'dict object' has no attribute 'X'。這裡補上。)
+            #   安全:只讀 .json、只取 dict、≤1MB、不覆寫固定 key/step_vars。
+            _op = out.get("path") or ""
+            if isinstance(_op, str) and _op.lower().endswith(".json"):
+                try:
+                    import json as _json
+                    _cand = _op
+                    if (not os.path.exists(_cand) and _cand.startswith("/mnt/")
+                            and len(_cand) > 7 and _cand[6] == "/"):
+                        _cand = _cand[5].upper() + ":" + _cand[6:]   # /mnt/c/.. → C:/..
+                    if os.path.exists(_cand) and os.path.getsize(_cand) <= 1_000_000:
+                        _data = _json.load(open(_cand, encoding="utf-8"))
+                        if isinstance(_data, dict):
+                            for _k, _v in _data.items():
+                                if isinstance(_k, str) and _k not in out:
+                                    out[_k] = _v
+                except Exception:
+                    pass
             steps_ns[sr.step_name] = {"output": out}
 
     ctx: dict[str, Any] = {
