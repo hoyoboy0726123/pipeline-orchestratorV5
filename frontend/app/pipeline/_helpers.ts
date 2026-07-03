@@ -26,6 +26,7 @@ export interface StepData extends Record<string, unknown> {
   hcOnTimeout?: 'wait' | 'pass' | 'reject' | 'abort'  // 超時後行動,預設 wait = 永遠等
   // 背景模式(Script 開 daemon / GUI 用):啟動後不等 exit、立即下一步、subprocess 由 runner 接管
   background?: boolean
+  background_keep?: boolean   // 背景模式下:workflow 結束「不」自動 kill、進程留在桌面供手動操作
   readyAfterSeconds?: number   // 背景啟動後等 N 秒讓 daemon ready 再下一步,預設 0
   // 桌面自動化節點（computer_use）
   computerUse?: boolean                  // optional — 桌面自動化步驟
@@ -490,6 +491,15 @@ export function newHumanConfirmData(index = 0): HumanConfirmData {
     status: 'idle',
     errorMsg: '',
   }
+}
+
+// 防呆:新增桌面自動化節點時,確保名稱不與現有節點撞名(計數器頁面重整後會歸零、
+// 撞名會讓兩節點共用同一個 _assets 夾 → 互相覆蓋錨點圖)。回傳一個目前沒被用到的 桌面自動化_N。
+export function dedupeComputerUseName(name: string, existing: Set<string>): string {
+  if (!existing.has(name)) return name
+  let k = 1
+  while (existing.has(`桌面自動化_${k}`)) k++
+  return `桌面自動化_${k}`
 }
 
 let _computerUseCounter = 0
@@ -1223,6 +1233,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       llmRole: effectiveLlmRole,
       // 背景模式(daemon / GUI app):不等 exit、立刻下一步
       background: !!(d as { background?: boolean }).background,
+      background_keep: (d as { background_keep?: boolean }).background_keep !== false,  // 預設 true(保留)
       readyAfterSeconds: (d as { readyAfterSeconds?: number }).readyAfterSeconds || 0,
       index: i,
       status: d.status,
@@ -1490,6 +1501,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
     if (s.askMode) lines.push(`    ask_mode: true`)
     if (s.background) {
       lines.push(`    background: true`)
+      lines.push(`    background_keep: ${s.background_keep === false ? 'false' : 'true'}`)  // 預設 true(保留)
       if (s.readyAfterSeconds && s.readyAfterSeconds > 0) {
         lines.push(`    ready_after_seconds: ${s.readyAfterSeconds}`)
       }
@@ -1635,6 +1647,8 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
       } else if (/^hc_on_timeout:/.test(t) && cur) {
         const v = t.replace(/^hc_on_timeout:\s*/, '').replace(/^"|"$/g, '').trim()
         if (v === 'wait' || v === 'pass' || v === 'reject' || v === 'abort') cur.hcOnTimeout = v
+      } else if (/^background_keep:/.test(t) && cur) {
+        cur.background_keep = /true/.test(t)
       } else if (/^background:/.test(t) && cur) {
         cur.background = /true/.test(t)
       } else if (/^ready_after_seconds:/.test(t) && cur) {

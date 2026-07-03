@@ -360,21 +360,38 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
                       <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
                         勾起來:啟動後**不等**腳本結束、立刻下一步、subprocess 留著。
                         適合開 GUI / server / daemon 等永遠不退出的進程,讓後續節點可以對它做自動化。
-                        Workflow 跑完會自動 kill。
+                        Workflow 跑完預設會自動 kill(下方可改為保留)。
                       </p>
                     </div>
                   </label>
                   {(data as { background?: boolean }).background && (
-                    <div className="mt-2 pl-5">
-                      <label className="text-[11px] text-gray-500 block mb-0.5">啟動後等幾秒讓它 ready 再下一步(秒,0=不等)</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={120}
-                        value={(data as { readyAfterSeconds?: number }).readyAfterSeconds ?? 0}
-                        onChange={e => upd({ readyAfterSeconds: parseInt(e.target.value) || 0 } as Partial<typeof data>)}
-                        className={`${inputCls} font-mono`}
-                      />
+                    <div className="mt-2 pl-5 space-y-2">
+                      <label className="flex items-start gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={(data as { background_keep?: boolean }).background_keep !== false}
+                          onChange={e => upd({ background_keep: e.target.checked } as Partial<typeof data>)}
+                          className="mt-0.5 w-3.5 h-3.5 rounded accent-orange-500"
+                        />
+                        <div className="flex-1">
+                          <div className="text-[11px] font-semibold text-orange-700">🛡️ 保留進程、結束不自動 kill(預設開)</div>
+                          <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+                            預設勾選:Workflow 跑完後**不**關閉這個 GUI / 進程,留在桌面讓你手動操作。
+                            取消勾選 → 結束時自動 kill。(手動中止 abort 一律強制關閉;保留時進程需自行關閉以釋放資源)
+                          </p>
+                        </div>
+                      </label>
+                      <div>
+                        <label className="text-[11px] text-gray-500 block mb-0.5">啟動後等幾秒讓它 ready 再下一步(秒,0=不等)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={120}
+                          value={(data as { readyAfterSeconds?: number }).readyAfterSeconds ?? 0}
+                          onChange={e => upd({ readyAfterSeconds: parseInt(e.target.value) || 0 } as Partial<typeof data>)}
+                          className={`${inputCls} font-mono`}
+                        />
+                      </div>
                     </div>
                   )}
                 </div>

@@ -21,14 +21,10 @@ defusedxml
 lxml
 feedparser
 markitdown[pptx]
-
-# computer_use 節點依賴（純 Python 桌面自動化，V2 新增）
 pyautogui
 opencv-python
 pygetwindow
 pynput
-
-# Outlook 自動化節點依賴（Windows-only；V5 新增，sandbox 不裝）
 pywinauto
 comtypes
 python-pptx
@@ -36,3 +32,4 @@ jinja2
 markdown
 tabulate
 uiautomation
+openai-whisper
