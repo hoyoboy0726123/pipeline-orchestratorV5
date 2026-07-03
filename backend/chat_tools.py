@@ -1191,6 +1191,15 @@ async def dispatch_subagent_async(
         else:
             wd = OUTPUT_BASE_PATH / working_dir
     wd = wd.resolve()
+    # 安全容器化:working_dir 一律限制在輸出目錄內。擋絕對路徑(C:\Windows…)與 .. 逃逸,
+    # 否則子代理 cwd 可讀寫專案外任意 host 目錄(對比 read_subagent_file/send_subagent_file_to_tg
+    # 都有 relative_to 檢查,此處原本獨缺)。
+    _out_base = OUTPUT_BASE_PATH.resolve()
+    if not (wd == _out_base or wd.is_relative_to(_out_base)):
+        return json.dumps({
+            "ok": False,
+            "error": f"working_dir 必須位於輸出目錄({_out_base})之內;已擋下越界路徑:{working_dir}",
+        }, ensure_ascii=False)
     wd.mkdir(parents=True, exist_ok=True)
 
     chain_total = 1 + len(follow_up)

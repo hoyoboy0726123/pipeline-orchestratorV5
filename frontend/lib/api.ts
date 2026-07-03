@@ -1242,8 +1242,10 @@ export async function pipelineChatStream(
             throw new Error(ev.detail || '串流回 error 事件')
           }
         } catch (e) {
-          // JSON parse 失敗 → 略過此行(不是合法事件、可能是空行)
-          if (e instanceof Error && e.message.startsWith('串流回')) throw e
+          // 只吞「JSON.parse 失敗」(SyntaxError,通常是空行/非法事件行);
+          // 其餘一律往上拋 —— 包含後端 error 事件與 onEvent() 拋出的例外,
+          // 否則後端回錯時使用者只看到空泡泡、不跳任何錯誤。
+          if (!(e instanceof SyntaxError)) throw e
         }
       }
       nl = buffer.indexOf('\n')
