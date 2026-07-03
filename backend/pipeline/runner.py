@@ -54,8 +54,8 @@ async def force_abort(run_id: str):
     from .executor import kill_run_processes
     from .computer_use import request_abort as _cu_abort
     _abort_flags.add(run_id)
-    # 1. 立即 kill 所有子進程
-    kill_run_processes(run_id)
+    # 1. 立即 kill 所有子進程(abort = 強制全殺,含 background_keep)
+    kill_run_processes(run_id, force=True)
     # 1a. 通知 computer_use 引擎中止（它跑在 executor thread 裡，kill 不到）
     _cu_abort(run_id)
     # 2. Cancel asyncio task
@@ -1653,7 +1653,7 @@ async def _run_pipeline_inner(
                 input_params=getattr(run, "input_params", None) or {},
             )
             _render_var_step(step, _var_ctx)
-        except _VarExpressionError as _var_exc:
+        except Exception as _var_exc:  # 放寬:Jinja2 執行期 TypeError/ValueError 也接住,不讓 run 協程靜默崩(CancelledError 屬 BaseException 不會被吃,abort 仍有效)
             logger.error(f"[{step.name}] 變數展開失敗:{_var_exc}")
             step_result = StepResult(
                 step_index=run.current_step,
@@ -1744,7 +1744,7 @@ async def _run_pipeline_inner(
                     decision_msg = f"IF 求值={cond} → 跳到 {target_name or '(end)'}"
                 else:
                     raise _CondError("condition 節點需填 expression(IF)或 switch(Switch)")
-            except _CondError as _ce:
+            except Exception as _ce:  # 放寬:型別比較/filter 的 TypeError/ValueError 也接住 → self-heal,不讓 run 卡死
                 logger.error(f"[{step.name}] condition 求值失敗:{_ce}")
                 _cond_sugg = (
                     "檢查 expression / switch 表達式語法、引用變數是否存在。"
@@ -2349,6 +2349,7 @@ async def _run_pipeline_inner(
                     working_dir=wd,
                     background=getattr(step, "background", False),
                     ready_after_seconds=getattr(step, "ready_after_seconds", 0),
+                    background_keep=getattr(step, "background_keep", True),
                 )
 
             # 快速模式：Recipe 命中 + 執行成功 → 確定性驗證（不叫 LLM）

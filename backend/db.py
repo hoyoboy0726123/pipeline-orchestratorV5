@@ -402,7 +402,7 @@ def mark_recipe_failed(workflow_id: str, step_name: str):
     conn = get_conn()
     conn.execute("""
         UPDATE recipes SET fail_count = fail_count + 1, last_fail_at = ?,
-        disabled = CASE WHEN fail_count >= 2 THEN 1 ELSE 0 END
+        disabled = CASE WHEN fail_count + 1 >= 2 THEN 1 ELSE 0 END
         WHERE workflow_id=? AND step_name=?
     """, (time.time(), workflow_id, step_name))
     conn.commit()

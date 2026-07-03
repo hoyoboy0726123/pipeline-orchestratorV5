@@ -196,6 +196,41 @@ def render_step(step, context: dict):
     return step
 
 
+# 已解析的 JSON 輸出快取:key=(path, mtime),避免每步 build_context 重讀所有 .json(原本 O(N^2))
+_JSON_OUT_CACHE: dict[tuple, Any] = {}
+
+
+def _load_json_output(path: str) -> Any:
+    """讀該步 .json 輸出檔、回傳 dict(供 output 攤平);失敗回 None。
+    安全:只讀 .json、≤1MB、utf-8-sig(容 UTF-8 BOM)、with open、(path,mtime) 快取。
+    """
+    if not isinstance(path, str) or not path.lower().endswith(".json"):
+        return None
+    cand = path
+    if not os.path.exists(cand) and cand.startswith("/mnt/") and len(cand) > 7 and cand[6] == "/":
+        cand = cand[5].upper() + ":" + cand[6:]   # /mnt/c/.. → C:/..
+    try:
+        st = os.stat(cand)
+    except OSError:
+        return None
+    if st.st_size > 1_000_000:
+        return None
+    key = (cand, st.st_mtime)
+    if key in _JSON_OUT_CACHE:
+        return _JSON_OUT_CACHE[key]
+    import json as _json
+    data = None
+    try:
+        with open(cand, encoding="utf-8-sig") as f:   # utf-8-sig 同時容 BOM / 無 BOM
+            data = _json.load(f)
+    except Exception:
+        data = None
+    if len(_JSON_OUT_CACHE) > 256:
+        _JSON_OUT_CACHE.clear()   # 簡單防爆(非完整 LRU,夠用)
+    _JSON_OUT_CACHE[key] = data
+    return data
+
+
 def build_context(*, step_results=None, input_params=None,
                   env_passthrough: bool = True) -> dict:
     """組裝 render context: {steps, input, env}。
@@ -221,6 +256,16 @@ def build_context(*, step_results=None, input_params=None,
                 # 不覆寫上面的固定 key(stdout / path 等)
                 if k not in out:
                     out[k] = v
+            # 把該步「JSON 輸出檔」的欄位提供給下游 condition/switch:
+            #   - 完整物件掛 output.json.<key>(永遠可用、不會與 stdout/path/status 等固定 key 衝突)
+            #   - 同時攤平到 output.<key>(讓 AI 助手直覺寫 output.口碑 即可用),但不覆寫固定 key/step_vars
+            #   AI 助手常寫 output.<json欄位> 而原本讀不到 → 'dict object' has no attribute 'X';這裡補上。
+            _jdata = _load_json_output(out.get("path") or "")
+            if isinstance(_jdata, dict):
+                out["json"] = _jdata
+                for _k, _v in _jdata.items():
+                    if isinstance(_k, str) and _k not in out:
+                        out[_k] = _v
             steps_ns[sr.step_name] = {"output": out}
 
     ctx: dict[str, Any] = {
