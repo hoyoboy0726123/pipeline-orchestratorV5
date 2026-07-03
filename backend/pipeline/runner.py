@@ -1476,6 +1476,25 @@ async def run_pipeline(
             run_id=run_id,
             start_from_step=start_from_step,
         )
+    except Exception as _fatal:
+        # 兜底:resume/self-heal 的 run_pipeline 都是 fire-and-forget task,內部未預期例外
+        # (store I/O 錯、殘餘型別錯等)會被 asyncio 吞掉 → run 永遠卡在 running、不通知不決策。
+        # 這裡統一把 run 標 failed + 通知。(CancelledError 屬 BaseException,abort 仍正常傳播不進來。)
+        logger.error(f"[run_pipeline] 未預期例外、run_id={run_id}:{_fatal}", exc_info=True)
+        try:
+            _st = get_store()
+            _r = _st.load(run_id) if run_id else None
+            if _r is not None and _r.status not in ("completed", "failed", "aborted"):
+                _r.status = "failed"
+                _r.ended_at = datetime.now().isoformat()
+                _st.save(_r)
+                await _notify_failure(_r, ValidationResult(
+                    status="failed", reason=f"未預期錯誤:{_fatal}",
+                    suggestion="請看後端 log 追根因",
+                ), "(pipeline)")
+        except Exception:
+            logger.error("[run_pipeline] 兜底標記 failed 也失敗", exc_info=True)
+        return run_id or ""
     finally:
         if _do_minimize:
             window_helper.request_restore()
