@@ -306,31 +306,42 @@ def _parse_install_commands(text: str) -> tuple[list[str], list[str], list[str]]
     npm_pkgs: list[str] = []
     system_tools: set[str] = set()
 
-    # pip install：抓每條 install 指令後面的所有套件名（允許引號、extras、版本）
-    # 範例匹配："pip install pandas", 'pip install "markitdown[pptx]"', "pip install -U foo bar"
-    for m in re.finditer(r"\bpip\s+install\s+([^\n`]+)", text, re.IGNORECASE):
-        args = m.group(1)
-        for tok in re.findall(r'"([^"]+)"|\'([^\']+)\'|(\S+)', args):
-            pkg = next(filter(None, tok), "")
-            if not pkg or pkg.startswith("-"):
-                continue
-            # 略過 install 自己的子命令/路徑（--user, -U, requirements.txt 等）
-            if pkg in ("install", "pip") or pkg.startswith("."):
-                continue
-            if pkg.endswith(".txt"):
-                continue
-            pip_pkgs.append(pkg)
+    # 只在「像指令的文字」裡找安裝指令,避免把散文當套件
+    # (踩過:"pip install the following packages: pandas" 把 the/following/packages 都當套件)。
+    # 來源:markdown 程式碼區塊 ``` ``` + 反引號行內碼 + 以 pip/npm install 開頭的行。
+    _cmd_chunks: list[str] = []
+    _cmd_chunks += re.findall(r"```[^\n]*\n(.*?)```", text, re.DOTALL)
+    _cmd_chunks += re.findall(r"`([^`\n]+)`", text)
+    for _ln in text.splitlines():
+        _s = _ln.strip().lstrip("$").strip()
+        if re.match(r"(pip[0-9.]*|python[0-9.]*\s+-m\s+pip|npm)\s+install\b", _s, re.IGNORECASE):
+            _cmd_chunks.append(_s)
+    scan_text = "\n".join(_cmd_chunks)
+
+    # 合法套件名:名稱 + 可選 extras + 可選版本約束(擋掉 the / following / packages: 這種散文 token)
+    _pkg_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._\-]+\])?([<>=!~][^\s]*)?$")
+
+    def _accept(pkg: str, self_names: tuple) -> str:
+        pkg = pkg.strip().strip("\"'").rstrip(",;.")
+        if not pkg or pkg.startswith("-") or pkg.startswith(".") or pkg.endswith(".txt"):
+            return ""
+        if pkg.lower() in self_names:
+            return ""
+        return pkg if _pkg_re.match(pkg) else ""
+
+    # pip install：抓每條 install 指令後面的套件名(允許引號、extras、版本)
+    for m in re.finditer(r"\bpip[0-9.]*\s+install\s+([^\n`]+)", scan_text, re.IGNORECASE):
+        for tok in re.findall(r'"([^"]+)"|\'([^\']+)\'|(\S+)', m.group(1)):
+            pkg = _accept(next(filter(None, tok), ""), ("install", "pip"))
+            if pkg:
+                pip_pkgs.append(pkg)
 
     # npm install：同上
-    for m in re.finditer(r"\bnpm\s+install\s+([^\n`]+)", text, re.IGNORECASE):
-        args = m.group(1)
-        for tok in re.findall(r'"([^"]+)"|\'([^\']+)\'|(\S+)', args):
-            pkg = next(filter(None, tok), "")
-            if not pkg or pkg.startswith("-"):
-                continue
-            if pkg in ("install", "npm"):
-                continue
-            npm_pkgs.append(pkg)
+    for m in re.finditer(r"\bnpm\s+install\s+([^\n`]+)", scan_text, re.IGNORECASE):
+        for tok in re.findall(r'"([^"]+)"|\'([^\']+)\'|(\S+)', m.group(1)):
+            pkg = _accept(next(filter(None, tok), ""), ("install", "npm"))
+            if pkg:
+                npm_pkgs.append(pkg)
 
     # 系統工具：只認反引號包住的（`soffice`、`pdftoppm`）或括號內的（(`magick`)）
     # 避免匹配到英文敘述裡的普通單字（例如 "Convert slides" 不該認作 ImageMagick）

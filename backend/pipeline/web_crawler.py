@@ -2083,13 +2083,14 @@ async def _run_flaresolverr(
 
     # 依序試候選 URL(WSL IP > localhost > 127.0.0.1):Windows host 連 WSL docker port
     # 走 localhost 常不穩、WSL IP 直連穩。連不上(ConnectError)就換下一個。
-    candidates = _flaresolverr_candidates()
+    # _flaresolverr_candidates() 內含 subprocess.run(同步)→ 丟 executor,不阻塞 event loop
+    candidates = await asyncio.get_running_loop().run_in_executor(None, _flaresolverr_candidates)
     data = None
     last_err = ""
     for cand in candidates:
         try:
-            with httpx.Client(timeout=timeout + 10) as client:
-                resp = client.post(cand, json=body)
+            async with httpx.AsyncClient(timeout=timeout + 10) as client:
+                resp = await client.post(cand, json=body)
             if resp.status_code != 200:
                 last_err = f"FlareSolverr 回 {resp.status_code}：{resp.text[:300]}"
                 continue
