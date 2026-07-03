@@ -24,10 +24,12 @@ def _resolve_role_settings(s: dict, role: str) -> dict:
 
     回傳統一 key:provider/model/ollama_thinking/ollama_num_ctx/gemini_thinking/anthropic_thinking/ollama_base_url
     """
-    if role == "secondary" and (s.get("secondary_provider") or "").strip():
+    if (role == "secondary"
+            and (s.get("secondary_provider") or "").strip()
+            and (s.get("secondary_model") or "").strip()):   # 兩者都要有,否則 fallback primary(避免只設 provider 沒設 model → KeyError)
         return {
-            "provider": s["secondary_provider"],
-            "model": s["secondary_model"],
+            "provider": s.get("secondary_provider") or "",
+            "model": s.get("secondary_model") or "",
             "ollama_thinking": s.get("secondary_ollama_thinking", "off"),
             "ollama_num_ctx": s.get("secondary_ollama_num_ctx", 16384),
             "gemini_thinking": s.get("secondary_gemini_thinking", "off"),
@@ -36,8 +38,8 @@ def _resolve_role_settings(s: dict, role: str) -> dict:
         }
     # primary 或 secondary 沒設定時 fallback
     return {
-        "provider": s["provider"],
-        "model": s["model"],
+        "provider": s.get("provider") or "",
+        "model": s.get("model") or "",
         "ollama_thinking": s.get("ollama_thinking", "off"),
         "ollama_num_ctx": s.get("ollama_num_ctx", 16384),
         "gemini_thinking": s.get("gemini_thinking", "off"),

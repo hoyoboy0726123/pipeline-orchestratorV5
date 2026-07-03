@@ -1735,7 +1735,10 @@ async def _run_pipeline_inner(
                 if step.switch:
                     # Switch 模式
                     val = _eval_val(step.switch, _var_ctx)
-                    target_name = step.cases.get(val, "") or step.default
+                    # cases key 正規化成字串:YAML 裸數字(cases:{200:ok})會被 parse 成 int、
+                    # 與字串 val 對不上 → 永遠走 default。統一轉 str 再查。
+                    _cases_norm = {str(_k): _v for _k, _v in (step.cases or {}).items()}
+                    target_name = _cases_norm.get(str(val), "") or step.default
                     decision_msg = f"switch 求值={val!r} → 跳到 {target_name or '(end)'}"
                 elif step.expression:
                     # IF 模式
@@ -1998,7 +2001,9 @@ async def _run_pipeline_inner(
                         if action == "pass":
                             await resume_pipeline(rid, decision="continue", hint="(自動超時通過)")
                         elif action == "reject":
-                            await resume_pipeline(rid, decision="retry", hint="(自動超時駁回、上一步重做)")
+                            # 用 redo_prev(重做上一步)而非 retry:retry 會重跑 human_confirm 節點本身
+                            # → 又彈同一個確認、超時再彈…無限迴圈。reject 的語意是「駁回 → 重做產出被審那步」。
+                            await resume_pipeline(rid, decision="redo_prev", hint="(自動超時駁回、重做上一步)")
                         elif action == "abort":
                             _cur.status = "aborted"
                             _cur.ended_at = datetime.now().isoformat()
