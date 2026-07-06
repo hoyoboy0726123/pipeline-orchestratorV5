@@ -511,6 +511,32 @@ def _maybe_reddit_static_url(url: str) -> Optional[str]:
     return None
 
 
+async def _curl_exe_get(url: str, headers: dict, timeout: int) -> tuple[int, str, str]:
+    """用系統 curl.exe 抓頁(Windows Schannel TLS 指紋,能過 Reddit 等擋 Python 客戶端的站)。
+    回 (status_code, html, final_url)。curl 不存在或失敗 → (0, "", "")。跑在 thread pool 不擋 loop。"""
+    import shutil
+    curl = shutil.which("curl")
+    if not curl:
+        return (0, "", "")
+    ua = headers.get("User-Agent", "Mozilla/5.0")
+    # -L 跟轉址; -sS 靜默但留錯誤; -w 末尾附 status 與 final url(用少見分隔符切開)
+    SEP = "\n<<<CURLMETA>>>\n"
+    args = [curl, "-sSL", "--compressed", "-m", str(timeout),
+            "-A", ua, "-H", "Accept-Language: en-US,en;q=0.9",
+            "-w", f"{SEP}%{{http_code}}{SEP}%{{url_effective}}", url]
+    def _run():
+        try:
+            p = subprocess.run(args, capture_output=True, timeout=timeout + 10)
+            out = p.stdout.decode("utf-8", "replace")
+            if SEP not in out:
+                return (0, "", "")
+            body, status, final = out.rsplit(SEP, 2)
+            return (int(status.strip() or 0), body, final.strip())
+        except Exception:
+            return (0, "", "")
+    return await asyncio.get_event_loop().run_in_executor(None, _run)
+
+
 async def _fetch_static_http(*, fetch_url: str, requested_url: str, output_path: str,
                              timeout: int, logger: logging.Logger, step_name: str,
                              started_at: float) -> "CrawlResult":
@@ -525,21 +551,32 @@ async def _fetch_static_http(*, fetch_url: str, requested_url: str, output_path:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    status_code = 0
+    html = ""
+    base = fetch_url
     try:
         async with httpx.AsyncClient(headers=headers, timeout=timeout,
                                      follow_redirects=True) as c:
             resp = await c.get(fetch_url)
+        status_code = resp.status_code
+        html = resp.text or ""
+        base = str(resp.url)
     except Exception as e:
-        logger.warning(f"[{step_name}] 純 HTTP 抓取失敗:{e}")
-        return _err(requested_url, f"純 HTTP 抓取失敗:{e}", tier="http")
+        logger.warning(f"[{step_name}] httpx 抓取失敗:{e},改試系統 curl.exe")
 
-    html = resp.text or ""
-    if resp.status_code != 200 or len(html) < 500:
+    # Reddit 等站對 Python HTTP 客戶端(httpx / curl_cffi 含 impersonate)一律回 403,
+    # 但系統 curl.exe(Windows Schannel TLS 指紋)拿得到 200 → 被擋時退回 curl.exe。
+    if status_code != 200 or len(html) < 500:
+        c_status, c_html, c_url = await _curl_exe_get(fetch_url, headers, timeout)
+        if c_status == 200 and len(c_html) >= 500:
+            logger.info(f"[{step_name}] 🔁 httpx 被擋(status={status_code}),curl.exe fallback 成功")
+            status_code, html, base = c_status, c_html, (c_url or base)
+
+    if status_code != 200 or len(html) < 500:
         return _err(requested_url,
-                    f"純 HTTP 回 status={resp.status_code}、內容過薄({len(html)} bytes)",
+                    f"純 HTTP 回 status={status_code}、內容過薄({len(html)} bytes);"
+                    f"httpx 與 curl.exe 皆無法取得(站點反爬)",
                     tier="http")
-
-    base = str(resp.url)
     links_internal: list = []
     try:
         from bs4 import BeautifulSoup
@@ -579,7 +616,7 @@ async def _fetch_static_http(*, fetch_url: str, requested_url: str, output_path:
 
     res = CrawlResult(
         ok=True, tier="http", url=requested_url, final_url=base,
-        status_code=resp.status_code, markdown=md, html="", title=_extract_title(html, md),
+        status_code=status_code, markdown=md, html="", title=_extract_title(html, md),
         error="", duration_ms=0, extra={"links_internal": links_internal},
     )
     wrapped = _wrap_with_frontmatter(res, requested_url=requested_url,
