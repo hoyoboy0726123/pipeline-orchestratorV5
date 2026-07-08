@@ -21,6 +21,7 @@ matplotlib
 opencv-python-headless
 python-pptx
 pdfplumber
+markdown
 newspaper3k
 cloudscraper
 feedparser
@@ -35,3 +36,5 @@ markitdown[pptx]
 xlsxwriter
 tabulate
 pyfiglet
+qrcode
+openai-whisper

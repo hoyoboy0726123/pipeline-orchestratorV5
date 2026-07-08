@@ -54,8 +54,8 @@ async def force_abort(run_id: str):
     from .executor import kill_run_processes
     from .computer_use import request_abort as _cu_abort
     _abort_flags.add(run_id)
-    # 1. 立即 kill 所有子進程
-    kill_run_processes(run_id)
+    # 1. 立即 kill 所有子進程(abort = 強制全殺,含 background_keep)
+    kill_run_processes(run_id, force=True)
     # 1a. 通知 computer_use 引擎中止（它跑在 executor thread 裡，kill 不到）
     _cu_abort(run_id)
     # 2. Cancel asyncio task
@@ -120,6 +120,55 @@ def _decision_keyboard(run_id: str, has_prev: bool = True) -> InlineKeyboardMark
         ],
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def _resolve_script_interpreter(step):
+    """從 script step 的 batch 解析它執行時用的 python 直譯器。
+
+    與 executor._script_env() 的設計一致:script 節點刻意與後端 venv 脫鉤
+    —— 沒勾「使用虛擬環境」→ 裸 python 走系統全域;勾了 → 該專案 venv。
+    自癒(install_dep)要裝進「這一步真正執行的直譯器」,而不是沙盒 / 後端 venv,
+    才打得到、又不污染編排器自己的環境。
+
+    回傳直譯器路徑字串;非 python 指令(node 等)或無法判定 → None(退回原邏輯)。
+    """
+    import os, re, shutil
+    batch = (getattr(step, "batch", "") or "").strip()
+    if not batch:
+        return None
+    m = re.match(r'\s*"([^"]+)"|\s*(\S+)', batch)   # 取第一個 token(支援引號路徑)
+    tok = ((m.group(1) or m.group(2)) if m else "").strip()
+    if not tok or not os.path.basename(tok).lower().startswith("python"):
+        return None
+    if ("/" in tok) or ("\\" in tok):              # 帶路徑(venv 等)→ 直接用
+        p = tok if os.path.isabs(tok) else os.path.join(getattr(step, "working_dir", "") or os.getcwd(), tok)
+        return os.path.normpath(p)
+    # 裸 python / python3 → 用 script 執行環境的 PATH 解析(= 它實際吃到的全域 python)
+    try:
+        from pipeline.executor import _script_env
+        return shutil.which(tok, path=_script_env().get("PATH"))
+    except Exception:
+        return shutil.which(tok)
+
+
+def _pip_install_into(python_exe, pkg):
+    """用指定 python 直譯器 pip install 單一套件。回傳 (ok, msg)。"""
+    import subprocess
+    try:
+        from pipeline.executor import _script_env
+        env = _script_env()
+    except Exception:
+        env = None
+    try:
+        r = subprocess.run([python_exe, "-m", "pip", "install", pkg],
+                           capture_output=True, text=True, timeout=600, env=env)
+        if r.returncode == 0:
+            return True, (r.stdout or "")[-300:]
+        return False, (r.stderr or r.stdout or "")[-500:]
+    except subprocess.TimeoutExpired:
+        return False, "逾時(install timeout)"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
 
 
 def _missing_dep_keyboard(run_id: str, packages: list[str]) -> InlineKeyboardMarkup:
@@ -1427,6 +1476,25 @@ async def run_pipeline(
             run_id=run_id,
             start_from_step=start_from_step,
         )
+    except Exception as _fatal:
+        # 兜底:resume/self-heal 的 run_pipeline 都是 fire-and-forget task,內部未預期例外
+        # (store I/O 錯、殘餘型別錯等)會被 asyncio 吞掉 → run 永遠卡在 running、不通知不決策。
+        # 這裡統一把 run 標 failed + 通知。(CancelledError 屬 BaseException,abort 仍正常傳播不進來。)
+        logger.error(f"[run_pipeline] 未預期例外、run_id={run_id}:{_fatal}", exc_info=True)
+        try:
+            _st = get_store()
+            _r = _st.load(run_id) if run_id else None
+            if _r is not None and _r.status not in ("completed", "failed", "aborted"):
+                _r.status = "failed"
+                _r.ended_at = datetime.now().isoformat()
+                _st.save(_r)
+                await _notify_failure(_r, ValidationResult(
+                    status="failed", reason=f"未預期錯誤:{_fatal}",
+                    suggestion="請看後端 log 追根因",
+                ), "(pipeline)")
+        except Exception:
+            logger.error("[run_pipeline] 兜底標記 failed 也失敗", exc_info=True)
+        return run_id or ""
     finally:
         if _do_minimize:
             window_helper.request_restore()
@@ -1604,7 +1672,7 @@ async def _run_pipeline_inner(
                 input_params=getattr(run, "input_params", None) or {},
             )
             _render_var_step(step, _var_ctx)
-        except _VarExpressionError as _var_exc:
+        except Exception as _var_exc:  # 放寬:Jinja2 執行期 TypeError/ValueError 也接住,不讓 run 協程靜默崩(CancelledError 屬 BaseException 不會被吃,abort 仍有效)
             logger.error(f"[{step.name}] 變數展開失敗:{_var_exc}")
             step_result = StepResult(
                 step_index=run.current_step,
@@ -1686,7 +1754,10 @@ async def _run_pipeline_inner(
                 if step.switch:
                     # Switch 模式
                     val = _eval_val(step.switch, _var_ctx)
-                    target_name = step.cases.get(val, "") or step.default
+                    # cases key 正規化成字串:YAML 裸數字(cases:{200:ok})會被 parse 成 int、
+                    # 與字串 val 對不上 → 永遠走 default。統一轉 str 再查。
+                    _cases_norm = {str(_k): _v for _k, _v in (step.cases or {}).items()}
+                    target_name = _cases_norm.get(str(val), "") or step.default
                     decision_msg = f"switch 求值={val!r} → 跳到 {target_name or '(end)'}"
                 elif step.expression:
                     # IF 模式
@@ -1695,7 +1766,7 @@ async def _run_pipeline_inner(
                     decision_msg = f"IF 求值={cond} → 跳到 {target_name or '(end)'}"
                 else:
                     raise _CondError("condition 節點需填 expression(IF)或 switch(Switch)")
-            except _CondError as _ce:
+            except Exception as _ce:  # 放寬:型別比較/filter 的 TypeError/ValueError 也接住 → self-heal,不讓 run 卡死
                 logger.error(f"[{step.name}] condition 求值失敗:{_ce}")
                 _cond_sugg = (
                     "檢查 expression / switch 表達式語法、引用變數是否存在。"
@@ -1949,7 +2020,9 @@ async def _run_pipeline_inner(
                         if action == "pass":
                             await resume_pipeline(rid, decision="continue", hint="(自動超時通過)")
                         elif action == "reject":
-                            await resume_pipeline(rid, decision="retry", hint="(自動超時駁回、上一步重做)")
+                            # 用 redo_prev(重做上一步)而非 retry:retry 會重跑 human_confirm 節點本身
+                            # → 又彈同一個確認、超時再彈…無限迴圈。reject 的語意是「駁回 → 重做產出被審那步」。
+                            await resume_pipeline(rid, decision="redo_prev", hint="(自動超時駁回、重做上一步)")
                         elif action == "abort":
                             _cur.status = "aborted"
                             _cur.ended_at = datetime.now().isoformat()
@@ -2300,6 +2373,7 @@ async def _run_pipeline_inner(
                     working_dir=wd,
                     background=getattr(step, "background", False),
                     ready_after_seconds=getattr(step, "ready_after_seconds", 0),
+                    background_keep=getattr(step, "background_keep", True),
                 )
 
             # 快速模式：Recipe 命中 + 執行成功 → 確定性驗證（不叫 LLM）
@@ -3400,26 +3474,54 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
         if not pkgs_to_install:
             return "⚠️ 沒有有效套件名"
 
-        # 判斷裝到哪：sandbox 模式裝容器、否則裝 host venv
-        try:
-            import sys as _sys
-            from pathlib import Path as _PI
-            _backend = str(_PI(__file__).parent.parent.absolute())
-            if _backend not in _sys.path:
-                _sys.path.insert(0, _backend)
-            from settings import get_settings as _gs
-            sandbox_mode = _gs().get("skill_sandbox_mode", "host") == "wsl_docker"
-        except Exception:
-            sandbox_mode = False
+        import sys as _sys
+        from pathlib import Path as _PI
+        _backend = str(_PI(__file__).parent.parent.absolute())
+        if _backend not in _sys.path:
+            _sys.path.insert(0, _backend)
 
-        from skill_pkg_manager import add_package, add_package_sandbox
-        installer = add_package_sandbox if sandbox_mode else add_package
-        target = "sandbox" if sandbox_mode else "host"
+        # 判斷裝到哪:
+        #   1. 失敗的是 *script step* → 裝進「該 step 實際執行的 python 直譯器」
+        #      (沒勾 venv = 全域;勾了 = 該專案 venv)。script 節點刻意與後端 venv 脫鉤
+        #      (見 executor._script_env),自癒也要裝到它真正用的環境、不污染後端 venv、
+        #      更不能裝去八竿子打不著的沙盒容器(script 不在沙盒跑)。
+        #   2. 否則(skill step 等)→ 依 skill_sandbox_mode 裝沙盒 / 後端 venv host(原邏輯)。
+        _script_py = None
+        try:
+            import json as _jd
+            _sug = _jd.loads(run.awaiting_suggestion or "{}")
+            _sname = _sug.get("step_name")
+            _fstep = next((s for s in config.steps if s.name == _sname), None) if _sname else None
+            _is_script = bool(_fstep) and bool(getattr(_fstep, "batch", "")) and not (
+                _fstep.skill_mode or _fstep.subagent or _fstep.computer_use
+                or _fstep.outlook_automation or _fstep.web_crawler
+                or _fstep.condition or _fstep.human_confirm
+            )
+            if _is_script:
+                _script_py = _resolve_script_interpreter(_fstep)
+        except Exception as _e:
+            logger.warning(f"[install_dep] 判斷 script 直譯器失敗、退回原邏輯:{_e}")
+
         results = []
-        for pkg in pkgs_to_install:
-            ok, msg = installer(pkg)
-            results.append((pkg, ok, msg))
-            logger.info(f"[install_dep] {target} pip install {pkg}: ok={ok}, msg={msg}")
+        if _script_py:
+            target = f"script 直譯器（{_script_py}）"
+            for pkg in pkgs_to_install:
+                ok, msg = _pip_install_into(_script_py, pkg)
+                results.append((pkg, ok, msg))
+                logger.info(f"[install_dep] {target} pip install {pkg}: ok={ok}, msg={str(msg)[:200]}")
+        else:
+            try:
+                from settings import get_settings as _gs
+                sandbox_mode = _gs().get("skill_sandbox_mode", "host") == "wsl_docker"
+            except Exception:
+                sandbox_mode = False
+            from skill_pkg_manager import add_package, add_package_sandbox
+            installer = add_package_sandbox if sandbox_mode else add_package
+            target = "sandbox" if sandbox_mode else "host"
+            for pkg in pkgs_to_install:
+                ok, msg = installer(pkg)
+                results.append((pkg, ok, msg))
+                logger.info(f"[install_dep] {target} pip install {pkg}: ok={ok}, msg={msg}")
 
         all_ok = all(ok for _, ok, _ in results)
         if not all_ok:

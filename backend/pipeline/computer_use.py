@@ -935,13 +935,15 @@ def execute_action(
             # 3. 全螢幕也找不到 → 退回絕對座標 fallback（下方 else 分支）
             _SETTLE_RETRIES = 2          # 第一次 + 最多 1 次 retry
             _SETTLE_WAIT_MS = 150        # retry 前 sleep
+            _FULLSCREEN_MIN_THRESHOLD = 0.80   # 全桌面 fallback 的最低 CV 門檻(避免大螢幕假匹配點錯)
 
             # 使用者明確指定的搜尋紅框（優先於錄製座標附近搜尋）
             region_rect = _parse_search_region(action)
             cv_strict = bool(action.get("cv_strict_region", False))
 
             def _search(nx_: Optional[int], ny_: Optional[int],
-                        force_region: Optional[tuple[int, int, int, int]] = "use_outer") -> MatchResult:
+                        force_region: Optional[tuple[int, int, int, int]] = "use_outer",
+                        threshold_override: Optional[float] = None) -> MatchResult:
                 """先跑 gray 模式，若 conf < threshold 再跑 edge 模式，取較高 conf。
                 edge 對 hover fade / 主題色差異更容忍，代價 +20ms。
 
@@ -949,20 +951,22 @@ def execute_action(
                   "use_outer"（預設）→ 用外層 region_rect（紅框）
                   None              → 強制忽略 region_rect，用 nx_/ny_ 或全螢幕
                   tuple             → 強制用這個 region
+                threshold_override: 全桌面搜尋時傳較高門檻,避免大螢幕假匹配點錯位置。
                 """
                 if force_region == "use_outer":
                     use_region = region_rect
                 else:
                     use_region = force_region
+                eff_threshold = threshold if threshold_override is None else threshold_override
 
                 def _find(m: str) -> MatchResult:
                     if use_region is not None:
-                        return find_template(str(tpl_path), threshold=threshold, multi_scale=True,
+                        return find_template(str(tpl_path), threshold=eff_threshold, multi_scale=True,
                                              region=use_region, mode=m)
                     if nx_ is not None and ny_ is not None:
-                        return find_template(str(tpl_path), threshold=threshold, multi_scale=True,
+                        return find_template(str(tpl_path), threshold=eff_threshold, multi_scale=True,
                                              near_xy=(nx_, ny_), search_radius=cv_search_radius, mode=m)
-                    return find_template(str(tpl_path), threshold=threshold, multi_scale=True, mode=m)
+                    return find_template(str(tpl_path), threshold=eff_threshold, multi_scale=True, mode=m)
                 gray = _find("gray")
                 if gray.found:
                     return gray
@@ -991,13 +995,16 @@ def execute_action(
                     m = _search(int(fx), int(fy), force_region=None)
                 # Phase 3：附近 miss、不嚴格、未鎖定附近 → 擴大全螢幕
                 if not m.found and not cv_search_only_near and not cv_strict:
-                    logger.info(f"[computer_use]   附近 ±{cv_search_radius}px 找不到（best={m.confidence:.2f}），擴大到整個桌面")
-                    m = _search(None, None, force_region=None)
+                    logger.info(f"[computer_use]   附近 ±{cv_search_radius}px 找不到（best={m.confidence:.2f}），擴大到整個桌面（門檻提高避免誤點）")
+                    # 全桌面搜尋強制較高門檻:0.5 在 4K/多螢幕幾乎必有假陽性 → 點到無關位置卻當成功
+                    m = _search(None, None, force_region=None,
+                                threshold_override=max(threshold, _FULLSCREEN_MIN_THRESHOLD))
                 # 嚴格模式 + 紅框 miss：明確標示原因
                 if not m.found and cv_strict and region_rect is not None:
                     m.reason = f"嚴格鎖定範圍：紅框內找不到 {img_name}（{m.reason}）"
             else:
-                m = _search(None, None)
+                # 無錄製座標 → 純全桌面模板搜尋,同樣用較高門檻避免誤點
+                m = _search(None, None, threshold_override=max(threshold, _FULLSCREEN_MIN_THRESHOLD))
 
             if m.found:
                 # 螢幕邊緣擷取時，點擊位置不在錨點影像中心，加上偏移校正

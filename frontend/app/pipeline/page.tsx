@@ -48,7 +48,7 @@ import {
   type ConditionData,
   type ScriptNode, type SkillNode, type HumanConfirmNode, type ComputerUseNode, type VisualValidationNode,
   type OutlookNode, type WebCrawlerNode, type SubagentNode, type ConditionNode,
-  newStepData, newSkillData, newAiValidationData, newHumanConfirmData, newComputerUseData,
+  newStepData, newSkillData, newAiValidationData, newHumanConfirmData, newComputerUseData, dedupeComputerUseName,
   newVisualValidationData, newOutlookData, newWebCrawlerData, newSubagentData, newConditionData,
   stepsToFlow, flowToSteps, stepsToYaml, parseYaml,
 } from './_helpers'
@@ -935,7 +935,11 @@ export default function PipelinePage() {
     const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
     const x = lastNode ? lastNode.position.x + 320 : 100
     const y = lastNode ? lastNode.position.y : 160
-    setNodes(ns => [...ns, { id, type: 'computerUse', position: { x, y }, data }])
+    setNodes(ns => {
+      // 防呆:用當前節點清單確保名稱唯一(計數器頁面重整會歸零、避免兩節點共用同一 _assets 夾)
+      data.name = dedupeComputerUseName(data.name, new Set(ns.map(n => String((n.data as { name?: string }).name || ''))))
+      return [...ns, { id, type: 'computerUse', position: { x, y }, data }]
+    })
     setSelectedId(id)
   }, [nodes, setNodes])
 
@@ -1020,7 +1024,12 @@ export default function PipelinePage() {
         case 'condition':          data = newConditionData(0); break
         default: return
       }
-      setNodes(ns => [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }])
+      setNodes(ns => {
+        if (nodeType === 'computerUse') {
+          data.name = dedupeComputerUseName(data.name, new Set(ns.map(n => String((n.data as { name?: string }).name || ''))))
+        }
+        return [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }]
+      })
       setEdges(es => [
         ...es.filter(x => x.id !== edgeId),
         { id: `e-${source}-${id}`, source, target: id, ...DEFAULT_EDGE_OPTIONS },

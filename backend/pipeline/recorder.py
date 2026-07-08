@@ -115,6 +115,7 @@ def _save_png(out_path: Path, img_bgr) -> bool:
         ok, buf = cv2.imencode(".png", img_bgr)
         if not ok:
             return False
+        out_path.parent.mkdir(parents=True, exist_ok=True)  # 資產夾不存在就先建,避免每張截圖寫失敗
         out_path.write_bytes(buf.tobytes())
         return out_path.is_file() and out_path.stat().st_size > 0
     except Exception as e:
@@ -399,10 +400,15 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
             "hold_sec": hold_sec,
             "modifiers": mods,
             "description": f"{mods_desc}{btn_name} 點擊 @ {panchor.get('image')}{hold_desc}（錄製座標 {x},{y}）",
+            # 預設「純 CV」:關 UIA、開 CV、座標當最終 fallback。實測純 CV 最穩;
+            # UIA 資訊仍存在 ui 欄位,使用者想開三層自己在面板切回即可。
+            "use_uia": False,
+            "use_cv": True,
+            "use_coord": True,
         }
         click_action.update(panchor)  # image + anchor_off_x + anchor_off_y
         if pui:
-            click_action["ui"] = pui  # UIA-first 三層 fallback 用
+            click_action["ui"] = pui  # 保留 UIA 資訊(預設不用、面板可開回)
         session.actions.append(click_action)
     else:
         click_at_action = {
@@ -461,7 +467,10 @@ _modifier_solo: dict[str, bool] = {}
 def _disqualify_active_modifiers_as_solo() -> None:
     """有任何非修飾鍵被按下、或滑鼠點擊/滾輪觸發時呼叫，
     把目前按著的修飾鍵全部標記為「已搭配其他動作」，放開時不再輸出獨立 hotkey。"""
-    for m in _active_modifiers:
+    # 迭代快照:滑鼠與鍵盤是兩條 pynput 執行緒,鍵盤端會同時 add/discard _active_modifiers。
+    # 純 Python for 迴圈會在 bytecode 間讓出 GIL → 撞到修改就 RuntimeError(Set changed size)、
+    # listener 靜默停掉、錄製漏抓。list() 是 C 層原子快照,不會被中途修改影響。
+    for m in list(_active_modifiers):
         _modifier_solo[m] = False
 
 

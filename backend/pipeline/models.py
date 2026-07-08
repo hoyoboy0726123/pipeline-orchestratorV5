@@ -223,6 +223,10 @@ class PipelineStep(BaseModel):
     # 進階(選填):啟動後等 N 秒讓 daemon ready、再下一步(預設 0 = 不等)。
     background: bool = False
     ready_after_seconds: int = 0
+    # background_keep:背景模式下,workflow 結束是否「保留」進程(不自動 kill)。
+    # 預設 True = 保留進程留在桌面供手動操作;設 False 才在結束時自動 kill。
+    # abort(手動中止)一律強制 kill,不受此旗標影響。
+    background_keep: bool = True
     # ── 控制流:任意 step 用 next 顯式跳到下一個 step ── Ticket 2 ───
     # 一般 step 跑完依 YAML 順序前進;設了 next 就改跳到指定 step name。
     # 特殊值 "end" / "__end__" / "" → 結束流程(預設行為:空字串 = 線性下一個)

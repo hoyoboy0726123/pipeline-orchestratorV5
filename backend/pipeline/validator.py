@@ -522,6 +522,11 @@ def _read_output_text(p: "Path") -> str:
     if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".zip", ".mp4", ".mp3", ".wav"}:
         return ""  # 二進位、跳過
     try:
+        # 大檔上限:爬蟲列表+上百子頁合併 md 可數十 MB,每次驗證整檔載入+regex 掃太重。
+        # 假佔位/silent-fail 特徵在開頭就夠判 → 超過 2MB 只讀前 2MB。
+        if p.stat().st_size > 2_000_000:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                return f.read(2_000_000)
         return p.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return ""

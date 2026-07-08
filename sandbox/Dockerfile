@@ -51,9 +51,10 @@ RUN MPLRC=$(python -c "import matplotlib; print(matplotlib.matplotlib_fname())")
 # ── Tier 3b：影像處理（opencv headless，最大的單一套件）──
 RUN pip install --no-cache-dir opencv-python-headless
 
-# ── Tier 4：文件產出（PPT / PDF）──
+# ── Tier 4：文件產出（PPT / PDF / Markdown）──
 # python-pptx：Python 原生產 PPT；pdfplumber：PDF 文字抽取
-RUN pip install --no-cache-dir python-pptx pdfplumber
+# markdown：Python-Markdown，Markdown → HTML(報表常用);與 markdownify(HTML→MD) 互補、別搞混
+RUN pip install --no-cache-dir python-pptx pdfplumber markdown
 
 # ── Tier 5：爬蟲進階（新聞 + Cloudflare 繞過 + RSS + UA rotation）──
 # newspaper3k 會拉 nltk / tldextract / feedparser（~100MB）；cloudscraper 繞 CF 5s 挑戰

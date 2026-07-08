@@ -380,10 +380,16 @@ _proc_lock = threading.Lock()
 _running_procs: dict[str, list] = {}  # run_id → list of (subprocess.Popen | asyncio.subprocess.Process)
 
 
-def register_proc(run_id: str, proc):
-    """註冊一個正在執行的子進程，供 abort 時立即 kill"""
+_keepalive_procs: dict[str, set] = {}  # run_id → set of proc(background_keep=True、結束不自動 kill)
+
+
+def register_proc(run_id: str, proc, keep: bool = False):
+    """註冊一個正在執行的子進程，供 abort 時立即 kill。
+    keep=True:background_keep 進程,workflow 正常結束時不 kill(僅 abort/force 才殺)。"""
     with _proc_lock:
         _running_procs.setdefault(run_id, []).append(proc)
+        if keep:
+            _keepalive_procs.setdefault(run_id, set()).add(proc)
 
 
 def unregister_proc(run_id: str, proc):
@@ -398,13 +404,25 @@ def unregister_proc(run_id: str, proc):
                 del _running_procs[run_id]
 
 
-def kill_run_processes(run_id: str):
+def kill_run_processes(run_id: str, force: bool = False):
     """立即終止指定 run 的所有子進程,連同 process tree(防 cmd.exe wrapper 殺掉、Python 變孤兒)。
     Windows 經典問題:create_subprocess_shell 透過 cmd.exe 開 Python,proc.kill() 只殺 cmd.exe,
     Python 子進程繼續活著(尤其有 GUI 的時候 GUI window 留著)。用 psutil 走完整 process tree。
+    force=False(workflow 正常結束):跳過 background_keep 進程、讓它們留在桌面。
+    force=True(手動 abort):全部殺掉、不保留。
     """
     with _proc_lock:
         procs = _running_procs.pop(run_id, [])
+        keep = _keepalive_procs.pop(run_id, set())
+    if not force and keep:
+        survivors = [p for p in procs if p in keep]
+        procs = [p for p in procs if p not in keep]
+        if survivors:
+            try:
+                import logging as _logging
+                _logging.getLogger("pipeline").info(f"🛡️ kill_run_processes({run_id}):保留 {len(survivors)} 個 background_keep 進程(留在桌面)")
+            except Exception:
+                pass
     if not procs:
         return
     try:
@@ -697,6 +715,7 @@ async def execute_step(
     working_dir: Optional[str] = None,
     background: bool = False,
     ready_after_seconds: int = 0,
+    background_keep: bool = False,
 ) -> ExecResult:
     """
     執行 shell 命令，串流輸出到 logger，回傳完整結果。
@@ -747,7 +766,7 @@ async def execute_step(
             cwd=cwd_arg,
         )
         if run_id:
-            register_proc(run_id, proc)
+            register_proc(run_id, proc, keep=(background and background_keep))
 
         # ── 背景模式:不等 exit、給 daemon 一段時間 boot up 後直接回 success ──
         if background:
