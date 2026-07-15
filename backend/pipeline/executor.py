@@ -1249,6 +1249,26 @@ def _skill_read_file(path: str, max_lines: int = 100, offset: int = 0) -> str:
 # - glob:列檔、不用 Path.glob() in Python
 # 跟 run_python 互補:run_python 仍是邏輯處理主力,新 tool 接管「LLM 已知做什麼」場景
 
+def _parse_write_file_for_recipe(input_str: str) -> tuple[Optional[str], Optional[str]]:
+    """輕量解析 write_file 的 input(與 _skill_write_file 同兩種格式)→ (path, content)。
+    給 recipe 記錄用;解析失敗回 (None, None)(recipe 少存一筆、不影響執行)。"""
+    try:
+        stripped = (input_str or "").lstrip()
+        if stripped.lower().startswith("path:") and "\n---" in stripped:
+            first_newline = stripped.find("\n")
+            path = stripped[:first_newline].split(":", 1)[1].strip()
+            rest = stripped[first_newline + 1:]
+            sep = re.search(r"^---\s*$", rest, flags=re.MULTILINE)
+            if not sep:
+                return None, None
+            return path, rest[sep.end():].lstrip("\n")
+        import json as _json
+        data = _json.loads(input_str)
+        return (data.get("path") or data.get("file_path") or None), data.get("content")
+    except Exception:
+        return None, None
+
+
 def _skill_write_file(input_str: str) -> str:
     """write_file(path, content) — 兩種 input 格式:
     1. JSON(短內容、< 5KB 推薦):{"path": "...", "content": "..."}
@@ -2606,16 +2626,15 @@ async def execute_step_with_skill(
                 logger.debug(f"[{step_name}] 📖 無 Recipe 紀錄")
             _fp = {p: _recipe_fp(p) for p in input_paths}
             cached = match_recipe(pipeline_id, _rkey, _recipe_sha1(task_description), _fp)
-            # 互動式 recipe(過程用過 ask_user)不直接重播:快取碼把上次的人工選擇寫死在裡面,
-            # 直接 replay 等於拿舊答案、永遠不再問使用者 → 使用者這次的選擇「沒被記錄/沒被使用」。
-            # 退回 LLM 重跑,讓 ask_user 重新觸發、收這次的回答。was_interactive 一直有存、
-            # 但 replay 從來沒檢查它(稽查 ask_user/recipe 問題的 root cause)。
+            # 互動式 recipe(過程用過 ask_user):**快速模式沿用上次選擇重播**。
+            # 語意分流:本段只在 use_recipe=True(使用者明按快速模式)走到 —
+            # 快速模式=「照上次調好的跑」→ 沿用上次選擇並在 log 透明告知;
+            # 想改選擇 → 用「完整模式」重跑(會重新問、新答案覆蓋 recipe)。
             if cached and cached.get("was_interactive"):
                 logger.info(
-                    f"[{step_name}] 📖 命中互動式 recipe(含 ask_user 回答),不直接重播 → "
-                    f"退回 LLM 重跑以重新詢問使用者"
+                    f"[{step_name}] 📖 命中互動式 recipe(含上次 ask_user 的選擇)→ "
+                    f"快速模式沿用上次選擇直接重播;若要重新選擇,請用「完整模式」重跑本工作流"
                 )
-                cached = None
             if cached:
                 logger.info(
                     f"[{step_name}] 📖 找到快取 recipe (成功 {cached['success_count']} 次, "
@@ -3736,6 +3755,21 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                             pending_recipe=None,
                             missing_packages=[_pkg_shell],
                         )
+            # write_file 成功也要留 recipe code(同 native loop;否則互動步 recipe 從未儲存)
+            if tool_name == "write_file" and str(tool_result).startswith("✓"):
+                _wf_p, _wf_c = _parse_write_file_for_recipe(tool_input)
+                if _wf_p and _wf_c is not None:
+                    _wf_target = (
+                        Path(_wf_p).name
+                        if output_path and Path(_wf_p).name == Path(output_path).name
+                        else _wf_p
+                    )
+                    last_successful_code = (
+                        "from pathlib import Path\n"
+                        f"p = Path({_wf_target!r})\n"
+                        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+                        f"p.write_text({_wf_c!r}, encoding='utf-8')\n"
+                    )
             # 追蹤 run_python 成敗：用 [exit code:] 在 tool_result 是否出現當判斷
             # （sandbox 跟 host 兩條路徑都用同個 marker，見 _skill_run_python / _try_sandbox_exec）
             if tool_name == "run_python":
@@ -4521,6 +4555,25 @@ async def _execute_skill_native_loop(
                 last_run_python_ok = "[exit code:" not in result
                 if last_run_python_ok:
                     last_successful_code = tc_args.get("code", "")
+            elif tc_name == "write_file" and str(result).startswith("✓"):
+                # write_file 成功也要留 recipe code — 否則「ask_user → write_file 寫結果」
+                # 的互動步 last_successful_code 恆空 → recipe 從未儲存 → 快速模式永遠重問。
+                # 合成等效確定性 Python(內容含上次使用者的選擇);檔案為本步 output 時用
+                # 裸檔名(replay 前 runner 會 chdir,不烤死 per-run 絕對路徑)。
+                _wf_p = (tc_args.get("path") or "").strip()
+                _wf_c = tc_args.get("content")
+                if _wf_p and _wf_c is not None:
+                    _wf_target = (
+                        Path(_wf_p).name
+                        if output_path and Path(_wf_p).name == Path(output_path).name
+                        else _wf_p
+                    )
+                    last_successful_code = (
+                        "from pathlib import Path\n"
+                        f"p = Path({_wf_target!r})\n"
+                        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+                        f"p.write_text({_wf_c!r}, encoding='utf-8')\n"
+                    )
             elif tc_name == "run_shell":
                 last_run_shell_ok = "[exit code:" not in result
                 if last_run_shell_ok:
