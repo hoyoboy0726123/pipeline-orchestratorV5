@@ -150,7 +150,7 @@ async def run_visual_validation(
                 return (False, (
                     f"視覺驗證需 LibreOffice 才能渲染 {_ext.upper()} 真實版面、主機未裝。"
                     "請改用 vv_source=current_screen(目前螢幕)模式、或安裝 LibreOffice 後重啟 backend:"
-                    "winget install -e --id TheDocumentFoundation.LibreOffice"
+                    "winget install -e --id TheDocumentFoundation.LibreOffice --source winget"
                 ))
         images = _resolve_image_for_file(prev_output_file, out_dir=out_dir)
     elif source == "current_screen":

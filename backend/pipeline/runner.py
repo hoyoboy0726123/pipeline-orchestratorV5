@@ -2488,7 +2488,7 @@ async def _run_pipeline_inner(
                                 _vv_suggestion = (
                                     "⚠ 偵測到主機未裝 LibreOffice、VLM 看到的不是真實 PPT/DOCX 版面"
                                     "(走純文字 PNG 退化路徑、VLM 永遠評不過)。"
-                                    "強烈建議:winget install -e --id TheDocumentFoundation.LibreOffice "
+                                    "強烈建議:winget install -e --id TheDocumentFoundation.LibreOffice --source winget "
                                     "(macOS:brew install --cask libreoffice / Linux:sudo apt install libreoffice)。"
                                     "裝完重啟 backend 再重試。"
                                     + ("\n\n原 VLM 訊息:" + _vv_suggestion if _vv_suggestion else "")

@@ -72,7 +72,7 @@ def get_host_tools() -> list[HostTool]:
         installed=bool(lo_path),
         found_at=lo_path,
         install_cmd={
-            "windows": "winget install -e --id TheDocumentFoundation.LibreOffice",
+            "windows": "winget install -e --id TheDocumentFoundation.LibreOffice --source winget",
             "macos": "brew install --cask libreoffice",
             "linux": "sudo apt install libreoffice",
         },
@@ -88,7 +88,7 @@ def get_host_tools() -> list[HostTool]:
         installed=bool(ff_path),
         found_at=ff_path,
         install_cmd={
-            "windows": "winget install -e --id Gyan.FFmpeg",
+            "windows": "winget install -e --id Gyan.FFmpeg --source winget",
             "macos": "brew install ffmpeg",
             "linux": "sudo apt install ffmpeg",
         },

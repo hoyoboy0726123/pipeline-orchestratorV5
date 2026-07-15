@@ -60,7 +60,7 @@
 選用：
 - [uv](https://docs.astral.sh/uv/) — 更快的 Python 套件管理工具
 - Telegram Bot — 遠端通知與人工確認操作
-- LibreOffice — 視覺驗證 / 人工確認預覽 `.pptx` / `.docx` 時用(沒裝會 fallback 純文字 PNG、VLM 評不過)。Windows:`winget install -e --id TheDocumentFoundation.LibreOffice`
+- LibreOffice — 視覺驗證 / 人工確認預覽 `.pptx` / `.docx` 時用(沒裝會 fallback 純文字 PNG、VLM 評不過)。Windows:`winget install -e --id TheDocumentFoundation.LibreOffice --source winget`
 
 ---
 

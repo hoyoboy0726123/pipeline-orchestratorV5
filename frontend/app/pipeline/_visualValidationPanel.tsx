@@ -88,7 +88,7 @@ export default function VisualValidationPanel({ data, onUpdate, onClose, onDelet
               }`}
               onClick={() => {
                 if (prevOutputDisabled) {
-                  toast.error('主機未裝 LibreOffice — 無法渲染 pptx/docx 真實版面;此模式停用。請先安裝再重啟 backend:winget install -e --id TheDocumentFoundation.LibreOffice', {
+                  toast.error('主機未裝 LibreOffice — 無法渲染 pptx/docx 真實版面;此模式停用。請先安裝再重啟 backend:winget install -e --id TheDocumentFoundation.LibreOffice --source winget', {
                     duration: 9000,
                   })
                 }
