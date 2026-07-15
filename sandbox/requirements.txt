@@ -37,4 +37,7 @@ xlsxwriter
 tabulate
 pyfiglet
 qrcode
-openai-whisper
+
+# openai-whisper 已移出預裝(會拖 PyTorch ~2-3GB、只服務影音轉字幕情境)。
+# 需要時 runtime install_dep 自癒會當場裝,或手動:
+#   wsl docker exec pipeline-sandbox-v5 pip install openai-whisper
