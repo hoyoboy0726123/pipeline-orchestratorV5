@@ -1204,7 +1204,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         batch: d.taskDescription,
         workingDir: d.workingDir || '',
         outputPath: d.outputPath,
-        expect: aiData?.expectText || d.expectedOutput,
+        expect: aiData?.expectText || d.expectedOutput || (d as any).expectText || '',
         jsonSchemaText: aiData?.jsonSchemaText || (d as any).jsonSchemaText || '',
         skillMode: true,
         // 對 skill 節點不設 expectSkillMode — 後端用 has_expect 自動判斷深淺
@@ -1253,7 +1253,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       batch: d.batch,
       workingDir: d.workingDir || '',
       outputPath: (aiData?.targetPath && !d.outputPath) ? aiData.targetPath : d.outputPath,
-      expect: aiData?.expectText || d.expect,
+      expect: aiData?.expectText || d.expect || (d as any).expectText || '',
       jsonSchemaText: aiData?.jsonSchemaText || (d as any).jsonSchemaText || '',
       skillMode: false,  // script / 其他節點:step-level 永不是 skill
       // AI 驗證節點若勾「Skill 模式」→ expectSkillMode=true → 走 deep 驗證
@@ -1377,6 +1377,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.vvSearchRegion && s.vvSearchRegion.length === 4) {
         lines.push(`    vv_search_region: [${s.vvSearchRegion.join(', ')}]`)
       }
+      emitOutputBlock(lines, s)
       if (s.timeout && s.timeout !== 120) lines.push(`    timeout: ${s.timeout}`)
       if (s.llmRole === 'secondary') lines.push(`    llm_role: secondary`)
       continue
@@ -1526,6 +1527,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
           lines.push(`      - ${compact}`)
         }
       }
+      emitOutputBlock(lines, s)
       if (s.timeout !== 300) lines.push(`    timeout: ${s.timeout}`)
       // computer_use 一定寫 retry(即使是 0),因為 backend PipelineStep 預設 retry=1
       // 對 UI 自動化來說 retry 從動作 #1 重跑會重複點擊造成副作用,所以預期是 retry=0

@@ -155,7 +155,8 @@ def _step_to_node(step: dict, idx: int) -> dict:
             "taskDescription": step.get("batch", ""),
             "workingDir": step.get("working_dir", ""),
             "outputPath": output_path,
-            "expectedOutput": step.get("expect", ""),
+            # expect 正確層級在 output: 底下(base_data 已抽好);頂層 expect 是舊格式後備
+            "expectedOutput": base_data.get("expectText") or step.get("expect", ""),
             "readonly": step.get("readonly", False),
             "skill": step.get("skill", ""),
             "askMode": step.get("ask_mode", False),
@@ -193,7 +194,9 @@ def _step_to_node(step: dict, idx: int) -> dict:
         "batch": step.get("batch", ""),
         "workingDir": step.get("working_dir", ""),
         "outputPath": output_path,
-        "expectedOutput": step.get("expect", ""),
+        # 前端 script 節點(StepData spread)讀的是 expect 鍵;expectedOutput 留著向後相容
+        "expect": base_data.get("expectText") or step.get("expect", ""),
+        "expectedOutput": base_data.get("expectText") or step.get("expect", ""),
     }}
 
 
