@@ -1701,6 +1701,16 @@ async def api_get_workflow(wf_id: str):
 async def api_update_workflow(wf_id: str, req: WorkflowUpdateRequest):
     from db import update_workflow
     patch = {k: v for k, v in req.model_dump().items() if v is not None}
+    # 只帶 yaml 不帶 canvas(外部 API / TG 遙控更新)→ 從 yaml 重建 canvas,
+    # 否則 DB 留著舊 canvas,前端下次載入畫布再 autosave 就會把新 yaml 洗回舊內容(實測事故)。
+    if "yaml" in patch and "canvas" not in patch:
+        try:
+            from yaml_to_canvas import yaml_to_canvas
+            _cv = yaml_to_canvas(patch["yaml"])
+            if _cv:
+                patch["canvas"] = _cv
+        except Exception:
+            pass  # 重建失敗不阻擋 yaml 更新
     wf = update_workflow(wf_id, patch)
     if not wf:
         raise HTTPException(status_code=404, detail="找不到工作流")

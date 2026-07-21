@@ -48,14 +48,36 @@ def _step_to_node(step: dict, idx: int) -> dict:
     }
     output = step.get("output") or {}
     output_path = output.get("path", "") if isinstance(output, dict) else ""
+    # expect / json_schema:任何節點的 output 都可能帶(驗證閘規格)。
+    # 之前只有 script/skill 分支帶 expect、全部分支都不帶 json_schema →
+    # 前端從 canvas 讀不到 → autosave round-trip 把 YAML 裡寫好的驗證整批洗掉(實測)。
+    # 對齊 next/llmRole 策略:統一塞進 base_data、所有節點型別通吃。
+    if isinstance(output, dict):
+        import json as _json_s
+        base_data["expectText"] = output.get("expect") or output.get("description") or ""
+        _js = output.get("json_schema")
+        base_data["jsonSchemaText"] = (
+            _json_s.dumps(_js, ensure_ascii=False) if isinstance(_js, dict) and _js else ""
+        )
+    else:
+        base_data["expectText"] = ""
+        base_data["jsonSchemaText"] = ""
 
     # human_confirm
     if step.get("human_confirm"):
+        # message 存在 YAML 的 message: 欄(前端 stepsToYaml 寫的),不是 batch —
+        # 之前讀 batch 導致自訂訊息在 round-trip 後全變預設「請確認」(實測)。
+        # notify/screenshot/preview/send_prev/hc_on_timeout 同理:canvas 不帶就會被 autosave 洗掉。
         return {**common, "type": "humanConfirmation", "data": {
             **base_data,
-            "message": step.get("batch", "請確認"),
+            "message": step.get("message") or step.get("batch") or "請確認",
             "outputPath": output_path,
             "sendOutput": step.get("send_output", True),
+            "notifyTelegram": step.get("notify_telegram", True),
+            "screenshot": bool(step.get("screenshot", False)),
+            "previewPrevOutput": bool(step.get("preview_prev_output", False)),
+            "sendPrevOutput": bool(step.get("send_prev_output", False)),
+            "hcOnTimeout": step.get("hc_on_timeout", "wait"),
         }}
 
     # visual_validation
