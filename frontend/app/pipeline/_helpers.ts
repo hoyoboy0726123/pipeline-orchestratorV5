@@ -1262,6 +1262,26 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
 }
 
 // ── Steps → YAML string ───────────────────────────────────────────────────────
+/** 序列化 output 區塊(path + expect + skill_mode)— 所有節點型別共用。
+ * 修:web_crawler / subagent / outlook 分支原本只寫 path、把 expect 默默丟掉
+ * (實測:hero 對話 YAML 有 expect,套用到畫布後全消失 — 同 llm_role 掉欄位家族)。 */
+function emitOutputBlock(lines: string[], s: StepData) {
+  if (!(s.outputPath || s.expect)) return
+  lines.push(`    output:`)
+  if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
+  if (s.expect) {
+    if (s.expect.includes('\n') || s.expect.length > 80) {
+      lines.push(`      description: |`)
+      for (const dl of s.expect.split('\n')) {
+        lines.push(`        ${dl}`)
+      }
+    } else {
+      lines.push(`      description: "${s.expect.replace(/"/g, '\\"')}"`)
+    }
+  }
+  if (s.expectSkillMode) lines.push(`      skill_mode: true`)
+}
+
 export function stepsToYaml(name: string, steps: StepData[]): string {
   // 自動判斷 validate：有 skill 步驟或任何步驟有 expect → 啟用
   const needsValidate = steps.some(s => s.skillMode || !!s.expect)
@@ -1385,10 +1405,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
           }
         }
       }
-      if (s.outputPath) {
-        lines.push(`    output:`)
-        lines.push(`      path: ${s.outputPath}`)
-      }
+      emitOutputBlock(lines, s)
       if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
       if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
       if (s.next) lines.push(`    next: ${s.next}`)
@@ -1413,10 +1430,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         }
       }
       if (s.workingDir) lines.push(`    working_dir: ${s.workingDir}`)
-      if (s.outputPath) {
-        lines.push(`    output:`)
-        lines.push(`      path: ${s.outputPath}`)
-      }
+      emitOutputBlock(lines, s)
       if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
       if (s.retry !== undefined && s.retry !== 1) lines.push(`    retry: ${s.retry}`)
       if (s.next) lines.push(`    next: ${s.next}`)
@@ -1439,10 +1453,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.outlookParams && Object.keys(s.outlookParams).length > 0) {
         lines.push(`    outlook_params: ${JSON.stringify(s.outlookParams)}`)
       }
-      if (s.outputPath) {
-        lines.push(`    output:`)
-        lines.push(`      path: ${s.outputPath}`)
-      }
+      emitOutputBlock(lines, s)
       if (s.timeout && s.timeout !== 600) lines.push(`    timeout: ${s.timeout}`)
       if (s.retry && s.retry !== 0) lines.push(`    retry: ${s.retry}`)
       if (s.llmRole === 'secondary') lines.push(`    llm_role: secondary`)
@@ -1506,22 +1517,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         lines.push(`    ready_after_seconds: ${s.readyAfterSeconds}`)
       }
     }
-    if (s.outputPath || s.expect) {
-      lines.push(`    output:`)
-      if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
-      if (s.expect) {
-        if (s.expect.includes('\n') || s.expect.length > 80) {
-          lines.push(`      description: |`)
-          for (const dl of s.expect.split('\n')) {
-            lines.push(`        ${dl}`)
-          }
-        } else {
-          lines.push(`      description: "${s.expect.replace(/"/g, '\\"')}"`)
-        }
-      }
-      // output.skill_mode 只在 script 節點 + AI 驗證節點勾深度時寫；skill 節點不寫
-      if (s.expectSkillMode) lines.push(`      skill_mode: true`)
-    }
+    emitOutputBlock(lines, s)
     if (s.timeout !== 300) lines.push(`    timeout: ${s.timeout}`)
     // retry 的後端 default 是 1，只要不等於 1 都得寫出來（包含使用者明確設 0）
     if (s.retry !== 1)     lines.push(`    retry: ${s.retry}`)
