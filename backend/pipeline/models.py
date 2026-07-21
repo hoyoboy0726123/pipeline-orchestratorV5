@@ -33,6 +33,10 @@ class StepOutput(BaseModel):
     description: str = ""  # 同 expect 的別名，YAML 可用 description 代替
     ai_validation: bool = True  # YAML 可用 ai_validation: true 明確啟用
     skill_mode: bool = False  # True = 使用 Skill agent 主動驗證
+    # 輸出 JSON Schema 合約(選填,自 Atlas backport):輸出檔為 .json 時,先跑
+    # 「確定性 schema 驗證」(0 token、比 LLM 驗證更硬)。不過 → 直接 fail +
+    # 具體欄位錯誤(自癒可讀懂修正)。生成端也會把 schema 塞進任務要求。
+    json_schema: dict = {}
 
     def get_expect(self) -> str:
         """取得驗證描述（優先 expect，fallback 到 description）"""

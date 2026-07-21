@@ -48,6 +48,28 @@ def _resolve_role_settings(s: dict, role: str) -> dict:
     }
 
 
+def compute_retry_wait(err_msg: str, attempt: int) -> Optional[float]:
+    """LLM 暫時錯誤的退避秒數;回 None = 不該重試(每日額度 RPD 用盡,等到明天才會恢復)。
+
+    429(RESOURCE_EXHAUSTED)幾乎都是「每分鐘」限制(RPM/TPM):滑動窗最多 ~60s 就釋放,
+    但等 1-2 秒必然還在同一窗內白白燒掉重試次數(實測 gemma-4 免費層 2026-07 頻繁踩到)
+    → 改用 20/40 秒跨窗;Google 錯誤 body 常帶 retryDelay 官方建議秒數,優先採用。
+    其他暫時性錯誤(5xx / overloaded)維持短退避。
+    """
+    m = err_msg or ""
+    if "429" in m or "RESOURCE_EXHAUSTED" in m or "ResourceExhausted" in m:
+        low = m.lower()
+        if "perday" in low.replace(" ", "") or "per day" in low:
+            return None  # RPD 用盡:重試無意義,直接報錯讓使用者換模型
+        import re as _re
+        rd = _re.search(r"retry[_ ]?delay[\"':{\s]+(?:seconds[\"':\s]+)?(\d+)", m, _re.IGNORECASE) \
+            or _re.search(r"retry in (\d+(?:\.\d+)?)\s*s", m, _re.IGNORECASE)
+        if rd:
+            return min(float(rd.group(1)) + 2.0, 90.0)
+        return [20.0, 40.0][min(attempt, 1)]
+    return float(2 ** attempt)
+
+
 def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
     """依當前設定回傳一個 LangChain chat model 實例。
 
@@ -283,7 +305,11 @@ async def invoke_with_streaming(
             _msg = str(_api_exc)
             _is_transient = any(m in _msg for m in _TRANSIENT_MARKERS)
             if _is_transient and _attempt < len(_API_RETRY_BACKOFF):
-                _wait = _API_RETRY_BACKOFF[_attempt]
+                _wait = compute_retry_wait(_msg, _attempt)
+                if _wait is None:
+                    log.warning(f"[{label}] 每日額度(RPD)用盡、不重試 — 請切換模型或等額度重置")
+                    raise
+                _wait = max(_wait, _API_RETRY_BACKOFF[_attempt])
                 log.warning(
                     f"[{label}] ⚠ LLM API 暫時性錯誤（{_msg[:140]}）"
                     f"→ {_wait:.0f}s 後自動重試 {_attempt + 1}/{len(_API_RETRY_BACKOFF)}"

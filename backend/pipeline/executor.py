@@ -4342,7 +4342,11 @@ async def _execute_skill_native_loop(
                 last_err = e
                 if any(k in str(e).lower() for k in _RETRIABLE):
                     if _attempt < 2:
-                        _w = 2 ** _attempt
+                        from llm_factory import compute_retry_wait
+                        _w = compute_retry_wait(str(e), _attempt)
+                        if _w is None:
+                            logger.warning(f"[{step_name}] 每日額度(RPD)用盡、不重試 — 請切換模型或等額度重置")
+                            break
                         logger.warning(
                             f"[{step_name}] LLM 暫時錯誤、{_w}s retry({_attempt + 1}/2):"
                             f"{type(e).__name__}: {str(e)[:200]}"

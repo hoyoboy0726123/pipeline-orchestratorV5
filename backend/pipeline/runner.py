@@ -2342,8 +2342,19 @@ async def _run_pipeline_inner(
                     and step.output is not None
                     and (bool(step.output.get_expect()) or step.skill_mode)
                 )
+                # 生成端對齊 schema 合約:把 json_schema 塞進任務描述,
+                # 讓 LLM 在「寫程式之前」就知道輸出結構要求(驗證端閘門在後面把關)。
+                _task_desc = step.batch
+                if step.output and getattr(step.output, "json_schema", None):
+                    import json as _sj
+                    _task_desc = (
+                        f"{step.batch}\n\n"
+                        f"【輸出 JSON Schema 合約(強制)】輸出檔必須是純 JSON、且完全符合此 schema"
+                        f"(欄位名/型別一致、不得有 markdown/frontmatter/多餘文字):\n"
+                        f"{_sj.dumps(step.output.json_schema, ensure_ascii=False)}"
+                    )
                 exec_result = await execute_step_with_skill(
-                    task_description=step.batch,
+                    task_description=_task_desc,
                     timeout=step.timeout,
                     logger=logger,
                     step_name=step.name,
@@ -2437,6 +2448,30 @@ async def _run_pipeline_inner(
                     _decl_ok = False
                 _missing_promised_output = not _decl_ok
 
+            # ── 輸出 JSON Schema 合約閘門(確定性、0 token、在任何 LLM 驗證之前;自 Atlas backport)──
+            # 弱模型結構翻車(缺欄位/型別錯/frontmatter 垃圾)在這裡被硬擋,
+            # 錯誤訊息含具體欄位 → 自癒 LLM 讀得懂、能精準修。
+            _schema_fail_val = None
+            if (
+                exec_result.exit_code == 0
+                and step.output and getattr(step.output, "json_schema", None)
+                and (_eff_output_path or step.output.path)
+            ):
+                try:
+                    from .schema_gate import validate_output_schema
+                    _gate_path = _eff_output_path or str(_resolve_path(step.output.path))
+                    _ok, _err = validate_output_schema(_gate_path, step.output.json_schema)
+                    if not _ok:
+                        logger.warning(f"[{step.name}] ❌ schema 合約未通過:{_err.splitlines()[0]}")
+                        _schema_fail_val = ValidationResult(
+                            status="failed", reason=_err,
+                            suggestion="輸出結構不符合 json_schema 合約;請依錯誤逐欄修正(欄位名/型別要完全一致、只輸出純 JSON)。",
+                        )
+                    else:
+                        logger.info(f"[{step.name}] ✅ schema 合約通過(確定性驗證、0 token)")
+                except Exception as _ge:
+                    logger.warning(f"[{step.name}] schema 閘門異常(略過、不擋):{_ge}")
+
             # exit_code -429 = LLM 配額用盡（executor 標記），直接走 rate_limited 路徑、不再叫 validator（會再 429 一次）
             if exec_result.exit_code == -429:
                 val = ValidationResult(
@@ -2444,6 +2479,8 @@ async def _run_pipeline_inner(
                     reason=(exec_result.stderr or "LLM 配額用盡或速率受限（429）"),
                     suggestion="等配額重置或在 Settings 切換 provider（Groq / OpenAI / Anthropic / Ollama 本地）",
                 )
+            elif _schema_fail_val is not None:
+                val = _schema_fail_val
             # outlook_automation 節點：agent 自己回 done(success) 就決定成敗了，不需 LLM 驗證
             elif step.outlook_automation:
                 _status = "ok" if exec_result.exit_code == 0 else "failed"

@@ -613,7 +613,11 @@ async def run_subagent(
                 _msg = str(e).lower()
                 _retriable = any(k in _msg for k in _RETRIABLE_KEYWORDS)
                 if _retriable and _attempt < 2:
-                    _wait = 2 ** _attempt
+                    from llm_factory import compute_retry_wait
+                    _wait = compute_retry_wait(str(e), _attempt)
+                    if _wait is None:
+                        log.warning(f"[{step_name}] 每日額度(RPD)用盡、不重試 — 請切換模型或等額度重置")
+                        break
                     log.warning(
                         f"[{step_name}] LLM 暫時錯誤、{_wait}s 後 retry({_attempt + 1}/2):"
                         f" {type(e).__name__}: {str(e)[:200]}"
@@ -1107,7 +1111,11 @@ async def _run_subagent_native(
                 _msg = str(e).lower()
                 _retriable = any(k in _msg for k in _RETRIABLE_KEYWORDS)
                 if _retriable and _attempt < 2:
-                    _wait = 2 ** _attempt
+                    from llm_factory import compute_retry_wait
+                    _wait = compute_retry_wait(str(e), _attempt)
+                    if _wait is None:
+                        log.warning(f"[{step_name}] 每日額度(RPD)用盡、不重試 — 請切換模型或等額度重置")
+                        break
                     log.warning(
                         f"[{step_name}] LLM 暫時錯誤、{_wait}s retry({_attempt + 1}/2):"
                         f"{type(e).__name__}: {str(e)[:200]}"

@@ -14,6 +14,7 @@ export interface StepData extends Record<string, unknown> {
   // 純 skill 節點不需要這個（後端看 expect 有沒有填來決定深淺）；
   // 只有 script 節點 + AI 驗證節點勾「Skill 模式」時才會被設成 true。
   expectSkillMode?: boolean
+  jsonSchemaText?: string  // 輸出 JSON Schema 合約(自 Atlas backport)
   readonly?: boolean    // optional — skill 唯讀驗證模式
   skill?: string        // optional — 掛載的 Claude Code skill 名稱
   askMode?: boolean     // optional — 詢問模式（LLM 積極問使用者）
@@ -860,6 +861,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           workingDir: s.workingDir,
           outputPath: s.outputPath,
           expectedOutput: s.expect,
+          jsonSchemaText: s.jsonSchemaText || '',
           readonly: s.readonly || false,
           skill: s.skill || '',
           askMode: s.askMode || false,
@@ -1177,6 +1179,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         workingDir: d.workingDir || '',
         outputPath: d.outputPath,
         expect: aiData?.expectText || d.expectedOutput,
+        jsonSchemaText: aiData?.jsonSchemaText || (d as any).jsonSchemaText || '',
         skillMode: true,
         // 對 skill 節點不設 expectSkillMode — 後端用 has_expect 自動判斷深淺
         readonly: d.readonly || false,
@@ -1224,6 +1227,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
       workingDir: d.workingDir || '',
       outputPath: (aiData?.targetPath && !d.outputPath) ? aiData.targetPath : d.outputPath,
       expect: aiData?.expectText || d.expect,
+      jsonSchemaText: aiData?.jsonSchemaText || (d as any).jsonSchemaText || '',
       skillMode: false,  // script / 其他節點:step-level 永不是 skill
       // AI 驗證節點若勾「Skill 模式」→ expectSkillMode=true → 走 deep 驗證
       expectSkillMode: !!aiData?.skillMode,
@@ -1266,7 +1270,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
  * 修:web_crawler / subagent / outlook 分支原本只寫 path、把 expect 默默丟掉
  * (實測:hero 對話 YAML 有 expect,套用到畫布後全消失 — 同 llm_role 掉欄位家族)。 */
 function emitOutputBlock(lines: string[], s: StepData) {
-  if (!(s.outputPath || s.expect)) return
+  if (!(s.outputPath || s.expect || s.jsonSchemaText)) return
   lines.push(`    output:`)
   if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
   if (s.expect) {
@@ -1280,6 +1284,12 @@ function emitOutputBlock(lines: string[], s: StepData) {
     }
   }
   if (s.expectSkillMode) lines.push(`      skill_mode: true`)
+  // 輸出 JSON Schema 合約(inline JSON = 合法 YAML flow style,單行輸出)
+  if (s.jsonSchemaText && s.jsonSchemaText.trim()) {
+    let oneLine = s.jsonSchemaText.trim()
+    try { oneLine = JSON.stringify(JSON.parse(oneLine)) } catch { oneLine = oneLine.split('\n').map(x => x.trim()).join(' ') }
+    lines.push(`      json_schema: ${oneLine}`)
+  }
 }
 
 export function stepsToYaml(name: string, steps: StepData[]): string {
@@ -1612,6 +1622,29 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         } else {
           cur.expect = val
         }
+      } else if (/^json_schema:/.test(t) && cur && inOutput) {
+        // 輸出 JSON Schema 合約(自 Atlas backport):inline JSON(單行)直接存;block 巢狀原樣收集
+        const rawJs = t.replace(/^json_schema:\s*/, '').trim()
+        if (rawJs) {
+          cur.jsonSchemaText = rawJs
+        } else {
+          const baseIndent = line.match(/^(\s*)/)?.[1].length ?? 0
+          const collected: string[] = []
+          let lj = li + 1
+          let minIndent = Infinity
+          while (lj < lines.length) {
+            const sub = lines[lj]
+            if (!sub.trim()) { collected.push(''); lj++; continue }
+            const subIndent = sub.match(/^(\s*)/)?.[1].length ?? 0
+            if (subIndent <= baseIndent) break
+            collected.push(sub)
+            if (subIndent < minIndent) minIndent = subIndent
+            lj++
+          }
+          const strip = minIndent === Infinity ? 0 : minIndent
+          cur.jsonSchemaText = collected.map(cl => cl ? cl.slice(strip) : '').join('\n').replace(/\s+$/, '')
+          li = lj - 1
+        }
       } else if (/^ai_validation:/.test(t) && cur && inOutput) {
         // ai_validation 是後端 model 上的死欄位，這裡單純忽略；
         // 解析時不再以它觸發任何狀態（避免「YAML 寫但行為不變」的假設）
@@ -1911,6 +1944,7 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     expect: partial.expect ?? '',
     skillMode: partial.skillMode ?? false,
     expectSkillMode: partial.expectSkillMode ?? false,
+    jsonSchemaText: partial.jsonSchemaText ?? '',
     readonly: partial.readonly ?? false,
     skill: partial.skill ?? '',
     humanConfirm: partial.humanConfirm ?? false,
