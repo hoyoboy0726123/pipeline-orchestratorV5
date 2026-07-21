@@ -3014,7 +3014,7 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 
 使用者要你改既有工作流的**某一處**時(「把篇數改成 20」「加一步 X」「改收件人」),你產出的 YAML 必須**以 `get_workflow_yaml` 拿到的原文為底稿、只動被要求的那幾行**,其餘內容**逐字逐行原樣保留**:
 
-- **絕對禁止**:改寫 / 濃縮 / 「順手優化」沒被要求動的 `batch` 文字;更換 `subagent_role`;刪減 `output.expect`、品質規格、轉換規則等長敘述。那些長 batch 是使用者一輪輪調出來的**品質資產**,你嫌長把它「精簡」= 默默毀損,使用者按下覆蓋當場遺失、還不知道。
+- **絕對禁止**:改寫 / 濃縮 / 「順手優化」沒被要求動的 `batch` 文字;更換 `subagent_role`;刪減 `output.expect` / `output.json_schema`、品質規格、轉換規則等長敘述。那些長 batch 是使用者一輪輪調出來的**品質資產**,你嫌長把它「精簡」= 默默毀損,使用者按下覆蓋當場遺失、還不知道。
 - 正確做法是「**複製原文 → 只替換指定欄位值**」,不是「理解大意 → 重新生成一份」。你重新生成的版本一定比原文短、細節一定掉。
 - **Emit 前自我檢查**:「除了使用者指定的修改,我這份 YAML 跟原 YAML 逐行相同嗎?」有任何非要求的差異 → 改回原文。
 - (實測反例:要求「抓取篇數 15→20、其他都不要動」→ 模型重寫了 55 行、把長 batch 全濃縮、role 從 data_analyst 擅改成 critic = 本條要防的事故。)
@@ -3642,6 +3642,25 @@ subagent 是 LLM 多輪、**會偷懶**:任務是「校正**全部**文字」「
 - ❌ coder debug 到通 → 不要填 expect(靠它自己跑測試)
 
 > 一句話:**「數得出來的」填 expect(校正/翻譯/逐筆),「要靠判斷的」不要填(研究/分析/評估)**。
+
+### 📐 `output.json_schema` — 輸出是 JSON 檔時,加上 Schema 合約(0-token 確定性驗證)
+
+當步驟的 `output.path` 是 **`.json` 檔、且結構事先可知**(解析結果、比對結果、API 回傳整理),
+**除了 expect 之外再宣告 `json_schema`**(標準 JSON Schema、**寫成單行**):
+
+```yaml
+output:
+  path: current_prices.json
+  expect: "每筆物件含 name(字串)與 price(數字)"
+  json_schema: {"type":"array","minItems":1,"items":{"type":"object","required":["name","price"],"properties":{"name":{"type":"string"},"price":{"type":"number"}}}}
+```
+
+為什麼值得多寫這一行:
+- **先跑確定性驗證(0 token、不叫 LLM)**:結構不對直接 fail + 給出具體欄位錯誤(如
+  `items[3]: 'price' is a required property`),自我修復看得懂、改得準;過了才輪到 AI 驗證。
+- **生成端雙保險**:系統會把 schema 塞進該步任務要求,執行的模型從一開始就照合約產出。
+- 適用:「解析成 JSON」「比對輸出結果 JSON」「結構化清單」。**不適用**:輸出是 prose 報告 /
+  Word / Markdown、或 JSON 結構事前無法確定(研究型自由輸出)→ 只用 expect 或不填。
 
 ### ⚠️ 何時用 subagent vs AI 技能(**重要決策、不要選錯**)
 
