@@ -5126,16 +5126,29 @@ def _clean_latex(text: str) -> str:
 _CHAT_MAX_TOOL_ITERATIONS = 5
 
 
-def _friendly_llm_error(e: Exception) -> tuple[int, str]:
+def _friendly_llm_error(e: Exception, est_input_tokens: int | None = None) -> tuple[int, str]:
     """把 LLM build / invoke 階段的常見 exception 翻譯成繁中友善訊息。
     回傳 (HTTP status code, 訊息)。
 
     這是給 chat / agent 用的 error wrapper、讓桌面 + TG 都看到一致的原因說明
     （而非 raw stack trace）。
+
+    est_input_tokens(選填):呼叫端已知這次輸入的估算 token 數(低估值)時傳入,
+    用來偵測「單次輸入就超過模型 TPM、重試永遠無效」→ 直接給換模型的明確指引。
     """
     name = type(e).__name__
     msg = str(e) or ""
     msg_lc = msg.lower()
+
+    # 0. 單次輸入超過 TPM:最高優先(這種 429 重試無解,要給明確的換模型指引)
+    if est_input_tokens:
+        try:
+            from llm_factory import tpm_overflow_hint
+            _hint = tpm_overflow_hint(msg, est_input_tokens)
+            if _hint:
+                return 429, _hint
+        except Exception:
+            pass
 
     # 1. 未設定 provider / model
     if isinstance(e, KeyError) and "provider" in msg.lower():
@@ -5402,7 +5415,9 @@ async def _chat_agent_loop(
                 response = llm_with_tools.invoke(lc_messages)
         except Exception as e:
             _log.warning(f"[/pipeline/chat] LLM invoke 失敗(iter {iteration}):{type(e).__name__}: {e}")
-            sc, friendly = _friendly_llm_error(e)
+            # 字元數//2 低估 token 數:只在「明確超過 TPM」時觸發 fail-fast 指引
+            _est_in = sum(len(str(getattr(_m, "content", "") or "")) for _m in lc_messages) // 2
+            sc, friendly = _friendly_llm_error(e, est_input_tokens=_est_in)
             raise HTTPException(status_code=sc, detail=friendly)
         lc_messages.append(response)
         tool_calls = getattr(response, "tool_calls", None) or []
@@ -5647,7 +5662,8 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 accumulated = chunk if accumulated is None else accumulated + chunk
         except Exception as e:
             _log.warning(f"[/pipeline/chat/stream] astream 失敗(iter {iteration}):{type(e).__name__}: {e}")
-            sc, friendly = _friendly_llm_error(e)
+            _est_in = sum(len(str(getattr(_m, "content", "") or "")) for _m in lc_messages) // 2
+            sc, friendly = _friendly_llm_error(e, est_input_tokens=_est_in)
             yield {"type": "error", "status_code": sc, "detail": friendly}
             return
 

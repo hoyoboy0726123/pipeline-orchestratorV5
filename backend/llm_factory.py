@@ -70,6 +70,43 @@ def compute_retry_wait(err_msg: str, attempt: int) -> Optional[float]:
     return float(2 ** attempt)
 
 
+def tpm_overflow_hint(err_msg: str, est_input_tokens: int) -> Optional[str]:
+    """429 且「單一請求的輸入就超過該模型每分鐘 token 上限(TPM)」→ 重試永遠無效。
+
+    背景:hero 系統提示注入約 40-55K tokens,而 gemma-4 免費層 2026-07 被下修到
+    16K TPM —— 單次就超標 2.5 倍以上,滑動窗永遠塞不進,20/40 秒退避只是白等。
+
+    判斷條件(全部成立才觸發、避免誤殺):
+    1. 錯誤是 429/RESOURCE_EXHAUSTED
+    2. 配額指標是「輸入 token × 每分鐘」(Google quotaId 如
+       GenerateContentInputTokensPerModelPerMinute-FreeTier)
+    3. 錯誤 body 帶 quotaValue,且我們的輸入「低估值」仍超過它
+       (呼叫端用 字元數//2 低估,寧可漏報、不可誤報)
+
+    回 None = 非此情況(照常走退避重試);回字串 = 給使用者的說明,呼叫端應直接
+    fail-fast、不再重試。
+    """
+    m = err_msg or ""
+    if not ("429" in m or "RESOURCE_EXHAUSTED" in m or "ResourceExhausted" in m):
+        return None
+    low = m.lower().replace("_", "").replace("-", "").replace(" ", "")
+    if "inputtoken" not in low or "perminute" not in low:
+        return None
+    import re as _re
+    qv = _re.search(r"quota[_ ]?value[\"':\s]+(\d+)", m, _re.IGNORECASE)
+    if not qv:
+        return None
+    limit = int(qv.group(1))
+    if est_input_tokens <= limit:
+        return None
+    return (
+        f"這次要送給模型的內容約 {est_input_tokens:,}+ tokens,已超過此模型的每分鐘 token 上限"
+        f"(TPM ≈ {limit:,})。單一請求就塞不進限流窗口,重試等待也永遠不會成功。"
+        f"建議:到 Settings 把主模型換成 TPM 較高的模型(如 Gemini Flash 系列或付費層),"
+        f"弱模型留給工作流步驟(單步輸入小、不會踩到這個限制)。"
+    )
+
+
 def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
     """依當前設定回傳一個 LangChain chat model 實例。
 
