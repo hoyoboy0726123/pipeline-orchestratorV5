@@ -120,6 +120,9 @@ export interface SubagentData extends Record<string, unknown> {
   timeout: number
   retry: number
   llmRole?: 'primary' | 'secondary'
+  // 驗證閘(output.expect / output.json_schema):面板可編輯,YAML↔canvas 全程保留
+  expectText?: string
+  jsonSchemaText?: string
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string
@@ -342,6 +345,9 @@ export interface WebCrawlerData extends Record<string, unknown> {
   outputPath: string
   retry: number
   timeout: number
+  // 驗證閘(output.expect / output.json_schema):面板可編輯,YAML↔canvas 全程保留
+  expectText?: string
+  jsonSchemaText?: string
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
   errorMsg: string

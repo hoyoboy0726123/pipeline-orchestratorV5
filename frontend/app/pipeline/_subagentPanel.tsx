@@ -256,6 +256,34 @@ export default function SubagentConfigPanel({ node, onUpdate, onClose, onDelete,
             </p>
           </div>
 
+          {/* 驗證閘：expect + JSON Schema（對應 YAML output.expect / output.json_schema） */}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">預期輸出描述（AI 驗證、選填）</label>
+            <textarea
+              rows={3}
+              value={data.expectText || ''}
+              onChange={e => onUpdate({ expectText: e.target.value })}
+              placeholder={'描述「怎樣才算做完做對」…\n例如：輸入幾筆輸出就幾筆、無遺漏'}
+              className={`${inputCls} resize-y text-xs leading-relaxed min-h-[60px]`}
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              <b>填了</b> → 跑完會深度驗證產出檔（適合「全部/每一筆」可數任務）。<b>研究/探索型請留空</b>，避免誤殺正常輸出。
+            </p>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">JSON Schema 合約（選填）</label>
+            <textarea
+              rows={3}
+              value={data.jsonSchemaText || ''}
+              onChange={e => onUpdate({ jsonSchemaText: e.target.value })}
+              placeholder={'輸出是 .json 時填標準 JSON Schema…\n例：{"type":"array","items":{"type":"object","required":["name","price"]}}'}
+              className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[60px]`}
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              0-token 確定性驗證：結構不對直接 fail 並回報具體欄位錯誤，比 AI 驗證更硬、更省。
+            </p>
+          </div>
+
           {/* 提醒：跟 AI 技能節點的差別 */}
           <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs leading-relaxed">
             <div className="font-medium text-amber-800 mb-1">⚠️ AI 多輪代理 vs AI 技能節點</div>

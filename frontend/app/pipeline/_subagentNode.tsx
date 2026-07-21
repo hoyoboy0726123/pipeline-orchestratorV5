@@ -65,6 +65,11 @@ function SubagentStepNode({ data, selected }: NodeProps<SubagentNodeType>) {
         {data.outputPath ? (
           <p className="text-xs text-gray-400 truncate">→ {data.outputPath.replace(/^.*\/([^/]+)$/, '$1')}</p>
         ) : null}
+        {(data.expectText || data.jsonSchemaText) ? (
+          <p className="text-[11px] text-purple-500 truncate" title={String(data.expectText || '')}>
+            🛡 {data.jsonSchemaText ? 'Schema 合約' : ''}{data.jsonSchemaText && data.expectText ? ' + ' : ''}{data.expectText ? 'AI 驗證' : ''}
+          </p>
+        ) : null}
         {status === 'failed' && errorMsg && <p className="text-xs text-red-500 truncate">{errorMsg}</p>}
       </div>
 

@@ -774,6 +774,21 @@ csrf_token=xyz`}
           </p>
         </div>
 
+        {/* 驗證閘：expect（對應 YAML output.expect；抓外部資料建議必填） */}
+        <div>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">預期輸出描述（AI 驗證、建議填）</label>
+          <textarea
+            rows={3}
+            value={data.expectText || ''}
+            onChange={e => onUpdate({ expectText: e.target.value })}
+            placeholder={'描述「怎樣才算真的抓到目標資料」…\n例：確實抓到商品列表(多筆名稱+價格)，非 404/反爬錯頁/cookie 同意頁'}
+            className={`${inputCls} resize-y text-xs leading-relaxed min-h-[60px]`}
+          />
+          <p className="text-[10px] text-gray-400 mt-0.5">
+            抓外部資料常拿到「看似成功的錯頁」（403 / 空頁 / 反爬頁），填了才能在這一步就攔下、不會污染下游。
+          </p>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">Timeout（秒）</label>
