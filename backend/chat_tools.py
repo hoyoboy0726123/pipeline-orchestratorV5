@@ -485,9 +485,16 @@ async def start_workflow(query: str, confirm: bool = False) -> str:
         import yaml as _yaml
         parsed = _yaml.safe_load(yaml_text) or {}
         steps = parsed.get("steps") or []
-        needs_validate = bool(parsed.get("validate")) or any(
-            isinstance(s, dict) and s.get("expect") for s in steps
-        )
+        # expect 巢在 output: 底下(expect / description 同義)、json_schema 也算要驗證;
+        # 之前讀步驟頂層 s.get("expect") 永遠 miss → validate 只靠 YAML 明寫才會開
+        def _step_has_gate(s):
+            if not isinstance(s, dict):
+                return False
+            o = s.get("output")
+            return isinstance(o, dict) and bool(
+                o.get("expect") or o.get("description") or o.get("json_schema")
+            )
+        needs_validate = bool(parsed.get("validate")) or any(_step_has_gate(s) for s in steps)
         # 重用 main.start_pipeline 已寫好的全套邏輯(parse / validate / save run / 背景啟動)
         # 改 async tool 直接 await、不再 thread + asyncio.run(那會關掉 background task 的 loop、
         # pipeline 跑到一半被砍。最早的版本用 thread 是因為 tool 本來是 sync、
