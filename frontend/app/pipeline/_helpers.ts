@@ -1302,12 +1302,13 @@ function emitOutputBlock(lines: string[], s: StepData) {
   if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
   if (s.expect) {
     if (s.expect.includes('\n') || s.expect.length > 80) {
-      lines.push(`      description: |`)
+      // 統一寫 expect:(description 是同義別名,但與 hero/文件用字不一致會讓使用者以為欄位被改掉)
+      lines.push(`      expect: |`)
       for (const dl of s.expect.split('\n')) {
         lines.push(`        ${dl}`)
       }
     } else {
-      lines.push(`      description: "${s.expect.replace(/"/g, '\\"')}"`)
+      lines.push(`      expect: "${s.expect.replace(/"/g, '\\"')}"`)
     }
   }
   if (s.expectSkillMode) lines.push(`      skill_mode: true`)
