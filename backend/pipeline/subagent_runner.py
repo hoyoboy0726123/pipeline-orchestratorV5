@@ -570,6 +570,18 @@ async def run_subagent(
         iteration = i + 1
         log.info(f"[{step_name}] Subagent 迭代 {iteration}/{max_iter}")
 
+        # 收斂催促:倒數第 2 輪注入(Atlas 實測:translator 吃到 ~64 萬字元內容逐篇翻譯,
+        # 燒光 max_iter 也到不了 done、retry 同樣命運;「說完成沒下 done」的舊防護管不到
+        # 這型)。提前要求部分交付+誠實 summary,產出檔留在 run 目錄、重試輪能接著做。
+        if iteration == max_iter - 1 and max_iter >= 4:
+            messages.append(HumanMessage(content=(
+                f"[系統提醒] 這是倒數第 2 輪({iteration}/{max_iter})。"
+                "如果任務量太大、剩餘輪數內確定做不完:請立刻把「目前已完成的部分」寫入輸出檔,"
+                "然後用 done 如實回報 —— summary 必須明講完成比例與未完成的部分(例:「完成 6/10 篇,"
+                "第 7-10 篇未翻」)。部分交付+誠實回報,遠比燒完輪數什麼都沒交好;"
+                "不要在剩餘輪數再開新的大段工作。"
+            )))
+
         # LLM call with retry — Gemma / Gemini 免費 tier 高負載常 503、其他 provider
         # 也有 429 / overloaded、長 task 容易撞。retriable error 用 exponential
         # backoff 重試 2 次(1s / 2s wait)、總共最多 3 次嘗試。非 retriable

@@ -3067,6 +3067,7 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 - **「每一筆都要 LLM 處理」(逐段校對 / 逐句翻譯 / 逐則改寫)→ 用 skill / subagent 步驟讓它「自己」做,或先 script 拆批再每批一個 subagent**。**拆不拆在設計時就決定、別賭 runtime 當場猜大小**:輸入在數十筆內、且預估輸出 < 約 8000 字(模型單次輸出上限)→ **一個 step 讓 agent 自己整批做完**即可;**輸入上看百筆 / 預估輸出會超過約 8000 字 → 一律設計成「script 拆成固定大小 chunk → 每個 chunk 一個 subagent → script 合併」**(批量大小由 Python 確定性公式決定、不靠 LLM 判斷,這才是它穩的原因)。⚠️ **絕不要把它設計成「一個 skill 節點寫 Python 迴圈呼叫 LLM API」** —— skill/subagent runtime 本身就是 LLM,但它在沙盒裡常會 `import openai` 呼叫外部 API、沒金鑰直接 rc=1 卡死(實測:whisper_srt 的「分段校正」步驟整步卡在要 OpenAI key)。把語言處理交給 agent 自己、把拆合交給確定性程式。
 - 需要「**給人看的乾淨標題 / 名稱 / 一句摘要**」→ **絕不要叫 pandas / regex 步驟去產**(程式只會切出「ECN .JHR.JPR_ MP加導90」這種碎片);程式步只負責把「原文樣本」原樣帶下去,**重寫成人話交給下游的 subagent 步驟**。
 - 一個步驟的 `output.expect` 得寫成「**而且…而且…而且…**」三個以上條件 → 那其實是三個步驟。
+- **翻譯 / 改寫 / 逐筆處理「大量文本」的步驟必須設處理上限**:上游是整頁爬蟲內容或整份文件時,batch 要明訂每篇/每段上限(例:「每篇 content 只翻前 1500 字元,超過的部分以(其餘留言略)代替」),或在上游解析步就裁剪欄位。把幾十萬字元原文塞給逐字處理步 = 再多輪數也燒不完、必然 max_iter 失敗(實測)。
 - 「**先 X、再根據結果決定 Y**」→ X 一步、Y 一步,中間用 condition / 驗證閘接。
 
 ### 🧭 一句話心法
