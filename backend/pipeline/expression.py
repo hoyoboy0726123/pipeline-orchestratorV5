@@ -300,8 +300,16 @@ def eval_condition(expression: str, context: dict) -> bool:
 
     # 容許使用者寫 `{{ x > 1 }}` 或純 `x > 1`,統一包成 `{{ ... }}` 給 Jinja2
     expr = expression.strip()
+    import re as _re
     if not expr.startswith("{{"):
         expr = "{{ " + expr + " }}"
+    elif not _re.fullmatch(r"\{\{((?!\}\}).)*\}\}", expr, _re.DOTALL):
+        # 陷阱寫法:`{{ x }} == True`(比較式在 }} 外面)——Jinja 只渲染大括號內,
+        # 結果變字串 "False == True" → 非空字串 → 永遠判 True(Atlas 實測:
+        # changed=false 卻走了 on_true、整條報告寄信鏈白跑)。AI 規劃器很容易產生
+        # 這種形式 → 拆掉內層 {{ }}、整句重包一次,讓比較真的進 Jinja 求值。
+        inner = expr.replace("{{", " ").replace("}}", " ")
+        expr = "{{ " + inner + " }}"
 
     rendered = render(expr, context)
     # Jinja2 render 把 True/False/数值 都會轉字串(例 "True" / "0" / "")
