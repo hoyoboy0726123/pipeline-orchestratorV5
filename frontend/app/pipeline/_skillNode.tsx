@@ -60,6 +60,11 @@ function SkillStepNode({ data, selected }: NodeProps<SkillNodeType>) {
         ) : (
           <p className="text-xs text-gray-300 italic">（無輸出路徑）</p>
         )}
+        {(data.expectedOutput || (data as any).jsonSchemaText) ? (
+          <p className="text-[11px] text-purple-500 truncate" title={String(data.expectedOutput || '')}>
+            🛡 {(data as any).jsonSchemaText ? 'Schema 合約' : ''}{(data as any).jsonSchemaText && data.expectedOutput ? ' + ' : ''}{data.expectedOutput ? 'AI 驗證' : ''}
+          </p>
+        ) : null}
         {status === 'failed' && errorMsg && <p className="text-xs text-red-500 truncate">{errorMsg}</p>}
       </div>
 

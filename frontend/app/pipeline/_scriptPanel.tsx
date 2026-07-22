@@ -342,6 +342,14 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
                   </p>
                 </div>
                 <div>
+                  <label className="text-xs text-gray-500 block mb-1">JSON Schema 合約（選填、輸出是 .json 時）</label>
+                  <textarea rows={2} value={(data as any).jsonSchemaText || ''} onChange={e => upd({ jsonSchemaText: e.target.value } as any)}
+                    placeholder={'標準 JSON Schema,例:{"type":"object","required":["total"]}'} className={`${inputCls} resize-none font-mono text-xs`} />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    0-token 確定性驗證,結構不對直接 fail、先於 AI 驗證執行。
+                  </p>
+                </div>
+                <div>
                   <label className="text-xs text-gray-500 block mb-1">工作目錄</label>
                   <input value={data.workingDir} onChange={e => upd({ workingDir: e.target.value })}
                     placeholder="（留空 = 使用預設目錄）" className={inputCls} />

@@ -305,6 +305,21 @@ export default function SkillConfigPanel({ node, onUpdate, onClose, onDelete, wo
             </p>
           </div>
 
+          {/* JSON Schema 合約（對應 YAML output.json_schema） */}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">JSON Schema 合約（選填）</label>
+            <textarea
+              rows={3}
+              value={(data as any).jsonSchemaText || ''}
+              onChange={e => onUpdate({ jsonSchemaText: e.target.value } as any)}
+              placeholder={'輸出是 .json 時填標準 JSON Schema…\n例：{"type":"object","required":["pdf_path"]}'}
+              className={`${inputCls} resize-y font-mono text-xs leading-relaxed min-h-[60px]`}
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              0-token 確定性驗證：結構不對直接 fail 並回報具體欄位錯誤，先於 AI 驗證執行。
+            </p>
+          </div>
+
           {/* Recipe status */}
           {hasRecipe && (
             <div className="p-3 rounded-xl bg-amber-50 border border-amber-200">
