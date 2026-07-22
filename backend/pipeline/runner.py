@@ -1591,6 +1591,14 @@ async def _run_pipeline_inner(
                     _eff_path = _sr.actual_output_path
             if _eff_path:
                 p = _Path(_eff_path).expanduser()
+                # YAML 的 output.path 常是相對路徑(如 price_report.docx),正常執行時
+                # _resolve_path 會以 run 輸出目錄為基準;重建如果直接拿原始值,下游
+                # (outlook 附件「上一步輸出」等)會對 CWD 解析 → 找到專案根、報「附件不存在」
+                # (Atlas 實測:resume 後寄送報告步驟踩到;V5 同碼、只是還沒被踩到)。
+                if not p.is_absolute():
+                    _rb_base = _workflow_output_dir(config.name)
+                    if _rb_base:
+                        p = _rb_base / p
                 out_info = {"path": str(p), "schema": ""}
                 try:
                     if p.suffix == ".csv" and p.exists():
