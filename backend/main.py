@@ -3116,7 +3116,7 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 # ✅ 正確(口頭說改、YAML 真寫滿)
 - name: 判斷是否通知
   condition: true
-  expression: "{{ steps.比對價格變動.output.changed }} == True"
+  expression: "{{ steps.比對價格變動.output.changed }}"   # 布林直接裸用;比較式必須寫在 {{ }} 之內
   on_true: 發送 TG 通知
 - name: 發送 TG 通知
   human_confirm: true
@@ -4022,7 +4022,7 @@ PPT 大綱結構                → presentation_designer
 ```yaml
 - name: 判斷是否通知
   condition: true
-  expression: "{{ steps.比對價格變動.output.changed }} == True"
+  expression: "{{ steps.比對價格變動.output.changed }}"   # 布林直接裸用;比較式必須寫在 {{ }} 之內
   on_true: 發送 TG 通知
   # on_false 不寫 / 留空 = 結束流程
 ```
@@ -4085,6 +4085,10 @@ skill 節點的 stdout 太雜(`[run_python]...`)沒法直接給 condition。但 
 - **判斷「包含」用 `'關鍵字' in 變數`、絕對不要用 `.contains()`**(Jinja2 / dict 沒有 contains 方法):
   - ✅ `expression: "{{ 'AI' in steps.摘要.output.stdout }}"`
   - ❌ `expression: "{{ steps.摘要.output.stdout.contains('AI') }}"`(求值失敗)
+- **整個比較式都要在同一組 `{{ }}` 之內**;布林變數直接裸用最穩:
+  - ✅ `expression: "{{ steps.比對.output.changed }}"`(布林裸用)
+  - ✅ `expression: "{{ steps.比對.output.changed == true }}"`(比較式在 {{ }} 內)
+  - ❌ `expression: "{{ steps.比對.output.changed }} == True"`(`}}` 提早關閉,比較式落在外面 → 渲染成字串、判斷失真)
 - 字串相等用 `==`;數字比較先轉型:`{{ steps.統計.output.數量 | int > 10 }}`
 - 只能引用 output namespace **真的有的 key**(不確定 → 讓上游 skill 明確 export、或用固定 key `stdout`)
 - 表達式只回傳 bool(IF)或可比對純值(Switch);別寫多行 / 別有副作用
