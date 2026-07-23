@@ -587,11 +587,15 @@ def _run_output_name(run) -> str:
     started_at 解析失敗時退用 run_id 前綴(仍穩定、唯一)。
     """
     base = (getattr(run, "pipeline_name", "") or "").strip()
+    _rid = (getattr(run, "run_id", "") or "").replace("-", "")[:6]
     try:
         ts = datetime.fromisoformat(run.started_at).strftime("%Y%m%d_%H%M%S")
     except Exception:
         ts = (getattr(run, "run_id", "") or "run")[:8]
-    sub = f"run_{ts}"
+    # 加 run_id 尾綴:started_at 只到「秒」,同一 workflow 同秒被觸發兩次(folder_watch
+    # 一次丟多檔、webhook 連打)會落同一個 run_<ts>/ 夾、輸出互相覆蓋(Atlas 實測 concurrency bug)。
+    # run_id 每個 run 唯一 → 破除碰撞;resume 用同一 run_id → 仍映射同一夾、不受影響。
+    sub = f"run_{ts}_{_rid}" if _rid else f"run_{ts}"
     return f"{base}/{sub}" if base else sub
 
 
