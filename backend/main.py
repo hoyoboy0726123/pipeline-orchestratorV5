@@ -321,12 +321,23 @@ async def get_available_models(refresh: bool = False):
             if not _gemini_key:
                 return [], "未設定 GEMINI_API_KEY"
             try:
-                r = await client.get(
-                    f"https://generativelanguage.googleapis.com/v1beta/models?key={_gemini_key}",
-                )
-                r.raise_for_status()
+                # v1beta models 有分頁(一頁預設 50、nextPageToken 續抓)。不翻頁的話
+                # 模型數超過 50 之後,新模型會默默消失在清單裡(實測 2026-07 已達 2 頁)。
+                raw_models: list = []
+                _page_token = ""
+                for _pg in range(5):  # 安全上限 5 頁,防 token 迴圈異常
+                    _url = f"https://generativelanguage.googleapis.com/v1beta/models?key={_gemini_key}"
+                    if _page_token:
+                        _url += f"&pageToken={_page_token}"
+                    r = await client.get(_url)
+                    r.raise_for_status()
+                    _body = r.json()
+                    raw_models.extend(_body.get("models", []))
+                    _page_token = _body.get("nextPageToken") or ""
+                    if not _page_token:
+                        break
                 models = []
-                for m in r.json().get("models", []):
+                for m in raw_models:
                     mid = m.get("name", "").replace("models/", "")
                     if not any(mid.startswith(p) for p in _GEMINI_TEXT_PREFIXES):
                         continue
@@ -373,8 +384,9 @@ async def get_available_models(refresh: bool = False):
             if not _ant_key:
                 return [], "未設定 ANTHROPIC_API_KEY"
             try:
+                # Anthropic /v1/models 預設一頁只回 20 個 → 帶 limit=1000 一次拿全
                 r = await client.get(
-                    "https://api.anthropic.com/v1/models",
+                    "https://api.anthropic.com/v1/models?limit=1000",
                     headers={"x-api-key": _ant_key, "anthropic-version": "2023-06-01"},
                 )
                 r.raise_for_status()
