@@ -4910,6 +4910,14 @@ def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = ""
         lines.append("使用者談到 Outlook 任務時，**先比對上面模板**。挑最貼近意圖的模板，"
                      "把使用者提供的資訊填到 `outlook_params` 裡。**沒有合適模板**才退而填空 `outlook_template:` "
                      "改用 `batch:` 自由描述需求走 LLM 路徑。")
+        lines.append("")
+        lines.append("**多信箱(重要)**:`folder` 參數預設 `inbox` = Outlook 裡的**第一個**信箱。"
+                     "使用者若同時有私人與公司帳號、且要撈的是非第一個帳號,必須把 folder 寫成"
+                     "「信箱名/資料夾名」,例 `Wilson_Bai@asus.com/收件匣`、`user@corp.com/Inbox/客訴`。"
+                     "使用者提到「公司信箱」「另一個信箱」「工作信箱」時,**先問清楚是哪個帳號**"
+                     "(或請他到 Outlook 左欄看信箱顯示名),不要預設抓 inbox 抓到錯的帳號。")
+        lines.append("**大信箱效能**:公司信箱常有數萬封,Outlook COM 逐封掃會很久 →"
+                     "這類步驟 timeout 建議 1800-3600、並盡量用 since/until 縮小範圍。")
         parts.append("\n".join(lines))
     except Exception:
         pass

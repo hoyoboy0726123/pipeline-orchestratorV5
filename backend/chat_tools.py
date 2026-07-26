@@ -2302,7 +2302,57 @@ def read_project_file(path: str, max_chars: int = 8000) -> str:
 
 
 # Module-level export 給 main.py 用
+@tool
+async def list_outlook_folders(max_depth: int = 2) -> str:
+    """列出本機 Outlook 的所有信箱(帳號)與資料夾,含每個資料夾的信件數。
+
+    規劃 Outlook 工作流前用這個確認「要撈哪個帳號的哪個資料夾」——
+    folder 參數預設 inbox 只會抓到第一個信箱;多帳號要寫「信箱名/資料夾名」。
+
+    Args:
+        max_depth: 往下展開幾層子資料夾(預設 2;信箱本身算第 1 層)。
+    """
+    def _walk():
+        import win32com.client, pythoncom
+        pythoncom.CoInitialize()
+        try:
+            ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+            out = []
+            for i in range(1, ns.Folders.Count + 1):
+                store = ns.Folders.Item(i)
+                out.append(f"📮 信箱:{store.Name}")
+
+                def _sub(folder, depth, prefix):
+                    if depth > max_depth:
+                        return
+                    try:
+                        for j in range(1, folder.Folders.Count + 1):
+                            f = folder.Folders.Item(j)
+                            try:
+                                cnt = f.Items.Count
+                            except Exception:
+                                cnt = "?"
+                            if cnt == "?" or int(cnt) > 0:
+                                out.append(f"{prefix}└ {f.Name}  ({cnt} 封)"
+                                           f"   → folder: \"{store.Name}/{f.Name}\"")
+                            _sub(f, depth + 1, prefix + "  ")
+                    except Exception:
+                        pass
+                _sub(store, 1, "   ")
+            return "\n".join(out) if out else "(找不到任何 Outlook 信箱)"
+        finally:
+            pythoncom.CoUninitialize()
+    try:
+        import asyncio as _a
+        res = await _a.get_event_loop().run_in_executor(None, _walk)
+        return (res + "\n\n用法:把上面的 folder 值填進 outlook_params 的 folder 欄位;"
+                      "只填 inbox 會抓第一個信箱。")
+    except Exception as e:
+        return f"列舉 Outlook 資料夾失敗({type(e).__name__}: {e})。請確認 Outlook 已安裝且已登入。"
+
+
 CHAT_TOOLS = [
+    list_outlook_folders,                            # 列 Outlook 信箱/資料夾(多帳號)
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
     list_workflow_variables,                 # 列工作流可用變數(規劃 / 修改用)
     save_workflow_yaml, create_workflow_yaml, start_workflow,    # 寫工具(走 two-step approval)
