@@ -290,11 +290,18 @@ def _h_daily_todo(*, params: dict, output_path: Path,
     (logger_obj or logger).info(f"[{step_name}] daily_todo 命中 {n} 封信，寫到 {output_path}")
 
     # 友善的中文欄名 + 只取常用欄位
+    # include_body:下游要分析「內文」時必須開(例:從 Bug 通知信的內文表格抽數字)。
+    # 預設不帶 —— 內文很長,待辦清單用途帶了只會讓檔案爆大(Atlas 實測:沒這選項時,
+    # 下游解析內文的步驟只能拿到 5 個欄位、永遠解析出 0 筆)。
+    _inc_body = bool(params.get("include_body"))
     columns = ["received", "sender_name", "subject", "is_unread", "has_attachments"]
     rename = {
         "received": "收件時間", "sender_name": "寄件人", "subject": "主旨",
         "is_unread": "未讀", "has_attachments": "有附件",
     }
+    if _inc_body:
+        columns.append("body_text")
+        rename["body_text"] = "內文"
     header_parts = [
         f"# 待辦清單 — {step_name}",
         f"資料夾：`{folder}`，命中 {n} 封信",

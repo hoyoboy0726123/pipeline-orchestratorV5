@@ -86,6 +86,7 @@ const TEMPLATES: Template[] = [
       { key: 'since', label: '從', type: 'datetime-local' },
       { key: 'until', label: '到', type: 'datetime-local' },
       { key: 'unread_only', label: '只取未讀', type: 'bool' },
+      { key: 'include_body', label: '包含信件內文（下游要分析內文時必勾）', type: 'bool' },
       { key: 'output_format', label: '輸出格式', type: 'select',
         options: [{ value: 'md', label: 'Markdown' }, { value: 'xlsx', label: 'Excel' }, { value: 'txt', label: '純文字' }, { value: 'json', label: 'JSON（下游程式解析用）' }] },
     ],
