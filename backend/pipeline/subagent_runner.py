@@ -1322,6 +1322,30 @@ async def _run_subagent_native(
                     _mt_sub = _st_sub.st_mtime
                     _floor_sub = 5000 if _p_sub.suffix.lower() in _office_exts_sub else 100
                     if _sz_sub >= _floor_sub:
+                        # 「重寫上限」守門:不管 mtime 有沒有變,輸出檔已存在的總輪數要設上限。
+                        # 否則「每輪都重寫同一份 report.md」→ mtime 每輪都變 → 下方 spin counter
+                        # 一直被當成正當 polish 重置 → 永遠收不了尾(Atlas 實測 report_writer)。
+                        output_seen_rounds_sub = locals().get("output_seen_rounds_sub", 0) + 1
+                        if not _web_searched_this_iter and output_seen_rounds_sub >= 6:
+                            log.warning(
+                                f"[{step_name}] ⚠ Output {output_path} 已存在 {output_seen_rounds_sub} 輪"
+                                f"(含反覆重寫)、強制 success 收尾"
+                            )
+                            return SubagentResult(
+                                success=True,
+                                final_message=(
+                                    f"系統強制收尾:輸出檔 {_p_sub.name}({_sz_sub:,} bytes)已存在 "
+                                    f"{output_seen_rounds_sub} 輪、LLM 反覆重寫未主動 done"
+                                ),
+                                iterations=iteration, tool_calls_made=tool_calls_made,
+                                token_usage=accumulated_usage,
+                            )
+                        if output_seen_rounds_sub == 3:
+                            messages.append(HumanMessage(content=(
+                                f"[系統] 報告檔 {output_path} 已寫出({_sz_sub:,} bytes)。"
+                                f"內容夠用就**立刻呼叫 done(success=true)** —— 不要再反覆重寫追求完美。"
+                                f"再空轉幾輪會被系統強制結束。"
+                            )))
                         _last_mt_sub = locals().get("last_output_mtime_sub", None)
                         if _last_mt_sub is None or _mt_sub > _last_mt_sub:
                             # mtime 變動 = LLM 真的在 polish → 重置 counter
