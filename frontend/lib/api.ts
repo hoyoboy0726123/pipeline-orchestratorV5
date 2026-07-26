@@ -191,9 +191,11 @@ export interface SkillDependencies {
   python?: {
     requirements_txt: string[]
     imports_detected: string[]
+    undeclared_imports?: string[]
     suggested_pip: string[]
     installed: string[]
     missing: string[]
+    has_manifest?: boolean
   }
   node?: {
     package_json: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } | null

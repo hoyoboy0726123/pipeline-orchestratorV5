@@ -444,17 +444,31 @@ def scan_skill_dependencies(skill_name: str) -> dict:
         imp for imp in imports_detected
         if imp not in _STDLIB_MODULES and imp not in local_module_names and not imp.startswith("_")
     )
-    suggested_pip_from_imports = [_PIP_NAME_MAP.get(m, m) for m in third_party]
 
-    # ── 從 SKILL.md 與參考 .md 文字中抽出 pip / npm / 系統工具 ──
-    md_pip, md_npm, system_tools = _scan_markdown_dependencies(skill_dir)
+    # ── 從 SKILL.md 與參考 .md 文字中抽出 pip 提示 + 系統工具 ──
+    md_pip, _md_npm_ignored, system_tools = _scan_markdown_dependencies(skill_dir)
 
-    # 合併 pip：優先 requirements.txt → 程式 import → markdown
+    # ── 可一鍵安裝的依賴 = 只認「高信心的宣告來源」(寧可漏報、不可誤導安裝)──
+    #   ✅ requirements.txt(權威)+ 散文 pip install 帶版本約束者(X>=1.0,幾乎必是真套件)
+    #   ❌ 散文裸單字(backend/agent/db)、import 掃描 —— 一律不進安裝清單:
+    #      import 名≠套件名、且會撈到專案本地模組 → `pip install db` 供應鏈風險;
+    #      npm 只認 package.json(文件範例 `npm install -g backend` 會被誤撈)。
+    #   缺套件由 runtime 自癒準確補裝,不需在此臆測。import 保留為僅參考欄位、前端不給安裝鈕。
+    def _has_version(spec: str) -> bool:
+        return bool(re.search(r"[<>=!~]", spec))
+
     suggested_pip: list[str] = []
-    for pkg in requirements_txt + suggested_pip_from_imports + md_pip:
-        base = re.split(r"[<>=!~\[]", pkg)[0].strip()
-        if base and pkg not in suggested_pip:
+    _pip_bases = set()
+    for pkg in requirements_txt + [p for p in md_pip if _has_version(p)]:
+        base = re.split(r"[<>=!~\[]", pkg)[0].strip().lower().replace("_", "-")
+        if base and base not in _pip_bases:
             suggested_pip.append(pkg)
+            _pip_bases.add(base)
+    undeclared_imports = [
+        m for m in third_party
+        if m.lower().replace("_", "-") not in _pip_bases
+        and _PIP_NAME_MAP.get(m, m).lower().replace("_", "-") not in _pip_bases
+    ]
 
     # ── Node.js 依賴 ─────────────────────────────────────
     package_json = None
@@ -465,8 +479,8 @@ def scan_skill_dependencies(skill_name: str) -> dict:
         except Exception:
             package_json = None
 
-    # 合併 npm：package.json 的 dependencies + markdown 提示
-    suggested_npm: list[str] = list(md_npm)
+    # npm 只認 package.json 的 dependencies(不吃 markdown 散文)
+    suggested_npm: list[str] = []
     if isinstance(package_json, dict):
         for key in ("dependencies", "devDependencies"):
             deps = package_json.get(key) or {}
@@ -482,11 +496,13 @@ def scan_skill_dependencies(skill_name: str) -> dict:
         "python": {
             "requirements_txt": requirements_txt,
             "imports_detected": sorted(imports_detected),
+            "undeclared_imports": undeclared_imports,
             "suggested_pip": suggested_pip,
+            "has_manifest": bool(requirements_txt),
         },
         "node": {
             "package_json": package_json,
-            "needs_npm_install": package_json is not None or bool(md_npm),
+            "needs_npm_install": package_json is not None,
             "suggested_npm": suggested_npm,
         },
         "system_tools": system_tools,

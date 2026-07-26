@@ -279,12 +279,20 @@ function InstalledSkillsSection({ onInstallRequest }: { onInstallRequest: (pkg: 
                             ) : (
                               <p className="text-gray-400">
                                 {deps.python && deps.python.suggested_pip.length === 0
-                                  ? '無外部依賴（只用標準庫）'
+                                  ? (deps.python.has_manifest === false
+                                      ? '此 skill 未用 requirements.txt 宣告依賴;缺套件會在執行時自動偵測補裝'
+                                      : '無外部依賴（只用標準庫）')
                                   : '✓ 所有依賴已安裝'}
                               </p>
                             )}
                             {deps.python && deps.python.installed.length > 0 && (
                               <p className="mt-1 text-green-600">已安裝：{deps.python.installed.join(', ')}</p>
+                            )}
+                            {deps.python && deps.python.undeclared_imports && deps.python.undeclared_imports.length > 0 && (
+                              <p className="mt-1 text-gray-400 text-[11px] leading-relaxed">
+                                偵測到程式 import(未在 requirements.txt 宣告、<b>不提供一鍵安裝</b>,可能含本地模組/誤判,僅供參考):
+                                {' '}{deps.python.undeclared_imports.join('、')}
+                              </p>
                             )}
                           </div>
 
