@@ -5200,31 +5200,19 @@ async def execute_step_with_outlook(
             logger.warning(f"[{step_name}] ⚠ 預抓失敗：{err_pf}（LLM 將自己抓）")
 
     # LLM
-    from llm_factory import build_llm, provider_has_native_fc
+    from llm_factory import build_llm, resolve_loop_mode
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
     from langchain_core.tools import tool as _lc_tool
-    # Outlook 自由輸入模式靠 bind_tools 原生 FC;訂閱 CLI 無 FC → 自動改用有 FC 的另一 role
-    # (比照 VLM),兩邊都無 FC 才報錯引導改用直接模板(同步 Atlas)。
-    _eff_llm_role = llm_role
-    if not provider_has_native_fc(llm_role):
-        _other_role = "secondary" if llm_role == "primary" else "primary"
-        if provider_has_native_fc(_other_role):
-            logger.info(
-                f"[{step_name}] {llm_role} 模型(訂閱 CLI、無原生 function calling)不支援 Outlook "
-                f"自由輸入的工具驅動 → 自動改用 {_other_role} 模型"
-            )
-            _eff_llm_role = _other_role
-        else:
-            return ExecResult(
-                exit_code=-1, stdout="",
-                stderr=(
-                    "Outlook 自由輸入模式需要支援原生 function calling 的模型,但主/副模型"
-                    "目前都是訂閱 CLI(無 function calling)。請把主或副其中一個設為 API 模型"
-                    "(Gemini / OpenAI 等),或改用 Outlook 的『直接模板』(daily_todo / "
-                    "send_with_attachment 等,不需 function calling、任何模型都能跑)。"
-                ),
-            )
-    llm = build_llm(role=_eff_llm_role)
+    # Outlook 自由輸入模式要驅動 run_python/done。原生 FC(bind_tools)是預設;訂閱 CLI 無 FC →
+    # 改走 <tool> 文字協議、**仍用使用者選的主模型**(與 skill/subagent/hero 同一套機制)。
+    # 不甩給副模型 —— 那會讓使用者指定的強模型沒用到、且沒設副模型時直接不可用(同步 Atlas)。
+    _outlook_loop_mode = resolve_loop_mode(os.environ.get("SUBAGENT_LOOP_MODE", "native"), role=llm_role)
+    llm = build_llm(role=llm_role)
+    if _outlook_loop_mode != "native":
+        logger.info(
+            f"[{step_name}] provider 無原生 function calling(訂閱 CLI)→ Outlook 工具改走 <tool> 文字協議"
+            f"(仍用 {llm_role} 模型)"
+        )
 
     user_prompt = _build_outlook_prompt(
         template=template,
@@ -5239,7 +5227,22 @@ async def execute_step_with_outlook(
                 + ("（資料已預抓）" if prefetched_data else ""))
     logger.debug(f"[{step_name}] user prompt:\n{user_prompt}")
 
-    messages = [SystemMessage(content=_OUTLOOK_SYSTEM_PROMPT), HumanMessage(content=user_prompt)]
+    # 文字協議模式:反轉 system prompt 內「必須原生 FC、禁止 <tool>」那段
+    _outlook_sys = _OUTLOOK_SYSTEM_PROMPT
+    if _outlook_loop_mode != "native":
+        _outlook_sys += (
+            "\n\n## 本次改用「文字協議」呼叫工具(覆蓋上面『原生 function calling』那段)\n"
+            "本環境的模型沒有原生 function calling。**請忽略上面「禁止寫 <tool> 文字格式」的指示** ——\n"
+            "本次你必須用以下純文字格式呼叫工具,系統會解析並執行:\n"
+            "<tool>run_python</tool>\n"
+            "<input>\n（這裡放 Python 程式碼）\n</input>\n\n"
+            "結束時:\n"
+            "<tool>done</tool>\n"
+            '<input>{"success": true, "summary": "中文說明結果"}</input>\n\n'
+            "規則:每則回覆只寫**一個** <tool>…</tool><input>…</input>,寫完就停、等系統回真實結果再繼續。\n"
+            "不要自己編造執行結果。"
+        )
+    messages = [SystemMessage(content=_outlook_sys), HumanMessage(content=user_prompt)]
     all_stdout: list[str] = []
     last_run_python_ok: Optional[bool] = None
     import time as _time
@@ -5298,11 +5301,17 @@ async def execute_step_with_outlook(
             stderr=f"Outlook bind_tools 失敗：{_be}",
         )
 
+    def _tool_reply(content: str, tool_call_id: str):
+        """工具結果接回對話。native 用 ToolMessage(需 id 配對);文字協議用 HumanMessage。"""
+        if _outlook_loop_mode == "native":
+            return ToolMessage(content=content, tool_call_id=tool_call_id)
+        return HumanMessage(content=f"[工具結果]\n{content}")
+
     consecutive_empty = 0  # 連續空回應守門：gemma native-FC config 下可能 tool_calls + content 皆空 → 早退、別空轉
 
     try:
         for iteration in range(OUTLOOK_AGENT_MAX_ITERATIONS):
-            logger.info(f"[{step_name}] Outlook 迭代 {iteration + 1}/{OUTLOOK_AGENT_MAX_ITERATIONS} [NATIVE]")
+            logger.info(f"[{step_name}] Outlook 迭代 {iteration + 1}/{OUTLOOK_AGENT_MAX_ITERATIONS} [{_outlook_loop_mode.upper()}]")
             if _time.time() - start_time > timeout:
                 logger.warning(f"[{step_name}] Outlook agent 整體 timeout（{timeout}s）達到")
                 return ExecResult(
@@ -5318,6 +5327,25 @@ async def execute_step_with_outlook(
             )
             tool_calls = list(getattr(response, "tool_calls", []) or [])
             content_str = _extract_text(response.content)
+            # 文字協議:解析 <tool>…</tool><input>…</input> 成與原生 tool_calls 同形狀
+            if _outlook_loop_mode != "native" and not tool_calls and content_str:
+                for _i, _c in enumerate(_parse_skill_tool_calls(content_str)):
+                    _nm = (_c.get("tool") or "").strip()
+                    _raw = (_c.get("input") or "").strip()
+                    if _nm not in name_to_tool:
+                        continue
+                    if _nm == "run_python":
+                        _args = {"code": _raw}
+                    else:
+                        try:
+                            _v = json.loads(_raw)
+                            _args = _v if isinstance(_v, dict) else {"summary": _raw}
+                        except Exception:
+                            _args = ({"question": _raw} if _nm == "ask_user"
+                                     else {"success": True, "summary": _raw})
+                    tool_calls.append({"name": _nm, "args": _args, "id": f"tp{iteration}_{_i}"})
+                if tool_calls:
+                    logger.info(f"[{step_name}] 文字協議解析出 {len(tool_calls)} 個工具呼叫")
             logger.info(
                 f"[{step_name}] LLM 回覆（content {len(content_str)} 字, tool_calls={len(tool_calls)}）"
             )
@@ -5347,9 +5375,14 @@ async def execute_step_with_outlook(
                         )
                 else:
                     consecutive_empty = 0
-                messages.append(HumanMessage(content=
-                    "請使用工具（原生 function calling）呼叫 run_python / done / ask_user。"
-                    "不要用文字描述工具呼叫。"))
+                if _outlook_loop_mode == "native":
+                    messages.append(HumanMessage(content=
+                        "請使用工具（原生 function calling）呼叫 run_python / done / ask_user。"
+                        "不要用文字描述工具呼叫。"))
+                else:
+                    messages.append(HumanMessage(content=
+                        "沒解析到工具呼叫。請用文字協議:<tool>run_python</tool> 換行 <input>…程式碼…</input>"
+                        "(或 <tool>done</tool> + JSON input)。每則只寫一個工具、寫完就停。"))
                 continue
 
             consecutive_empty = 0
@@ -5376,7 +5409,7 @@ async def execute_step_with_outlook(
                     try:
                         errs = check_imports(tool_input)
                     except SyntaxError as e:
-                        messages.append(ToolMessage(
+                        messages.append(_tool_reply(
                             content=f"[系統] 你提交的 Python 有語法錯誤：{e}", tool_call_id=tc_id,
                         ))
                         last_run_python_ok = False
@@ -5384,7 +5417,7 @@ async def execute_step_with_outlook(
                     if errs:
                         err_msg = format_errors_for_agent(errs)
                         logger.warning(f"[{step_name}] 偵測到 disallowed imports：{[e.module for e in errs]}")
-                        messages.append(ToolMessage(content=err_msg, tool_call_id=tc_id))
+                        messages.append(_tool_reply(content=err_msg, tool_call_id=tc_id))
                         last_run_python_ok = False
                         continue
 
@@ -5407,7 +5440,7 @@ async def execute_step_with_outlook(
                     logger.debug(f"[{step_name}] 執行結果：{tool_result[:1500]}")
                     all_stdout.append(f"[run_python] {tool_result}")
                     last_run_python_ok = "[exit code:" not in tool_result
-                    messages.append(ToolMessage(content=tool_result, tool_call_id=tc_id))
+                    messages.append(_tool_reply(content=tool_result, tool_call_id=tc_id))
                     continue
 
                 if tool_name == "ask_user":
@@ -5418,11 +5451,11 @@ async def execute_step_with_outlook(
                         run_id, question, options, context, logger, step_name,
                     )
                     all_stdout.append(f"[ask_user] {question} → {answer}")
-                    messages.append(ToolMessage(content=f"[ask_user 答案] {answer}", tool_call_id=tc_id))
+                    messages.append(_tool_reply(content=f"[ask_user 答案] {answer}", tool_call_id=tc_id))
                     continue
 
                 # 不支援的工具（理論上 bind_tools 後不會發生）
-                messages.append(ToolMessage(
+                messages.append(_tool_reply(
                     content=(f"[系統] 工具 {tool_name} 不在 Outlook 節點允許清單。"
                              f"可用：run_python / done / ask_user。"),
                     tool_call_id=tc_id,
@@ -5438,7 +5471,7 @@ async def execute_step_with_outlook(
                 # 守門：宣稱成功但最近 run_python 失敗 → 拒絕
                 if success and last_run_python_ok is False:
                     logger.warning(f"[{step_name}] 在 run_python 失敗後送 done(success=true)，拒絕")
-                    messages.append(ToolMessage(
+                    messages.append(_tool_reply(
                         content="[系統] 拒絕 done：上一次 run_python 失敗。先修錯再 done。",
                         tool_call_id=tc_id,
                     ))
@@ -5446,7 +5479,7 @@ async def execute_step_with_outlook(
                 # 守門：宣稱成功但 output 檔不存在
                 if success and output_path and not Path(output_path).exists():
                     logger.warning(f"[{step_name}] done 宣稱成功但 {output_path} 不存在，拒絕")
-                    messages.append(ToolMessage(
+                    messages.append(_tool_reply(
                         content=(f"[系統] 你宣稱成功但輸出檔 {output_path} 不存在。"
                                  f"請用 run_python 實際寫入後再 done。"),
                         tool_call_id=tc_id,
