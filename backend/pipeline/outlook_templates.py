@@ -167,7 +167,9 @@ def _df_to_format(df: pd.DataFrame, fmt: str, output_path: Path, *,
     fmt = (fmt or "md").lower()
     # 副檔名跟 fmt 不一致時自動調整 — runner 預先 default 路徑（通常是 .md）但
     # 使用者選了 xlsx → 若不調整會 ValueError "Invalid extension for engine"
-    expected_suffix = {"xlsx": ".xlsx", "txt": ".txt", "md": ".md"}.get(fmt, ".md")
+    # json:給下游程式解析用(md 表格要 LLM 重解、易失真);之前不支援 → 悄悄改成 .md、
+    # 下游 step 找不到宣告的 .json 檔而斷鏈(實測踩過)。
+    expected_suffix = {"xlsx": ".xlsx", "txt": ".txt", "md": ".md", "json": ".json"}.get(fmt, ".md")
     if output_path.suffix.lower() != expected_suffix:
         output_path = output_path.with_suffix(expected_suffix)
 
@@ -175,6 +177,21 @@ def _df_to_format(df: pd.DataFrame, fmt: str, output_path: Path, *,
 
     if fmt == "xlsx":
         df.to_excel(str(output_path), index=False, engine="openpyxl")
+        return output_path
+
+    if fmt == "json":
+        # records 形式最好餵下游:[{欄位: 值}, ...];datetime 轉字串避免序列化炸
+        import json as _json
+        _df = df.copy()
+        for _c in _df.columns:
+            if str(_df[_c].dtype).startswith("datetime") or str(_df[_c].dtype) == "object":
+                _df[_c] = _df[_c].apply(
+                    lambda v: v.isoformat() if hasattr(v, "isoformat") else v
+                )
+        _recs = _json.loads(_df.to_json(orient="records", force_ascii=False, date_format="iso"))
+        output_path.write_text(
+            _json.dumps(_recs, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return output_path
 
     if fmt == "txt":
