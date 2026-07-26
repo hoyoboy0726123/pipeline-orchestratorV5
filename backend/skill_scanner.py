@@ -322,7 +322,14 @@ def _parse_install_commands(text: str) -> tuple[list[str], list[str], list[str]]
     # 版本約束只允許版本字元(數字/字母/點/比較符),不允許引號/括號 —
     # 否則文件範例 `done(missing_packages=["X"])` 的 `missing_packages=["X"])` 會被
     # 當「套件+版本約束」放行(實測誤判)。
-    _pkg_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._\-]+\])?([<>=!~][0-9A-Za-z.,*<>=!~+\-]*)?$")
+    # 版本部分必須是「運算子 + 數字開頭的版本」(>=0.3.0),不吃程式碼片段
+    # (missing_packages=["<pkg>"]) / foo=bar 這種單一 = 或含括號的都擋掉)。
+    _pkg_re = re.compile(
+        r"^[A-Za-z0-9][A-Za-z0-9._-]*"
+        r"(\[[A-Za-z0-9,._\-]+\])?"
+        r"((===|==|!=|~=|>=|<=|>|<)[0-9][A-Za-z0-9.*+!_.\-]*"
+        r"(\s*,\s*(===|==|!=|~=|>=|<=|>|<)[0-9][A-Za-z0-9.*+!_.\-]*)*)?$"
+    )
 
     def _accept(pkg: str, self_names: tuple) -> str:
         pkg = pkg.strip().strip("\"'").rstrip(",;.")
