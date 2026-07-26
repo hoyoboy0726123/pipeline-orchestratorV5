@@ -3140,6 +3140,7 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
         injected_hint_kinds: set[str] = set()  # 已注入過的 kind、避免每輪重複注入同一條
         # Output-driven done 提示:輸出檔已產生、提醒 LLM 早 done、避免「再驗證一輪」迴圈
         output_done_hint_injected = False
+        _commit_steer_sent = False   # 探索癱瘓守門(同 NATIVE 版)
         import time as _time
         skill_start_time = _time.time()
 
@@ -3219,6 +3220,22 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
 
         for iteration in range(SKILL_MAX_ITERATIONS):
             logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS}")
+
+            # 探索癱瘓守門(同 NATIVE 版):輸出檔遲遲不產出 → 逼停止探索、動手寫
+            if (
+                output_path and not _commit_steer_sent
+                and (iteration + 1) >= max(4, int(SKILL_MAX_ITERATIONS * 0.55))
+                and not Path(output_path).exists()
+            ):
+                _commit_steer_sent = True
+                _remain = SKILL_MAX_ITERATIONS - (iteration + 1)
+                logger.info(f"[{step_name}] ⏱ 探索過久({iteration+1} 輪未產出 {output_path})、注入 commit steer")
+                messages.append(HumanMessage(content=(
+                    f"[系統] 你已用掉 {iteration + 1}/{SKILL_MAX_ITERATIONS} 輪、大多在觀察或測試資料格式,"
+                    f"但輸出檔 {output_path} 還沒產出。**現在停止探索** —— 用你目前已知的結構,"
+                    f"在下一個 run_python 直接寫「完整解析 + 寫檔到 {output_path}」的程式碼(允許先不完美、"
+                    f"以能跑出合規結果為先),跑完 print 確認檔案存在後 done。只剩 {_remain} 輪,繼續探索會直接失敗。"
+                )))
 
             # Context 雪崩防護:第 4 輪起壓縮更早的 tool 結果(保留最近 3 輪完整、舊的摺成首尾預覽)
             # 解決 25 輪場景每輪 token 從 9k 漲到 21k 的問題、保持每輪 context size 大致穩定
@@ -4201,6 +4218,7 @@ async def _execute_skill_native_loop(
     prose_before_tool_violations = 0   # task #160:有 tool_calls 但 content 過長累計
     fake_done_count = 0
     _FAKE_DONE_LIMIT_SKILL = 3
+    _commit_steer_sent = False   # 探索癱瘓守門:輸出檔遲遲不產出時逼 LLM 停止探索、動手寫(只發一次)
 
     # ── 不收斂守門(task #187、2026-05-29):偵測「相同 tool input 重複失敗」死循環 ──
     # 真實案例:Gemma 寫的 docx-js code 有 API bug、node rc=1,它每輪重寫一模一樣的
@@ -4255,6 +4273,23 @@ async def _execute_skill_native_loop(
 
     for iteration in range(SKILL_MAX_ITERATIONS):
         logger.info(f"[{step_name}] Skill 執行迭代 {iteration + 1}/{SKILL_MAX_ITERATIONS} [NATIVE]")
+
+        # 探索癱瘓守門:輸出檔宣告了、用掉 >=55% 輪數卻還沒產出 → 逼 LLM 停止探索、動手寫。
+        # (實測 Atlas:解析貼文 skill 花光 20 輪全在 print 觀察格式、從未寫 parsed.json、也沒 done。)
+        if (
+            output_path and not _commit_steer_sent
+            and (iteration + 1) >= max(4, int(SKILL_MAX_ITERATIONS * 0.55))
+            and not Path(output_path).exists()
+        ):
+            _commit_steer_sent = True
+            _remain = SKILL_MAX_ITERATIONS - (iteration + 1)
+            logger.info(f"[{step_name}] ⏱ 探索過久({iteration+1} 輪未產出 {output_path})、注入 commit steer")
+            messages.append(HumanMessage(content=(
+                f"[系統] 你已用掉 {iteration + 1}/{SKILL_MAX_ITERATIONS} 輪、大多在觀察或測試資料格式,"
+                f"但輸出檔 {output_path} 還沒產出。**現在停止探索** —— 用你目前已知的結構,"
+                f"在下一個 run_python 直接寫「完整解析 + 寫檔到 {output_path}」的程式碼(允許先不完美、"
+                f"以能跑出合規結果為先),跑完 print 確認檔案存在後 done。只剩 {_remain} 輪,繼續探索會直接失敗。"
+            )))
 
         # Context 雪崩防護(跟 text 版同邏輯)
         if iteration >= SKILL_CONTEXT_KEEP_RECENT_FULL + 1:
