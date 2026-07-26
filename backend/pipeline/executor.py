@@ -5200,10 +5200,31 @@ async def execute_step_with_outlook(
             logger.warning(f"[{step_name}] ⚠ 預抓失敗：{err_pf}（LLM 將自己抓）")
 
     # LLM
-    from llm_factory import build_llm
+    from llm_factory import build_llm, provider_has_native_fc
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
     from langchain_core.tools import tool as _lc_tool
-    llm = build_llm(role=llm_role)
+    # Outlook 自由輸入模式靠 bind_tools 原生 FC;訂閱 CLI 無 FC → 自動改用有 FC 的另一 role
+    # (比照 VLM),兩邊都無 FC 才報錯引導改用直接模板(同步 Atlas)。
+    _eff_llm_role = llm_role
+    if not provider_has_native_fc(llm_role):
+        _other_role = "secondary" if llm_role == "primary" else "primary"
+        if provider_has_native_fc(_other_role):
+            logger.info(
+                f"[{step_name}] {llm_role} 模型(訂閱 CLI、無原生 function calling)不支援 Outlook "
+                f"自由輸入的工具驅動 → 自動改用 {_other_role} 模型"
+            )
+            _eff_llm_role = _other_role
+        else:
+            return ExecResult(
+                exit_code=-1, stdout="",
+                stderr=(
+                    "Outlook 自由輸入模式需要支援原生 function calling 的模型,但主/副模型"
+                    "目前都是訂閱 CLI(無 function calling)。請把主或副其中一個設為 API 模型"
+                    "(Gemini / OpenAI 等),或改用 Outlook 的『直接模板』(daily_todo / "
+                    "send_with_attachment 等,不需 function calling、任何模型都能跑)。"
+                ),
+            )
+    llm = build_llm(role=_eff_llm_role)
 
     user_prompt = _build_outlook_prompt(
         template=template,
