@@ -217,7 +217,24 @@ def _to_dt(s: Any, end_of_day: bool = False) -> Optional[datetime]:
     會變成 0 秒區間、抓 0 封信(實測 daily_todo 踩過)。"""
     if not s:
         return None
-    dt = s if isinstance(s, datetime) else pd.to_datetime(s).to_pydatetime()
+    # 相對日期關鍵字要正規化到「當天 00:00」——否則 pandas 的 "today"/"now" 會回「現在的
+    # 完整時間戳(含時分秒)」→ since="today" 變成「此刻」→ 只抓到未來的信 = 0 封(Atlas 實測踩爆)。
+    if isinstance(s, str):
+        _key = s.strip().lower()
+        _mid = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        _kw = {
+            "today": _mid, "今天": _mid, "本日": _mid, "當日": _mid, "今日": _mid,
+            "yesterday": _mid - timedelta(days=1), "昨天": _mid - timedelta(days=1), "昨日": _mid - timedelta(days=1),
+            "tomorrow": _mid + timedelta(days=1), "明天": _mid + timedelta(days=1), "明日": _mid + timedelta(days=1),
+        }
+        if _key in _kw:
+            dt = _kw[_key]
+        elif _key in ("now", "現在", "此刻", "目前"):
+            dt = datetime.now()
+        else:
+            dt = pd.to_datetime(s).to_pydatetime()
+    else:
+        dt = s if isinstance(s, datetime) else pd.to_datetime(s).to_pydatetime()
     if (end_of_day and dt.hour == 0 and dt.minute == 0
             and dt.second == 0 and dt.microsecond == 0):
         dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
