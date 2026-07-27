@@ -48,7 +48,38 @@ const PRICING_TABLE: Pricing[] = [
   ['ollama', 0, 0],  // local, no API cost
 ]
 
-/** 算給定 model + token 用量的 USD 成本。配對不到 pricing 表回 null。 */
+/** 後端 token_cost.py 算好的分項成本(單一真相來源)。
+ *
+ * 為什麼優先用後端的:Anthropic 的 input_tokens **不含**快取讀取,而快取讀取
+ * 只要 input 的 1/10 價、快取寫入是 1.25~2 倍 —— 只拿 input+output 乘單價
+ * (即下面的 computeCostUsd)會算錯好幾倍。後端才拿得到完整的四種 token。
+ */
+export type BackendCost = {
+  priced: boolean
+  partial?: boolean
+  model_key?: string
+  input_usd: number
+  cache_read_usd: number
+  cache_write_usd: number
+  output_usd: number
+  total_usd: number
+  saved_usd: number
+  prompt_tokens: number
+  total_tokens: number
+  note?: string
+  pricing_as_of?: string
+}
+
+/** 取後端成本;沒有(舊 run / 後端沒模組)才回 null 讓呼叫端走 fallback。 */
+export function backendCostUsd(cost: BackendCost | null | undefined): number | null {
+  if (!cost || !cost.priced) return null
+  return cost.total_usd
+}
+
+/** 算給定 model + token 用量的 USD 成本。配對不到 pricing 表回 null。
+ *  ⚠️ 只涵蓋 input/output、**不含快取**,僅在後端沒給 cost 時當退路。 */
+/** 算給定 model + token 用量的 USD 成本。配對不到 pricing 表回 null。
+ *  ⚠️ 只涵蓋 input/output、**不含快取**,僅在後端沒給 cost 時當退路。 */
 export function computeCostUsd(model: string, inputTokens: number, outputTokens: number): number | null {
   if (!model) return null
   const lower = model.toLowerCase()

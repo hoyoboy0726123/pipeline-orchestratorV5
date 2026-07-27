@@ -62,7 +62,7 @@ import {
   openOutputFolder,
 } from '@/lib/api'
 import type { PipelineRun } from '@/lib/types'
-import { computeCostUsd, formatCostUsd } from '@/lib/cost'
+import { computeCostUsd, formatCostUsd, type BackendCost } from '@/lib/cost'
 import { useRunStatusStore } from './_runStatus'
 
 const nodeTypes = {
@@ -2511,24 +2511,42 @@ export default function PipelinePage() {
                       <span className="text-gray-500 text-[11px]">({traceRun.status})</span>
                       {(() => {
                         const srs = traceRun.step_results || []
-                        const totalTokens = srs.reduce((s: number, sr) => s + (sr.token_usage?.total_tokens || 0), 0)
                         const totalTools = srs.reduce((s: number, sr) => s + (sr.tool_calls?.length || 0), 0)
-                        // 累計 USD 成本：每 step 用各自的 model 算（不同 step 可能切過 model）
-                        let totalCost = 0
-                        let hasCost = false
-                        for (const sr of srs) {
-                          const tu = sr.token_usage
-                          if (tu?.model && tu.total_tokens) {
-                            const c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
-                            if (c !== null) { totalCost += c; hasCost = true }
+                        // 成本與 token 總量優先用後端 token_cost.py 算好的：
+                        // 它含快取讀取／寫入（各自單價差到 20 倍），前端表算不準
+                        const runCost = traceRun.cost as BackendCost | undefined
+                        let totalTokens = runCost?.total_tokens || 0
+                        let totalCost = runCost && runCost.priced ? runCost.total_usd : 0
+                        let hasCost = !!(runCost && runCost.priced)
+                        if (!runCost) {
+                          // 舊 run（後端還沒算成本）→ 退回前端表，僅 input+output
+                          totalTokens = srs.reduce((s: number, sr) => s + (sr.token_usage?.total_tokens || 0), 0)
+                          for (const sr of srs) {
+                            const tu = sr.token_usage
+                            if (tu?.model && tu.total_tokens) {
+                              const c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
+                              if (c !== null) { totalCost += c; hasCost = true }
+                            }
                           }
                         }
+                        const saved = runCost?.saved_usd || 0
+                        const costTitle = runCost
+                          ? `input ${formatCostUsd(runCost.input_usd)} + 快取讀 ${formatCostUsd(runCost.cache_read_usd)}`
+                            + ` + 快取寫 ${formatCostUsd(runCost.cache_write_usd)} + output ${formatCostUsd(runCost.output_usd)}`
+                            + (runCost.pricing_as_of ? `（單價版本 ${runCost.pricing_as_of}）` : '')
+                            + (runCost.partial ? '｜部分步驟的模型無單價資料，未計入' : '')
+                          : '估算成本（前端表、不含快取）'
                         return (
                           <span className="text-gray-400 text-[11px] ml-auto">
                             合計 <span className="text-indigo-300">{totalTokens.toLocaleString()}</span> tokens ·{' '}
                             <span className="text-indigo-300">{totalTools}</span> tool calls ·{' '}
                             <span className="text-indigo-300">{srs.length}</span> steps
-                            {hasCost && <> · <span className="text-emerald-300" title="估算成本（公開定價、僅參考）">~{formatCostUsd(totalCost)}</span></>}
+                            {hasCost && <> · <span className="text-emerald-300" title={costTitle}>{formatCostUsd(totalCost)}</span></>}
+                            {saved > 0 && (
+                              <span className="text-emerald-500/60 ml-1" title="快取讀取只要一般 input 的 1/10 價">
+                                (快取省 {formatCostUsd(saved)})
+                              </span>
+                            )}
                           </span>
                         )
                       })()}
@@ -2544,18 +2562,36 @@ export default function PipelinePage() {
                               {ok ? '✓' : failed ? '✗' : '⚠'}
                             </span>{' '}
                             <span className="font-medium">{sr.step_name}</span>
-                            {sr.token_usage?.total_tokens ? (
-                              <span className="text-gray-500 ml-2 text-[11px]">({(sr.token_usage.total_tokens).toLocaleString()} tok)</span>
-                            ) : null}
+                            {(() => {
+                              // token 數優先用後端算的（含快取；前端 total_tokens 少算快取那塊）
+                              const sc = sr.cost as BackendCost | undefined
+                              const tok = sc?.total_tokens || sr.token_usage?.total_tokens || 0
+                              if (!tok) return null
+                              return <span className="text-gray-500 ml-2 text-[11px]">({tok.toLocaleString()} tok)</span>
+                            })()}
                             {sr.tool_calls?.length ? (
                               <span className="text-gray-500 ml-1 text-[11px]">· {sr.tool_calls.length} tools</span>
                             ) : null}
                             {(() => {
                               const tu = sr.token_usage
-                              if (!tu?.model || !tu.total_tokens) return null
-                              const c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
+                              const sc = sr.cost as BackendCost | undefined
+                              let c: number | null = null
+                              let tip = ''
+                              if (sc && sc.priced) {
+                                c = sc.total_usd
+                                tip = `model: ${tu?.model || sc.model_key}\n`
+                                    + `input ${formatCostUsd(sc.input_usd)} / 快取讀 ${formatCostUsd(sc.cache_read_usd)}`
+                                    + ` / 快取寫 ${formatCostUsd(sc.cache_write_usd)} / output ${formatCostUsd(sc.output_usd)}`
+                              } else if (sc && !sc.priced) {
+                                return sc.note
+                                  ? <span className="text-gray-600 ml-1 text-[11px]" title={sc.note}>· 無單價</span>
+                                  : null
+                              } else if (tu?.model && tu.total_tokens) {
+                                c = computeCostUsd(tu.model, tu.input_tokens || 0, tu.output_tokens || 0)
+                                tip = `model: ${tu.model}（前端表估算、不含快取）`
+                              }
                               if (c === null) return null
-                              return <span className="text-emerald-400/70 ml-1 text-[11px]" title={`model: ${tu.model}`}>· ~{formatCostUsd(c)}</span>
+                              return <span className="text-emerald-400/70 ml-1 text-[11px]" title={tip}>· {formatCostUsd(c)}</span>
                             })()}
                           </summary>
                           <div className="px-2 pb-2 space-y-1 border-t border-gray-800 pt-1.5">

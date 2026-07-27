@@ -5918,6 +5918,32 @@ async def clear_workflow_chat_api(workflow_id: str):
 
 # ── Helpers ──────────────────────────────────────────────────
 def _run_to_dict(r):
+    # 成本在後端算(單一真相來源),前端只負責顯示。
+    # 必須分項算 —— 快取讀取只要 input 的 1/10 價,加總再乘單價會失真。
+    try:
+        from token_cost import estimate_cost, sum_costs, PRICING_AS_OF
+    except Exception:  # 模組缺失不該讓整個 run 詳情掛掉
+        estimate_cost = sum_costs = None
+        PRICING_AS_OF = ""
+
+    _usages = [getattr(s, 'token_usage', {}) or {} for s in r.step_results]
+
+    def _cost_of(u):
+        if not (estimate_cost and u):
+            return None
+        try:
+            return estimate_cost(u)
+        except Exception:
+            return None
+
+    _run_cost = None
+    if sum_costs:
+        try:
+            _run_cost = sum_costs(_usages)
+            _run_cost["pricing_as_of"] = PRICING_AS_OF
+        except Exception:
+            _run_cost = None
+
     return {
         "run_id": r.run_id,
         "pipeline_name": r.pipeline_name,
@@ -5926,6 +5952,7 @@ def _run_to_dict(r):
         "total_steps": len(r.config_dict.get("steps", [])),
         "started_at": r.started_at,
         "ended_at": r.ended_at,
+        "cost": _run_cost,
         "step_results": [
             {"step_index": s.step_index, "step_name": s.step_name, "exit_code": s.exit_code,
              "validation_status": s.validation_status, "validation_reason": s.validation_reason,
@@ -5933,6 +5960,7 @@ def _run_to_dict(r):
              "stdout_tail": s.stdout_tail, "stderr_tail": s.stderr_tail,
              "actual_output_path": getattr(s, 'actual_output_path', '') or '',
              "token_usage": getattr(s, 'token_usage', {}) or {},
+             "cost": _cost_of(getattr(s, 'token_usage', {}) or {}),
              "tool_calls": getattr(s, 'tool_calls', []) or [],
              "started_at": getattr(s, 'started_at', '') or '',
              "ended_at": getattr(s, 'ended_at', '') or ''}

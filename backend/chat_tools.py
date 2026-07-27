@@ -1637,7 +1637,22 @@ def check_subagent_status(task_id: str = "") -> str:
     out.append(f"tools used: {tools}")
     tu = r.get("token_usage") or {}
     if tu.get("total_tokens"):
-        out.append(f"tokens: input={tu.get('input_tokens', 0)} output={tu.get('output_tokens', 0)} total={tu.get('total_tokens', 0)} model={tu.get('model', '')!r}")
+        # 一定要連快取數一起印:Anthropic 的 input_tokens 不含快取讀取,
+        # 只印 input/output 會讓人以為用量只有零頭
+        _cr = tu.get("cache_read_tokens", 0) or 0
+        _cc = tu.get("cache_creation_tokens", 0) or 0
+        _line = (f"tokens: input={tu.get('input_tokens', 0)} output={tu.get('output_tokens', 0)}"
+                 f" cache_read={_cr} cache_write={_cc} model={tu.get('model', '')!r}")
+        try:
+            from token_cost import estimate_cost, format_usd
+            _c = estimate_cost(tu)
+            if _c.get("priced"):
+                _line += f" | 成本 {format_usd(_c['total_usd'])}"
+                if _c.get("saved_usd", 0) > 0:
+                    _line += f"(快取省下 {format_usd(_c['saved_usd'])})"
+        except Exception:
+            pass
+        out.append(_line)
     if r.get("error"):
         out.append(f"error: {r['error'][:300]}")
     _summary = r.get('summary', '(空)')

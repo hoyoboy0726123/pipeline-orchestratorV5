@@ -270,14 +270,16 @@ async def invoke_with_streaming(
                     if v:
                         acc_um[k] = acc_um.get(k, 0) + int(v)
                 # langchain 0.3+ Anthropic: input_token_details = {"cache_read": N, "cache_creation": N}
+                # 部分 provider 改放頂層 cache_read_tokens → 兩種形狀都收,漏收會低估成本
                 itd = um.get("input_token_details") or {}
-                if isinstance(itd, dict):
-                    cr = itd.get("cache_read")
-                    if cr:
-                        acc_um["cache_read_tokens"] += int(cr)
-                    cc = itd.get("cache_creation")
-                    if cc:
-                        acc_um["cache_creation_tokens"] += int(cc)
+                if not isinstance(itd, dict):
+                    itd = {}
+                cr = itd.get("cache_read") or um.get("cache_read_tokens")
+                if cr:
+                    acc_um["cache_read_tokens"] += int(cr)
+                cc = itd.get("cache_creation") or um.get("cache_creation_tokens")
+                if cc:
+                    acc_um["cache_creation_tokens"] += int(cc)
             c = getattr(chunk, "content", None)
             if c:
                 if isinstance(c, list):

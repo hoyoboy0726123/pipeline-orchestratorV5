@@ -77,7 +77,27 @@ export interface TokenUsage {
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
+  // Anthropic 的 input_tokens **不含**快取讀取，這兩欄才是大宗（成本算不準的根源）
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
   model?: string
+}
+
+/** 後端 token_cost.py 算好的分項成本（見 lib/cost.ts 的 BackendCost）。 */
+export interface StepCost {
+  priced: boolean
+  partial?: boolean
+  model_key?: string
+  input_usd: number
+  cache_read_usd: number
+  cache_write_usd: number
+  output_usd: number
+  total_usd: number
+  saved_usd: number
+  prompt_tokens: number
+  total_tokens: number
+  note?: string
+  pricing_as_of?: string
 }
 
 export interface StepResult {
@@ -93,6 +113,7 @@ export interface StepResult {
   // 以下為 trace / token tracking 加上的欄位（subagent / skill 才會填）
   actual_output_path?: string
   token_usage?: TokenUsage
+  cost?: StepCost | null
   tool_calls?: ToolCall[]
   started_at?: string
   ended_at?: string
@@ -102,6 +123,7 @@ export interface PipelineRun {
   run_id: string
   pipeline_name: string
   current_step: number
+  cost?: StepCost | null
   step_results: StepResult[]
   status: 'running' | 'awaiting_human' | 'completed' | 'failed' | 'aborted'
   log_path: string

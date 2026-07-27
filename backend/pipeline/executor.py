@@ -3295,7 +3295,10 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             reply = (llm_result.get("content") or "").strip()
             _um = llm_result.get("usage_metadata") or {}
             if _um:
-                for _k in ("input_tokens", "output_tokens", "total_tokens"):
+                # 必須連 cache_* 一起收:Anthropic 的 input_tokens **不含**快取讀取,
+                # 漏收會讓成本嚴重低估(實測某 run 顯示 input=4,真實 prompt 是 59,336 tok)
+                for _k in ("input_tokens", "output_tokens", "total_tokens",
+                           "cache_read_tokens", "cache_creation_tokens"):
                     _v = _um.get(_k) or 0
                     if _v: acc_usage[_k] = acc_usage.get(_k, 0) + int(_v)
             if not acc_usage.get("model"):
@@ -4404,14 +4407,15 @@ async def _execute_skill_native_loop(
                 _v = um.get(_k) or 0
                 if _v:
                     acc_usage[_k] = acc_usage.get(_k, 0) + int(_v)
+            # 快取數有兩種形狀:langchain 標準的 input_token_details、
+            # 或 provider 直接放頂層 —— 兩種都收,漏一種成本就會低估
             itd = um.get("input_token_details") or {}
-            if isinstance(itd, dict):
-                acc_usage["cache_read_tokens"] = (
-                    acc_usage.get("cache_read_tokens", 0) + (itd.get("cache_read", 0) or 0)
-                )
-                acc_usage["cache_creation_tokens"] = (
-                    acc_usage.get("cache_creation_tokens", 0) + (itd.get("cache_creation", 0) or 0)
-                )
+            _cr = (itd.get("cache_read", 0) if isinstance(itd, dict) else 0)                 or um.get("cache_read_tokens", 0) or 0
+            _cc = (itd.get("cache_creation", 0) if isinstance(itd, dict) else 0)                 or um.get("cache_creation_tokens", 0) or 0
+            if _cr:
+                acc_usage["cache_read_tokens"] = acc_usage.get("cache_read_tokens", 0) + int(_cr)
+            if _cc:
+                acc_usage["cache_creation_tokens"] = acc_usage.get("cache_creation_tokens", 0) + int(_cc)
         if not acc_usage.get("model"):
             _rm = getattr(response, "response_metadata", None) or {}
             acc_usage["model"] = _rm.get("model_name") or _rm.get("model") or ""
