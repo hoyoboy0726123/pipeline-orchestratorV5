@@ -8,7 +8,7 @@ import { useWorkflowStore } from './_store'
 import {
   pipelineChatStream,
   getEnvPaths, type EnvPaths,
-  getWorkflowChat, appendWorkflowChat, clearWorkflowChat,
+  getWorkflowChat, appendWorkflowChat, clearWorkflowChat, setWorkflowChat,
 } from '@/lib/api'
 
 // ── AI Chat Message Type ─────────────────────────────────────────────────────
@@ -146,8 +146,9 @@ export interface AtlasChatProps {
    * - `drawer`:Phase 4 將實作 — 從旁邊滑出的抽屜
    */
   mode?: AtlasChatMode
-  /** 套用 LLM 產生的 YAML 到 canvas(建立新工作流 / 覆寫目前)。 */
-  onYamlApply: (yaml: string, mode: 'new' | 'overwrite') => void
+  /** 套用 LLM 產生的 YAML 到 canvas(建立新工作流 / 覆寫目前)。
+   *  mode='new' 時回傳新工作流 id(Hero 靠它把對話灌進新工作流);其餘回 null。 */
+  onYamlApply: (yaml: string, mode: 'new' | 'overwrite') => void | Promise<string | null>
 }
 
 // ── AtlasChat Component ─────────────────────────────────────────────────────
@@ -1199,8 +1200,28 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
 
   // YAML 套用包裝:套用後 hero 不關、繼續在 hero 內對話
   // (若想立刻去畫布看結果、使用者可按最小化按鈕)
-  const handleYamlApplyInHero = (yaml: string, mode: 'new' | 'overwrite') => {
-    onYamlApply(yaml, mode)
+  const handleYamlApplyInHero = async (yaml: string, mode: 'new' | 'overwrite') => {
+    // onYamlApply 的回傳是 void | string | null(sidebar 版不回傳 id)→ 窄化成 string | null
+    const applied = await onYamlApply(yaml, mode)
+    const newId = typeof applied === 'string' ? applied : null
+    // Hero 對話原本不 persist,套用後就永久消失 —— 但那段對話是「為什麼這樣設計」
+    // 的唯一紀錄。工作流建好後把它灌進該工作流的對話,之後在側邊助手回溯得到。
+    // Hero 只有「建立新工作流」一顆按鈕(overwrite 按鈕只在 sidebar),所以這裡
+    // 一定是全新的空工作流 → 用 setWorkflowChat 整份寫入,不會蓋掉任何既有討論。
+    if (newId) {
+      const carry = heroMessages
+        .filter(m => !m.yamlError && (m.content || '').trim() && !m.streaming)
+        .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+      if (carry.length) {
+        try {
+          await setWorkflowChat(newId, [
+            { role: 'assistant' as const,
+              content: '── 以下為在首頁建立此工作流時的原始討論(自動保留、方便回溯需求來源)──' },
+            ...carry,
+          ])
+        } catch {/* 灌入失敗不該擋住進畫布 —— 工作流本身已建立成功 */}
+      }
+    }
     // 套 YAML 是「進畫布」的訊號、自動切回 sidebar 讓使用者看到畫布
     exitToSidebar(true)
   }

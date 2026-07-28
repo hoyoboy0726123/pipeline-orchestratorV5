@@ -1267,9 +1267,12 @@ export default function PipelinePage() {
 
   // ── Import from YAML ──────────────────────────────────────────────────────
   // mode: 'new' = 建立新工作流（不碰目前的）；'overwrite' = 覆蓋目前工作流
-  const importYaml = useCallback(async (yaml: string, mode: 'new' | 'overwrite' = 'overwrite') => {
+  /** 套用 YAML 到畫布。mode='new' 時回傳新建立的 workflow id、否則回傳 null。
+   *  回傳 id 是給 Hero 用的:Hero 建完工作流後要把「當初為什麼這樣設計」的對話
+   *  灌進那條工作流,之後在側邊助手才回溯得到(見 _atlasChat 的 handleYamlApplyInHero)。 */
+  const importYaml = useCallback(async (yaml: string, mode: 'new' | 'overwrite' = 'overwrite'): Promise<string | null> => {
     const parsed = parseYaml(yaml)
-    if (!parsed) { toast.error('YAML 格式有誤'); return }
+    if (!parsed) { toast.error('YAML 格式有誤'); return null }
     const { nodes: ns, edges: es } = stepsToFlow(parsed.steps)
 
     if (mode === 'new') {
@@ -1294,6 +1297,8 @@ export default function PipelinePage() {
         saveCanvas(newId, ns as AppNode[], es, importedYaml)
       }, 120)
       toast.success(`已建立新工作流「${name}」`)
+      setShowYaml(false)
+      return newId
     } else {
       setPipelineName(parsed.name)
       setNodes(ns)
@@ -1301,6 +1306,7 @@ export default function PipelinePage() {
       toast.success('已覆蓋目前工作流')
     }
     setShowYaml(false)
+    return null
   }, [setNodes, setEdges, createWorkflow, saveCanvas])
 
   // ── Run pipeline ──────────────────────────────────────────────────────────
