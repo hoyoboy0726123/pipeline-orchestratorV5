@@ -79,7 +79,7 @@ const TEMPLATES: Template[] = [
     execMode: 'direct',
     description: '掃指定資料夾的信，按條件過濾，結果整理成 markdown / xlsx 待辦清單',
     params: [
-      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 Wilson_Bai@asus.com/收件匣' },
+      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 ABC@company.com/收件匣' },
       { key: 'subject', label: '主旨關鍵字（多個用逗號）', type: 'text', placeholder: '報告, urgent' },
       { key: 'sender', label: '寄件人（多個用逗號）', type: 'text', placeholder: 'boss@x.com' },
       { key: 'exact_match', label: '完全相等比對（不勾 = 模糊比對）', type: 'bool' },
@@ -101,7 +101,7 @@ const TEMPLATES: Template[] = [
       { key: 'keywords', label: '關鍵字（多個用逗號 = OR 邏輯）', type: 'text', placeholder: '客戶投訴, 退費' },
       { key: 'search_in', label: '搜尋範圍', type: 'select',
         options: [{ value: 'subject', label: '主旨' }, { value: 'body', label: '本文' }, { value: 'both', label: '主旨+本文' }] },
-      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 Wilson_Bai@asus.com/收件匣' },
+      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 ABC@company.com/收件匣' },
       { key: 'since', label: '從', type: 'datetime-local' },
       { key: 'until', label: '到', type: 'datetime-local' },
       { key: 'detail_level', label: '報告詳細度', type: 'select',
@@ -197,7 +197,7 @@ const TEMPLATES: Template[] = [
     execMode: 'direct',
     description: '搜出符合條件的信件、批次搬到目標資料夾',
     params: [
-      { key: 'folder', label: '來源資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 Wilson_Bai@asus.com/收件匣' },
+      { key: 'folder', label: '來源資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 ABC@company.com/收件匣' },
       { key: 'subject', label: '主旨關鍵字（可選）', type: 'text' },
       { key: 'sender', label: '寄件人（可選）', type: 'text' },
       { key: 'since', label: '從（可選）', type: 'datetime-local' },
@@ -215,7 +215,7 @@ const TEMPLATES: Template[] = [
     execMode: 'direct',
     description: '搜出符合條件的信件、批次設為已讀或未讀',
     params: [
-      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 Wilson_Bai@asus.com/收件匣' },
+      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 ABC@company.com/收件匣' },
       { key: 'subject', label: '主旨關鍵字（可選）', type: 'text' },
       { key: 'sender', label: '寄件人（可選）', type: 'text' },
       { key: 'since', label: '從（可選）', type: 'datetime-local' },
@@ -232,7 +232,7 @@ const TEMPLATES: Template[] = [
     execMode: 'direct',
     description: '搜出符合條件的信件、批次加追蹤旗標、標完成或清除',
     params: [
-      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 Wilson_Bai@asus.com/收件匣' },
+      { key: 'folder', label: '資料夾', type: 'text', placeholder: 'inbox / 收件匣 / 帳號@公司.com/收件匣', hint: '預設 inbox(第一個信箱)。多帳號:填「信箱名/收件匣」,例 ABC@company.com/收件匣' },
       { key: 'subject', label: '主旨關鍵字（可選）', type: 'text' },
       { key: 'sender', label: '寄件人（可選）', type: 'text' },
       { key: 'since', label: '從（可選）', type: 'datetime-local' },

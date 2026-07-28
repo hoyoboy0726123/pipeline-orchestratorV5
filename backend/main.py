@@ -4913,7 +4913,7 @@ def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = ""
         lines.append("")
         lines.append("**多信箱(重要)**:`folder` 參數預設 `inbox` = Outlook 裡的**第一個**信箱。"
                      "使用者若同時有私人與公司帳號、且要撈的是非第一個帳號,必須把 folder 寫成"
-                     "「信箱名/資料夾名」,例 `Wilson_Bai@asus.com/收件匣`、`user@corp.com/Inbox/客訴`。"
+                     "「信箱名/資料夾名」,例 `ABC@company.com/收件匣`、`user@corp.com/Inbox/客訴`。"
                      "使用者提到「公司信箱」「另一個信箱」「工作信箱」時,**先問清楚是哪個帳號**"
                      "(或請他到 Outlook 左欄看信箱顯示名),不要預設抓 inbox 抓到錯的帳號。")
         lines.append("**大信箱效能**:公司信箱常有數萬封,Outlook COM 逐封掃會很久 →"
