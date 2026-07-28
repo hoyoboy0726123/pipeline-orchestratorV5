@@ -7,8 +7,26 @@ import type { OutlookData, OutlookNode } from './_helpers'
 import { VariableInput } from './_variablePicker'
 import LlmRoleSelector from './_llmRoleSelector'
 
+// 後端 outlook_templates._to_dt 認得的相對日期關鍵字。
+// 這些值執行當下才換算，是「每天撈當天信」的正解（勝過 {{ input.date }}：
+// 後者沒帶啟動參數時會變空字串、日期過濾整個失效）。
+const REL_DATE_KEYWORDS = [
+  'today', '今天', '本日', '當日', '今日',
+  'yesterday', '昨天', '昨日',
+  'tomorrow', '明天', '明日',
+]
+const isRelDate = (v: string) =>
+  REL_DATE_KEYWORDS.includes((v || '').trim()) ||
+  REL_DATE_KEYWORDS.includes((v || '').trim().toLowerCase())
+
 // 帶「確定」按鈕的日期/時間欄位：onChange 只寫 draft，按確定才 commit 到 params
 // 避免使用者在 picker 裡選一半就被當前值覆蓋（用戶反映需要明確確認）
+//
+// ⚠️ 為什麼要特別處理相對日期：<input type="datetime-local"> 只吃
+// `YYYY-MM-DDTHH:mm`，塞 "today" 進去是非法值 → 瀏覽器直接渲染成空白。
+// 結果 YAML 明明寫了 since:"today"、面板卻一片空白，使用者以為沒設定，
+// 一旦手動補一個日期就把 "today" 覆蓋掉、每日排程就此失效。
+// 所以關鍵字要用文字模式顯示，並提供雙向切換。
 function DateTimeField({ value, type, onCommit }: {
   value: string
   type: 'date' | 'datetime-local'
@@ -18,28 +36,66 @@ function DateTimeField({ value, type, onCommit }: {
   // 外部值變動（譬如切模板後重置）時同步 draft
   useEffect(() => { setDraft(value || '') }, [value])
   const dirty = draft !== (value || '')
+
+  // ── 關鍵字模式：picker 顯示不了，改用唯讀文字 + 切回日期的按鈕 ──
+  if (isRelDate(value)) {
+    return (
+      <div className="flex gap-1.5 items-center">
+        <div className="flex-1 border border-sky-300 bg-sky-50 rounded-lg px-2.5 py-1.5 text-sm flex items-center gap-2 min-w-0">
+          <span className="font-mono text-sky-700 shrink-0">{value}</span>
+          <span className="text-[11px] text-sky-600/80 truncate">相對日期 · 每次執行換算成當下日期</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => onCommit('')}
+          title="清掉關鍵字、改用日期選擇器指定固定日期"
+          className="shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors"
+        >
+          改用日期
+        </button>
+      </div>
+    )
+  }
+
+  // ── 日期模式：原本的 picker，另加常用關鍵字快捷鍵 ──
   return (
-    <div className="flex gap-1.5 items-center">
-      <input
-        className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400/20 bg-white"
-        type={type}
-        value={draft}
-        onChange={e => setDraft(e.target.value)}
-      />
-      <button
-        type="button"
-        onClick={() => onCommit(draft)}
-        disabled={!dirty}
-        title={dirty ? '套用此日期' : '已套用'}
-        className={`shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors ${
-          dirty
-            ? 'bg-sky-500 hover:bg-sky-600 text-white'
-            : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-        }`}
-      >
-        <Check className="w-3.5 h-3.5" />
-        {dirty ? '確定' : '已套用'}
-      </button>
+    <div className="space-y-1">
+      <div className="flex gap-1.5 items-center">
+        <input
+          className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400/20 bg-white"
+          type={type}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+        />
+        <button
+          type="button"
+          onClick={() => onCommit(draft)}
+          disabled={!dirty}
+          title={dirty ? '套用此日期' : '已套用'}
+          className={`shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors ${
+            dirty
+              ? 'bg-sky-500 hover:bg-sky-600 text-white'
+              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+          }`}
+        >
+          <Check className="w-3.5 h-3.5" />
+          {dirty ? '確定' : '已套用'}
+        </button>
+      </div>
+      <div className="flex gap-1 items-center">
+        <span className="text-[11px] text-gray-400">每天自動跑選這個：</span>
+        {['today', 'yesterday'].map(kw => (
+          <button
+            key={kw}
+            type="button"
+            onClick={() => onCommit(kw)}
+            title={`填入 ${kw} —— 執行當下才換算，排程每天都會是當天`}
+            className="px-1.5 py-0.5 rounded text-[11px] font-mono border border-sky-200 text-sky-600 hover:bg-sky-50 transition-colors"
+          >
+            {kw}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
