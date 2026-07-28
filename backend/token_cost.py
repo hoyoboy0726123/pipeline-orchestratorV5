@@ -214,7 +214,15 @@ def estimate_cost(usage: dict, *, cache_ttl: str = "5m") -> dict:
     key = normalize_model(u.get("model"))
     # 訂閱路徑(claude_cli)實際不從 API 扣款 —— 金額仍要算,但必須標示清楚,
     # 否則使用者會以為這筆錢真的被扣了。
-    is_sub = str(u.get("provider") or "").strip().lower() == "claude_cli"
+    _prov = str(u.get("provider") or "").strip().lower()
+    if _prov:
+        is_sub = _prov == "claude_cli"
+    else:
+        # 舊 run 沒存 provider(欄位是後來才加的)→ 用 model 名稱回推。
+        # claude CLI 只回報 "opus"/"sonnet"/"haiku" 這種**裸短名**;
+        # Anthropic API 一律回完整 ID(claude-opus-5、claude-opus-4-5-20251101),
+        # 其他家也都是完整名 —— 所以裸短名等同 claude_cli 的指紋。
+        is_sub = str(u.get("model") or "").strip().lower() in _ALIASES
     base = {
         "priced": False,
         "model_key": key or "",
