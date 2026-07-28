@@ -53,14 +53,21 @@ StrOrList = Union[str, list[str], None]
 
 # ── Helper：日期 / 過濾條件正規化 ────────────────────────────────────
 def _to_datetime(d: DateLike) -> Optional[datetime]:
-    """各種日期輸入 → timezone-aware datetime（用本地時區）；None 回 None。
+    """各種日期輸入 → **naive 本地牆鐘** datetime；None 回 None。
 
-    Outlook COM 的 ReceivedTime 屬性是 pywintypes.datetime，**永遠帶 tzinfo**（本地時區）。
-    所以這邊回的也必須是 timezone-aware，否則跟 received 比較會 TypeError：
-      can't compare offset-naive and offset-aware datetimes
+    ⚠️ 為什麼是 naive 而不是 timezone-aware（這裡踩過坑）：
+    Outlook COM 的 ReceivedTime 是 pywintypes.datetime，它**帶 tzinfo 但那個值不可信**
+    —— 實測在 UTC+8 機器上回傳 `2026-07-28 11:50 tzinfo=GMT Standard Time(UTC+00:00)`，
+    但 11:50 其實是**本地**時間（本機時鐘就是 11:51）。也就是說：牆鐘是本地的、
+    標籤卻寫 GMT。
 
-    處理：使用者通常傳 naive datetime（"2026-04-27" / datetime.now()）→ 我們補上本地時區。
-    使用者主動帶 tz 的就尊重原值。"""
+    舊版這裡回 aware(+08:00) 去跟那個假 GMT 比較，Python 會把「11:50 本地」當成
+    「11:50 UTC」，切點等於整整早了 8 小時 —— 實測「撈今天」會多撈到昨天 16:00
+    之後的 99 封信，每日報表的資料範圍是錯的。
+
+    所以統一成「naive 本地牆鐘」比較：使用者講的 today 是本地午夜，COM 給的也是
+    本地牆鐘，兩邊脫掉 tz 直接比才是對的。這也跟下方寫進 dataframe 的處理一致
+    （那裡的註解本來就寫著「避免 pywintypes 的不正規 tzinfo」）。"""
     if d is None:
         return None
     if isinstance(d, datetime):
@@ -71,10 +78,23 @@ def _to_datetime(d: DateLike) -> Optional[datetime]:
         out = pd.to_datetime(d).to_pydatetime()
     else:
         raise TypeError(f"不認識的日期型別：{type(d).__name__}")
-    # 補上 tzinfo（本地時區）讓比較不炸 — datetime.now().astimezone() 會帶當前本地 tz
-    if out.tzinfo is None:
-        out = out.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    # 使用者若主動帶了 tz（例 ISO 字串含 offset）→ 先換算成本地，再脫成牆鐘
+    if out.tzinfo is not None:
+        out = out.astimezone().replace(tzinfo=None)
     return out
+
+
+def _naive_local(dt):
+    """COM datetime → naive 本地牆鐘，供日期比較用。
+
+    pywintypes 的 tzinfo 標示不可信（見 _to_datetime），但牆鐘值是本地的，
+    所以直接脫掉 tzinfo 即可，**不可**做 astimezone 換算（那會再位移一次）。"""
+    if dt is None:
+        return None
+    try:
+        return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) is not None else dt
+    except Exception:
+        return dt
 
 
 def _match(text: str, pattern: Optional[str], exact: bool) -> bool:
@@ -192,10 +212,12 @@ def search_mail(
         except Exception:
             continue
 
+        # 比較一律用 naive 本地牆鐘 —— COM 的 tzinfo 標示不可信（見 _to_datetime）
+        received_cmp = _naive_local(received)
         # 因為 items 已 sort by received desc，遇到比 since 更早就可以中止
-        if since_dt and received < since_dt:
+        if since_dt and received_cmp < since_dt:
             break
-        if until_dt and received > until_dt:
+        if until_dt and received_cmp > until_dt:
             continue
 
         if unread_only and not bool(item.UnRead):
@@ -606,10 +628,13 @@ def calendar_list(
             if item.Class != 26:  # AppointmentItem.Class = 26
                 continue
             start = item.Start
-            if start < since_dt:
+            # 與 search_mail 同理:COM tzinfo 不可信，比較一律用 naive 本地牆鐘。
+            # （_to_datetime 現在回 naive，這裡不脫 tz 會 TypeError）
+            start_cmp = _naive_local(start)
+            if start_cmp < since_dt:
                 # IncludeRecurrences 下 items 已 sorted by Start，超過 since_dt 才開始計算
                 continue
-            if start > until_dt:
+            if start_cmp > until_dt:
                 break
             rows.append({
                 "entry_id": item.EntryID,
