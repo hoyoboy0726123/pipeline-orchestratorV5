@@ -58,6 +58,7 @@ export type BackendCost = {
   priced: boolean
   partial?: boolean
   model_key?: string
+  billing?: 'api' | 'subscription'
   input_usd: number
   cache_read_usd: number
   cache_write_usd: number
@@ -95,7 +96,7 @@ export function computeCostUsd(model: string, inputTokens: number, outputTokens:
 export function formatCostUsd(cost: number | null | undefined): string {
   if (cost === null || cost === undefined) return ''
   if (cost === 0) return '$0'
-  if (cost < 0.0001) return `$${cost.toExponential(1)}`
+  if (cost < 0.0001) return '<$0.0001'
   if (cost < 0.01)   return `$${cost.toFixed(4)}`
   if (cost < 1)      return `$${cost.toFixed(3)}`
   return `$${cost.toFixed(2)}`

@@ -212,9 +212,13 @@ def estimate_cost(usage: dict, *, cache_ttl: str = "5m") -> dict:
     prompt_tok = in_tok + cr_tok + cw_tok
 
     key = normalize_model(u.get("model"))
+    # 訂閱路徑(claude_cli)實際不從 API 扣款 —— 金額仍要算,但必須標示清楚,
+    # 否則使用者會以為這筆錢真的被扣了。
+    is_sub = str(u.get("provider") or "").strip().lower() == "claude_cli"
     base = {
         "priced": False,
         "model_key": key or "",
+        "billing": "subscription" if is_sub else "api",
         "input_usd": 0.0, "cache_read_usd": 0.0,
         "cache_write_usd": 0.0, "output_usd": 0.0,
         "total_usd": 0.0, "saved_usd": 0.0,
@@ -262,24 +266,29 @@ def estimate_cost(usage: dict, *, cache_ttl: str = "5m") -> dict:
         "total_usd": round(input_usd + cr_usd + cw_usd + out_usd, 6),
         "saved_usd": round(saved, 6),
     })
+    if is_sub:
+        base["note"] = "訂閱不計費,此為 API 等值成本(供評估是否轉 API 用)"
     return base
 
 
 def sum_costs(usages: list[dict], *, cache_ttl: str = "5m") -> dict:
     """多個步驟的成本加總。任一步驟算不出價就標記 partial。"""
     agg = {
-        "priced": True, "partial": False,
+        "priced": True, "partial": False, "billing": "api",
         "input_usd": 0.0, "cache_read_usd": 0.0, "cache_write_usd": 0.0,
         "output_usd": 0.0, "total_usd": 0.0, "saved_usd": 0.0,
-        "prompt_tokens": 0, "total_tokens": 0,
+        "prompt_tokens": 0, "total_tokens": 0, "note": "",
     }
     seen_any = False
+    any_sub = False
     for usg in usages or []:
         if not usg:
             continue
         c = estimate_cost(usg, cache_ttl=cache_ttl)
         agg["prompt_tokens"] += c["prompt_tokens"]
         agg["total_tokens"] += c["total_tokens"]
+        if c.get("billing") == "subscription":
+            any_sub = True
         if c["priced"]:
             seen_any = True
             for k in ("input_usd", "cache_read_usd", "cache_write_usd",
@@ -288,6 +297,10 @@ def sum_costs(usages: list[dict], *, cache_ttl: str = "5m") -> dict:
         elif c["total_tokens"] > 0:
             agg["partial"] = True
     agg["priced"] = seen_any
+    # 只要有任一步驟走訂閱,整筆就標訂閱(避免使用者誤以為全額被扣款)
+    if any_sub:
+        agg["billing"] = "subscription"
+        agg["note"] = "訂閱不計費,此為 API 等值成本(供評估是否轉 API 用)"
     return agg
 
 
@@ -299,6 +312,8 @@ def format_usd(v: float) -> str:
         return "$0"
     if v <= 0:
         return "$0"
+    if v < 0.0001:
+        return "<$0.0001"   # 不用科學記號:$5.0e-5 在成本欄會被誤讀成亂碼
     if v < 0.01:
         return f"${v:.4f}"
     if v < 1:

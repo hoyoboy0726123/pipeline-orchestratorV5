@@ -88,6 +88,7 @@ export interface StepCost {
   priced: boolean
   partial?: boolean
   model_key?: string
+  billing?: 'api' | 'subscription'
   input_usd: number
   cache_read_usd: number
   cache_write_usd: number

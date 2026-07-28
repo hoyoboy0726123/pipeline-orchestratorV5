@@ -2542,8 +2542,14 @@ export default function PipelinePage() {
                             <span className="text-indigo-300">{totalTools}</span> tool calls ·{' '}
                             <span className="text-indigo-300">{srs.length}</span> steps
                             {hasCost && <> · <span className="text-emerald-300" title={costTitle}>{formatCostUsd(totalCost)}</span></>}
+                            {hasCost && runCost?.billing === 'subscription' && (
+                              <span className="text-amber-400/80 ml-1"
+                                    title="這條 run 走訂閱制 CLI，實際不從 API 扣款。這個金額是「如果改用 API 會花多少」，供你評估要不要轉 API。">
+                                訂閱不計費·API 等值
+                              </span>
+                            )}
                             {saved > 0 && (
-                              <span className="text-emerald-500/60 ml-1" title="快取讀取只要一般 input 的 1/10 價">
+                              <span className="text-emerald-500/60 ml-1" title="快取讀取只要一般 input 的 1/10 價；此金額是「若無快取會多付多少」，不是折扣後的實付額">
                                 (快取省 {formatCostUsd(saved)})
                               </span>
                             )}

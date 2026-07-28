@@ -441,5 +441,15 @@ async def invoke_with_streaming(
         )
 
     if return_usage:
-        return {"content": content, "usage_metadata": usage, "model": model_name}
+        # provider 直接問這次實際用的 llm 物件（不是查設定）——
+        # 設定可能在 run 途中被改，物件本身才是這次呼叫的真相。
+        # 訂閱路徑(claude_cli)要標出來，讓前端顯示「訂閱不計費、此為 API 等值成本」。
+        try:
+            _prov = str(getattr(llm, "_llm_type", "") or "")
+        except Exception:
+            _prov = ""
+        if not _prov:
+            _prov = type(llm).__name__
+        return {"content": content, "usage_metadata": usage,
+                "model": model_name, "provider": _prov}
     return content

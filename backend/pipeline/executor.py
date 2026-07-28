@@ -3303,6 +3303,9 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
                     if _v: acc_usage[_k] = acc_usage.get(_k, 0) + int(_v)
             if not acc_usage.get("model"):
                 acc_usage["model"] = llm_result.get("model") or ""
+            # provider 記一次就好(同一步驟不會換 provider);訂閱路徑要據此標示不計費
+            if not acc_usage.get("provider"):
+                acc_usage["provider"] = llm_result.get("provider") or ""
             # 完整記錄 LLM 回覆（含程式碼），避免 log 截斷讓後續分析誤判
             _reply_preview = reply if len(reply) <= 4000 else reply[:4000] + f"...[已截斷，完整長度 {len(reply)} 字]"
             logger.debug(f"[{step_name}] Agent 回覆：\n{_reply_preview}")
