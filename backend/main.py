@@ -3175,8 +3175,12 @@ V5 runner 有內建 `_notify_final()`、Pipeline 結束時(completed / failed / 
 4. **`outlook_params` 一律用 inline JSON 一行寫**（不要多行 YAML 格式 — 前端解析器只認 inline JSON）：
    - ✅ 正確：`outlook_params: {"to":"wilson@x.com","subject":"日報","body":"請查收"}`
    - ❌ 錯誤：`outlook_params:` 換行後 `  to: wilson@x.com` `  subject: ...`（多行格式會被前端解析器丟掉）
-   - **⚠ 已知 round-trip bug**：用戶把含 `outlook_params:` 的 YAML 貼到 YAML 面板「套用」後，這欄位有時會被前端 round-trip 吃掉。**所以你最後在 Plan / Confirm / 回應結尾必須附帶提醒**：
-     > 「貼上 YAML 套用後，請到畫布的 Outlook 節點 panel 點開、確認 to / subject / body 都填好（YAML round-trip 有時會吃掉這欄位）。」
+   - **round-trip 已修好、不要再警告使用者**：舊版前端會在「貼 YAML → 套用」時吃掉 `outlook_params`，該 bug 已修復（實測 parseYaml → stepsToFlow → flowToSteps → stepsToYaml 四段全數保留，含 folder / since / output_format / include_body）。**不要再在回應結尾附「請確認 panel 有沒有被吃掉」這類提醒** —— 那會讓使用者以為系統不可靠。
+
+   **`since` / `until` 支援相對日期關鍵字（優先用，勝過 `{{ input.date }}`）**：
+   - 可直接填：`today` / `今天` / `本日` / `當日` / `今日`、`yesterday` / `昨天` / `昨日`、`tomorrow` / `明天` / `明日`
+   - 執行當下才換算，所以「每天撈當天信」寫死 `"since":"today"` 就對了。
+   - **不要為了「每天跑」而改用 `{{ input.date }}`**：那是啟動參數，使用者直接按「執行」沒帶參數時會展開成空字串 → `since` 變成 `None` → **日期過濾整個失效、變成撈全部**。`today` 則直接按執行、掛 cron 都正確，且面板上看得到真實值。
 5. **路徑判斷**：使用者沒指定 → 用相對（純檔名最簡，系統自動落到 workflow dir）。使用者明說特定值（含絕對路徑、家目錄、磁碟代號）→ 照用
 6. **🚫 絕不自創 / 假設欄位、標籤、Sheet 名稱（grounding 鐵律、連強模型都會犯）**：寫讀檔 / 範本填充類 batch 時——
    - 使用者**有給**欄位 / 標籤名 → **逐字照用**（例:給了「標題、部門、負責人、營收、備註、圖」就用這六個,**不可**改寫成「名稱、價格、規格」「姓名、職稱、電話、照片」這類**訓練裡常見模板的腦補欄位**）。
@@ -3207,7 +3211,7 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 
 | 使用者說 | 該用 | 為什麼 |
 |---|---|---|
-| 「每天 / 每週自動跑」 | `{{ input.date }}`,設定 cron 排程帶 today | 否則檔名會固定、每天蓋掉昨天 |
+| 「每天 / 每週自動跑」**的檔名** | `{{ input.date }}`,設定 cron 排程帶 today | 否則檔名會固定、每天蓋掉昨天 |
 | 「同一條流程跑不同客戶 / 部門」 | `{{ input.customer }}` 等 | 一條 YAML 處理所有 case、改流程改一處 |
 | 「上一步抓到的 X 餵給下一步」 | `{{ steps.X.output.<save_as> }}` | 跨節點傳值,免剪貼簿繞道 |
 | 「用 UIA 抓欄位、後面要查 / 寄 / 存」 | UIA 用 `save_as: order_id`、下游 `{{ steps.uia_step.output.order_id }}` | UIA save_as 自動成為 inter-step 變數 |
@@ -3216,6 +3220,12 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 
 - 使用者只跑「**一次性 / 寫死腳本**」、值不會變 → 不要硬塞 `{{ }}`,直接寫死
 - 使用者已給絕對路徑 / 具體 email / 固定 URL → 寫死即可
+- **節點本身就支援相對日期關鍵字時 → 用關鍵字,不要用 `{{ input.date }}`**。
+  例:Outlook 節點的 `since` / `until` 吃 `today` / `yesterday` / `今天` / `昨天`,
+  「每天撈當天信」直接寫 `"since":"today"`。用 `{{ input.date }}` 反而製造地雷 ——
+  使用者按「執行」沒帶參數就展開成空字串、過濾失效,而 `today` 直接執行與 cron 都正確。
+  **判準:「每天跑」要變的是輸出檔名(用變數),不是節點的日期條件(用關鍵字)。**
+- 步驟內 UIA 短變數(如 `text: "{{order_id}}"` 引用同步驟 save_as)→ **保留 UIA 既有語法**,不要轉成 `steps.X.output.X`(那是錯的、會打架)
 - 步驟內 UIA 短變數(如 `text: "{{order_id}}"` 引用同步驟 save_as)→ **保留 UIA 既有語法**,不要轉成 `steps.X.output.X`(那是錯的、會打架)
 
 ## 範例對照
@@ -4918,6 +4928,16 @@ def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = ""
                      "(或請他到 Outlook 左欄看信箱顯示名),不要預設抓 inbox 抓到錯的帳號。")
         lines.append("**大信箱效能**:公司信箱常有數萬封,Outlook COM 逐封掃會很久 →"
                      "這類步驟 timeout 建議 1800-3600、並盡量用 since/until 縮小範圍。")
+        lines.append("**相對日期(每日排程必看)**:`since` / `until` 直接吃關鍵字 —— "
+                     "`today`/`今天`/`本日`/`當日`/`今日`、`yesterday`/`昨天`/`昨日`、"
+                     "`tomorrow`/`明天`/`明日`,執行當下才換算。"
+                     "所以「每天撈當天信」**寫死 `\"since\":\"today\"` 就好**,"
+                     "**不要改用 `{{ input.date }}`** —— 那是啟動參數,使用者直接按「執行」"
+                     "沒帶參數時會變成空字串、日期過濾整個失效(變成撈全部)。"
+                     "`today` 則手動執行與 cron 排程都正確,面板上也看得到真實值。")
+        lines.append("**內文分析**:下游若要讀信件內文(抽數字、分類、摘要),"
+                     "`daily_todo` 必須加 `\"include_body\":true` —— 預設只輸出"
+                     "收件時間/寄件人/主旨/未讀/有附件五欄,不含內文,下游會拿到空值。")
         parts.append("\n".join(lines))
     except Exception:
         pass
