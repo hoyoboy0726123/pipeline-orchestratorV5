@@ -1801,10 +1801,35 @@ def _parse_skill_tool_calls(text: str) -> list[dict]:
     calls = []
 
     # ── Step 1：嘗試標準 <input>...</input> 格式 ──
+    # ⚠️ 非貪婪 (.*?) 會停在**第一個** </input>。若 LLM 產生的程式碼本身含
+    # 「</input>」字面字串(寫 XML/HTML 處理、或寫這個協議的說明文件時很常見),
+    # 內容會被腰斬 → JSON 解析失敗 → 靜默走錯路。
+    # 實測:{"code": "s = '</input>'\nprint(len(s))"} 只會抓到 {"code": "s = '
+    # 所以:非貪婪抓到的內容若不是合法 JSON,就改用「延伸到最後一個 </input>」
+    # 再試一次;仍不行才退回非貪婪的結果(保證不比修前差)。
     pattern_std = re.compile(r'<tool>(.*?)</tool>\s*<input>(.*?)</input>', re.DOTALL)
-    for m in pattern_std.finditer(text):
-        calls.append({"tool": m.group(1).strip(), "input": m.group(2).strip()})
-    if calls:
+    pattern_greedy = re.compile(r'<tool>(.*?)</tool>\s*<input>(.*)</input>', re.DOTALL)
+
+    def _looks_like_json(s: str) -> bool:
+        s = (s or "").strip()
+        if not (s.startswith("{") or s.startswith("[")):
+            return False
+        try:
+            json.loads(s)
+            return True
+        except Exception:
+            return False
+
+    std_matches = list(pattern_std.finditer(text))
+    if std_matches:
+        # 只有「單一工具呼叫 + 非貪婪結果不是合法 JSON」時才嘗試貪婪延伸;
+        # 多個呼叫時貪婪會把它們併成一段,反而更糟。
+        if len(std_matches) == 1 and not _looks_like_json(std_matches[0].group(2)):
+            gm = pattern_greedy.search(text)
+            if gm and _looks_like_json(gm.group(2)):
+                return [{"tool": gm.group(1).strip(), "input": gm.group(2).strip()}]
+        for m in std_matches:
+            calls.append({"tool": m.group(1).strip(), "input": m.group(2).strip()})
         return calls
 
     # ── Step 2：找所有 code blocks，再找離 <tool> 最近的那個 ──
