@@ -214,6 +214,43 @@ def build_llm(temperature: float = 0.0, role: str = "primary") -> Any:
     raise ValueError(f"unknown provider: {provider}")
 
 
+# ── 沒有原生 function calling 的 provider（CLI 訂閱大腦）需走「文字協議」loop ──
+# V5 目前沒有這類 provider，這個集合是空的 → 下面三支一律回「有原生 FC / native」，
+# 行為與加入前完全相同。留著是因為 executor 的 Outlook 路徑會 import
+# resolve_loop_mode（缺了會 ImportError），也預留未來接 CLI 訂閱大腦的接點。
+_CLI_PROVIDERS: set[str] = set()
+
+
+def provider_has_native_fc(role: str = "primary") -> bool:
+    """該 role 目前的 provider 是否支援原生 function calling。
+    沒有的（CLI 訂閱大腦）回 False，呼叫端據此改走 <tool> 文字協議。"""
+    try:
+        cfg = _resolve_role_settings(get_settings(), role)
+        return (cfg.get("provider") or "") not in _CLI_PROVIDERS
+    except Exception:
+        return True
+
+
+def provider_supports_vision(role: str = "primary") -> bool:
+    """該 role 目前的 provider 能不能吃圖片（multimodal）。
+
+    純文字橋接的 provider（CLI 訂閱大腦）會把 image blocks 丟掉 → 回 False。
+    VLM 驗證必須據此改用別的 role 或明確報錯，否則模型會「沒看到圖就下判決」。"""
+    try:
+        cfg = _resolve_role_settings(get_settings(), role)
+        return (cfg.get("provider") or "") not in _CLI_PROVIDERS
+    except Exception:
+        return True
+
+
+def resolve_loop_mode(env_mode: str, role: str = "primary") -> str:
+    """把 SUBAGENT_LOOP_MODE(native/text)依 provider 修正:
+    無原生 FC 的 provider 一律 text（它吐 <tool> 純文字、沒有 native tool_calls）。"""
+    if not provider_has_native_fc(role):
+        return "text"
+    return (env_mode or "native").strip().lower()
+
+
 async def invoke_with_streaming(
     llm: Any,
     messages: list,
