@@ -30,8 +30,17 @@ log = logging.getLogger(__name__)
 from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 
 SKILL_TOOL_TIMEOUT = 60          # 預設值：給沒透過 execute_step_with_skill 流程的呼叫者用
-SKILL_TOOL_TIMEOUT_MAX = 300     # 動態 tool timeout 上限(2026-05-24 從 180→300:node build_pptx 等任務常超 180s、放寬避免 SIGTERM)
-SKILL_MAX_ITERATIONS = 20  # 互動式 skill(python-cli-extractor:問 A-B/subcommand/參數 + 掃描大專案找函式簽名 + GUI 解耦 + retry 補套件 + 重跑)耗 iter 多;較不聰明的模型(Gemma 等)還會空回覆 / 多繞、15 仍會撞牆。20 留足容錯。純運算 skill 照樣 4-5 輪結束
+SKILL_TOOL_TIMEOUT_MAX = 900     # 動態 tool timeout 上限
+                                 # 2026-05-24 從 180→300:node build_pptx 等任務常超 180s、放寬避免 SIGTERM
+                                 # 2026-08-02 從 300→900:使用者在 YAML 明寫 timeout: 5400(擺明這步要跑很久),
+                                 #   //3 算出 1800s 卻被 min(300) 壓回去 —— 明確意圖被硬編碼上限吃掉。
+                                 #   Atlas 實測 Whisper 轉 15 分鐘影片用掉 251s / 上限 300s,只剩 49s 餘裕;
+                                 #   換成 20 分鐘影片就會被 SIGTERM。因為仍保留 //3,只有 step.timeout ≥ 900
+                                 #   的步驟受影響(預設 300 → 100s、600 → 200s 完全不變)。
+SANDBOX_HEARTBEAT_SEC = 15       # 沙盒執行期間每幾秒寫一行「執行中… Ns」。
+                                 # 15s 夠讓使用者確認還活著,又不會把 log 洗版
+                                 # (最壞情況:跑滿 900s 上限 → 60 行)。
+SKILL_MAX_ITERATIONS = 20 # 互動式 skill(python-cli-extractor:問 A-B/subcommand/參數 + 掃描大專案找函式簽名 + GUI 解耦 + retry 補套件 + 重跑)耗 iter 多;較不聰明的模型(Gemma 等)還會空回覆 / 多繞、15 仍會撞牆。20 留足容錯。純運算 skill 照樣 4-5 輪結束
 
 # 連續 N 輪 LLM 口頭說「完成」但沒下 <tool>done</tool> → 強制 done 收尾
 # 解決 Sonnet / GPT 等強模型常見的「死循環式 verify」— 寫好檔案後一直確認、不打標準 tag
@@ -230,11 +239,13 @@ def _compute_tool_timeout(step_timeout: int) -> int:
     """從 step.timeout 推導「單次 run_python / run_shell 上限秒數」。
     使用者已用 step.timeout 標註過該步驟大概要多久、tool 上限自然該跟著放寬。
 
-    公式(2026-05-24 寬鬆化):min(300, max(90, step.timeout // 3))
+    公式:min(SKILL_TOOL_TIMEOUT_MAX, max(90, step.timeout // 3))
     - step.timeout=270(短任務)  → 90s
     - step.timeout=300(預設)    → 100s
     - step.timeout=600          → 200s
-    - step.timeout=900+         → 300s(封頂)
+    - step.timeout=900          → 300s
+    - step.timeout=1800         → 600s   ← 2026-08-02 放寬上限後才拿得到
+    - step.timeout=2700+        → 900s(封頂)
 
     寬鬆化原因(取代 //5 60s 公式):
     - node build_pptx.js 生 9 slide 含複雜 shape 超 60s → SIGTERM、step fail
@@ -2159,23 +2170,48 @@ def _try_sandbox_exec(tool_name: str, tool_input: str, cwd: Optional[str], run_i
         _SANDBOX_WARNED.clear()
 
     _lg.info(f"[sandbox] 🛡 在容器內執行 {tool_name}（{len(tool_input)} 字元、timeout={tool_timeout}s）")
-    if tool_name == "run_python":
-        res = _sandbox.run_python(
-            tool_input, cwd=cwd,
-            timeout=tool_timeout,
-            run_id=run_id,
-            register_cb=register_proc,
-            unregister_cb=unregister_proc,
-        )
-    else:  # run_shell
-        res = _sandbox.run_shell(
-            tool_input, cwd=cwd,
-            timeout=tool_timeout,
-            run_id=run_id,
-            register_cb=register_proc,
-            unregister_cb=unregister_proc,
-        )
+
+    # ── 心跳:容器執行期間每 15 秒寫一行 ────────────────────────────────
+    # 沙盒執行是同步阻塞的,期間 log 一行都不會增加 —— 前端每 1.5 秒重抓 log 重繪,
+    # 於是畫面完全靜止。Atlas 實測有 264s / 251s 兩段全靜默(裝 torch 與 Whisper 轉錄),
+    # 使用者無法分辨「正在算」與「卡死了」。LLM 生成那條路早就有心跳
+    # (`✍️ 產生中… 82s`),這裡補齊,兩條路一致。
+    # 純顯示、不改任何行為:看門狗只讀 _hb_done、不碰執行結果。
+    import threading as _hb_threading
+    import time as _hb_time
+    _hb_done = _hb_threading.Event()
+    _hb_t0 = _hb_time.monotonic()
+
+    def _heartbeat():
+        while not _hb_done.wait(SANDBOX_HEARTBEAT_SEC):
+            _elapsed = int(_hb_time.monotonic() - _hb_t0)
+            _lg.info(f"[sandbox] ⏳ {tool_name} 執行中… {_elapsed}s / 上限 {tool_timeout}s")
+
+    _hb_thread = _hb_threading.Thread(target=_heartbeat, daemon=True,
+                                      name=f"sandbox-hb-{run_id or 'x'}")
+    _hb_thread.start()
+    try:
+        if tool_name == "run_python":
+            res = _sandbox.run_python(
+                tool_input, cwd=cwd,
+                timeout=tool_timeout,
+                run_id=run_id,
+                register_cb=register_proc,
+                unregister_cb=unregister_proc,
+            )
+        else:  # run_shell
+            res = _sandbox.run_shell(
+                tool_input, cwd=cwd,
+                timeout=tool_timeout,
+                run_id=run_id,
+                register_cb=register_proc,
+                unregister_cb=unregister_proc,
+            )
+    finally:
+        # finally 確保拋例外時心跳也會停,不留 orphan thread
+        _hb_done.set()
     _lg.info(f"[sandbox] ✓ 容器執行完畢 rc={res.returncode}"
+             + f"、耗時 {int(_hb_time.monotonic() - _hb_t0)}s"
              + (" (timed out)" if res.timed_out else ""))
 
     # 組裝輸出 — 格式刻意與 host 版本一致，LLM 分不出差別
