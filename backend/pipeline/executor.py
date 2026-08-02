@@ -1033,11 +1033,19 @@ def detect_pip_install(tc_name: str, tc_args) -> list:
     tc_args 接 dict 或 JSON 字串(native FC 兩種格式都處理)。"""
     import re
     if not isinstance(tc_args, dict):
+        _raw = tc_args if isinstance(tc_args, str) else ""
         try:
             import json as _j
-            tc_args = _j.loads(tc_args) if (isinstance(tc_args, str) and tc_args.strip().startswith("{")) else {}
+            tc_args = _j.loads(_raw) if _raw.strip().startswith("{") else {}
         except Exception:
             tc_args = {}
+        if not isinstance(tc_args, dict):
+            tc_args = {}
+        # skill / 文字協議路徑的 tool_input 是「裸命令 / 裸程式碼」、不是 JSON。
+        # 舊版在這裡直接歸零 → 那條路的 pip install 從來沒被攔到過
+        # (2026-08-02 於 Atlas 實測:torch 2.5GB 靜默裝進沙盒、繞過使用者確認)。
+        if not tc_args and _raw:
+            tc_args = {"command": _raw, "code": _raw}
     if tc_name == "run_shell":
         cmd = str(tc_args.get("command") or tc_args.get("input") or "")
         if _is_pip_install_cmd(cmd):
@@ -1916,11 +1924,15 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
     # ── 硬攔 run_shell 的 pip install:skill 不准自己裝套件、強制走 missing_dependency 使用者確認 ──
     # (2026-05-31 發現:gemma 會 run_shell pip install 繞過確認;executor 的 missing_module steering
     #  只是軟提示、擋不住會自作主張的模型。這裡硬攔、回 steering 逼它改 done(missing_packages)。)
-    if tool_name == "run_shell" and _is_pip_install_cmd(tool_input):
+    # (2026-08-02:原本只攔 run_shell,run_python 內用 subprocess 跑 pip 可完全繞過。
+    #  改走共用的 detect_pip_install → run_shell 與 run_python 兩條路都涵蓋。
+    #  這裡是「所有 caller 共用的最後防線」——skill loop / subagent / sandbox_tools 都經過。)
+    _pip_attempt = detect_pip_install(tool_name, tool_input) if tool_name in ("run_shell", "run_python") else []
+    if _pip_attempt:
         if logger:
-            logger.warning(f"[run_shell] 攔截 pip install、要求改走 done(missing_packages)：{(tool_input or '')[:80]}")
+            logger.warning(f"[{tool_name}] 攔截 pip install {_pip_attempt}、要求改走 done(missing_packages)：{(tool_input or '')[:80]}")
         return (
-            "[系統攔截] 不允許用 run_shell 直接 pip install 裝套件。\n"
+            f"[系統攔截] 不允許用 {tool_name} 直接 pip install 裝套件(偵測到:{_pip_attempt})。\n"
             "缺套件時請改呼叫 done(success=false, missing_packages=[\"套件名\"])、"
             "系統會跳出『允許安裝』確認給使用者、同意後才裝到容器、並自動重跑這步。\n"
             "(這是系統層級的安全規定:裝任何依賴都必須經使用者確認、不能由 skill 自行安裝。)"
@@ -3739,32 +3751,24 @@ SPA 站(Reddit/Twitter/X/Instagram/Threads/Bluesky):`wait_until="domcontentloade
             # (2026-05-31:sandbox 跑外部腳本(main_CLI.py)撞缺套件時 stderr 常沒完整傳回、
             #  ModuleNotFoundError regex 抓不到;但 skill 想自己裝時命令明擺著有套件名 → 從這抽最可靠。
             #  抽到套件名就直接轉系統『允許安裝』確認,不靠 stderr 格式、也不靠 skill 乖乖 done(missing_packages)。)
-            if tool_name == "run_shell":
-                # tool_input 可能是純字串、或 native FC 的 JSON {"command":"..."} → 正規化成命令字串
-                # (2026-05-31:skill loop 這層的 tool_input 是 JSON、_is_pip_install_cmd 直接判會 False;
-                #  _execute_skill_tool 內部才解析成純字串、所以要在這先正規化。)
-                _cmd_norm = tool_input
-                if isinstance(_cmd_norm, str) and _cmd_norm.lstrip().startswith("{"):
-                    try:
-                        import json as _j_norm
-                        _parsed = _j_norm.loads(tool_input)
-                        _cmd_norm = _parsed.get("command") or _parsed.get("input") or tool_input
-                    except Exception:
-                        _cmd_norm = tool_input
-                if _is_pip_install_cmd(_cmd_norm):
-                    _after = _cmd_norm.split("install", 1)[1] if "install" in _cmd_norm else ""
-                    _pkgs = [p.split("==")[0].split(">")[0].split("<")[0].strip()
-                             for p in _after.split()
-                             if not p.startswith("-") and not p.endswith((".txt", ".cfg", ".toml"))]
-                    if _pkgs:
-                        logger.warning(f"[{step_name}] 🛑 攔 run_shell pip install {_pkgs} → 轉 missing_dependency 使用者確認")
-                        return ExecResult(
-                            exit_code=1,
-                            stdout="\n".join(all_stdout),
-                            stderr=f"偵測到 skill 嘗試自行安裝套件 {_pkgs}。已改走系統的『允許安裝』使用者確認流程。",
-                            pending_recipe=None,
-                            missing_packages=_pkgs,
-                        )
+            # (2026-08-02:原本只判 run_shell,run_python 包 subprocess 跑 pip 就完全繞過。
+            #  改用共用的 detect_pip_install,與 native loop 同一套判斷、兩條迴圈行為一致;
+            #  裸字串輸入也已在該 helper 內處理。)
+            # 抽不出套件名(如 pip 的參數是變數:`pip(["torch", ...])` 包在函式裡)時刻意**不**在這層
+            # 攔死 —— 讓它掉到下面 _execute_skill_tool 的同一套偵測,那層回 steering 訊息
+            # 要求模型改用 done(missing_packages=[...]) 自報套件名,一樣會彈出「允許安裝」,
+            # 比在這裡直接把整步判失敗好(使用者才知道到底缺什麼)。
+            if tool_name in ("run_shell", "run_python"):
+                _pkgs = [p for p in detect_pip_install(tool_name, tool_input) if p != "(未知套件)"]
+                if _pkgs:
+                    logger.warning(f"[{step_name}] 🛑 攔 {tool_name} pip install {_pkgs} → 轉 missing_dependency 使用者確認")
+                    return ExecResult(
+                        exit_code=1,
+                        stdout="\n".join(all_stdout),
+                        stderr=f"偵測到 skill 嘗試自行安裝套件 {_pkgs}。已改走系統的『允許安裝』使用者確認流程。",
+                        pending_recipe=None,
+                        missing_packages=_pkgs,
+                    )
 
             tool_result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda tn=tool_name, ti=tool_input, lg=logger, fh=force_host, tt=tool_timeout: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id, logger=lg, force_host=fh, tool_timeout=tt)
