@@ -679,6 +679,19 @@ def execute_action(
             if not img_name:
                 return ActionResult(False, index, atype, "click_image 缺 image 欄位")
             tpl_path = assets_dir / img_name
+            # 多形態錨點：同一顆按鈕的不同樣子。每張都比一次取最高分。
+            _variants = [v for v in (action.get("image_variants") or [])
+                         if isinstance(v, str) and v.strip()]
+            tpl_candidates = [(img_name, tpl_path)]
+            for _v in _variants:
+                _vp = assets_dir / _v
+                if _vp.is_file():
+                    tpl_candidates.append((_v, _vp))
+                else:
+                    logger.warning(f"[computer_use]   多形態錨點 {_v} 檔案不存在，略過")
+            if len(tpl_candidates) > 1:
+                _names = ", ".join(n for n, _ in tpl_candidates)
+                logger.info(f"[computer_use]   多形態錨點：共 {len(tpl_candidates)} 張候選（{_names}）")
             # 門檻：action-level confidence 覆蓋 step 層級 cv_threshold，皆缺就用 0.5
             threshold = float(action.get("confidence") or cv_threshold)
             button = action.get("button", "left")
@@ -832,8 +845,38 @@ def execute_action(
                     return ActionResult(False, index, atype,
                         "vlm_mode=anchor_pick 但 vlm_prompt 為空（必填，告訴 VLM 要點什麼）")
                 region_rect_p = _parse_search_region(action)
-                ok_pick, picked_idx, pick_reason = _vlm_pick_anchor(
-                    vlm_prompt_pick, anchor_names, assets_dir, region_rect_p, logger)
+                # ⚡ 先用純 CV 試一輪（免費、~50ms，實測比讓模型挑更準）。
+                #    每張候選都比一次；最高分過門檻且明顯領先第二名就直接用它，
+                #    完全不用打雲端 API。分不出來（分數接近 or 都太低）才退回 VLM。
+                #    2026-08-06 實測：最大化↔還原兩態互測 1.000 vs 0.707，
+                #    差距 0.29 —— 這種情況 CV 分得非常清楚。
+                _CV_PICK_MIN = float(action.get("confidence") or cv_threshold)
+                _CV_PICK_MARGIN = 0.10
+                ok_pick, picked_idx, pick_reason = False, 0, ""
+                try:
+                    _scores = []
+                    for _nm in anchor_names:
+                        _p = assets_dir / _nm
+                        if not _p.is_file():
+                            _scores.append(-1.0)
+                            continue
+                        _r = find_template(str(_p), threshold=0.0, multi_scale=True,
+                                           region=region_rect_p, mode="gray")
+                        _scores.append(_r.confidence)
+                    _order = sorted(range(len(_scores)), key=lambda i: _scores[i], reverse=True)
+                    _top = _order[0]
+                    _second = _scores[_order[1]] if len(_order) > 1 else -1.0
+                    if _scores[_top] >= _CV_PICK_MIN and (_scores[_top] - _second) >= _CV_PICK_MARGIN:
+                        ok_pick, picked_idx = True, _top
+                        pick_reason = (f"純 CV 直接分辨（{anchor_names[_top]}={_scores[_top]:.2f}，"
+                                       f"第二名 {_second:.2f}），未呼叫 VLM")
+                        logger.info(f"[computer_use]   anchor_pick：{pick_reason}")
+                except Exception as _ce:
+                    logger.debug(f"[computer_use]   anchor_pick 純 CV 預篩跳過：{_ce}")
+                if not ok_pick:
+                    logger.info("[computer_use]   anchor_pick：純 CV 分不出來 → 交給 VLM 挑")
+                    ok_pick, picked_idx, pick_reason = _vlm_pick_anchor(
+                        vlm_prompt_pick, anchor_names, assets_dir, region_rect_p, logger)
                 if not ok_pick:
                     return ActionResult(False, index, atype,
                         f"VLM 無法挑錨點：{pick_reason}")
@@ -959,14 +1002,29 @@ def execute_action(
                     use_region = force_region
                 eff_threshold = threshold if threshold_override is None else threshold_override
 
-                def _find(m: str) -> MatchResult:
+                def _find_one(p: str, m: str) -> MatchResult:
                     if use_region is not None:
-                        return find_template(str(tpl_path), threshold=eff_threshold, multi_scale=True,
+                        return find_template(p, threshold=eff_threshold, multi_scale=True,
                                              region=use_region, mode=m)
                     if nx_ is not None and ny_ is not None:
-                        return find_template(str(tpl_path), threshold=eff_threshold, multi_scale=True,
+                        return find_template(p, threshold=eff_threshold, multi_scale=True,
                                              near_xy=(nx_, ny_), search_radius=cv_search_radius, mode=m)
-                    return find_template(str(tpl_path), threshold=eff_threshold, multi_scale=True, mode=m)
+                    return find_template(p, threshold=eff_threshold, multi_scale=True, mode=m)
+
+                def _find(m: str) -> MatchResult:
+                    """單張時就是一次比對；多形態時每張都比、取分數最高的。"""
+                    best = _find_one(str(tpl_candidates[0][1]), m)
+                    if len(tpl_candidates) == 1:
+                        return best
+                    best_name = tpl_candidates[0][0]
+                    for _nm, _p in tpl_candidates[1:]:
+                        r = _find_one(str(_p), m)
+                        if r.confidence > best.confidence:
+                            best, best_name = r, _nm
+                    if best_name != img_name:
+                        logger.info(f"[computer_use]   多形態錨點[{m}]：採用 {best_name}"
+                                    f"（conf={best.confidence:.2f}）")
+                    return best
                 gray = _find("gray")
                 if gray.found:
                     return gray
@@ -1654,7 +1712,8 @@ def validate_action_assets(actions: list[dict], assets_dir: Path) -> list[str]:
                 if not (assets_dir / name).is_file():
                     missing.append(name)
             # vlm_mode=anchor_pick 用的多張候選錨點圖也要檢查
-            for name in (a.get("vlm_anchors") or []):
+            for name in (list(a.get("image_variants") or [])
+                         + list(a.get("vlm_anchors") or [])):
                 if not name or name in seen:
                     continue
                 seen.add(name)

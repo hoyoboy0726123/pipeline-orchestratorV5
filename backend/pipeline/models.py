@@ -184,6 +184,18 @@ class ComputerUseAction(BaseModel):
     # anchor_pick 模式的候選錨點圖檔名清單（每張都相對 assets_dir）。off 模式不用。
     vlm_anchors: list[str] = []
 
+    # ── 多形態錨點（純 CV，不需要任何模型）─────────────────────────
+    # 同一顆按鈕會隨狀態換樣子時（最大化↔還原、播放↔暫停、亮↔暗主題），
+    # 錄製時把每種樣子各存一張，執行時**每張都比一次、取分數最高的**。
+    # 取最高分而不是「第一張過門檻就用」：兩張候選都可能勉強過門檻，
+    # 只有分數差距分得出來哪張是畫面當下真正的樣子。
+    #
+    # 2026-08-06 記事本標題列實測（UIA 給真值）：
+    #   還原態找「最大化」鈕：單張錯形態誤差 311px(conf 0.63) → 多形態 0px(conf 1.00)
+    #   最大化態找「還原」鈕：單張錯形態 conf 只有 0.59       → 多形態 0px(conf 1.00)
+    # 這正是 anchor_pick 要解的問題，但純 CV 更快更準，而且不用打雲端 API。
+    image_variants: list[str] = []
+
 
 class PipelineStep(BaseModel):
     name: str
