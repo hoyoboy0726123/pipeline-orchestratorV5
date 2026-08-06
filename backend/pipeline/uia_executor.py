@@ -522,7 +522,23 @@ def execute_uia_action(action: dict, step_window: str,
                     wp.Close()
                     return UiaActionResult(True, f"已關閉視窗 {target.Name!r:.60} via WindowPattern")
             except Exception as e:
-                return UiaActionResult(False, f"WindowPattern.Close() 失敗:{e}")
+                # ⚠ Close() 丟例外不等於沒關掉。2026-08-06 實測 Win11 記事本：
+                #   視窗確實關了，但 COM 回 -2147220991「事件無法啟動任何訂閱者」。
+                #   直接回失敗會讓整個工作流誤判中止，所以先確認視窗是不是真的還在。
+                _gone = False
+                try:
+                    for _ in range(6):          # 最多等 1.5s，關閉是非同步的
+                        time.sleep(0.25)
+                        if not target.Exists(0, 0):
+                            _gone = True
+                            break
+                except Exception:
+                    _gone = True
+                if _gone:
+                    return UiaActionResult(
+                        True, f"已關閉視窗（Close() 回了 {type(e).__name__}，"
+                              f"但確認視窗已消失，視為成功）")
+                return UiaActionResult(False, f"WindowPattern.Close() 失敗且視窗還在:{e}")
             return UiaActionResult(False, "目標控制項或父鏈沒 WindowPattern、不能關")
 
         elif atype == "uia_assert_state":

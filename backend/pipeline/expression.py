@@ -231,6 +231,12 @@ def _load_json_output(path: str) -> Any:
     return data
 
 
+# output namespace 的固定 key（步驟中繼資料）。
+# 撞名時**使用者資料贏** —— output.status 讀起來就該是「我輸出的 status」。
+# 步驟自己的值永遠可從 output.step.<key> 取得，不會遺失。
+_FIXED_OUTPUT_KEYS = {"stdout", "stderr", "exit_code", "path", "status"}
+
+
 def build_context(*, step_results=None, input_params=None,
                   env_passthrough: bool = True) -> dict:
     """組裝 render context: {steps, input, env}。
@@ -250,12 +256,28 @@ def build_context(*, step_results=None, input_params=None,
                 "path": getattr(sr, "actual_output_path", "") or "",
                 "status": getattr(sr, "validation_status", "") or "",
             }
+            # ⚠ 撞名（2026-08-06 實測於 Atlas-Lite，Atlas/V5 同樣程式碼同樣中招）：
+            #   使用者資料的欄位名如果跟上面五個固定 key 一樣
+            #   （status / path / stdout / stderr / exit_code），舊寫法是固定 key 贏，
+            #   使用者拿到的是「步驟中繼資料」而不是自己的值 —— 而且毫無提示。
+            #   實測：腳本輸出 status='failed'，{{ steps.X.output.status }} 求出 'ok'
+            #   （那是步驟執行狀態），switch 因此跳到 ok 分支。status 是極常見的欄位名。
+            #   改成**使用者資料優先**；步驟中繼資料完整保留在 output.step.<key>。
+            out["step"] = dict(out)
+            _shadowed: list = []
+
+            def _promote(src: dict) -> None:
+                for k, v in src.items():
+                    if not isinstance(k, str):
+                        continue
+                    if k in _FIXED_OUTPUT_KEYS and out.get(k) != v:
+                        _shadowed.append(k)
+                    out[k] = v
+
             # save_as / step_vars promote 到 output namespace
             sv = getattr(sr, "step_vars", None) or {}
-            for k, v in sv.items():
-                # 不覆寫上面的固定 key(stdout / path 等)
-                if k not in out:
-                    out[k] = v
+            out["vars"] = dict(sv)      # 永遠拿得到，不受撞名影響
+            _promote(sv)
             # 把該步「JSON 輸出檔」的欄位提供給下游 condition/switch:
             #   - 完整物件掛 output.json.<key>(永遠可用、不會與 stdout/path/status 等固定 key 衝突)
             #   - 同時攤平到 output.<key>(讓 AI 助手直覺寫 output.口碑 即可用),但不覆寫固定 key/step_vars
@@ -263,9 +285,12 @@ def build_context(*, step_results=None, input_params=None,
             _jdata = _load_json_output(out.get("path") or "")
             if isinstance(_jdata, dict):
                 out["json"] = _jdata
-                for _k, _v in _jdata.items():
-                    if isinstance(_k, str) and _k not in out:
-                        out[_k] = _v
+                _promote(_jdata)
+            if _shadowed:
+                import logging as _lg
+                _lg.getLogger("pipeline").info(
+                    f"[{sr.step_name}] 輸出欄位 {sorted(set(_shadowed))} 跟步驟中繼資料同名，"
+                    f"`output.<欄位>` 用你的值；步驟本身的值請用 `output.step.<欄位>`。")
             steps_ns[sr.step_name] = {"output": out}
 
     ctx: dict[str, Any] = {

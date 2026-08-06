@@ -58,3 +58,8 @@ opencc-python-reimplemented
 # ONNX runtime、不拖 torch;首次啟動自動下載 MiniLM 多語言模型(~220MB)。
 # 沒裝 / 下載失敗 → episodic 自動降級關鍵字檢索(facts 記憶不受影響)。
 fastembed
+
+# output.json_schema 的驗證引擎。
+# ⚠ 以前沒宣告，只是剛好被 mcp 當相依裝進來 —— 相依樹一動就會讓所有
+#   json_schema 合約靜默失效（實測型別完全錯誤也印「通過」）。明確宣告。
+jsonschema>=4.0.0

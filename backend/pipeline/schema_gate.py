@@ -37,7 +37,12 @@ def validate_output_schema(path: str, schema: dict) -> Tuple[bool, str]:
     try:
         import jsonschema
     except ImportError:
-        return True, ""  # 套件缺 → 不擋(degrade gracefully),但正常安裝都有
+        # ⚠ 不能靜默放行。2026-08-06 實測：jsonschema 從來沒被列進 requirements.txt，
+        #   Atlas 是靠 mcp 套件把它當相依順便裝進來才「剛好能用」——
+        #   相依樹一動就會全部失效，而且失效時還會印「✅ schema 合約通過」。
+        #   宣告了驗證卻靜默跳過比不驗更危險，改成明確失敗。
+        return False, ("缺少 jsonschema 套件，無法驗證 output.json_schema 合約。"
+                       "請執行：pip install jsonschema")
 
     validator_cls = jsonschema.validators.validator_for(schema)
     try:
