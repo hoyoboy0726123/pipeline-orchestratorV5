@@ -209,9 +209,9 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     if (!acts?.length || !dir) return
     try {
       const res = await analyzeAnchors(dir, acts as unknown as Record<string, unknown>[], {
-        cv_search_radius: (data as any).cvSearchRadius ?? 400,
-        cv_threshold: (data as any).cvThreshold ?? 0.5,
-        cv_search_only_near: (data as any).cvSearchOnlyNear === true,
+        cv_search_radius: data.cvSearchRadius ?? 400,
+        cv_threshold: data.cvThreshold ?? 0.5,
+        cv_search_only_near: data.cvSearchOnlyNear === true,
       })
       const map: typeof anchorRisk = {}
       for (const r of res.results) {
@@ -259,9 +259,9 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // 解掉了紅字還掛著；半徑調大引入新風險卻一片安靜 —— 後者更危險。
   const riskSignature = JSON.stringify({
     dir: data.assetsDir,
-    radius: (data as any).cvSearchRadius ?? 400,
-    threshold: (data as any).cvThreshold ?? 0.5,
-    onlyNear: (data as any).cvSearchOnlyNear === true,
+    radius: data.cvSearchRadius ?? 400,
+    threshold: data.cvThreshold ?? 0.5,
+    onlyNear: data.cvSearchOnlyNear === true,
     acts: (data.actions || []).map((a: any) => [
       a.type, a.image, a.x, a.y, a.search_region, a.cv_strict_region, a.confidence,
     ]),
