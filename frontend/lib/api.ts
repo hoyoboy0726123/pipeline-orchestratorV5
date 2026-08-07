@@ -1333,6 +1333,41 @@ export interface AssetFileEntry {
   size: number
   mtime: number
 }
+export interface AnchorAnalysis {
+  index: number
+  checked: boolean
+  /** 執行時「真的搆得到而且搶得走」的相似處數量（不是整張畫面的總數） */
+  rivals: number
+  nearest_rival_px: number
+  /** 整張錄製畫面上掃到的相似處總數（含搆不到 / 分數差太多的） */
+  scanned?: number
+  /** 各階段各有幾個搆得到，決定要給什麼建議 */
+  phases?: { box: number; near: number; fullscreen: number }
+  /** 錨點幾乎沒有特徵（純色）→ CV 會亂命中，比有替身更嚴重 */
+  flat?: boolean
+  variance?: number
+  target_score?: number
+  best_rival_score?: number
+  reason: string
+}
+
+/** 算每張錨點在錄製畫面上有幾個「執行時搶得走」的替身。 */
+export async function analyzeAnchors(
+  assetsDir: string,
+  actions: Record<string, unknown>[],
+  cv?: { cv_search_radius?: number; cv_threshold?: number; cv_search_only_near?: boolean },
+): Promise<{ results: AnchorAnalysis[] }> {
+  // 一定要把步驟層級的 CV 設定帶過去 —— 分析要用「執行時真的會用的那組值」，
+  // 否則會報一堆執行時根本碰不到的假警報。
+  const res = await fetch(`${BASE}/computer-use/assets/analyze-anchors`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assets_dir: assetsDir, actions, ...(cv || {}) }),
+  })
+  if (!res.ok) throw new Error(`錨點分析失敗（${res.status}）`)
+  return res.json()
+}
+
 export async function listAssetFiles(dir: string): Promise<{ dir: string; files: AssetFileEntry[] }> {
   const url = `${BASE}/computer-use/assets/list?dir=${encodeURIComponent(dir)}`
   const res = await fetchWithRetry(url)

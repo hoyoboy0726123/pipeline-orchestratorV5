@@ -687,6 +687,52 @@ def _validate_assets_path(path_str: str) -> "Path":
     return target_resolved
 
 
+class AnchorAnalyzeRequest(BaseModel):
+    assets_dir: str
+    actions: list   # 整個步驟的動作序列（只有帶 image 的會被分析）
+    # 步驟層級的 CV 設定。分析必須用「執行時真的會用的那組值」，
+    # 否則會報出一堆執行時根本搆不到的假警報。
+    cv_search_radius: int = 400
+    cv_threshold: float = 0.5
+    cv_search_only_near: bool = False
+
+
+@app.post("/computer-use/assets/analyze-anchors")
+async def analyze_anchors(req: AnchorAnalyzeRequest):
+    """算每張錨點在錄製畫面上有幾個替身，而且**執行時真的搆得到、搶得走**。
+
+    錄製完自動跑一次；前端也會在 CV 設定變動時重算（不然警告會說謊）。
+    只有真的有風險才回報 —— 早期版本掃整張圖就報警，結果報一堆碰不到的
+    位置，反而害使用者去改不該改的設定。
+    """
+    from pipeline.computer_use import analyze_anchor_uniqueness
+
+    assets = _validate_assets_path(req.assets_dir)
+    if not assets.is_dir():
+        raise HTTPException(status_code=404, detail=f"找不到 assets 目錄：{assets}")
+
+    def _run():
+        out = []
+        for i, a in enumerate(req.actions or []):
+            if not isinstance(a, dict) or not (a.get("image") or "").strip():
+                out.append({"index": i, "checked": False, "reason": "非錨點動作"})
+                continue
+            r = analyze_anchor_uniqueness(
+                assets, a,
+                cv_search_radius=req.cv_search_radius,
+                cv_threshold=float(a.get("confidence") or req.cv_threshold),
+                cv_search_only_near=bool(a.get("cv_search_only_near",
+                                               req.cv_search_only_near)),
+            )
+            r["index"] = i
+            out.append(r)
+        return out
+
+    # 每張圖一次全螢幕 matchTemplate，20 個動作約 1~2 秒 —— 丟 executor 別卡 event loop
+    loop = asyncio.get_event_loop()
+    return {"results": await loop.run_in_executor(None, _run)}
+
+
 @app.get("/computer-use/assets/list")
 async def list_assets(dir: str):
     """列出 assets_dir 內的 PNG 錨點檔。給「VLM 挑錨點」的檔案選擇器用 —

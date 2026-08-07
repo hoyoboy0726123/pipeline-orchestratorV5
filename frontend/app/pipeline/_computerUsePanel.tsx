@@ -38,6 +38,7 @@ import {
   stopComputerUseRecording,
   getComputerUseRecordingStatus,
   loadComputerUseRecording,
+  analyzeAnchors,
   deleteComputerUseAssets,
   armComputerUseRecordingHotkey,
   disarmComputerUseRecordingHotkey,
@@ -193,6 +194,55 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     }
   }
 
+  // 錨點獨特性：index → 這張錨點回放時可能被哪些地方搶走。
+  // 只提醒、不改執行行為（試過依它自動鎖搜尋範圍，實測不可行 ——
+  // 錄製當下的替身分佈預測不了回放當下的）。
+  const [anchorRisk, setAnchorRisk] = useState<Record<number, {
+    rivals: number; nearest: number; scanned: number
+    phases?: { box: number; near: number; fullscreen: number }
+    flat?: boolean; variance?: number
+    targetScore?: number; rivalScore?: number
+  }>>({})
+
+  // silent = 設定變動時的自動重算，不跳 toast（拖框時會洗版）
+  const runAnchorCheck = async (acts: ComputerUseAction[], dir: string, silent = false) => {
+    if (!acts?.length || !dir) return
+    try {
+      const res = await analyzeAnchors(dir, acts as unknown as Record<string, unknown>[], {
+        cv_search_radius: (data as any).cvSearchRadius ?? 400,
+        cv_threshold: (data as any).cvThreshold ?? 0.5,
+        cv_search_only_near: (data as any).cvSearchOnlyNear === true,
+      })
+      const map: typeof anchorRisk = {}
+      for (const r of res.results) {
+        // flat（純色錨點）比有替身嚴重 —— CV 對它完全無效，一定要報
+        if (r.checked && (r.rivals > 0 || r.flat)) {
+          map[r.index] = {
+            rivals: r.rivals, nearest: r.nearest_rival_px,
+            scanned: r.scanned ?? r.rivals, phases: r.phases,
+            flat: r.flat, variance: r.variance,
+            targetScore: r.target_score, rivalScore: r.best_rival_score,
+          }
+        }
+      }
+      setAnchorRisk(map)
+      if (silent) return
+      const nFlat = Object.values(map).filter(m => m.flat).length
+      const nRival = Object.keys(map).length - nFlat
+      if (nFlat > 0) {
+        toast.error(`${nFlat} 個錨點幾乎沒有特徵（純色），CV 會亂命中 —— 請重圈`, { duration: 10000 })
+      }
+      if (nRival > 0) {
+        toast.warning(`${nRival} 個錨點有分數逼近的替身，回放時可能被搶走（見動作列表的 ⚠）`, { duration: 7000 })
+      }
+      if (nFlat === 0 && nRival === 0) {
+        toast.success('錨點檢查通過：搜尋範圍內沒有分數搶得走真目標的地方')
+      }
+    } catch (e) {
+      console.warn('anchor check:', e)   // 分析失敗不影響錄製結果
+    }
+  }
+
   const handleLoadRecording = async () => {
     try {
       const res = await loadComputerUseRecording(defaultAssetsDir)
@@ -203,6 +253,33 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
       console.warn('Load recording:', e)
     }
   }
+
+  // ── 設定一改就重算警告 ────────────────────────────────────────────
+  // 警告是「依目前設定判斷風險」，設定變了卻不重算就會說謊：縮小橘框把風險
+  // 解掉了紅字還掛著；半徑調大引入新風險卻一片安靜 —— 後者更危險。
+  const riskSignature = JSON.stringify({
+    dir: data.assetsDir,
+    radius: (data as any).cvSearchRadius ?? 400,
+    threshold: (data as any).cvThreshold ?? 0.5,
+    onlyNear: (data as any).cvSearchOnlyNear === true,
+    acts: (data.actions || []).map((a: any) => [
+      a.type, a.image, a.x, a.y, a.search_region, a.cv_strict_region, a.confidence,
+    ]),
+  })
+  useEffect(() => {
+    const acts = data.actions || []
+    if (!acts.some((a: any) => a.type === 'click_image' && a.image)) {
+      setAnchorRisk({})
+      return
+    }
+    const t = setTimeout(() => {
+      runAnchorCheck(acts, data.assetsDir || '', true)
+    }, 500)
+    return () => clearTimeout(t)
+    // riskSignature 已涵蓋所有會影響結果的輸入
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [riskSignature])
+
 
   // 動作操作
   const moveAction = (i: number, dir: -1 | 1) => {
@@ -625,6 +702,41 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                       )}
                     </div>
                     {a.description && <p className="text-xs text-gray-600 mt-0.5 truncate">{a.description}</p>}
+                    {/* 純色錨點：比「有替身」嚴重 —— CV 對它完全無效 */}
+                    {anchorRisk[i]?.flat && (
+                      <p className="text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-1 mt-1 leading-snug">
+                        ⛔ 這張錨點<strong>幾乎沒有特徵</strong>（灰階變異數 {anchorRisk[i].variance}）。
+                        它跟畫面上<strong>任何一塊平坦區域</strong>比對都會是滿分，
+                        所以 CV 可能命中完全無關的位置。
+                        <br />
+                        請按「編輯錨點」重圈一個<strong>含文字或邊框</strong>的範圍。
+                      </p>
+                    )}
+                    {/* 有替身：只在「執行時搆得到而且分數搶得走」時才報，
+                        而且建議要對症下藥 —— 替身在搜尋半徑內時勾「只搜附近」沒用 */}
+                    {anchorRisk[i] && !anchorRisk[i].flat && (() => {
+                      const r = anchorRisk[i]
+                      const nearRisk = (r.phases?.near || 0) > 0 || (r.phases?.box || 0) > 0
+                      const onlyFullscreen = !nearRisk && (r.phases?.fullscreen || 0) > 0
+                      return (
+                        <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 mt-1 leading-snug">
+                          ⚠ 回放時搜尋範圍內有 {r.rivals} 個地方<strong>相似度逼近真目標</strong>
+                          （目標 {r.targetScore?.toFixed(2)} vs 它 {r.rivalScore?.toFixed(2)}，
+                          最近的在 {r.nearest}px 外）。
+                          CV 取範圍內分數最高的，所以真目標只要掉一點分就可能被搶走。
+                          {r.scanned > r.rivals && (
+                            <span className="text-amber-600">
+                              （另有 {r.scanned - r.rivals} 個較像的地方，但分數差得夠遠、搶不走，沒列入）
+                            </span>
+                          )}
+                          <br />
+                          {onlyFullscreen
+                            ? '只有在「橘框和附近都找不到、退回整個桌面」時才會撞到。可勾步驟設定的「只搜錄製座標附近」（找不到就停，不退回全桌面）。'
+                            : '它就在搜尋範圍內，所以勾「只搜附近」沒有用。建議：把 CV 搜尋半徑縮小／拖一個橘框把範圍鎖小／改用 UIA 定位／把錨點框大一點含周邊文字讓它變獨特。'}
+                        </p>
+                      )
+                    })()}
+
                     {a.text && <p className="text-xs text-gray-500 mt-0.5 truncate font-mono">"{a.text}"</p>}
                     {a.keys && a.keys.length > 0 && (
                       <p className="text-xs text-gray-500 mt-0.5 font-mono">{a.keys.join('+')}</p>

@@ -35,6 +35,42 @@ _TPL_CACHE_MAX = 64
 _tpl_cache: "OrderedDict[tuple[str, float], tuple[np.ndarray, np.ndarray]]" = OrderedDict()
 
 
+# 錨點「有沒有特徵」的下限（灰階變異數）。
+# 2026-08-06 實測：TM_CCOEFF_NORMED 對零變異模板是數學退化的（除以 0），
+# 純色錨點跟**任何東西**比都拿 1.000 —— 連純雜訊都 1.000，
+# 也就是 CV 會隨便命中一塊平坦區域。
+# 判別力實測：變異數 20 以下完全分不出來，100 以上正常（0.000~0.062）；
+# 實際錄製的錨點是 888~5295，門檻取 100 有將近 9 倍餘裕。
+ANCHOR_MIN_VARIANCE = 100.0
+
+
+def _anchor_variance(img) -> float:
+    """錨點的灰階變異數。太低 = 這張圖沒有特徵，比對結果不可信。"""
+    import cv2
+    if img is None:
+        return 0.0
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    return float(np.var(g))
+
+
+def _imread_unicode(path):
+    """讀圖但吃得下非 ASCII 路徑。讀不到回 None。
+
+    cv2.imread 在 Windows 無法開啟含中文的路徑（直接回 None，不報錯），
+    而工作流名稱幾乎都是中文（例：ai_output\新工作流\桌面自動化_1_assets），
+    所以一律走 read_bytes + imdecode。
+    """
+    import cv2
+    from pathlib import Path as _P
+    try:
+        buf = np.frombuffer(_P(path).read_bytes(), dtype=np.uint8)
+    except OSError:
+        return None
+    if buf.size == 0:
+        return None
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
 def _load_template(tpl_path: Path):
     """解碼錨點圖 → 回傳 (gray, edge) 灰階/Canny 邊緣陣列，兩者皆用於 find_template 的 mode 切換。
     命中快取直接回；未命中解碼一次存入。失敗回 (None, None, 錯誤訊息)。"""
@@ -582,6 +618,173 @@ def _vlm_pick_anchor(prompt: str, anchor_names: list[str], assets_dir: Path,
         return (False, -1, f"VLM 選的 index={idx} 超出範圍（只有 {len(anchor_names)} 張）")
     logger.info(f"[vlm_pick] picked [{idx}] {anchor_names[idx]} reason={reason[:120]}")
     return (True, idx, reason)
+
+
+# ── 錨點獨特性分析 ──────────────────────────────────────────────────
+# 「這張錨點回放時會不會挑錯」。錄製後算一次，只提醒、不改執行行為。
+ANCHOR_RIVAL_THRESHOLD = 0.5
+
+# 替身要「搶得走」才算數：CV 取的是搜尋範圍內**分數最高**的那一個，
+# 所以替身必須先贏過真目標。分數差得遠 = 只有真目標整個消失時才會被誤點，
+# 那不是「錨點不夠獨特」，報出來只會讓使用者學會忽略警告。
+# 2026-08-06 實測（8 個真實動作）：真目標一律 1.000，最強替身 0.593~0.699，
+# 差距 0.30~0.41 —— 全部搶不走。反例：視窗標題列三顆按鈕彼此 ~1.000。
+ANCHOR_RIVAL_GAP = 0.15
+
+# 全桌面 fallback 的最低 CV 門檻。analyze 要跟 execute_action 用同一個值，
+# 否則會報出「執行時根本搆不到」的假警報。
+_ANCHOR_FULLSCREEN_MIN = 0.80
+
+
+def analyze_anchor_uniqueness(assets_dir, action: dict,
+                              threshold: float = ANCHOR_RIVAL_THRESHOLD,
+                              max_peaks: int = 8,
+                              cv_search_radius: int = 400,
+                              cv_threshold: float = 0.5,
+                              cv_search_only_near: bool = False) -> dict:
+    """算這張錨點在錄製畫面上有幾個替身，**而且執行時真的搆得到、搶得走**。
+
+    用錄製時存的 full_NNN.png（那一刻的整個畫面），不是「現在」的畫面。
+
+    ⚠ 判定要跟 find_template 的三階段一致，否則會狂報假警報：
+        Phase 1  橘框內       門檻 cv_threshold  —— 沒拉橘框就不執行
+        Phase 2  座標 ±radius  門檻 cv_threshold
+        Phase 3  整個桌面      門檻 max(cv_threshold, 0.80)
+                              —— 勾「只搜附近」或嚴格鎖橘框就不執行
+      near_xy 是**方形**範圍（x/y 各 ±radius），不是圓形；用歐氏距離判斷會
+      漏掉四個角落的替身（假陰性，比假警報危險）。
+
+    回傳 checked / rivals / nearest_rival_px / scanned / phases /
+        flat / variance / target_score / best_rival_score / reason
+    """
+    import cv2
+    from pathlib import Path as _Path
+
+    assets_dir = _Path(assets_dir)
+
+    def _skip(why: str) -> dict:
+        return {"checked": False, "rivals": 0, "nearest_rival_px": 0, "scanned": 0,
+                "phases": {"box": 0, "near": 0, "fullscreen": 0},
+                "flat": False, "variance": 0.0,
+                "target_score": 0.0, "best_rival_score": 0.0, "reason": why}
+
+    img_name = (action.get("image") or "").strip()
+    full_name = (action.get("full_image") or "").strip()
+    if not img_name:
+        return _skip("這個動作沒有錨點圖")
+    if not full_name:
+        return _skip("沒有錄製當下的全螢幕截圖，無法判斷")
+
+    tpl = _imread_unicode(assets_dir / img_name)
+    full = _imread_unicode(assets_dir / full_name)
+    if tpl is None or full is None:
+        return _skip("錨點圖或全螢幕截圖讀取失敗")
+
+    cx = int(action.get("x", 0) or 0) - int(action.get("full_left", 0) or 0)
+    cy = int(action.get("y", 0) or 0) - int(action.get("full_top", 0) or 0)
+    H, W = full.shape[:2]
+    th, tw = tpl.shape[:2]
+    if not (0 <= cx < W and 0 <= cy < H):
+        return _skip("點擊座標不在全螢幕截圖範圍內")
+    if th >= H or tw >= W:
+        return _skip("錨點圖比全螢幕截圖還大")
+
+    # 純色錨點比「有替身」更嚴重：它跟任何一塊平坦區域都是滿分。
+    variance = _anchor_variance(tpl)
+    if variance < ANCHOR_MIN_VARIANCE:
+        return {"checked": True, "rivals": 0, "nearest_rival_px": 0, "scanned": 0,
+                "phases": {"box": 0, "near": 0, "fullscreen": 0},
+                "flat": True, "variance": round(variance, 1),
+                "target_score": 0.0, "best_rival_score": 0.0,
+                "reason": (f"這張錨點幾乎沒有特徵（灰階變異數 {variance:.1f}）——"
+                           f"它跟畫面上任何一塊平坦區域都會是滿分，CV 可能命中"
+                           f"完全無關的位置。請重圈一個含文字或邊框的範圍。")}
+
+    g_full = cv2.cvtColor(full, cv2.COLOR_BGR2GRAY)
+    g_tpl = cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY)
+    try:
+        res = cv2.matchTemplate(g_full, g_tpl, cv2.TM_CCOEFF_NORMED)
+    except cv2.error as e:
+        return _skip(f"比對失敗：{e}")
+
+    peaks = []
+    work = res.copy()
+    for _ in range(max_peaks):
+        _, val, _, loc = cv2.minMaxLoc(work)
+        if val < threshold:
+            break
+        peaks.append((float(val), loc[0] + tw // 2, loc[1] + th // 2))
+        work[max(0, loc[1] - th):loc[1] + th, max(0, loc[0] - tw):loc[0] + tw] = -1.0
+    if not peaks:
+        return _skip("錨點在自己的錄製截圖上都對不到，可能是錄壞了")
+
+    peaks.sort(key=lambda p: (p[1] - cx) ** 2 + (p[2] - cy) ** 2)
+    target_score = peaks[0][0]
+    all_rivals = peaks[1:]
+    scanned = len(all_rivals)
+    rivals = [r for r in all_rivals if r[0] >= target_score - ANCHOR_RIVAL_GAP]
+    weak = scanned - len(rivals)
+
+    off_l = int(action.get("full_left", 0) or 0)
+    off_t = int(action.get("full_top", 0) or 0)
+    box = action.get("search_region") or []
+    has_box = isinstance(box, (list, tuple)) and len(box) == 4 and box[2] > 0 and box[3] > 0
+    cv_strict = bool(action.get("cv_strict_region", False))
+    fullscreen_on = not cv_search_only_near and not (cv_strict and has_box)
+    full_min = max(cv_threshold, _ANCHOR_FULLSCREEN_MIN)
+
+    counts = {"box": 0, "near": 0, "fullscreen": 0}
+    reachable = []
+    best_rival = 0.0
+    for val, px, py in rivals:
+        d = int(((px - cx) ** 2 + (py - cy) ** 2) ** 0.5)
+        hit = False
+        if has_box and val >= cv_threshold:
+            l, t, w, h = box[0], box[1], box[2], box[3]
+            if l <= px + off_l <= l + w and t <= py + off_t <= t + h:
+                counts["box"] += 1
+                hit = True
+        in_near = abs(px - cx) <= cv_search_radius and abs(py - cy) <= cv_search_radius
+        if not (cv_strict and has_box) and val >= cv_threshold and in_near:
+            counts["near"] += 1
+            hit = True
+        if fullscreen_on and val >= full_min:
+            counts["fullscreen"] += 1
+            hit = True
+        if hit:
+            reachable.append(d)
+            best_rival = max(best_rival, val)
+
+    if not reachable:
+        if weak and not rivals:
+            why = (f"畫面上有 {weak} 個較像的地方，但分數都低於目標 "
+                   f"{ANCHOR_RIVAL_GAP:.2f} 以上（目標 {target_score:.2f}），搶不走 —— "
+                   f"只有真目標整個從畫面消失時才可能被誤點")
+        elif scanned:
+            why = f"畫面上有 {scanned} 個相似處，但執行時都搆不到"
+        else:
+            why = "錨點在錄製畫面上是獨一無二的"
+        return {"checked": True, "rivals": 0, "nearest_rival_px": 0, "scanned": scanned,
+                "phases": counts, "flat": False, "variance": round(variance, 1),
+                "target_score": round(target_score, 3), "best_rival_score": 0.0,
+                "reason": why}
+
+    nearest = min(reachable)
+    where = "、".join(n for n, ok in (("橘框內", counts["box"]),
+                                      ("錄製座標附近", counts["near"]),
+                                      ("退回全螢幕時", counts["fullscreen"])) if ok)
+    return {
+        "checked": True, "rivals": len(reachable), "nearest_rival_px": nearest,
+        "scanned": scanned, "phases": counts, "flat": False,
+        "variance": round(variance, 1),
+        "target_score": round(target_score, 3),
+        "best_rival_score": round(best_rival, 3),
+        "reason": (f"有 {len(reachable)} 個地方分數逼近真目標（{where}）："
+                   f"目標 {target_score:.2f} vs 替身 {best_rival:.2f}，"
+                   f"最近的在 {nearest}px 外"
+                   + (f"；另有 {scanned - len(reachable)} 個差太多或搆不到，不列入"
+                      if scanned > len(reachable) else "")),
+    }
 
 
 def _pyautogui_with_failsafe():
