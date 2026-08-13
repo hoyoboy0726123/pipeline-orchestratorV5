@@ -231,17 +231,63 @@ def provider_has_native_fc(role: str = "primary") -> bool:
         return True
 
 
-def provider_supports_vision(role: str = "primary") -> bool:
-    """該 role 目前的 provider 能不能吃圖片（multimodal）。
+# Ollama 模型 vision 能力查詢結果快取（key = (base_url, model)）。
+# /api/show 是本機呼叫、很快，但這支會被 VLM 路徑頻繁呼叫，還是快取一下。
+_OLLAMA_VISION_CACHE: dict = {}
 
-    純文字橋接的 provider（CLI 訂閱大腦）會把 image blocks 丟掉 → 回 False。
-    VLM 驗證必須據此改用別的 role 或明確報錯，否則模型會「沒看到圖就下判決」。"""
+
+def _ollama_has_vision(base_url: str, model: str) -> bool:
+    """問 Ollama 這顆模型到底看不看得到圖。
+
+    ⚠ 2026-08-13 修正：舊版只看 provider 不看 model，所以
+    `provider=ollama, model=qwen3:8b`（純文字）會被判定成「支援看圖」，
+    於是圖片照送、Ollama 收下後**默默忽略**，模型基於「沒看到畫面」給出
+    很有自信的判斷 —— 正是這支函式的 docstring 自己警告的那種靜默錯誤，
+    但守門條件只擋得住 CLI provider。
+
+    /api/show 的 capabilities 會明確列出 vision（實測 qwen3.6:27b 有、
+    qwen3:8b 沒有）。查不到一律**保守回 False** —— 寧可讓呼叫端改用
+    另一個 role 或明確報錯，也不要送圖給看不到的模型。
+    """
+    key = (base_url, model)
+    if key in _OLLAMA_VISION_CACHE:
+        return _OLLAMA_VISION_CACHE[key]
+    ok = False
+    try:
+        import httpx
+        r = httpx.post(f"{base_url.rstrip('/')}/api/show",
+                       json={"model": model}, timeout=8.0)
+        if r.status_code == 200:
+            caps = r.json().get("capabilities") or []
+            ok = "vision" in [str(c).lower() for c in caps]
+    except Exception:
+        ok = False
+    _OLLAMA_VISION_CACHE[key] = ok
+    return ok
+
+
+def provider_supports_vision(role: str = "primary") -> bool:
+    """該 role 目前的「provider + model」組合能不能吃圖片。
+
+    CLI 訂閱大腦走純文字橋(image blocks 被丟掉) → False。
+    Ollama → 實際查該模型的 capabilities（純文字模型很常見）。
+    其他雲端 provider → 沿用舊行為視為 True。
+
+    呼叫端（cu_vlm_verifier / visual_validator / computer_use）會據此改用
+    另一個 role 或明確報錯 —— 絕不能讓模型「沒看到圖就下判決」。
+    """
     try:
         cfg = _resolve_role_settings(get_settings(), role)
-        return (cfg.get("provider") or "") not in _CLI_PROVIDERS
+        provider = (cfg.get("provider") or "").strip()
+        if provider in _CLI_PROVIDERS:
+            return False
+        if provider == "ollama":
+            return _ollama_has_vision(
+                cfg.get("ollama_base_url") or "http://localhost:11434",
+                (cfg.get("model") or "").strip())
+        return True
     except Exception:
         return True
-
 
 def resolve_loop_mode(env_mode: str, role: str = "primary") -> str:
     """把 SUBAGENT_LOOP_MODE(native/text)依 provider 修正:

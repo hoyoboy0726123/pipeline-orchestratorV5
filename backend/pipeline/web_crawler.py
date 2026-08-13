@@ -577,6 +577,19 @@ async def _fetch_static_http(*, fetch_url: str, requested_url: str, output_path:
                     f"純 HTTP 回 status={status_code}、內容過薄({len(html)} bytes);"
                     f"httpx 與 curl.exe 皆無法取得(站點反爬)",
                     tier="http")
+
+    # ── 被導去登入牆 / 驗證牆 ────────────────────────────────────────
+    # ⚠ 2026-08-13 實測：Reddit 現在對匿名請求回 302 → /login/?reason=lor2，
+    #   最終是 200 + 308KB 的登入頁。上面兩道守門(狀態碼、內容過薄)都擋不住，
+    #   於是「抓到登入頁」被當成抓取成功，下游 subagent 就去分析一個登入頁，
+    #   產出一份看起來正常、實際毫無根據的報告 —— 典型的靜默失敗。
+    _blocked = _detect_login_wall(requested_url, base, html)
+    if _blocked:
+        return _err(requested_url,
+                    f"抓到的是登入/驗證頁而不是內容：{_blocked}。"
+                    f"（HTTP 200 但被導向 {base}）"
+                    f"此來源目前需要登入或通過驗證，請改用官方 API、RSS，或換一個資料源。",
+                    tier="http")
     links_internal: list = []
     try:
         from bs4 import BeautifulSoup
@@ -2336,6 +2349,39 @@ def _yaml_scalar(v) -> str:
     if any(c in s for c in ":#\n[]{}\"") or s.strip() != s:
         return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
     return s
+
+
+def _detect_login_wall(requested_url: str, final_url: str, html: str) -> str:
+    """回「被導去登入/驗證牆」的原因；沒有就回空字串。
+
+    為什麼需要這支：站點擋爬時不一定回 4xx。實測 Reddit 是 302 → 登入頁 →
+    200 + 308KB，狀態碼與長度都正常，靠那兩項判斷會把登入頁當成抓取成功。
+
+    判定盡量保守 —— 只在「原本要的網址跟最終網址不是同一件事」時才看內容特徵，
+    避免把本來就叫「登入」的頁面誤判（使用者可能真的要抓登入頁）。
+    """
+    from urllib.parse import urlparse
+    try:
+        rp, fp = urlparse(requested_url), urlparse(final_url or requested_url)
+    except Exception:
+        return ""
+    # 使用者原本就要抓登入頁 → 不判定
+    if any(k in (rp.path or "").lower() for k in ("/login", "/signin", "/sign_in", "/auth")):
+        return ""
+    moved = (rp.path or "/").rstrip("/") != (fp.path or "/").rstrip("/")
+    fpath = (fp.path or "").lower()
+    if moved and any(k in fpath for k in ("/login", "/signin", "/sign_in",
+                                          "/account/login", "/auth/")):
+        return f"被轉址到登入頁 {fpath}"
+    # 沒轉址但頁面本身是驗證牆（Cloudflare / 「請稍候」型）
+    head = html[:4000].lower()
+    for kw, why in (("just a moment", "Cloudflare 驗證牆"),
+                    ("please wait for verification", "驗證等待頁"),
+                    ("checking your browser", "瀏覽器檢查頁"),
+                    ("enable javascript and cookies to continue", "需要 JS/Cookie 的攔截頁")):
+        if kw in head:
+            return why
+    return ""
 
 
 def _err(url: str, msg: str, *, tier: str) -> CrawlResult:
