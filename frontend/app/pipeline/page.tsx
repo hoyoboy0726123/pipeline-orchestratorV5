@@ -440,7 +440,7 @@ export default function PipelinePage() {
   const runStatusRef = useRef(runStatus)
   const setRunStatus = (v: typeof runStatus) => { runStatusRef.current = v; _setRunStatus(v) }
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null)
-  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval' | 'self_heal'>('failure')
+  const [awaitingType, setAwaitingType] = useState<'failure' | 'confirm' | 'ask_user' | 'missing_dep' | 'cmd_approval' | 'self_heal' | 'inconclusive'>('failure')
   // Phase 3 自我修復回寫:修復成功跑完後,問是否把修好的 YAML 存回存檔工作流
   const [healWriteback, setHealWriteback] = useState<{ runId: string; workflowId: string } | null>(null)
   const [askUserOptions, setAskUserOptions] = useState<string[]>([])
@@ -577,7 +577,7 @@ export default function PipelinePage() {
             setRunStatus('awaiting')
             setAwaitingRunId(active.run_id)
             const at = (active as any).awaiting_type
-            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
+            const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : at === 'inconclusive' ? 'inconclusive' : 'failure'
             setAwaitingType(mapped)
             setAwaitingMessage((active as any).awaiting_message || '')
             setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1491,7 +1491,7 @@ export default function PipelinePage() {
                 setRunStatus('awaiting')
                 setAwaitingRunId(active.run_id)
                 const at = (active as any).awaiting_type
-                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
+                const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : at === 'inconclusive' ? 'inconclusive' : 'failure'
                 setAwaitingType(mapped)
                 setAwaitingMessage((active as any).awaiting_message || '')
                 setAwaitingSuggestion((active as any).awaiting_suggestion || '')
@@ -1578,7 +1578,7 @@ export default function PipelinePage() {
       if (data.status === 'awaiting_human') {
         const firstEntry = runStatusRef.current !== 'awaiting'
         const at = data.awaiting_type
-        const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : 'failure'
+        const mapped = at === 'human_confirm' ? 'confirm' : at === 'ask_user' ? 'ask_user' : at === 'missing_dependency' ? 'missing_dep' : at === 'command_approval' ? 'cmd_approval' : at === 'self_heal' ? 'self_heal' : at === 'inconclusive' ? 'inconclusive' : 'failure'
         if (firstEntry) {
           setRunning(false)
           setRunStatus('awaiting')
@@ -1604,7 +1604,9 @@ export default function PipelinePage() {
             toast.info('❓ AI 請求人工回答', { duration: 0, id: 'awaiting' })
           } else {
             toast[mapped === 'confirm' ? 'info' : 'warning'](
-              mapped === 'confirm' ? '✋ 等待人工確認' : '步驟執行失敗，請選擇處理方式',
+              mapped === 'confirm' ? '✋ 等待人工確認'
+                : mapped === 'inconclusive' ? '🔍 這一步沒被驗證過，請人工確認產出'
+                : '步驟執行失敗，請選擇處理方式',
               { duration: 0, id: 'awaiting' }
             )
           }
@@ -2149,6 +2151,35 @@ export default function PipelinePage() {
                   disabled={!hintText.trim()}
                   className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50"
                 >送出</button>
+              </div>
+            )}
+          </div>
+        )}
+        {/* 驗證沒得出結論 —— 刻意跟 failure 分開:講「失敗」會誤導,這一步很可能是好的 */}
+        {runStatus === 'awaiting' && awaitingRunId && awaitingType === 'inconclusive' && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-sky-50 border border-sky-200 rounded-2xl shadow-lg px-5 py-3 space-y-2 max-w-[600px] w-[90vw]">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sky-700 font-medium text-sm whitespace-nowrap">🔍 這一步沒被驗證過（不代表失敗）</span>
+              <div className="flex items-center gap-1.5 ml-auto flex-wrap">
+                <button
+                  onClick={() => handleDecision('continue')}
+                  title="人工看過產出、確認沒問題 → 標記通過並繼續下一步"
+                  className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 whitespace-nowrap"
+                >✓ 產出沒問題，通過</button>
+                <button
+                  onClick={() => handleDecision('retry')}
+                  title="重跑這一步並重新驗證"
+                  className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 whitespace-nowrap"
+                >🔄 重跑並重驗</button>
+                <button
+                  onClick={() => handleDecision('abort')}
+                  className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 whitespace-nowrap"
+                >✕ 中止</button>
+              </div>
+            </div>
+            {awaitingMessage && (
+              <div className="bg-sky-100 border border-sky-200 rounded-lg px-3 py-2">
+                <p className="text-xs text-sky-800 leading-relaxed whitespace-pre-line">{awaitingMessage}</p>
               </div>
             )}
           </div>

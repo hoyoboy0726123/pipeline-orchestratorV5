@@ -2808,6 +2808,26 @@ async def _run_pipeline_inner(
                 store.save(run)
                 return run.run_id
 
+            # inconclusive(驗證器跑不完、沒給結論):暫停等人工確認。
+            # ⚠ 刻意不併進 warning 的通過路徑 —— 「沒驗完」不等於「驗過了沒問題」。
+            #   實測踩過:使用者要求「≥20000 字」的報告,驗證器 15 輪跑不完就回 warning、
+            #   被當通過放行,實際只有 11,787 中文字(59%)、沒有任何人檢查過。
+            #   也刻意不 retry 步驟:沒結論多半是驗證器的問題,重跑步驟只是白燒時間。
+            if val.status == "inconclusive":
+                logger.warning(f"步驟 {step_num} ⏸ 驗證未得出結論 — 暫停等人工確認，不自動放行")
+                run.status = "awaiting_human"
+                run.awaiting_type = "inconclusive"
+                run.awaiting_message = f"""⚠ 這一步「沒有被驗證過」，不代表它失敗了
+
+原因：{val.reason}
+
+建議：{val.suggestion}
+
+請人工看一下產出，再選擇：通過 / 重試 / 中止"""
+                run.awaiting_suggestion = val.suggestion or ""
+                store.save(run)
+                return run.run_id
+
             # ── Phase B: ask_mode 命令授權拒絕/改任務 → 不 retry、直接 awaiting ──
             # executor 攔截敏感命令、用戶按拒絕或改任務後 stderr 會帶這些 prefix
             # 不 retry 因為 LLM 還是會寫同樣的命令 → 反覆觸發授權 = 死結

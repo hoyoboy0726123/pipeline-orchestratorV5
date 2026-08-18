@@ -42,7 +42,12 @@ SKILL_COOLDOWN_SECONDS = 60
 
 @dataclass
 class ValidationResult:
-    status: str      # "ok" | "warning" | "failed" | "rate_limited"
+    status: str      # "ok" | "warning" | "failed" | "rate_limited" | "inconclusive"
+    #  ok           已驗證、完全符合                      → 通過
+    #  warning      已驗證、有非致命問題                   → 通過(記 log)
+    #  failed       已驗證、未達要求                      → 進失敗流程
+    #  rate_limited 沒驗成(429)                          → 暫停等使用者決策
+    #  inconclusive 沒驗完、無結論 —— 不等於失敗,也不可靜默放行 → 暫停等人工確認
     reason: str      # 中文說明
     suggestion: str  # LLM 建議的修復方向（failed 時才有意義）
 
@@ -1246,6 +1251,16 @@ Exit Code：{exit_code}
             if iteration > 0:
                 await asyncio.sleep(SKILL_REQUEST_INTERVAL)
 
+            # 最後一輪:先逼它收尾,別讓「查到一半就沒輪次了」變成沒結論。
+            # 沒結論比 failed 更麻煩 —— 步驟可能其實是好的,但沒人知道。
+            if iteration == SKILL_MAX_ITERATIONS - 1:
+                messages.append(HumanMessage(content=(
+                    "⚠ 這是最後一輪。請**立刻呼叫 done 工具**給出結論,不要再呼叫任何其他工具。"
+                    "就用你目前已經掌握的證據判定:完全符合→ok、有非致命小問題→warning、"
+                    "確定沒達到要求→failed。若證據不足以斷定,回 warning 並在 reason 寫明"
+                    "「哪些條件還沒查證」。"
+                )))
+
             response: AIMessage = await asyncio.wait_for(
                 llm_with_tools.ainvoke(messages), timeout=180.0
             )
@@ -1344,12 +1359,16 @@ Exit Code：{exit_code}
                 logger.info(f"[{step_name}] Skill 驗證完成：{result.status} — {result.reason}")
                 return result
 
-        # 超過最大迭代次數
-        logger.warning(f"[{step_name}] Skill agent 達到最大迭代次數")
+        # 超過最大迭代次數 —— 連最後一輪的強制收尾都沒吐出 done。
+        # ⚠ 這是「沒有結論」,不是「驗過了、有小毛病」。不可以回 warning:
+        #   warning 在 runner 視為通過,會讓沒驗證過的步驟靜默過關(實測踩過:
+        #   使用者要求「≥20000 字」的報告,驗證器跑不完就放行,實際只有 59%)。
+        logger.warning(f"[{step_name}] Skill agent 達到最大迭代次數、仍未給出結論 → inconclusive")
         return ValidationResult(
-            status="warning",
-            reason=f"Skill agent 在 {SKILL_MAX_ITERATIONS} 次迭代內未完成驗證",
-            suggestion="建議手動檢查輸出結果",
+            status="inconclusive",
+            reason=f"驗證器在 {SKILL_MAX_ITERATIONS} 次迭代內未能得出結論(非步驟失敗)",
+            suggestion="步驟產出可能是好的,只是沒被驗證過。請人工確認產出是否符合要求，"
+                       "或選擇重試驗證 / 逕行通過。",
         )
 
     except Exception as e:
