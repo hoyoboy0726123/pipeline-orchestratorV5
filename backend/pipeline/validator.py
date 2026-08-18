@@ -511,6 +511,12 @@ _FILLER_MARKER_RE = re.compile(
     r"待翻譯|待補(?:充|入|齊)?|待填(?:入|寫)?|內容待(?:補|填|譯)|此處省略|內容省略|翻譯內容待",
     re.IGNORECASE,
 )
+
+# 「軟」標記:單看字串不足以斷定造假 —— researcher 常寫「## 待補面向」+「- [ ] 還沒搜的項目」
+# 當工作清單,那是誠實揭露缺口,語意跟「拿假內容充數」相反。這類只在**當成內容用**時才算造假。
+_SOFT_FILLER_RE = re.compile(r"待補(?:充|入|齊)?|待填(?:入|寫)?", re.IGNORECASE)
+# 待辦語境:markdown 標題、未勾選的 task list。這兩種是「宣告還沒做」,不是「假裝做完」。
+_TODO_CONTEXT_RE = re.compile(r"^\s*(?:#{1,6}\s|(?:[-*+]|\d+[.)])\s*\[\s*\]\s)")
 # 讀純文字輸出(office 走 _office_texts;其餘文字類副檔名直接讀)。回單一字串、讀不出回 ""。
 def _read_output_text(p: "Path") -> str:
     ext = p.suffix.lower()
@@ -548,8 +554,14 @@ def _scan_filler_placeholders(path: Optional[str]) -> "Optional[str]":
     text = _read_output_text(p)
     if not text or len(text) < 20:
         return None
-    m = _FILLER_MARKER_RE.search(text)
-    if m:
+    # 逐行掃:軟標記落在待辦語境(標題 / 未勾選 checkbox)就跳過,避免把
+    # 「## 待補面向 / - [ ] 尚未搜尋的項目」這種誠實工作清單誤判成造假(實測踩過)。
+    for line in text.splitlines():
+        m = _FILLER_MARKER_RE.search(line)
+        if not m:
+            continue
+        if _SOFT_FILLER_RE.fullmatch(m.group(0)) and _TODO_CONTEXT_RE.match(line):
+            continue
         return f"輸出含佔位/填充文字「{m.group(0)}」—— 這是做不到時填的假內容、不是真實產出。"
     return None
 
