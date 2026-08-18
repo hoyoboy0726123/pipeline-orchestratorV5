@@ -2811,7 +2811,8 @@ async def _run_pipeline_inner(
             # ── Phase B: ask_mode 命令授權拒絕/改任務 → 不 retry、直接 awaiting ──
             # executor 攔截敏感命令、用戶按拒絕或改任務後 stderr 會帶這些 prefix
             # 不 retry 因為 LLM 還是會寫同樣的命令 → 反覆觸發授權 = 死結
-            if val.status != "ok":
+            # (warning 視為通過、不進這些失敗分支 —— 與下方通過條件一致)
+            if val.status not in ("ok", "warning"):
                 _se = (exec_result.stderr or "").strip()
                 if _se.startswith("使用者拒絕執行敏感命令") or _se.startswith("使用者選擇改任務"):
                     logger.warning(f"步驟 {step_num} 命令授權:{_se[:80]} → 不 retry、等用戶在 failure awaiting 決策")
@@ -2827,7 +2828,7 @@ async def _run_pipeline_inner(
             # 缺套件早期攔截：executor 已偵測到 ModuleNotFoundError 且回 missing_packages,
             # 立刻轉 missing_dependency awaiting_human，**不進 step retry**
             # （否則 retry 會讓 LLM 改用「不裝套件、用 API 繞」的策略繞過確認對話框）
-            if val.status != "ok":
+            if val.status not in ("ok", "warning"):
                 _missing = getattr(exec_result, 'missing_packages', None) or []
                 if _missing:
                     logger.warning(
@@ -2852,7 +2853,8 @@ async def _run_pipeline_inner(
             # ── skill agent 主動 done(success=false) → 不 retry、直接 awaiting ──
             # 這是 agent 給的「明確結論」(例:沙盒跑不動、請切 host),不是 crash。
             # 重試只會重跑一輪得出同樣結論、浪費 LLM 額度、也延後使用者看到結論。
-            if val.status != "ok" and getattr(exec_result, "agent_concluded_fail", False):
+            if (val.status not in ("ok", "warning")
+                    and getattr(exec_result, "agent_concluded_fail", False)):
                 logger.warning(
                     f"步驟 {step_num} skill agent 主動 done(success=false) → 不 retry、直接 awaiting_human"
                 )
@@ -2871,8 +2873,19 @@ async def _run_pipeline_inner(
                 unregister_task(run.run_id)
                 return run.run_id
 
-            if val.status == "ok":
-                logger.info(f"步驟 {step_num} ✅ 通過")
+            # ⚠ warning 也算通過 —— validator.py 對三態的定義是
+            #   ok / warning(**步驟完成**但有非致命問題、建議人工確認) / failed。
+            #   舊寫法只認 ok，等於把三態壓成兩態、warning 形同 failed。
+            #   2026-08-18 實測：研究型 subagent 誠實標示「部分面向資料不足」→
+            #   validator 回 warning「已產出 14 個來源、11,208 bytes，建議人工確認」
+            #   → 被判失敗、重試耗盡、整條流程卡住。誠實反而被懲罰。
+            #   真正該擋的（杜撰 / 佔位填充 / 做一半）validator 回的是 failed，不受影響。
+            if val.status in ("ok", "warning"):
+                if val.status == "warning":
+                    logger.warning(
+                        f"步驟 {step_num} ⚠️ 通過（有提醒）：{(val.reason or '')[:160]}")
+                else:
+                    logger.info(f"步驟 {step_num} ✅ 通過")
                 # 收集延遲儲存的 recipe
                 if hasattr(exec_result, 'pending_recipe') and exec_result.pending_recipe:
                     run.pending_recipes.append(exec_result.pending_recipe)
