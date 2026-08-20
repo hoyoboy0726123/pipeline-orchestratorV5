@@ -49,7 +49,9 @@ markdownify
 # 之前用 Windows.Media.Ocr 在 <150% scaling 對複雜中文(檔/總/盤/畫等)漏字,
 # 在 Mica 半透明背景上更糟。RapidOCR 跨 scaling / 跨 OS 都穩定整詞識別、
 # 依賴只剩 onnxruntime ~50MB + 模型 ~15MB,首次跑會下載模型。
-rapidocr
+# 鎖版本:3.8.1→3.9.2 已實測回歸通過(OCR 12/12 繁體標籤、定位、取值、業務用語 8/8)。
+# 不鎖的話重裝會拿到未測過的版本 —— 開發機與新環境版本漂移比版本舊更危險。
+rapidocr==3.9.2
 onnxruntime
 # 簡繁體歸一化 — RapidOCR 中文模型訓練語料以簡體為主,target 通常是繁體
 # (例如「軟」會被讀成「软」、「畫」讀成「画」),歸一後雙邊都轉簡體再比對
