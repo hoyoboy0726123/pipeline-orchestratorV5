@@ -193,6 +193,7 @@ export interface ComputerUseAction {
       | 'assert_image' | 'assert_text' | 'activate_window' | 'if_image_found' | 'retry_until' | 'vlm_check'
       | 'uia_click' | 'uia_send_keys' | 'uia_get_text' | 'uia_get_table_rowcount' | 'uia_click_cell'
       | 'uia_wait_enabled' | 'uia_assert_state' | 'uia_close_window' | 'uia_set_clipboard'
+      | 'ocr_get_text'
   image?: string
   image2?: string        // 次錨點（多錨點驗證）
   dx2?: number           // 次錨點相對點擊點的 X 位移
@@ -219,6 +220,12 @@ export interface ComputerUseAction {
   modifiers?: string[]  // click 時按著的修飾鍵（如 ["ctrl"]、["ctrl","shift"]）
   use_ocr?: boolean     // click_image 顯式 OCR 啟用（勾選才跑 OCR，避免 silent 填字但沒觸發）
   ocr_text?: string     // OCR 目標文字（跟 use_ocr=true 搭配才生效）
+  // ── ocr_get_text 專用：讀「標籤旁邊的值」存成變數 ──
+  label?: string        // 要找的標籤文字（例：總計金額）
+  direction?: 'right' | 'below'   // 值在標籤的哪一側
+  kind?: 'amount' | 'ident' | 'any'  // 值的格式約束；抓錯比抓不到嚴重，務必指定
+  max_gap?: number      // 標籤與值的最大距離（px）
+  // save_as 沿用下方 UIA action 的同名欄位（同樣是「值存進哪個變數」）
   // OCR 搜尋範圍（藍框，絕對桌面座標；width=0 = 未設定，回退 near_xy+cv_search_radius）
   ocr_box_left?: number
   ocr_box_top?: number

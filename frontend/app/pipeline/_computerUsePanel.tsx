@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown, Pencil, Plus, Eye, MousePointer2 } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_helpers'
+import OcrFieldInserter from './_ocrFieldInserter'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
 const VLM_CHECK_BUILTIN_TEMPLATES: { id: string; label: string; prompt: string }[] = [
@@ -315,8 +316,17 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     onUpdate({ actions: next })
   }
 
+  /** 通用:在 index 位置插入一個動作(OCR 取值等)。 */
+  const insertActionAt = (index: number, action: ComputerUseAction) => {
+    const next = [...(data.actions || [])]
+    next.splice(index, 0, action)
+    onUpdate({ actions: next })
+  }
+
   // ➕ popover 開關：用 actionIndex 表示要在哪一個 index 插入（actions.length = 在最後）
+  // insertKind 區分同一個位置的兩種插入器(視覺判斷 / OCR 取值),否則會同時展開
   const [insertOpenAt, setInsertOpenAt] = useState<number | null>(null)
+  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr'>('vlm')
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => loadCustomTemplates())
   // 點外面關閉 popover
   useEffect(() => {
@@ -551,10 +561,17 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 尚未錄製任何動作
               </p>
               {/* 沒動作時也可以手動加 vlm_check */}
+              <OcrFieldInserter
+                index={0}
+                isOpen={insertOpenAt === 0 && insertKind === 'ocr'}
+                openMenu={() => { setInsertOpenAt(0); setInsertKind('ocr') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
               <VlmCheckInserter
                 index={0}
-                isOpen={insertOpenAt === 0}
-                openMenu={() => setInsertOpenAt(0)}
+                isOpen={insertOpenAt === 0 && insertKind === 'vlm'}
+                openMenu={() => { setInsertOpenAt(0); setInsertKind('vlm') }}
                 onPick={handlePickTemplate}
                 onSaveCustom={handleSaveCustomFromCurrent}
                 onDeleteCustom={handleDeleteCustom}
@@ -566,10 +583,17 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               {data.actions.map((a: ComputerUseAction, i: number) => (
                 <div key={i}>
                 {/* 動作前的 ➕ 插入點 */}
+                <OcrFieldInserter
+                  index={i}
+                  isOpen={insertOpenAt === i && insertKind === 'ocr'}
+                  openMenu={() => { setInsertOpenAt(i); setInsertKind('ocr') }}
+                  closeMenu={() => setInsertOpenAt(null)}
+                  onAdd={insertActionAt}
+                />
                 <VlmCheckInserter
                   index={i}
-                  isOpen={insertOpenAt === i}
-                  openMenu={() => setInsertOpenAt(i)}
+                  isOpen={insertOpenAt === i && insertKind === 'vlm'}
+                  openMenu={() => { setInsertOpenAt(i); setInsertKind('vlm') }}
                   onPick={handlePickTemplate}
                   onSaveCustom={handleSaveCustomFromCurrent}
                   onDeleteCustom={handleDeleteCustom}
@@ -960,10 +984,17 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 </div>
               ))}
               {/* 列表最後的 ➕ 插入點 */}
+              <OcrFieldInserter
+                index={data.actions.length}
+                isOpen={insertOpenAt === data.actions.length && insertKind === 'ocr'}
+                openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('ocr') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
               <VlmCheckInserter
                 index={data.actions.length}
-                isOpen={insertOpenAt === data.actions.length}
-                openMenu={() => setInsertOpenAt(data.actions.length)}
+                isOpen={insertOpenAt === data.actions.length && insertKind === 'vlm'}
+                openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('vlm') }}
                 onPick={handlePickTemplate}
                 onSaveCustom={handleSaveCustomFromCurrent}
                 onDeleteCustom={handleDeleteCustom}

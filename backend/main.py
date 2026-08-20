@@ -990,6 +990,115 @@ async def save_png_to_assets(req: SavePngRequest):
     }
 
 
+class OcrProbeRequest(BaseModel):
+    """對「當下螢幕」試抓某個標籤旁邊的值。給前端設定 ocr_get_text 時預覽用。"""
+    label: str
+    direction: str = "right"      # right 同列右側 / below 表格欄位
+    kind: str = "amount"          # amount 金額 / ident 單號統編 / any 任何含數字
+    region: Optional[list] = None # [left, top, width, height] 絕對桌面座標,省略=全螢幕
+    max_gap: int = 600
+
+
+@app.post("/computer-use/ocr/probe")
+async def ocr_probe(req: OcrProbeRequest):
+    """立刻對螢幕做一次 OCR、回報會抓到什麼。
+
+    找不到時回傳畫面上「相近的文字」候選 —— 只說「找不到」使用者不知道怎麼改,
+    看到實際 OCR 讀成什麼(例:總計金額被讀成 總計金额)才改得動。
+    """
+    import asyncio as _aio
+
+    def _work():
+        try:
+            from pipeline.computer_use import _capture_screen, _parse_search_region
+            from pipeline.ocr import _recognize, _normalize_cjk
+            from pipeline.ocr_file import read_field, find_label, AMOUNT_RE, IDENT_RE
+        except Exception as e:
+            return {"ok": False, "error": f"載入 OCR 模組失敗:{e}"}
+
+        try:
+            screen, sx, sy = _capture_screen()
+        except Exception as e:
+            return {"ok": False, "error": f"截圖失敗:{e}"}
+
+        ox, oy = sx, sy
+        if req.region and len(req.region) == 4:
+            l, t_, w_, h_ = [int(v) for v in req.region]
+            rl, rt = max(0, l - sx), max(0, t_ - sy)
+            screen = screen[rt:rt + h_, rl:rl + w_]
+            ox, oy = sx + rl, sy + rt
+            if getattr(screen, "size", 0) == 0:
+                return {"ok": False, "error": "指定範圍超出螢幕、裁出空白影像"}
+
+        try:
+            words = _aio.run(_recognize(screen, "zh-Hant-TW"))
+        except RuntimeError as e:
+            if "running event loop" not in str(e).lower():
+                return {"ok": False, "error": f"OCR 失敗:{e}"}
+            lp = _aio.new_event_loop()
+            try:
+                words = lp.run_until_complete(_recognize(screen, "zh-Hant-TW"))
+            finally:
+                lp.close()
+        except Exception as e:
+            return {"ok": False, "error": f"OCR 失敗:{e}"}
+
+        for w in words:
+            w["x"] += ox
+            w["y"] += oy
+
+        vre = {"amount": AMOUNT_RE, "ident": IDENT_RE}.get((req.kind or "amount").lower())
+        hit = read_field(words, req.label, direction=req.direction,
+                         value_re=vre, max_gap=req.max_gap)
+        out = {"ok": True, "word_count": len(words)}
+        if hit:
+            out.update(found=True, value=hit["value"],
+                       label_read_as=hit["label_text"], label_score=hit["label_score"],
+                       direction=hit["direction"], box=list(hit["value_box"]))
+            return out
+
+        out["found"] = False
+        # 標籤有沒有找到?分開報 —— 「標籤找不到」跟「標籤找到但旁邊沒有符合格式的值」
+        # 是兩種完全不同的問題,修法也不同(前者改標籤字、後者改方向或格式)
+        lab = find_label(words, req.label)
+        if lab:
+            lw, score = lab
+            out["label_found"] = True
+            out["label_read_as"] = lw.get("text", "")
+            out["label_score"] = round(score, 2)
+            out["reason"] = (f"標籤找到了（讀成「{lw.get('text','')}」），"
+                             f"但{'右側' if req.direction == 'right' else '下方'}"
+                             f"找不到符合「{req.kind}」格式的值 —— 試試換方向或改格式")
+        else:
+            out["label_found"] = False
+            tgt = _normalize_cjk(req.label)
+            scored = []
+            for w in words:
+                t = (w.get("text") or "").strip()
+                n = _normalize_cjk(t)
+                if not n or not t:
+                    continue
+                sim = sum(1 for c in tgt if c in n) / max(1, len(tgt))
+                scored.append((sim, t))
+            scored.sort(key=lambda s: -s[0])
+            cands = [t for s, t in scored if s > 0][:8]
+            if not cands:
+                # 一個字都對不上時,列「看起來像標籤的文字」(非純數字)——
+                # 空清單對使用者毫無幫助,至少讓他知道畫面上讀到什麼、可以直接點選
+                import re as _re
+                cands = [t for _, t in scored
+                         if not _re.fullmatch(r"[\d,.\-/:$ ]+", t)][:8]
+                out["reason"] = ("畫面上找不到這個標籤，也沒有相近的字。"
+                                 "下面是 OCR 在畫面上讀到的文字 —— 點一下可直接帶入")
+            else:
+                out["reason"] = ("畫面上找不到這個標籤。下面是 OCR 實際讀到的相近文字 —— "
+                                 "OCR 可能把繁體讀成簡體或漏字，照它讀到的填才對得上")
+            out["candidates"] = cands
+        return out
+
+    return await _aio.get_event_loop().run_in_executor(None, _work)
+
+
 class OcrFileRequest(BaseModel):
     """對圖檔 / PDF 做 OCR。不經螢幕 —— 不必先開檔、不受解析度與遮擋影響。"""
     path: str                              # 圖檔或 PDF 的絕對路徑
