@@ -256,6 +256,11 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
     const action: ComputerUseAction = {
       type,
       control,
+      // 記住這個元素是從哪個視窗挑的。backend 的優先序是 action.window > step 的
+      // uia_window > foreground,所以帶上之後,同一個節點就能跨視窗
+      //(例:從 EAP 讀值 → 填進 BPM 單)。不帶的話使用者一切換「目標視窗」,
+      // 先前挑的動作會跑去新視窗找舊欄位、全部失敗。
+      ...(uiaWindow.trim() ? { window: uiaWindow.trim() } : {}),
       // 帶上 picker 抓到的 rect、給 backend 在沒 Name/auto_id(generic Pane/GroupControl)時
       // 用 ControlFromPoint(rect 中心)當 fallback、避免 LookupError "searchProperties must not be empty"
       ...(el.rect && el.rect.length === 4 ? { rect: el.rect } : {}),
