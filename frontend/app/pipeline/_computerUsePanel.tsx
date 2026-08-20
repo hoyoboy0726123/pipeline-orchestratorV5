@@ -392,23 +392,24 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
         <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
           style={{ background: NODE_COLOR }}><MousePointer2 className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
-          <span className="font-semibold text-gray-800 text-sm block truncate">
-            桌面自動化節點
-            <AskAiButton
-              className="ml-2 align-middle"
-              nodeLabel={`桌面自動化節點（${(data.cuMode || 'pixel') === 'uia' ? 'UIA 控制' : '錄製回放'}）`}
-              stepName={data.name}
-              uiaWindow={data.uiaWindow || ''}
-              actions={data.actions}
-            />
-          </span>
+          <span className="font-semibold text-gray-800 text-sm block truncate">桌面自動化節點</span>
           <span className="text-xs text-gray-400">
             {(data.cuMode || 'pixel') === 'uia'
               ? 'UIA 控制(讀 GUI 結構、不靠座標)'
               : '錄製滑鼠/鍵盤操作，以圖像錨點穩定回放'}
           </span>
         </div>
-        <button onClick={onDelete} title="刪除" className="text-gray-300 hover:text-red-400 transition-colors p-1">🗑</button>
+        {/* ⚠ 這顆一定要放在標題區塊「外面」。塞進上面那個 block truncate 的 span 裡,
+            truncate 的 overflow:hidden + white-space:nowrap 會把按鈕文字裁掉/壓扁,
+            面板固定 420px 寬更明顯。 */}
+        <AskAiButton
+          className="shrink-0"
+          nodeLabel={`桌面自動化節點（${(data.cuMode || 'pixel') === 'uia' ? 'UIA 控制' : '錄製回放'}）`}
+          stepName={data.name}
+          uiaWindow={data.uiaWindow || ''}
+          actions={data.actions}
+        />
+        <button onClick={onDelete} title="刪除" className="text-gray-300 hover:text-red-400 transition-colors p-1 shrink-0">🗑</button>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors"><X className="w-4 h-4" /></button>
       </div>
 

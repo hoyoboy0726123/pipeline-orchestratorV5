@@ -94,22 +94,32 @@ export default function OcrFieldInserter({ index, isOpen, openMenu, closeMenu, o
     <div data-vlm-insert-popover
          className="my-1 rounded-lg border border-teal-200 bg-teal-50/60 p-2 space-y-1.5">
       <div className="flex items-center gap-1 text-[11px] font-semibold text-teal-800">
-        <ScanText className="w-3 h-3" /> OCR 取值：讀畫面上「標籤旁邊」的值
+        <ScanText className="w-3 h-3 shrink-0" />
+        <span className="min-w-0">OCR 取值：讀「標籤旁邊」的值</span>
       </div>
 
-      <div className="flex gap-1">
-        <input
-          value={label}
-          onChange={e => { setLabel(e.target.value); setProbe(null) }}
-          placeholder="標籤文字（例：總計金額）"
-          className="flex-1 min-w-0 text-[11px] px-1.5 py-1 rounded border border-gray-300 outline-none focus:border-teal-500"
-        />
-        <input
-          value={saveAs}
-          onChange={e => setSaveAs(e.target.value)}
-          placeholder="存成變數（例：發票金額）"
-          className="flex-1 min-w-0 text-[11px] px-1.5 py-1 rounded border border-gray-300 outline-none focus:border-teal-500 font-mono"
-        />
+      {/* ⚠ 兩個輸入框不要並排:面板只有 420px、扣掉 padding 每格剩約 180px,
+          placeholder「標籤文字（例：總計金額）」會被裁掉一半,使用者看不出要填什麼。
+          改成上下堆疊、各自帶標題。 */}
+      <div className="space-y-1">
+        <label className="block">
+          <span className="text-[10px] text-gray-500">要找的標籤</span>
+          <input
+            value={label}
+            onChange={e => { setLabel(e.target.value); setProbe(null) }}
+            placeholder="例：總計金額"
+            className="w-full text-[11px] px-1.5 py-1 rounded border border-gray-300 outline-none focus:border-teal-500"
+          />
+        </label>
+        <label className="block">
+          <span className="text-[10px] text-gray-500">值存成變數</span>
+          <input
+            value={saveAs}
+            onChange={e => setSaveAs(e.target.value)}
+            placeholder="例：發票金額"
+            className="w-full text-[11px] px-1.5 py-1 rounded border border-gray-300 outline-none focus:border-teal-500 font-mono"
+          />
+        </label>
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-gray-600">
@@ -135,9 +145,10 @@ export default function OcrFieldInserter({ index, isOpen, openMenu, closeMenu, o
             <option value="ident">單號 / 統編</option>
             <option value="any">不限</option>
           </select>
-          <span className="text-gray-400">{KIND_HINT[kind]}</span>
         </span>
       </div>
+      {/* 提示文字獨立一行 —— 跟 select 擠在同一列時會把 select 壓到只剩箭頭 */}
+      <div className="text-[10px] text-gray-400 pl-0.5">{KIND_HINT[kind]}</div>
 
       {/* 試抓 —— 目標畫面要開著 */}
       <div className="flex items-center gap-1">
@@ -146,12 +157,12 @@ export default function OcrFieldInserter({ index, isOpen, openMenu, closeMenu, o
           onClick={runProbe}
           disabled={probing}
           title="立刻對現在的螢幕試抓一次，確認標籤對得上"
-          className="text-[10px] px-2 py-1 rounded border border-teal-400 text-teal-700 hover:bg-teal-100 disabled:opacity-50 flex items-center gap-1"
+          className="text-[10px] px-2 py-1 rounded border border-teal-400 text-teal-700 hover:bg-teal-100 disabled:opacity-50 inline-flex items-center gap-1 whitespace-nowrap shrink-0"
         >
-          {probing ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScanText className="w-3 h-3" />}
+          {probing ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : <ScanText className="w-3 h-3 shrink-0" />}
           {probing ? '辨識中…' : '試抓看看'}
         </button>
-        <span className="text-[9px] text-gray-500">目標畫面要開著、不要被遮住</span>
+        <span className="text-[9px] text-gray-500 leading-tight">目標畫面要開著、不要被遮住</span>
       </div>
 
       {probe && (

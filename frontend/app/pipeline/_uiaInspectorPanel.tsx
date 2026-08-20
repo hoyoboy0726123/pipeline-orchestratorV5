@@ -94,10 +94,10 @@ function describeAction(
   }
 }
 
-const VIEW_BTN = 'px-2.5 py-1'
+const VIEW_BTN = 'px-2.5 py-1 whitespace-nowrap shrink-0'
 const VIEW_ON = ' bg-purple-600 text-white'
 const VIEW_OFF = ' bg-white text-gray-600 hover:bg-gray-50'
-const ROW_BASE = 'flex items-baseline gap-2 px-2 py-1.5 cursor-pointer hover:bg-purple-50'
+const ROW_BASE = 'flex items-baseline gap-2 px-2 py-1.5 cursor-pointer hover:bg-purple-50 leading-snug'
 
 function isInteractive(el: UiaElement): boolean {
   return INTERACTIVE.has(el.type || '')
@@ -571,7 +571,7 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
           <div className={`border rounded-lg px-2.5 py-2 text-[11px] ${tone}`}>
             <div className="font-semibold leading-snug">{v.text}</div>
             {stats.interactive > 0 && (
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono opacity-90">
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono opacity-90 [&>span]:whitespace-nowrap">
                 <span>可操作 {stats.interactive}</span>
                 <span>auto_id {stats.withId}</span>
                 <span>僅 name {stats.nameOnly}</span>
@@ -590,7 +590,7 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
 
           {/* 檢視切換 + 搜尋 */}
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex rounded-md overflow-hidden border border-gray-300 text-[11px]">
+            <div className="flex rounded-md overflow-hidden border border-gray-300 text-[11px] shrink-0">
               <button type="button" onClick={() => setView('list')}
                 className={VIEW_BTN + (view === 'list' ? VIEW_ON : VIEW_OFF)}>欄位清單</button>
               <button type="button" onClick={() => setView('tree')}
@@ -605,14 +605,14 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
               />
             )}
             {pageRoot && (
-              <label className="flex items-center gap-1 cursor-pointer text-[11px] text-gray-600">
-                <input type="checkbox" checked={pageOnly} onChange={e => setPageOnly(e.target.checked)} />
+              <label className="flex items-center gap-1 cursor-pointer text-[11px] text-gray-600 whitespace-nowrap shrink-0">
+                <input type="checkbox" className="shrink-0" checked={pageOnly} onChange={e => setPageOnly(e.target.checked)} />
                 只看網頁內容
               </label>
             )}
             {view === 'tree' && (
-              <label className="flex items-center gap-1 cursor-pointer text-[11px] text-gray-600">
-                <input type="checkbox" checked={interactiveOnly} onChange={e => setInteractiveOnly(e.target.checked)} />
+              <label className="flex items-center gap-1 cursor-pointer text-[11px] text-gray-600 whitespace-nowrap shrink-0">
+                <input type="checkbox" className="shrink-0" checked={interactiveOnly} onChange={e => setInteractiveOnly(e.target.checked)} />
                 只看可操作
               </label>
             )}

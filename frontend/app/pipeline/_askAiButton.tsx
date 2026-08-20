@@ -88,13 +88,14 @@ export default function AskAiButton({
       type="button"
       onClick={ask}
       title="把目前這個節點的設定狀態交給 AI，讓它接著告訴你下一步"
-      className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium
-                  text-indigo-600 border border-indigo-200 bg-indigo-50/60
+      className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium
+                  whitespace-nowrap text-indigo-600 border border-indigo-200 bg-indigo-50/60
                   hover:bg-indigo-100 hover:border-indigo-300 transition-colors ${className}`}
     >
-      <Sparkles className="w-3 h-3" />
-      卡住了？問 AI
-      <ChevronRight className="w-3 h-3 opacity-60" />
+      {/* 圖示要 shrink-0,否則空間不夠時 flex 會把它壓成細線 */}
+      <Sparkles className="w-3 h-3 shrink-0" />
+      <span className="whitespace-nowrap">問 AI</span>
+      <ChevronRight className="w-3 h-3 opacity-60 shrink-0" />
     </button>
   )
 }
