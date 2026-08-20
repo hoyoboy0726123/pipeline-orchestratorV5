@@ -275,6 +275,164 @@ def save_workflow_yaml(query: str, yaml_content: str, confirm: bool = False) -> 
 
 
 @tool
+def patch_node_actions(query: str, step_name: str, ops_json: str,
+                       confirm: bool = False) -> str:
+    """**定點修改**某個 computer_use 節點的動作序列(不重寫整份 YAML)。
+
+    使用者在 UIA Inspector 上一個一個挑出來的 control(auto_id / name)是整份設定裡
+    最貴的部分。用 save_workflow_yaml 整份覆蓋會把它們洗掉(你沒看過那些 id、
+    重寫必然生錯)。要動動作序列一律用這個工具。
+
+    Args:
+        query: workflow 名稱(模糊)或 id 前綴
+        step_name: 要改的步驟名(就是節點名稱)
+        ops_json: 操作清單 JSON 陣列,支援五種:
+          {"op":"append","action":{...}}                            尾端新增
+          {"op":"insert","index":2,"action":{...}}                  插到第 index 個之前(0 起算)
+          {"op":"set","index":1,"field":"text","value":"{{金額}}"}   改某動作的欄位
+          {"op":"move","from":3,"to":0}                             搬動作(修「取值排在填值後面」)
+          {"op":"delete","index":2}                                 刪動作
+        confirm: False = 預覽(回改動摘要)、True = 真寫。**一定先預覽給使用者看**。
+
+    使用者還沒挑控制項時,action 的 control 可以留空、改帶 description 說明
+    「這格待指定」,然後在回覆裡告訴他去哪個面板挑。
+    """
+    import json as _json
+    import re as _re
+    import yaml as _yaml
+    from db import update_workflow
+    wf, err = _resolve_workflow(query)
+    if not wf:
+        return err
+
+    try:
+        ops = _json.loads(ops_json)
+        if isinstance(ops, dict):
+            ops = [ops]
+        if not isinstance(ops, list) or not ops:
+            return "ops_json 要是非空的 JSON 陣列"
+    except Exception as e:
+        return f"ops_json 不是合法 JSON:{e}"
+
+    raw = wf.get("yaml") or ""
+    if not raw.strip():
+        return "這個工作流還沒有 YAML(可能是空白畫布)、沒有動作可改"
+    try:
+        doc = _yaml.safe_load(raw) or {}
+    except Exception as e:
+        return f"現有 YAML 解析失敗、不動它:{type(e).__name__}: {e}"
+
+    root = doc.get("pipeline") if isinstance(doc.get("pipeline"), dict) else doc
+    steps = root.get("steps")
+    if not isinstance(steps, list):
+        return "YAML 裡找不到 steps 陣列"
+
+    target = None
+    for s in steps:
+        if isinstance(s, dict) and str(s.get("name") or "").strip() == step_name.strip():
+            target = s
+            break
+    if target is None:
+        names = [str(s.get("name") or "?") for s in steps if isinstance(s, dict)]
+        return f"找不到步驟「{step_name}」。這個工作流的步驟有:{names}(名稱要完全一致)"
+    if not target.get("computer_use"):
+        return (f"步驟「{step_name}」不是桌面自動化節點、沒有動作序列。"
+                f"要改別的節點請用 save_workflow_yaml。")
+
+    actions = list(target.get("actions") or [])
+    before = len(actions)
+    log: list = []
+
+    for i, op in enumerate(ops):
+        if not isinstance(op, dict):
+            return f"第 {i+1} 個操作不是物件"
+        kind = str(op.get("op") or "").lower()
+        try:
+            if kind in ("append", "insert"):
+                a = op.get("action") or {}
+                if not a.get("type"):
+                    return f"第 {i+1} 個 {kind} 缺 action.type"
+                idx = len(actions) if kind == "append" else int(op.get("index", len(actions)))
+                actions.insert(max(0, min(idx, len(actions))), a)
+                log.append(f"+ 新增 {a.get('type')} 到第 {min(idx, len(actions))+1} 位")
+            elif kind == "set":
+                idx = int(op.get("index", -1))
+                if not (0 <= idx < len(actions)):
+                    return f"第 {i+1} 個 set 的 index={idx} 超出範圍(共 {len(actions)} 個)"
+                field = str(op.get("field") or "")
+                if not field:
+                    return f"第 {i+1} 個 set 缺 field"
+                old = actions[idx].get(field)
+                actions[idx] = {**actions[idx], field: op.get("value")}
+                log.append(f"~ 第 {idx+1} 個動作 {field}: {old!r} → {op.get('value')!r}")
+            elif kind == "move":
+                f_i, t_i = int(op.get("from", -1)), int(op.get("to", -1))
+                if not (0 <= f_i < len(actions)) or not (0 <= t_i < len(actions)):
+                    return f"第 {i+1} 個 move 的 index 超出範圍(共 {len(actions)} 個)"
+                actions.insert(t_i, actions.pop(f_i))
+                log.append(f"↕ 第 {f_i+1} 個動作移到第 {t_i+1} 位")
+            elif kind == "delete":
+                idx = int(op.get("index", -1))
+                if not (0 <= idx < len(actions)):
+                    return f"第 {i+1} 個 delete 的 index={idx} 超出範圍"
+                a = actions.pop(idx)
+                log.append(f"- 刪掉第 {idx+1} 個動作 {a.get('type')}")
+            else:
+                return f"第 {i+1} 個操作 op={kind!r} 不支援(只有 append/insert/set/move/delete)"
+        except Exception as e:
+            return f"第 {i+1} 個操作失敗:{type(e).__name__}: {e}"
+
+    # 取值必須排在用值之前 —— 順序錯了變數是空的,而且不報錯,是靜默給錯值
+    warn: list = []
+    seen: set = set()
+    for idx, a in enumerate(actions):
+        blob = " ".join(str(a.get(k) or "") for k in ("text", "batch", "message"))
+        for ref in _re.findall(r"\{\{\s*([^\s.}]+)\s*\}\}", blob):
+            if ref not in seen:
+                warn.append(f"第 {idx+1} 個動作用了 {{{{{ref}}}}},但前面沒有動作存過這個變數")
+        sa = str(a.get("save_as") or "").strip()
+        if sa:
+            seen.add(sa)
+
+    missing = [f"第 {i+1} 個({a.get('type')})" for i, a in enumerate(actions)
+               if str(a.get("type") or "").startswith("uia_")
+               and not a.get("control") and not a.get("rect")]
+
+    summary = (f"步驟「{step_name}」動作 {before} → {len(actions)} 個\n"
+               + "\n".join("  " + x for x in log))
+    if warn:
+        summary += "\n⚠ 變數順序:\n" + "\n".join("  " + w for w in warn)
+    if missing:
+        summary += ("\n⚠ 還沒指定控制項(要使用者自己在 UIA Inspector 上挑):\n  "
+                    + "、".join(missing))
+
+    if not confirm:
+        return ("[PREVIEW 不寫入]\n" + summary
+                + "\n\n把這份摘要講給使用者聽、取得同意後再用 confirm=True 寫入。")
+
+    target["actions"] = actions
+    try:
+        new_yaml = _yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=4096)
+    except Exception as e:
+        return f"YAML 產生失敗、不寫入:{type(e).__name__}: {e}"
+    # 畫布用既有 yaml_to_canvas 重生 —— canvas→YAML 的轉換只在前端,
+    # 只更新其中一邊會讓兩者漂移(執行看 YAML、畫面看 canvas)
+    try:
+        from yaml_to_canvas import yaml_to_canvas
+        new_canvas = yaml_to_canvas(new_yaml)
+        if not new_canvas:
+            return "改完的 YAML 轉不出畫布、不寫入(避免畫面與執行不一致)"
+    except Exception as e:
+        return f"改完的 YAML 轉畫布失敗、不寫入:{type(e).__name__}: {e}"
+    try:
+        update_workflow(wf.get("id"), {"yaml": new_yaml, "canvas": new_canvas})
+    except Exception as e:
+        return f"寫入失敗:{type(e).__name__}: {str(e)[:200]}"
+    return ("✅ 已套用\n" + summary
+            + "\n請告訴使用者:改好了,重新整理畫布就會看到。")
+
+
+@tool
 def create_workflow_yaml(name: str, yaml_content: str, confirm: bool = False) -> str:
     """**建立**新工作流(撞名拒絕、防誤覆蓋)、走兩步協議。
 
@@ -2370,7 +2528,8 @@ CHAT_TOOLS = [
     list_outlook_folders,                            # 列 Outlook 信箱/資料夾(多帳號)
     list_workflows, get_workflow_yaml, get_recent_runs, get_run_log,
     list_workflow_variables,                 # 列工作流可用變數(規劃 / 修改用)
-    save_workflow_yaml, create_workflow_yaml, start_workflow,    # 寫工具(走 two-step approval)
+    save_workflow_yaml, create_workflow_yaml, start_workflow,
+    patch_node_actions,                      # 定點改動作序列(不覆蓋整份、保住使用者挑的控制項)    # 寫工具(走 two-step approval)
     create_subagent_role,                    # 新增自訂 subagent role(走 two-step approval)
     send_file_to_tg,                         # 送檔到 TG(走 two-step approval)
     web_search,                              # 網路搜尋(限定工作流相關研究)
