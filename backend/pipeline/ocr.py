@@ -46,7 +46,8 @@ class OcrMatch:
 
 async def _recognize(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
     """跑 RapidOCR、回傳 [{text, x, y, w, h, line_text, line_index, confidence}]。
-    lang_tag 參數忽略(RapidOCR 中文模型本來就支援繁簡英多語)。
+    lang_tag 參數忽略(語言由 _get_rapid_engine() 選定的模型決定;
+    已指定 PP-OCRv5、繁簡英日通吃。PP-OCRv4 字典缺繁體字,勿退回)。
     RapidOCR 是同步 API,用 run_in_executor 丟 thread 不擋 event loop。"""
     from pipeline.ocr_rapid import recognize_rapid
     loop = asyncio.get_event_loop()

@@ -58,7 +58,28 @@ def _get_rapid_engine():
             return _RAPID_OCR_INSTANCE
         log.info("[ocr_rapid] 首次初始化 RapidOCR、載入 ONNX 模型 (~5-10s)...")
         from rapidocr import RapidOCR
-        _RAPID_OCR_INSTANCE = RapidOCR()
+        # ⚠ 一定要指定 PP-OCRv5:RapidOCR() 的預設是 ch/PP-OCRv4,而 v4 的字典
+        #   (ppocr_keys_v1.txt)裡**根本沒有**「額 稅 憑 簽」這些繁體字 —— 不是辨識錯,
+        #   是模型物理上輸出不了,會退化成「金额 / 營業税」或整個讀錯。
+        #   實測同一張繁中憑證:繁體標籤 v4 只對 5/12、v5 對 12/12,且 v5 還快 40%。
+        #   server 版沒更準(同樣 12/12)但慢 66%、載入 36s → 用 mobile。
+        #   chinese_cht 繁中專用版標籤也 12/12、但數字掉一個 → v5 通用版更好。
+        _params = None
+        try:
+            from rapidocr import LangRec, ModelType, OCRVersion
+            _params = {
+                "Rec.lang_type": LangRec.CH,
+                "Rec.ocr_version": OCRVersion.PPOCRV5,
+                "Rec.model_type": ModelType.MOBILE,
+            }
+        except Exception as e:  # 舊版 rapidocr 沒這些列舉
+            log.warning(f"[ocr_rapid] 取不到 v5 列舉({e})、退回套件預設模型")
+        try:
+            _RAPID_OCR_INSTANCE = RapidOCR(params=_params) if _params else RapidOCR()
+        except Exception as e:
+            # 模型下載失敗 / 參數不被接受 → 退回預設,寧可辨識差也別讓 OCR 整個掛掉
+            log.warning(f"[ocr_rapid] 以 PP-OCRv5 初始化失敗({e})、退回套件預設模型")
+            _RAPID_OCR_INSTANCE = RapidOCR()
         log.info("[ocr_rapid] RapidOCR ready")
     return _RAPID_OCR_INSTANCE
 
@@ -66,7 +87,8 @@ def _get_rapid_engine():
 def recognize_rapid(img_bgr: np.ndarray, lang_tag: Optional[str] = None) -> list[dict]:
     """跑 RapidOCR、回傳跟 Windows OCR _recognize() 同樣的 list[dict] schema。
 
-    lang_tag 參數忽略(RapidOCR 模型 ch 多語通用、不挑語言)。
+    lang_tag 參數忽略 —— 但**不是因為模型不挑語言**。實測 PP-OCRv4 中文模型的字典
+    缺「額稅憑簽」等繁體字、輸出不了;繁中要靠 _get_rapid_engine() 指定 PP-OCRv5 解決。
     RapidOCR 每個 detected region 直接是整詞、不像 Win OCR 把 CJK 拆單字,
     所以 line_text 跟 text 一樣,line_index 用 detection 順序當 index。
     """
