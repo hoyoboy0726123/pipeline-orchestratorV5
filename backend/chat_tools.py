@@ -286,7 +286,9 @@ def patch_node_actions(query: str, step_name: str, ops_json: str,
     Args:
         query: workflow 名稱(模糊)或 id 前綴
         step_name: 要改的步驟名(就是節點名稱)
-        ops_json: 操作清單 JSON 陣列,支援五種:
+        ops_json: 操作清單 JSON 陣列。⚠ **index 是對「前一個操作執行後」的清單算的**
+                  —— 一次刪兩個要從後往前刪,否則第二個 index 會指到別的動作。
+                  不確定就一次只送一個操作。支援五種:
           {"op":"append","action":{...}}                            尾端新增
           {"op":"insert","index":2,"action":{...}}                  插到第 index 個之前(0 起算)
           {"op":"set","index":1,"field":"text","value":"{{金額}}"}   改某動作的欄位
@@ -327,11 +329,15 @@ def patch_node_actions(query: str, step_name: str, ops_json: str,
     if not isinstance(steps, list):
         return "YAML 裡找不到 steps 陣列"
 
-    target = None
-    for s in steps:
-        if isinstance(s, dict) and str(s.get("name") or "").strip() == step_name.strip():
-            target = s
-            break
+    _hits = [s for s in steps
+             if isinstance(s, dict)
+             and str(s.get("name") or "").strip() == step_name.strip()]
+    if len(_hits) > 1:
+        # 安靜改第一個 = 使用者以為改到 B 其實改到 A。而且重名的話
+        # {{ steps.X.output.y }} 本來就指不明確,該先改名
+        return (f"有 {len(_hits)} 個步驟都叫「{step_name}」,不知道要改哪一個。"
+                f"請先把步驟改成不同名稱 —— 重名的話 {{{{ steps.X }}}} 引用本來就是壞的。")
+    target = _hits[0] if _hits else None
     if target is None:
         names = [str(s.get("name") or "?") for s in steps if isinstance(s, dict)]
         return f"找不到步驟「{step_name}」。這個工作流的步驟有:{names}(名稱要完全一致)"
@@ -352,9 +358,18 @@ def patch_node_actions(query: str, step_name: str, ops_json: str,
                 a = op.get("action") or {}
                 if not a.get("type"):
                     return f"第 {i+1} 個 {kind} 缺 action.type"
-                idx = len(actions) if kind == "append" else int(op.get("index", len(actions)))
-                actions.insert(max(0, min(idx, len(actions))), a)
-                log.append(f"+ 新增 {a.get('type')} 到第 {min(idx, len(actions))+1} 位")
+                if kind == "append":
+                    idx = len(actions)
+                else:
+                    idx = int(op.get("index", len(actions)))
+                    # 越界不可夾擠 —— AI 常用 -1 表達「最後」,夾成 0 會插到最前面、
+                    # 讓取值/填值順序整個反過來,而且不報錯
+                    if not (0 <= idx <= len(actions)):
+                        return (f"第 {i+1} 個 insert 的 index={idx} 超出範圍"
+                                f"(目前 {len(actions)} 個動作,可填 0~{len(actions)};"
+                                f"要加在最後請用 op=append)")
+                actions.insert(idx, a)
+                log.append(f"+ 新增 {a.get('type')} 到第 {idx+1} 位")
             elif kind == "set":
                 idx = int(op.get("index", -1))
                 if not (0 <= idx < len(actions)):
@@ -362,6 +377,9 @@ def patch_node_actions(query: str, step_name: str, ops_json: str,
                 field = str(op.get("field") or "")
                 if not field:
                     return f"第 {i+1} 個 set 缺 field"
+                if "value" not in op:
+                    # op.get("value") 會回 None,原本會把欄位寫成 null 而不報錯
+                    return f"第 {i+1} 個 set 缺 value(要把欄位清掉請用 value: \"\")"
                 old = actions[idx].get(field)
                 actions[idx] = {**actions[idx], field: op.get("value")}
                 log.append(f"~ 第 {idx+1} 個動作 {field}: {old!r} → {op.get('value')!r}")
@@ -394,8 +412,12 @@ def patch_node_actions(query: str, step_name: str, ops_json: str,
         if sa:
             seen.add(sa)
 
+    # 這兩種本來就不需要 control(uia_set_clipboard 根本不找控制項、
+    # uia_close_window 沒給就用 step window),列進警告會叫使用者去挑一個不需要的東西
+    _NO_CTRL_NEEDED = {"uia_set_clipboard", "uia_close_window"}
     missing = [f"第 {i+1} 個({a.get('type')})" for i, a in enumerate(actions)
                if str(a.get("type") or "").startswith("uia_")
+               and str(a.get("type")) not in _NO_CTRL_NEEDED
                and not a.get("control") and not a.get("rect")]
 
     summary = (f"步驟「{step_name}」動作 {before} → {len(actions)} 個\n"
@@ -411,6 +433,17 @@ def patch_node_actions(query: str, step_name: str, ops_json: str,
                 + "\n\n把這份摘要講給使用者聽、取得同意後再用 confirm=True 寫入。")
 
     target["actions"] = actions
+    # 寫入前先過 schema —— 不驗的話 AI 塞錯欄位名或錯型別(例 text 給 dict)
+    # 要等使用者按「執行」才炸,而且 ComputerUseAction 沒設 extra="forbid",
+    # 用錯欄位名不會報錯、執行時那個動作等於什麼都沒做(靜默給錯結果)
+    try:
+        from pipeline.models import PipelineConfig
+        _root = doc.get("pipeline") if isinstance(doc.get("pipeline"), dict) else doc
+        PipelineConfig.from_dict(
+            {k: v for k, v in _root.items() if not str(k).startswith("_")})
+    except Exception as e:
+        return (f"改完的內容過不了 schema 驗證、不寫入:{type(e).__name__}: {str(e)[:300]}\n"
+                f"多半是 action 欄位名或型別錯了(填值的文字欄位是 text、不是 value)")
     try:
         new_yaml = _yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=4096)
     except Exception as e:

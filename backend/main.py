@@ -5381,6 +5381,26 @@ class PipelineChatRequest(BaseModel):
 
 # 送 LLM 前保留最近多少則訊息（避免對話太長 token 爆炸 / 花錢）
 # 設 30 大致能容納「規劃 → 修改 → 再修改」幾輪；早期概念性討論遺忘可接受
+# 會真的寫入工作流的工具。判定「AI 宣稱套用了但其實沒寫」不能只看 `confirm is True`:
+# LLM 常送 "confirm": "true"(字串),pydantic 會轉成 True、工具照寫,但原始 args 是字串
+# → 舊判定失敗 → 明明寫了卻硬加「其實沒寫入」。使用者照提示再講一次,
+#   patch_node_actions 的 append/insert 會**再做一遍**,動作變成兩份(資料損壞)。
+_WRITE_TOOLS = ("save_workflow_yaml", "create_workflow_yaml", "patch_node_actions")
+
+
+def _wrote_for_sure(tname: str, targs: dict, tresult=None) -> bool:
+    """這個 tool call 是不是「確定有寫進 DB」。
+
+      · 是寫入類工具
+      · confirm 為真(寬鬆解析,見上面註解)
+    ⚠ 這裡的防呆是掃 lc_messages 的 tool_calls,拿不到工具回傳,所以只能驗參數 ——
+      「confirm=True 但工具因別的原因沒寫」這種情況擋不掉。
+    """
+    if tname not in _WRITE_TOOLS:
+        return False
+    return str((targs or {}).get("confirm", "")).strip().lower() in ("true", "1", "yes")
+
+
 _CHAT_HISTORY_CAP = 30
 
 
@@ -5893,7 +5913,7 @@ async def _chat_agent_loop(
                 for _tc in _tcs:
                     _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
                     _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
-                    if _tname in ("save_workflow_yaml", "create_workflow_yaml", "patch_node_actions") and (_targs or {}).get("confirm") is True:
+                    if _wrote_for_sure(_tname, _targs):
                         _actually_wrote = True
                         break
                 if _actually_wrote:
@@ -6130,7 +6150,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 for _tc in _tcs:
                     _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
                     _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
-                    if _tname in ("save_workflow_yaml", "create_workflow_yaml", "patch_node_actions") and (_targs or {}).get("confirm") is True:
+                    if _wrote_for_sure(_tname, _targs):
                         _actually_wrote = True
                         break
                 if _actually_wrote:

@@ -127,9 +127,20 @@ def _step_to_node(step: dict, idx: int) -> dict:
     if step.get("computer_use"):
         return {**common, "type": "computerUse", "data": {
             **base_data,
-            "actions": step.get("computer_use_actions", []),
-            "assetsDir": step.get("computer_use_assets_dir", ""),
-            "failFast": step.get("computer_use_fail_fast", True),
+            # ⚠ 這三個 key 一定要跟 YAML/models.py 一致。曾經寫成 computer_use_actions /
+            #   computer_use_assets_dir / computer_use_fail_fast —— 那些名字**全 codebase
+            #   只出現在這裡**,實際 YAML 用的是 actions / assets_dir / fail_fast。
+            #   後果是資料損壞:轉出來的 canvas 動作是空的,使用者一碰畫布,
+            #   autosave 就用空 canvas 重生 YAML 蓋回 DB,辛苦挑的 auto_id 永久消失。
+            "actions": step.get("actions", []),
+            "assetsDir": step.get("assets_dir", ""),
+            "failFast": step.get("fail_fast", True),
+            # cuMode / uiaWindow 之前完全沒讀 → UIA 節點會被重生成 pixel 模式、視窗設定消失
+            "cuMode": step.get("cu_mode", "pixel"),
+            "uiaWindow": step.get("uia_window", ""),
+            "cuVlmCheckStrategy": step.get("cu_vlm_check_strategy", "off"),
+            "cuOnMismatch": step.get("cu_on_mismatch", "stop_notify"),
+            "cuVlmMaxRetries": step.get("cu_vlm_max_retries", 1),
             "cvThreshold": step.get("cv_threshold", 0.5),
             "cvSearchOnlyNear": step.get("cv_search_only_near", False),
             "cvSearchRadius": step.get("cv_search_radius", 400),
