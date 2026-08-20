@@ -1240,9 +1240,13 @@ export async function pipelineChatStream(
   workflowId: string | null | undefined,
   onEvent: (ev: ChatStreamEvent) => void,
   signal?: AbortSignal,
+  extraSystem?: string | null,
 ): Promise<void> {
   const body: Record<string, unknown> = { messages }
   if (workflowId) body.workflow_id = workflowId
+  // 節點面板「問 AI」帶進來的當下設定狀態。後端 PipelineChatRequest.extra_system
+  // 會 append 到 system prompt，AI 因此知道使用者卡在哪、手上有哪些變數。
+  if (extraSystem) body.extra_system = extraSystem
   const res = await fetch(`${DIRECT_BASE}/pipeline/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

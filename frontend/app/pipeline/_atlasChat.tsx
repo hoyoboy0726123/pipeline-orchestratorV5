@@ -159,6 +159,14 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
   const { workflows, activeId } = useWorkflowStore()
 
   const [showChat, setShowChat] = useState(false)
+  // 節點面板按「卡住了？問 AI」帶進來的當下設定狀態。
+  // 有值就自動展開聊天,並在下一次送出時當 extra_system 附上去 —— AI 因此知道
+  // 使用者卡在哪個節點、已經加了哪些動作、手上有哪些變數。附一次就清掉。
+  const askAiContext = useWorkflowStore(s => s.askAiContext)
+  const setAskAiContext = useWorkflowStore(s => s.setAskAiContext)
+  useEffect(() => {
+    if (askAiContext) setShowChat(true)
+  }, [askAiContext])
   const [messages, setMessages] = useState<ChatMsg[]>([
     { role: 'assistant', content: '你好！請告訴我你想自動化的工作流程，我會幫你產生 Pipeline YAML 設定。\n\n（正在載入專案路徑資訊…）' }
   ])
@@ -266,6 +274,8 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
     let finalYaml: string | null = null
     let finalYamlError: string | null = null
     try {
+      const _askCtx = useWorkflowStore.getState().askAiContext
+      if (_askCtx) setAskAiContext(null)   // 只附一次,別每輪重複塞進 system
       await pipelineChatStream(
         newMsgs.map(m => ({ role: m.role, content: m.content })),
         chatUnbound ? undefined : (activeId ?? null),
@@ -318,6 +328,8 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
             throw new Error(ev.detail || '串流錯誤')
           }
         },
+        undefined,
+        _askCtx,
       )
       // 串流結束、finalize bubble
       setMessages(prev => {

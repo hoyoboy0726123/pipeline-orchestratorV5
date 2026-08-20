@@ -94,6 +94,13 @@ interface WorkflowStore {
   hasInteracted: boolean       // 有過互動就 true(Phase 4/5 用)
   setChatUIState: (s: ChatUIState) => void
   setHasInteracted: (b: boolean) => void
+
+  // ── 「卡住就問 AI」──────────────────────────
+  // 節點面板按「問 AI」時，把當下的設定狀態(節點型別 / 已加的動作 / 手上有哪些變數)
+  // 寫進這裡；聊天視窗會自動打開，並把它當 extra_system 送出去，
+  // AI 才知道使用者卡在哪一步、手上已經有什麼。用完清掉。
+  askAiContext: string | null
+  setAskAiContext: (c: string | null) => void
 }
 
 // 防抖佇列：合併多次快速 saveCanvas / updateWorkflow 呼叫
@@ -200,6 +207,9 @@ export const useWorkflowStore = create<WorkflowStore>()(
     hasInteracted: false,
     setChatUIState: (s) => set({ chatUIState: s }),
     setHasInteracted: (b) => set({ hasInteracted: b }),
+
+    askAiContext: null,
+    setAskAiContext: (c) => set({ askAiContext: c }),
   })
 )
 

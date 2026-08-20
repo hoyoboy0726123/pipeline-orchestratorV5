@@ -3460,6 +3460,28 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 
 啟動方式:`/run daily_report date=today email=boss@x.com`(`today` 自動轉今天日期)
 
+## UIA 動作清單(**只有這 9 種**,不要自己發明)
+
+| 動作 | 做什麼 | 關鍵欄位 |
+|---|---|---|
+| `uia_click` | 點控制項 | `control` |
+| `uia_send_keys` | **填文字 / 送按鍵到控制項** | `text`(可含 `{{var}}`)或 `keys` |
+| `uia_get_text` | 讀控制項的值 → 存變數 | `save_as` |
+| `uia_get_table_rowcount` | 讀表格列數 → 存變數 | `save_as` |
+| `uia_click_cell` | 點表格第 N 列第 M 欄 | `row` / `column` |
+| `uia_wait_enabled` | 等控制項出現且可用 | `timeout_sec` |
+| `uia_assert_state` | 驗狀態(失敗=整步 fail) | `check`: exists/enabled/focused/checked |
+| `uia_close_window` | 關視窗(不必拉到前景) | `window` |
+| `uia_set_clipboard` | 寫剪貼簿 | `text` |
+
+⚠️ **填值用 `uia_send_keys`,沒有 `uia_set_text` / `uia_set_value` 這種東西**(實測 AI 會猜這個名字、產出跑不動的 YAML)。
+⚠️ `control` 用 `{ auto_id: "..." }` 最穩(程式內部 ID、改版多半不變);
+   只有 `name`(畫面文字)時也可以,但文案一改就失效。**這兩個值必須由使用者在
+   UIA Inspector 面板上實際挑選取得 —— 你猜不到,也不要猜**。
+⚠️ 每個動作可帶自己的 `window`,所以**同一個節點可以跨視窗**
+   (優先序:`action.window` > 步驟的 `uia_window` > 最前面的視窗)。
+   從 A 系統讀、填到 B 系統,不一定要拆成兩個節點。
+
 ## UIA save_as 跨節點傳值(很重要)
 
 ```yaml

@@ -4,6 +4,7 @@ import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown, Pe
 import { toast } from 'sonner'
 import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_helpers'
 import OcrFieldInserter from './_ocrFieldInserter'
+import AskAiButton from './_askAiButton'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
 const VLM_CHECK_BUILTIN_TEMPLATES: { id: string; label: string; prompt: string }[] = [
@@ -391,7 +392,16 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
         <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0"
           style={{ background: NODE_COLOR }}><MousePointer2 className="w-4 h-4" strokeWidth={2.4} /></span>
         <div className="flex-1 min-w-0">
-          <span className="font-semibold text-gray-800 text-sm block truncate">桌面自動化節點</span>
+          <span className="font-semibold text-gray-800 text-sm block truncate">
+            桌面自動化節點
+            <AskAiButton
+              className="ml-2 align-middle"
+              nodeLabel={`桌面自動化節點（${(data.cuMode || 'pixel') === 'uia' ? 'UIA 控制' : '錄製回放'}）`}
+              stepName={data.name}
+              uiaWindow={data.uiaWindow || ''}
+              actions={data.actions}
+            />
+          </span>
           <span className="text-xs text-gray-400">
             {(data.cuMode || 'pixel') === 'uia'
               ? 'UIA 控制(讀 GUI 結構、不靠座標)'
