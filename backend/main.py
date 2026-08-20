@@ -5393,12 +5393,14 @@ def _wrote_for_sure(tname: str, targs: dict, tresult=None) -> bool:
 
       · 是寫入類工具
       · confirm 為真(寬鬆解析,見上面註解)
-    ⚠ 這裡的防呆是掃 lc_messages 的 tool_calls,拿不到工具回傳,所以只能驗參數 ——
-      「confirm=True 但工具因別的原因沒寫」這種情況擋不掉。
+      · 回傳字串以 ✅ 開頭(三個寫入工具成功時都是這個開頭)。只看參數的話,
+        confirm=True 但因為找不到步驟 / schema 不過 / 轉畫布失敗而沒寫的情況會被假放行。
     """
     if tname not in _WRITE_TOOLS:
         return False
-    return str((targs or {}).get("confirm", "")).strip().lower() in ("true", "1", "yes")
+    if str((targs or {}).get("confirm", "")).strip().lower() not in ("true", "1", "yes"):
+        return False
+    return str(tresult or "").lstrip().startswith("✅")
 
 
 _CHAT_HISTORY_CAP = 30
@@ -5805,6 +5807,10 @@ async def _chat_agent_loop(
     # 注意:cache 命中需 prefix 穩定、main.py:3318 _build_pipeline_system_prompt 內動態注入區塊
     # (今日日期、in-flight digest)應放在底稿後面、保最大化 cache prefix。
     _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    # 這個 turn 實際執行過的 tool call(含回傳)。下方「宣稱已套用」偵測要靠它 ——
+    # 文字協議模式(訂閱 CLI)解析出來的 tool_calls 是區域變數、從沒寫回 AIMessage,
+    # 只掃 lc_messages 會永遠找不到 → 即使真的寫入也會硬加「其實沒寫入」的假警告。
+    _executed_tool_calls: list[dict] = []
     lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
     # 記憶快照:獨立一條 system message(不帶 cache_control)、放在 cacheable 主 prompt 之後、
     # 不污染主 prompt 的 cache。memory_enabled=False 或無 facts → 空、不加。
@@ -5846,6 +5852,8 @@ async def _chat_agent_loop(
             tname = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
             targs = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
             tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "tc")
+            tc_dict = {"name": tname, "args": targs or {}, "id": tid}
+            _executed_tool_calls.append(tc_dict)   # result 於工具執行後補寫
             # 統一成 dict 形式給 callback、callback 失敗不影響主流程
             tc_dict = {"name": tname, "args": targs or {}, "id": tid}
             if on_tool_event:
@@ -5866,6 +5874,7 @@ async def _chat_agent_loop(
                         tool_result = tool_obj.invoke(targs or {})
                 except Exception as e:
                     tool_result = f"[Tool error: {type(e).__name__}: {str(e)[:300]}]"
+            tc_dict["result"] = str(tool_result)[:500]   # 給 _wrote_for_sure 判定用
             # Cap 單個 tool result（避免 token 爆）
             if isinstance(tool_result, str) and len(tool_result) > 16000:
                 tool_result = tool_result[:16000] + f"\n... (回傳超過 16000 字、後面截掉)"
@@ -5908,15 +5917,16 @@ async def _chat_agent_loop(
         if _claimed:
             # 掃 lc_messages 看這個 turn 有沒有真的 save_workflow_yaml(confirm=True) tool call
             _actually_wrote = False
-            for _m in lc_messages:
-                _tcs = getattr(_m, "tool_calls", None) or []
-                for _tc in _tcs:
-                    _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
-                    _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
-                    if _wrote_for_sure(_tname, _targs):
-                        _actually_wrote = True
-                        break
-                if _actually_wrote:
+            _scan = list(_executed_tool_calls)
+            for _m in lc_messages:      # native 模式的保險(理論上與上面重複)
+                _scan.extend(getattr(_m, "tool_calls", None) or [])
+            for _tc in _scan:
+                _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
+                _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
+                _tres = (_tc.get("result") if isinstance(_tc, dict)
+                         else getattr(_tc, "result", ""))
+                if _wrote_for_sure(_tname, _targs, _tres):
+                    _actually_wrote = True
                     break
             if not _actually_wrote:
                 _log.warning(f"[/pipeline/chat] (channel={_channel}) LLM 宣稱已套用但 turn 內沒 confirm=True tool call 也沒 YAML_READY、附 warning prefix")
@@ -6043,6 +6053,10 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
 
     # Prompt caching (#153):chat/stream endpoint 同 _chat_agent_loop 處理
     _sys_cache = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    # 這個 turn 實際執行過的 tool call(含回傳)。下方「宣稱已套用」偵測要靠它 ——
+    # 文字協議模式(訂閱 CLI)解析出來的 tool_calls 是區域變數、從沒寫回 AIMessage,
+    # 只掃 lc_messages 會永遠找不到 → 即使真的寫入也會硬加「其實沒寫入」的假警告。
+    _executed_tool_calls: list[dict] = []
     lc_messages: list = [SystemMessage(content=system_prompt, additional_kwargs=_sys_cache)]
     # 記憶快照:獨立 system message、不帶 cache_control、不污染主 prompt cache(同 _chat_agent_loop)
     _mem_snap = _memory_snapshot_text()
@@ -6102,6 +6116,8 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
             tname = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
             targs = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
             tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "tc")
+            tc_dict = {"name": tname, "args": targs or {}, "id": tid}
+            _executed_tool_calls.append(tc_dict)   # result 於工具執行後補寫
             yield {"type": "tool_start", "name": tname, "args": targs or {}}
             tool_obj = CHAT_TOOLS_BY_NAME.get(tname)
             if not tool_obj:
@@ -6114,6 +6130,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                         tool_result = tool_obj.invoke(targs or {})
                 except Exception as e:
                     tool_result = f"[Tool error: {type(e).__name__}: {str(e)[:300]}]"
+            tc_dict["result"] = str(tool_result)[:500]   # 給 _wrote_for_sure 判定用
             tool_result_str = str(tool_result)
             if len(tool_result_str) > 16000:
                 tool_result_str = tool_result_str[:16000] + "\n... (回傳超過 16000 字、後面截掉)"
@@ -6145,15 +6162,16 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         _claimed = any(p in content for p in _claim_patterns)
         if _claimed:
             _actually_wrote = False
-            for _m in lc_messages:
-                _tcs = getattr(_m, "tool_calls", None) or []
-                for _tc in _tcs:
-                    _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
-                    _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
-                    if _wrote_for_sure(_tname, _targs):
-                        _actually_wrote = True
-                        break
-                if _actually_wrote:
+            _scan = list(_executed_tool_calls)
+            for _m in lc_messages:      # native 模式的保險(理論上與上面重複)
+                _scan.extend(getattr(_m, "tool_calls", None) or [])
+            for _tc in _scan:
+                _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
+                _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
+                _tres = (_tc.get("result") if isinstance(_tc, dict)
+                         else getattr(_tc, "result", ""))
+                if _wrote_for_sure(_tname, _targs, _tres):
+                    _actually_wrote = True
                     break
             if not _actually_wrote:
                 _log.warning("[/pipeline/chat/stream] LLM 宣稱已套用但實際沒呼叫 confirm=True 也沒 YAML_READY、附 warning prefix")
