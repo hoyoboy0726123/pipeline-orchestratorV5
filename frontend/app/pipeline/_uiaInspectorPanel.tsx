@@ -34,6 +34,83 @@ interface PickerState {
   path: string[]   // 從 root 來的描述路徑(顯示用、不送 backend)
 }
 
+// ── 樹的可用性分析:過濾 + 判定 ──────────────────────────────
+// 為什麼需要:瀏覽器視窗裡「最小化 / 網址列 / 工具列 / 分頁」全都是 UIA 控制項。
+// 實測一個只有 13 個欄位的表單,整個視窗有 324 個節點、其中 277 個是瀏覽器外框。
+// 不過濾的話樹根本翻不完,使用者要自己用眼睛找哪個是真正的頁面欄位。
+
+/** 可互動控制項(要填值 / 要點的)。uiautomation 回的是帶 Control 字尾的名稱。 */
+const INTERACTIVE = new Set<string>([
+  'Edit', 'ComboBox', 'CheckBox', 'RadioButton', 'Button',
+  'List', 'ListItem', 'Spinner', 'Slider', 'Hyperlink', 'Tab', 'TabItem',
+].flatMap(n => [n, n + 'Control']))
+
+function isInteractive(el: UiaElement): boolean {
+  return INTERACTIVE.has(el.type || '')
+}
+
+/** 走訪整棵樹。 */
+function walkTree(el: UiaElement | null | undefined, out: UiaElement[] = []): UiaElement[] {
+  if (!el) return out
+  out.push(el)
+  ;(el.children || []).forEach(c => walkTree(c, out))
+  return out
+}
+
+/**
+ * 找「網頁內容」子樹。瀏覽器把頁面塞在 DocumentControl 底下,
+ * 只分析它才有意義。取節點最多的那個 Document(避開空的隱藏分頁)。
+ */
+function findPageRoot(root: UiaElement | null | undefined): UiaElement | null {
+  if (!root) return null
+  let best: UiaElement | null = null
+  let bestSize = 0
+  for (const el of walkTree(root)) {
+    if ((el.type || '').startsWith('Document')) {
+      const size = walkTree(el).length
+      if (size > bestSize) { best = el; bestSize = size }
+    }
+  }
+  return bestSize > 3 ? best : null
+}
+
+interface TreeStats {
+  isWeb: boolean
+  totalAll: number        // 整個視窗的節點數
+  totalScoped: number     // 分析範圍內的節點數
+  interactive: number
+  withId: number
+  nameOnly: number
+  anonymous: number
+  score: number           // 0..1 可指名率
+}
+
+function analyzeTree(root: UiaElement | null | undefined, scoped: UiaElement | null | undefined): TreeStats {
+  const all = walkTree(root)
+  const nodes = walkTree(scoped || root)
+  const inter = nodes.filter(isInteractive)
+  const withId = inter.filter(e => (e.auto_id || '').trim()).length
+  const nameOnly = inter.filter(e => !(e.auto_id || '').trim() && (e.name || '').trim()).length
+  const anonymous = inter.length - withId - nameOnly
+  // auto_id 給滿分、只有 name 給半分 —— name 是畫面文字,文案一改就失效
+  const score = inter.length ? (withId * 2 + nameOnly) / (inter.length * 2) : 0
+  return {
+    isWeb: !!scoped,
+    totalAll: all.length,
+    totalScoped: nodes.length,
+    interactive: inter.length,
+    withId, nameOnly, anonymous, score,
+  }
+}
+
+function verdictOf(s: TreeStats): { tone: 'good' | 'warn' | 'bad'; text: string } {
+  if (!s.interactive) return { tone: 'bad', text: 'UIA 看不到可操作的控制項 → 這個畫面只能用 CV / OCR' }
+  const pct = Math.round(s.score * 100)
+  if (s.score >= 0.8) return { tone: 'good', text: `很適合 UIA（可指名率 ${pct}%）→ 優先用 UIA，不受解析度與視窗位置影響` }
+  if (s.score >= 0.5) return { tone: 'warn', text: `部分可用（可指名率 ${pct}%）→ UIA 為主，抓不到的欄位退 CV / OCR` }
+  return { tone: 'bad', text: `可指名率僅 ${pct}% → UIA 幫助有限，建議以 CV / OCR 為主` }
+}
+
 export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddAction, workflowId }: Props) {
   const [tree, setTree] = useState<UiaInspectResult | null>(null)
   const [loading, setLoading] = useState(false)
@@ -52,6 +129,9 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
   // Live Picker(滑鼠 hover 桌面選元素)
   const [pickerActive, setPickerActive] = useState(false)
   const [hoveredEl, setHoveredEl] = useState<UiaElement | null>(null)
+  // 預設就聚焦頁面內容 + 只看可操作元素 —— 不過濾的話樹有 300+ 節點、翻不完
+  const [pageOnly, setPageOnly] = useState(true)
+  const [interactiveOnly, setInteractiveOnly] = useState(true)
   const pickerPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pickerActiveRef = useRef(false)   // unmount cleanup 用、避免 useEffect deps=[pickerActive]
                                           // 在 state 改變時誤觸發 cleanup 把 setInterval 砍掉
@@ -191,7 +271,15 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
   }, [])
 
+  /** 這個節點自己或後代有沒有可操作元素。用來決定「只看可操作」時要不要保留容器。 */
+  const keepNode = (el: UiaElement): boolean => {
+    if (!interactiveOnly) return true
+    if (isInteractive(el)) return true
+    return (el.children || []).some(keepNode)
+  }
+
   const renderNode = (el: UiaElement, path: string, depth: number = 0) => {
+    if (!keepNode(el)) return null
     const hasKids = el.children && el.children.length > 0
     const isOpen = expanded.has(path)
     const dimmed = !el.enabled || el.offscreen
@@ -380,18 +468,70 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
         </div>
       )}
 
-      {tree && tree.ok && (
+      {tree && tree.ok && (() => {
+        const pageRoot = findPageRoot(tree.tree)
+        const scoped = pageOnly ? pageRoot : null
+        const stats = analyzeTree(tree.tree, scoped)
+        const v = verdictOf(stats)
+        const tone = v.tone === 'good'
+          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+          : v.tone === 'warn'
+            ? 'bg-amber-50 border-amber-200 text-amber-800'
+            : 'bg-rose-50 border-rose-200 text-rose-800'
+        return (
         <div className="space-y-2">
           <div className="text-[11px] text-purple-700 bg-purple-100/50 rounded px-2 py-1">
             <strong>{tree.window.name || '(foreground)'}</strong>
             {tree.window.class && <span className="ml-2 text-gray-500">[{tree.window.class}]</span>}
           </div>
+
+          {/* 可用性判定 —— 按下抓取當下就知道該走 UIA 還是 CV,不用自己數 300 個節點 */}
+          <div className={`border rounded-lg px-2.5 py-2 text-[11px] ${tone}`}>
+            <div className="font-semibold leading-snug">{v.text}</div>
+            {stats.interactive > 0 && (
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono opacity-90">
+                <span>可操作 {stats.interactive}</span>
+                <span>auto_id {stats.withId}</span>
+                <span>僅 name {stats.nameOnly}</span>
+                {stats.anonymous > 0 && <span>匿名 {stats.anonymous}</span>}
+              </div>
+            )}
+            {pageRoot && (
+              <div className="mt-1 opacity-75">
+                偵測到網頁：視窗共 {stats.totalAll} 個節點，
+                {pageOnly
+                  ? `已排除 ${stats.totalAll - stats.totalScoped} 個瀏覽器外框（網址列 / 工具列 / 分頁）`
+                  : '含瀏覽器外框、數字會被灌水'}
+              </div>
+            )}
+          </div>
+
+          {/* 過濾開關 */}
+          <div className="flex flex-wrap items-center gap-3 text-[11px] text-gray-600 px-0.5">
+            {pageRoot && (
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" checked={pageOnly} onChange={e => setPageOnly(e.target.checked)} />
+                只看網頁內容
+              </label>
+            )}
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" checked={interactiveOnly} onChange={e => setInteractiveOnly(e.target.checked)} />
+              只看可操作元素
+            </label>
+            <span className="text-gray-400">（取消勾選看完整結構）</span>
+          </div>
+
           {/* element tree */}
           <div className="border border-gray-200 rounded-lg bg-white overflow-y-auto max-h-[40vh]">
-            {renderNode(tree.tree, '', 0)}
+            {renderNode(scoped || tree.tree, '', 0) || (
+              <div className="text-center text-[11px] text-gray-400 py-4">
+                這個範圍內沒有可操作元素 —— 取消「只看可操作元素」看完整結構
+              </div>
+            )}
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {!tree && !loading && !error && (
         <div className="text-center text-[11px] text-gray-500 py-3">
