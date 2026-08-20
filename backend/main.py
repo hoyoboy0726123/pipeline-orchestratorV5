@@ -3460,6 +3460,51 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
 
 啟動方式:`/run daily_report date=today email=boss@x.com`(`today` 自動轉今天日期)
 
+## 「同一組操作重複 N 次 → 結果累積成表格」的正確做法
+
+常見需求:一份清單有 50 個料號 / 客戶 / 單號,要逐筆去某系統查,把結果累積成 Excel。
+
+❌ **不要展開成 N×M 個寫死的動作**(50 筆 × 4 動作 = 200 個動作)。
+   清單一變就整份重做、動作面板翻不完、錯一筆看不出來,而且 YAML 會爆長。
+
+✅ **用「單筆迴圈」**:一組動作跑 N 次,每圈把結果**追加進檔案**。
+
+```yaml
+- name: 讀下一筆
+  batch: python "scripts/next_sku.py"      # 讀清單第 idx 筆、輸出 {"料號":..., "還有嗎": true}
+  output: { path: cur.json }
+
+- name: 查詢單筆                              # ← 迴圈的身體,只有一組動作
+  computer_use: true
+  actions:
+    - { type: uia_send_keys, control: {...}, text: "{{ steps.讀下一筆.output.料號 }}" }
+    - { type: uia_click, control: {...} }
+    - { type: uia_wait_enabled, control: {...} }     # 等結果出來再讀,不然讀到上一筆的舊值
+    - { type: uia_get_text, control: {...}, save_as: 庫存量 }
+
+- name: 追加一列
+  batch: python "scripts/append_row.py"     # openpyxl 開檔 → append → 存檔;idx 也在這裡 +1
+
+- name: 還有下一筆嗎
+  condition: true
+  expression: "{{ steps.讀下一筆.output.還有嗎 }}"
+  on_true: 讀下一筆                           # ← 回跳形成迴圈(condition 可以指向前面的步驟)
+  on_false: end
+```
+
+三個關鍵,少一個就會靜默出錯:
+1. **累積靠檔案、不靠變數** —— 變數每次執行該步驟就重置,第 2 圈會蓋掉第 1 圈,
+   跑完只剩最後一筆,而且不會報錯。計數器(idx)也要落在檔案裡。
+2. **每圈要能分辨「這筆查無資料」** —— 很多系統查不到時**留著上一筆的舊值**,
+   結果就是安靜地把前一筆的數字寫進錯的列,Excel 看起來完全正常。
+   要嘛先清空結果欄、要嘛驗證回傳值(例:等於「查無資料」就寫空白並標記)。
+3. **回跳有 MAX_VISITS=1000 的保護**,但清單超過 1000 筆就會被擋 —— 這種量級
+   改用單一 skill 節點在 Python 裡跑完整個迴圈,不要走工作流層級的迴圈。
+
+📌 **什麼時候該整包丟給 skill 節點**:筆數多(>50)、每圈邏輯複雜、或不需要人中途看 ——
+   節點切換有固定成本,而且任何一圈視窗跳掉整條就斷。工作流層級的迴圈適合
+   **筆數少、每圈都想看一眼**的情況。
+
 ## 使用者按「卡住了？問 AI」時:**能自己做的直接做,做不到的才教他怎麼做**
 
 不要只回一堆說明叫他自己去設定。判準很簡單 —— **這件事需不需要看畫面**:
@@ -5848,7 +5893,7 @@ async def _chat_agent_loop(
                 for _tc in _tcs:
                     _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
                     _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
-                    if _tname in ("save_workflow_yaml", "create_workflow_yaml") and (_targs or {}).get("confirm") is True:
+                    if _tname in ("save_workflow_yaml", "create_workflow_yaml", "patch_node_actions") and (_targs or {}).get("confirm") is True:
                         _actually_wrote = True
                         break
                 if _actually_wrote:
@@ -6085,7 +6130,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 for _tc in _tcs:
                     _tname = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
                     _targs = _tc.get("args") if isinstance(_tc, dict) else getattr(_tc, "args", {})
-                    if _tname in ("save_workflow_yaml", "create_workflow_yaml") and (_targs or {}).get("confirm") is True:
+                    if _tname in ("save_workflow_yaml", "create_workflow_yaml", "patch_node_actions") and (_targs or {}).get("confirm") is True:
                         _actually_wrote = True
                         break
                 if _actually_wrote:
