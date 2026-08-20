@@ -990,6 +990,63 @@ async def save_png_to_assets(req: SavePngRequest):
     }
 
 
+class OcrFileRequest(BaseModel):
+    """對圖檔 / PDF 做 OCR。不經螢幕 —— 不必先開檔、不受解析度與遮擋影響。"""
+    path: str                              # 圖檔或 PDF 的絕對路徑
+    fields: Optional[dict] = None          # {欄位名: 標籤} 或 {欄位名: {label, direction, kind}}
+    lang_tag: Optional[str] = "zh-Hant-TW"
+    words: bool = False                    # True = 連同所有詞與座標一起回(除錯用)
+
+
+@app.post("/ocr/file")
+async def ocr_file_api(req: OcrFileRequest):
+    """檔案 OCR:抓「某個標籤旁邊的值」(發票 / 憑證 / 單據)。
+
+    fields 的 kind:
+      amount(預設)= 只收金額格式;ident = 單號/統編;any = 只要含數字
+    抓不到的欄位回 null —— 不猜、不亂填。金額抓錯比抓不到嚴重得多。
+    """
+    from pipeline.ocr_file import (ocr_file, read_field, to_number,
+                                   AMOUNT_RE, IDENT_RE)
+    import asyncio as _aio
+
+    def _work():
+        p = Path(req.path)
+        if not p.exists():
+            return {"ok": False, "error": f"檔案不存在:{req.path}"}
+        try:
+            words = ocr_file(p, req.lang_tag)
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+        out: dict = {"ok": True, "path": str(p), "word_count": len(words)}
+        if req.fields:
+            vals, detail = {}, {}
+            for key, cfg in (req.fields or {}).items():
+                if isinstance(cfg, str):
+                    cfg = {"label": cfg}
+                kind = (cfg.get("kind") or "amount").lower()
+                vre = {"amount": AMOUNT_RE, "ident": IDENT_RE}.get(kind)  # any → None
+                r = read_field(words, cfg.get("label", key),
+                               direction=cfg.get("direction", "right"),
+                               value_re=vre,
+                               max_gap=int(cfg.get("max_gap", 600)))
+                vals[key] = r["value"] if r else None
+                if r:
+                    detail[key] = {"label_read_as": r["label_text"],
+                                   "label_score": r["label_score"],
+                                   "page": r["page"], "direction": r["direction"]}
+                    if kind == "amount":
+                        vals[key + "_num"] = to_number(r["value"])
+            out["fields"] = vals
+            out["detail"] = detail
+        if req.words:
+            out["words"] = words
+        return out
+
+    return await _aio.get_event_loop().run_in_executor(None, _work)
+
+
 class UiaInspectRequest(BaseModel):
     """檢視指定視窗(或 foreground)的 UIA element tree。"""
     window: str = ""             # 視窗 title pattern(支援 wildcard *)、空字串 = 當前 foreground

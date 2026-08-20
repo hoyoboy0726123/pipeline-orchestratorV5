@@ -51,6 +51,27 @@ _DONE_KEYWORDS = (
 )
 
 
+
+def _atlas_base_url() -> str:
+    """本機後端 base URL。優先吃環境變數,否則從 uvicorn 的 --port 推導。
+
+    script 節點需要它才能呼叫 /ocr/file 這類「只有後端環境跑得動」的能力。
+    """
+    import sys as _sys
+    env = (os.environ.get("ATLAS_BASE_URL") or "").strip()
+    if env:
+        return env.rstrip("/")
+    port = ""
+    argv = list(getattr(_sys, "argv", []) or [])
+    for i, a in enumerate(argv):
+        if a == "--port" and i + 1 < len(argv):
+            port = argv[i + 1].strip()
+            break
+        if a.startswith("--port="):
+            port = a.split("=", 1)[1].strip()
+            break
+    return f"http://127.0.0.1:{port or '8004'}"
+
 def _looks_like_done(reply: str) -> bool:
     """偵測 LLM 口頭表示完成但沒打 <tool>done</tool> 標準 tag。"""
     if not reply:
@@ -615,6 +636,11 @@ def _script_env() -> dict:
     env = os.environ.copy()
     venv = env.pop("VIRTUAL_ENV", None)
     env.pop("PYTHONHOME", None)
+    # 讓 script 節點找得到本機後端。script 跑的是**系統全域 Python**(見上方設計決策),
+    # 裡面沒有 rapidocr / numpy / opencv,所以像檔案 OCR 這種只有後端環境跑得動的能力
+    # 只能透過 HTTP 用 —— 而 urllib 是 stdlib、任何 Python 都有。
+    # 沿用 atlas_mcp_server.py 已有的 ATLAS_BASE_URL 慣例。
+    env.setdefault("ATLAS_BASE_URL", _atlas_base_url())
     paths = env.get("PATH", "").split(os.pathsep)
     drop = []
     if venv:
@@ -918,6 +944,10 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "",
         child_env = _clean_env()
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"  # Python 3.7+ 強制 UTF-8 模式
+        # 讓 script 節點找得到本機後端(檔案 OCR 等能力只能透過 API 用 ——
+        # script 跑的是系統全域 Python、沒有 rapidocr/numpy,不能直接 import)。
+        # 沿用 atlas_mcp_server.py 已有的 ATLAS_BASE_URL 慣例。
+        child_env.setdefault("ATLAS_BASE_URL", _atlas_base_url())
         # skill_llm helper:host 模式也注入 SKILL_LLM_* + PYTHONPATH(Windows 路徑),
         # 讓 `from skill_llm import llm` 走系統當前模型、不必 import openai。
         try:
