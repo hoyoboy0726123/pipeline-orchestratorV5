@@ -45,6 +45,40 @@ const INTERACTIVE = new Set<string>([
   'List', 'ListItem', 'Spinner', 'Slider', 'Hyperlink', 'Tab', 'TabItem',
 ].flatMap(n => [n, n + 'Control']))
 
+/** 動作序列上的人話描述:一眼看出這步「讀什麼存到哪」或「填什麼進哪」。 */
+function describeAction(
+  type: string,
+  el: UiaElement,
+  extra: Partial<ComputerUseAction>,
+): string {
+  const target = el.name || el.type || '控制項'
+  const v = (extra as any).save_as
+  const txt = (extra as any).text
+  const keys = (extra as any).keys
+  switch (type) {
+    case 'uia_get_text':
+      return v ? `讀「${target}」→ {{${v}}}` : `讀「${target}」(沒設變數、值會被丟掉)`
+    case 'uia_get_table_rowcount':
+      return v ? `數「${target}」列數 → {{${v}}}` : `數「${target}」列數`
+    case 'uia_send_keys':
+      if (txt) return `填入「${target}」← ${txt}`
+      if (keys) return `對「${target}」按 ${Array.isArray(keys) ? keys.join('+') : keys}`
+      return `送鍵到「${target}」`
+    case 'uia_click':
+      return `點擊「${target}」`
+    case 'uia_wait_enabled':
+      return `等「${target}」可用`
+    case 'uia_assert_state':
+      return `驗證「${target}」${(extra as any).check || ''}`
+    case 'uia_close_window':
+      return `關閉視窗「${target}」`
+    case 'uia_set_clipboard':
+      return `寫剪貼簿 ← ${txt || ''}`
+    default:
+      return `${type} ${el.type}${el.name ? ':' + el.name : ''}`
+  }
+}
+
 const VIEW_BTN = 'px-2.5 py-1'
 const VIEW_ON = ' bg-purple-600 text-white'
 const VIEW_OFF = ' bg-white text-gray-600 hover:bg-gray-50'
@@ -264,7 +298,10 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
       // 帶上 picker 抓到的 rect、給 backend 在沒 Name/auto_id(generic Pane/GroupControl)時
       // 用 ControlFromPoint(rect 中心)當 fallback、避免 LookupError "searchProperties must not be empty"
       ...(el.rect && el.rect.length === 4 ? { rect: el.rect } : {}),
-      description: `${type} ${el.type}${el.name ? `:${el.name}` : ''}`,
+      // 描述要讓人在序列上直接核對「這步做了什麼」——
+      // 只寫 uia_get_text EditControl:營業稅額 的話,看不出存到哪個變數、也看不出填了什麼值,
+      // 使用者必須逐一點開才知道對不對。
+      description: describeAction(type, el, extra),
       ...extra,
     }
     onAddAction(action)
