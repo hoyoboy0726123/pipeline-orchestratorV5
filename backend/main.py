@@ -3122,6 +3122,7 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
 | 使用者意圖 | 你的動作 |
 |---|---|
 | 「幫我加一步 X」(改既有 workflow) | get_workflow_yaml → 改好 → **直接 emit YAML_READY block + 改了哪幾處** → **不**呼叫 save_workflow_yaml(前端會渲染「覆蓋目前」按鈕、使用者點了會直接寫) |
+| 「幫我在這個桌面自動化節點加/改/搬動作」 | `patch_node_actions`(預覽 → 使用者同意 → confirm=True)。**不要** emit YAML_READY —— 整份覆蓋會洗掉使用者挑的 auto_id |
 | 使用者貼了 YAML、說「幫我套上去」 | 同上 — emit YAML_READY、不呼叫 tool |
 | 「跑這個 workflow」 | start_workflow(confirm=False) → 文字確認 → 等同意 → start_workflow(confirm=True) |
 | 「套用後直接跑」 | emit YAML_READY → 等使用者點「覆蓋目前」→ 收到使用者下一個訊息(例:「OK 跑」)→ start_workflow(confirm=False) → 確認 → start_workflow(confirm=True) |
@@ -3141,6 +3142,15 @@ _PIPELINE_SYSTEM_BASE = """你是 Pipeline 工作流設定助手。使用者用�
   ```
 - 前端看到 YAML_READY block 會自動渲染「⚠ 覆蓋目前」按鈕、使用者點下去就會寫入、無需 LLM 再呼叫工具
 - **不要**用 save_workflow_yaml(confirm=False) → 文字確認 → save_workflow_yaml(confirm=True) 那套舊兩步協議(不可靠、LLM 經常忘了第二步、空口宣稱已套用實際沒寫)
+
+> ⚠️ **唯一例外:computer_use 節點的「動作序列」**(`actions[]`)。
+> 這種修改**不要** emit YAML_READY,改用 `patch_node_actions`(它自己走預覽 → confirm 兩步)。
+> 原因:YAML_READY 是**整份覆蓋**,而使用者在 UIA Inspector 上一個一個挑出來的
+> `auto_id` 是整份設定裡最貴的部分 —— 你沒看過那些 id、重寫必然生錯,等於把他最花
+> 時間的成果洗掉。定點修改只動指定的動作、其餘原樣保留。
+> 「LLM 會忘記第二步」這個顧慮現在有配套:防呆會**看工具實際回傳**,只做了預覽卻說
+> 「已套用」會被抓到並當場告訴使用者,不會靜默過關。
+> 動作序列**以外**的一切(加步驟、改腳本、改條件、改收件人…)照舊走 YAML_READY。
 
 **save_workflow_yaml(confirm=True) 何時用** = 唯有「使用者明確說我不要按鈕、直接幫我寫」這種特殊情境。預設**永遠走 YAML_READY emit + 前端按鈕**。
 
@@ -5936,7 +5946,7 @@ async def _chat_agent_loop(
                         "然後你下 `/save <workflow名稱>` 套用。"
                     )
                 else:
-                    _next_step_hint = "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。"
+                    _next_step_hint = "請重新請我修改。一般步驟會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入;桌面自動化節點的動作序列則是我會先給你一份改動摘要、你說「好」我才會寫入。"
                 content = (
                     f"⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。{_next_step_hint}\n\n"
                     "(原回覆:)\n" + content
@@ -6177,7 +6187,7 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
                 _log.warning("[/pipeline/chat/stream] LLM 宣稱已套用但實際沒呼叫 confirm=True 也沒 YAML_READY、附 warning prefix")
                 content = (
                     "⚠️ 我剛剛口頭說已套用、但**實際上沒真的寫入**(系統自動偵測)。"
-                    "請重新請我修改、正常情況下會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入。\n\n"
+                    "請重新請我修改。一般步驟會出現「⚠ 覆蓋目前」按鈕、點下去才會真寫入;桌面自動化節點的動作序列則是我會先給你一份改動摘要、你說「好」我才會寫入。\n\n"
                     "(原回覆:)\n" + content
                 )
 
