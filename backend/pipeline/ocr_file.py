@@ -39,6 +39,9 @@ AMOUNT_RE = re.compile(
     r"^[$NT￥¥元\s]*-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*元?$")
 # 統編 / 單號:英數混合、不含空白
 IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-_/]{3,}$")
+# 統一編號:8 位純數字,且**必須通過檢查碼**(見 usable() 與 tw_data.validate_tax_id)。
+# 這是唯一能「證偽」的欄位型別 —— 其餘型別只驗格式,驗不出 OCR 有沒有讀錯字。
+TAXID_RE = re.compile(r"^\d{8}$")
 # ⚠ IDENT_RE 擋不掉日期(2026-07-18 / 2026/07/18 都會匹配)。發票上「發票號碼」右邊
 #   常常先印開立日期,不排除的話 min(gap) 會把日期當單號存進變數,下游拿去查會查無資料。
 _DATE_LIKE_RE = re.compile(
@@ -187,6 +190,13 @@ def read_field(words: list[dict], label: str, direction: str = "right",
             # 取最近的就會把日期當單號(靜默給錯值)
             if value_re is IDENT_RE and _DATE_LIKE_RE.match(t):
                 return False
+            # 統編:用檢查碼**證偽**。格式檢查只能確認「長得像」,
+            # 檢查碼能確認「算得過」—— OCR 把 8 讀成 3 會當場被抓到,
+            # 而且會自動跳過這個候選、繼續找下一個,而不是回一個錯號。
+            if value_re is TAXID_RE:
+                from pipeline.tw_data import validate_tax_id
+                if not validate_tax_id(t)[0]:
+                    return False
             return True
         return bool(_HAS_DIGIT.search(t))
 

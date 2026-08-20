@@ -24,11 +24,12 @@ interface Props {
 }
 
 type Dir = 'right' | 'below'
-type Kind = 'amount' | 'ident' | 'any'
+type Kind = 'amount' | 'ident' | 'taxid' | 'any'
 
 const KIND_HINT: Record<Kind, string> = {
   amount: '金額（38,500 / NT$1,925）',
-  ident: '單號、統編（AB-12345678）',
+  ident: '單號（AB-12345678）',
+  taxid: '統一編號 —— 會用檢查碼驗證，OCR 讀錯會當場抓到',
   any: '任何含數字的文字',
 }
 
@@ -142,7 +143,8 @@ export default function OcrFieldInserter({ index, isOpen, openMenu, closeMenu, o
             className="text-[10px] border border-gray-300 rounded px-1 py-0.5 bg-white"
           >
             <option value="amount">金額</option>
-            <option value="ident">單號 / 統編</option>
+            <option value="ident">單號</option>
+            <option value="taxid">統一編號（會驗檢查碼）</option>
             <option value="any">不限</option>
           </select>
         </span>

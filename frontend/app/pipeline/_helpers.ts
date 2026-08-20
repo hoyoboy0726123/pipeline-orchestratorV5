@@ -223,7 +223,7 @@ export interface ComputerUseAction {
   // ── ocr_get_text 專用：讀「標籤旁邊的值」存成變數 ──
   label?: string        // 要找的標籤文字（例：總計金額）
   direction?: 'right' | 'below'   // 值在標籤的哪一側
-  kind?: 'amount' | 'ident' | 'any'  // 值的格式約束；抓錯比抓不到嚴重，務必指定
+  kind?: 'amount' | 'ident' | 'taxid' | 'any'  // 值的格式約束；taxid 會驗檢查碼（唯一能證偽的）
   max_gap?: number      // 標籤與值的最大距離（px）
   // save_as 沿用下方 UIA action 的同名欄位（同樣是「值存進哪個變數」）
   // OCR 搜尋範圍（藍框，絕對桌面座標；width=0 = 未設定，回退 near_xy+cv_search_radius）

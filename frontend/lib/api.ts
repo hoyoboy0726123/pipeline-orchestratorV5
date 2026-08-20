@@ -698,7 +698,7 @@ export interface OcrProbeResult {
 export async function ocrProbe(req: {
   label: string
   direction?: 'right' | 'below'
-  kind?: 'amount' | 'ident' | 'any'
+  kind?: 'amount' | 'ident' | 'taxid' | 'any'
   region?: number[]
 }): Promise<OcrProbeResult> {
   const res = await fetch(`${BASE}/computer-use/ocr/probe`, {

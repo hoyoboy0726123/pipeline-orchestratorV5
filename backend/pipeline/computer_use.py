@@ -1739,7 +1739,7 @@ def execute_action(
             if not save_as:
                 return ActionResult(False, index, atype, "ocr_get_text 缺 save_as 欄位（值要存進哪個變數）")
             try:
-                from pipeline.ocr_file import read_field, AMOUNT_RE, IDENT_RE
+                from pipeline.ocr_file import read_field, AMOUNT_RE, IDENT_RE, TAXID_RE
             except Exception as _e:
                 return ActionResult(False, index, atype, f"無法載入 OCR 取值模組：{_e}")
             try:
@@ -1782,7 +1782,8 @@ def execute_action(
                 _w["y"] += oy
 
             kind = (action.get("kind") or "amount").lower()
-            vre = {"amount": AMOUNT_RE, "ident": IDENT_RE}.get(kind)  # any → None
+            vre = {"amount": AMOUNT_RE, "ident": IDENT_RE,
+                   "taxid": TAXID_RE}.get(kind)  # any → None
             hit = read_field(_words, label,
                              direction=(action.get("direction") or "right"),
                              value_re=vre,

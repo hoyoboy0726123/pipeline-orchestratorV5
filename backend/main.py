@@ -1012,7 +1012,8 @@ async def ocr_probe(req: OcrProbeRequest):
         try:
             from pipeline.computer_use import _capture_screen, _parse_search_region
             from pipeline.ocr import _recognize, _normalize_cjk
-            from pipeline.ocr_file import read_field, find_label, AMOUNT_RE, IDENT_RE
+            from pipeline.ocr_file import (read_field, find_label,
+                                           AMOUNT_RE, IDENT_RE, TAXID_RE)
         except Exception as e:
             return {"ok": False, "error": f"載入 OCR 模組失敗:{e}"}
 
@@ -1047,7 +1048,8 @@ async def ocr_probe(req: OcrProbeRequest):
             w["x"] += ox
             w["y"] += oy
 
-        vre = {"amount": AMOUNT_RE, "ident": IDENT_RE}.get((req.kind or "amount").lower())
+        vre = {"amount": AMOUNT_RE, "ident": IDENT_RE,
+               "taxid": TAXID_RE}.get((req.kind or "amount").lower())
         hit = read_field(words, req.label, direction=req.direction,
                          value_re=vre, max_gap=req.max_gap)
         out = {"ok": True, "word_count": len(words)}
@@ -1112,11 +1114,13 @@ async def ocr_file_api(req: OcrFileRequest):
     """檔案 OCR:抓「某個標籤旁邊的值」(發票 / 憑證 / 單據)。
 
     fields 的 kind:
-      amount(預設)= 只收金額格式;ident = 單號/統編;any = 只要含數字
+      amount(預設)= 只收金額格式;ident = 單號;
+      **taxid = 統一編號,會用檢查碼驗證** —— 這是唯一能證偽的型別,
+      OCR 讀錯一位數就算不過、會自動跳過去找下一個候選;any = 只要含數字
     抓不到的欄位回 null —— 不猜、不亂填。金額抓錯比抓不到嚴重得多。
     """
     from pipeline.ocr_file import (ocr_file, read_field, to_number,
-                                   AMOUNT_RE, IDENT_RE)
+                                   AMOUNT_RE, IDENT_RE, TAXID_RE)
     import asyncio as _aio
 
     def _work():
@@ -1135,7 +1139,8 @@ async def ocr_file_api(req: OcrFileRequest):
                 if isinstance(cfg, str):
                     cfg = {"label": cfg}
                 kind = (cfg.get("kind") or "amount").lower()
-                vre = {"amount": AMOUNT_RE, "ident": IDENT_RE}.get(kind)  # any → None
+                vre = {"amount": AMOUNT_RE, "ident": IDENT_RE,
+                   "taxid": TAXID_RE}.get(kind)  # any → None
                 r = read_field(words, cfg.get("label", key),
                                direction=cfg.get("direction", "right"),
                                value_re=vre,
