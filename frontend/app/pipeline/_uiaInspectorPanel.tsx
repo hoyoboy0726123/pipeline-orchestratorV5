@@ -40,10 +40,19 @@ interface PickerState {
 // 不過濾的話樹根本翻不完,使用者要自己用眼睛找哪個是真正的頁面欄位。
 
 /** 可互動控制項(要填值 / 要點的)。uiautomation 回的是帶 Control 字尾的名稱。 */
-const INTERACTIVE = new Set<string>([
+// 要「點」或「填」的控制項 —— 可指名率只用這組當分母
+const _ACTIONABLE = [
   'Edit', 'ComboBox', 'CheckBox', 'RadioButton', 'Button',
   'List', 'ListItem', 'Spinner', 'Slider', 'Hyperlink', 'Tab', 'TabItem',
-].flatMap(n => [n, n + 'Control']))
+  'MenuItem', 'DataGrid', 'Table', 'Tree', 'TreeItem',
+]
+// 只能「讀」的控制項 —— uia_get_text 的主要目標(訂單編號、狀態列、查詢結果)
+// 幾乎都是 TextControl。不列進清單的話,唯讀查詢頁會顯示成一片空白,
+// 判定還會紅字說「只能用 CV/OCR」,把使用者推去走比較不可靠的路徑。
+const _READABLE = ['Text', 'Document', 'StatusBar', 'Header', 'HeaderItem']
+const _mk = (ns: string[]) => new Set<string>(ns.flatMap(n => [n, n + 'Control']))
+const ACTIONABLE_TYPES = _mk(_ACTIONABLE)
+const INTERACTIVE = new Set<string>([..._mk(_ACTIONABLE), ..._mk(_READABLE)])
 
 /** 動作序列上的人話描述:一眼看出這步「讀什麼存到哪」或「填什麼進哪」。 */
 function describeAction(
@@ -66,6 +75,12 @@ function describeAction(
       return `送鍵到「${target}」`
     case 'uia_click':
       return `點擊「${target}」`
+    case 'uia_click_cell': {
+      // row 常是 {{rows + 1}} 這種最需要核對的值,落到 default 分支就看不到了
+      const r = (extra as any).row
+      const c = (extra as any).column
+      return `點「${target}」第 ${r ?? '?'} 列第 ${c ?? '?'} 欄`
+    }
     case 'uia_wait_enabled':
       return `等「${target}」可用`
     case 'uia_assert_state':
@@ -127,7 +142,9 @@ interface TreeStats {
 function analyzeTree(root: UiaElement | null | undefined, scoped: UiaElement | null | undefined): TreeStats {
   const all = walkTree(root)
   const nodes = walkTree(scoped || root)
-  const inter = nodes.filter(isInteractive)
+  // 計分只算「要點/要填」的 —— 唯讀 Text 沒有 auto_id 是常態,
+  // 算進分母會把可指名率壓低、誤判成「不適合 UIA」
+  const inter = nodes.filter(e => ACTIONABLE_TYPES.has(e.type || ''))
   const withId = inter.filter(e => (e.auto_id || '').trim()).length
   const nameOnly = inter.filter(e => !(e.auto_id || '').trim() && (e.name || '').trim()).length
   const anonymous = inter.length - withId - nameOnly
@@ -624,7 +641,7 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
                   return (
                     <div
                       key={path}
-                      onMouseEnter={() => hl(1200)}
+                      onMouseEnter={() => handleHover(path, el)}
                       onClick={() => { setPicker({ element: el, path: path.split('/') }); hl(3000) }}
                       className={ROW_BASE + (sel ? ' bg-purple-100' : '') + (el.enabled ? '' : ' opacity-50')}
                     >

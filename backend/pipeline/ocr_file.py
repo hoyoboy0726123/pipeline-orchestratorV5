@@ -28,10 +28,21 @@ MAX_PDF_PAGES = 20
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 
-# 金額:允許千分位、小數、前後貨幣符號
-AMOUNT_RE = re.compile(r"^[$NT￥¥元\s]*-?\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*[元]?$")
+# 金額:允許千分位、小數、前後貨幣符號。
+# ⚠ 千分位那組一定要寫成「有逗號版 | 無逗號版」的交替 —— 寫成 `\d{1,3}(?:,\d{3})*`
+#   會讓「40425」「12345.67」這種**沒有千分位的金額整個匹配不到**(實測踩過)。
+#   後果不是抓不到,是 read_field 濾掉真值後從同一列挑「下一個」通過的數字回去,
+#   金額欄位會靜默填成隔壁的稅額或單價。發票上本來就常印成無逗號,
+#   而且就算原稿有逗號,OCR 漏讀逗號也很常見。
+#   有逗號時仍嚴格檢查位置:1,2345 / 12,34 依然會被拒。
+AMOUNT_RE = re.compile(
+    r"^[$NT￥¥元\s]*-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*元?$")
 # 統編 / 單號:英數混合、不含空白
 IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-_/]{3,}$")
+# ⚠ IDENT_RE 擋不掉日期(2026-07-18 / 2026/07/18 都會匹配)。發票上「發票號碼」右邊
+#   常常先印開立日期,不排除的話 min(gap) 會把日期當單號存進變數,下游拿去查會查無資料。
+_DATE_LIKE_RE = re.compile(
+    r"^(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})$")
 _HAS_DIGIT = re.compile(r"\d")
 
 
@@ -114,8 +125,9 @@ def find_label(words: list[dict], label: str, min_score: float = 0.6):
     ⚠ 一定要走 _normalize_cjk:OCR 模型輸出簡繁混雜(實測「總計金額」→「總計金额」),
       直接 == 比對永遠比不到。
     """
-    tgt = _norm(label)
+    tgt = _norm(label).strip()
     if not tgt:
+        # 純空白的標籤:_norm 後仍是真值,不 strip 的話 "  " in t 會匹到任何含空白的詞
         return None
     best, best_s = None, 0.0
     for w in words:
@@ -149,6 +161,12 @@ def read_field(words: list[dict], label: str, direction: str = "right",
                否則右邊的日期、單號都可能被誤抓,而金額抓錯比抓不到嚴重得多。
     回 dict 或 None(抓不到就是 None,不猜)。
     """
+    # ⚠ 下面的方向分支是 `if d == "right": ... else: ...`,任何拼錯的值都會靜默
+    #   掉進 below 分支往下方找、通常剛好也找得到一個 → 回一個錯的值。
+    #   非前端路徑(YAML / API / skill 腳本)沒有型別保護,一定要在這裡擋。
+    if direction not in ("right", "below", "auto"):
+        raise ValueError(
+            f"direction 只能是 right / below / auto,收到 {direction!r}")
     hit = find_label(words, label)
     if not hit:
         return None
@@ -163,7 +181,13 @@ def read_field(words: list[dict], label: str, direction: str = "right",
         if w is lw or not t or w.get("page", 1) != page:
             return False
         if value_re is not None:
-            return bool(value_re.match(t))
+            if not value_re.match(t):
+                return False
+            # 單號/統編不能收日期 —— 發票上「發票號碼」右邊常先印開立日期,
+            # 取最近的就會把日期當單號(靜默給錯值)
+            if value_re is IDENT_RE and _DATE_LIKE_RE.match(t):
+                return False
+            return True
         return bool(_HAS_DIGIT.search(t))
 
     cands: list[tuple[float, str, dict]] = []
@@ -223,5 +247,8 @@ def to_number(s: Optional[str]) -> Optional[float]:
     """
     if not s:
         return None
-    m = re.search(r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?", s)
+    # ⚠ 不要寫成 `\d{1,3}(?:,\d{3})*|\d+` 的交替 —— re.search 只要第一個分支能匹就採用,
+    #   "40425" 會匹到 "404" 就收工(實測 1234→123.0、40425→404.0、12345.67→123.0)。
+    #   一條式 `\d[\d,]*` 直接吃完整串再去逗號,沒有這個坑。
+    m = re.search(r"-?\d[\d,]*(?:\.\d+)?", s)
     return float(m.group(0).replace(",", "")) if m else None

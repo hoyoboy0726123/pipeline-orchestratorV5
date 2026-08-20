@@ -75,6 +75,7 @@ export default function OcrFieldInserter({ index, isOpen, openMenu, closeMenu, o
     return (
       <div className="flex justify-center -my-0.5">
         <button
+          data-vlm-insert-trigger
           type="button"
           onClick={openMenu}
           title="在此位置插入 OCR 取值（讀畫面上某個標籤旁邊的值、存成變數）"
@@ -87,7 +88,11 @@ export default function OcrFieldInserter({ index, isOpen, openMenu, closeMenu, o
   }
 
   return (
-    <div className="my-1 rounded-lg border border-teal-200 bg-teal-50/60 p-2 space-y-1.5">
+    // data-vlm-insert-popover 是必要的:面板的「點外面關閉」handler 只認這個屬性,
+    // 沒有的話點自己的輸入框就會 mousedown → setInsertOpenAt(null) → 整張表單消失,
+    // 「插入這個動作」按鈕更慘 —— DOM 先被移除、onClick 永遠不會觸發。
+    <div data-vlm-insert-popover
+         className="my-1 rounded-lg border border-teal-200 bg-teal-50/60 p-2 space-y-1.5">
       <div className="flex items-center gap-1 text-[11px] font-semibold text-teal-800">
         <ScanText className="w-3 h-3" /> OCR 取值：讀畫面上「標籤旁邊」的值
       </div>

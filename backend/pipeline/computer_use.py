@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -852,7 +853,10 @@ def execute_action(
     """執行單一 action。action 是 ComputerUseAction.model_dump() 結果的 dict。
     _depth: 遞迴深度（if_image_found / retry_until 巢狀時累加），防寫爛的 YAML 無限遞迴。"""
     t0 = time.time()
-    step_variables = step_variables or {}
+    # ⚠ 不能寫 `step_variables or {}` —— 空 dict 是 falsy,會**換成另一個物件**,
+    #   巢狀動作(if_image_found / retry_until)存進去的變數就傳不回父層,而且是靜默的。
+    if step_variables is None:
+        step_variables = {}
     atype = action.get("type", "")
     desc = action.get("description") or atype
     indent = "  " * _depth if _depth > 0 else ""
@@ -1390,7 +1394,7 @@ def execute_action(
             # {{變數}} 替換 —— 沒有這層,前面 ocr_get_text / uia_get_text 取到的值填不進去,
             # 會把「{{發票金額}}」這幾個字原封不動打進欄位(看起來成功、內容全錯)。
             # uia_send_keys 一直有做,pixel 路徑的 type_text 之前漏了。
-            if "{{" in text and step_variables:
+            if "{{" in text:
                 try:
                     from .uia_executor import _substitute_vars
                     _before = text
@@ -1398,7 +1402,18 @@ def execute_action(
                     if text != _before:
                         logger.info(f"[computer_use] type_text 變數替換：{_before[:40]!r} → {text[:40]!r}")
                 except Exception as _e:
-                    logger.warning(f"[computer_use] type_text 變數替換失敗、用原字串:{_e}")
+                    logger.warning(f"[computer_use] type_text 變數替換失敗:{_e}")
+                # ⚠ _substitute_vars 找不到變數時**原樣保留**,不擋的話會把「{{金額}}」
+                #   這幾個字面字元打進金額欄位,而且動作回報成功 —— 靜默填錯值。
+                #   寧可響亮失敗。常見原因:取值動作排在後面、變數名打錯、
+                #   取值放在 if_image_found 之類的巢狀動作裡。
+                _left = re.findall(r"\{\{[^}]*\}\}", text)
+                if _left:
+                    return ActionResult(
+                        False, index, atype,
+                        f"變數未定義:{_left[:3]} —— 目前有的變數:{list(step_variables) or '(空)'}。"
+                        f"拒絕把字面 {{{{}}}} 填進欄位。"
+                        f"檢查:取值動作是否排在這一步之前、變數名是否一致")
             # ⚠ 一律走剪貼簿貼上,不要用 pg.write 逐字打。
             #   實測(中文 Windows):輸入法在啟用狀態時會攔截 pg.write 送出的按鍵 ——
             #   填「40,425」實際填進去變成「ˋ誒ㄓ」,而且**動作回報成功**。
@@ -1407,6 +1422,12 @@ def execute_action(
             #   現在統一 —— 貼上是 IME 免疫的。
             #   要逐字打(某些欄位擋貼上、或需要觸發 keypress 事件)就設 type_method: "keys"。
             _method = (action.get("type_method") or "clipboard").lower()
+            # ⚠ 含 \n / \t 一律逐字打。pyautogui 把它們當 Enter / Tab **按鍵**送出
+            #   (錄製出來的 "帳號\t密碼\n" 靠這個跳欄與送出);走剪貼簿貼上的話
+            #   單行欄位會吃掉或整段拒收 —— 表單沒送出、焦點沒跳欄,動作卻回報成功。
+            if _method != "keys" and ("\n" in text or "\t" in text):
+                _method = "keys"
+                logger.info("[computer_use] type_text 含換行/Tab、改走逐字打(保留按鍵語意)")
             if _method == "keys":
                 pg.write(text, interval=0.03)
                 msg = f"輸入文字（逐字、注意輸入法可能攔截）：{text[:30]}"
@@ -1415,7 +1436,13 @@ def execute_action(
                     import pyperclip
                     _prev = None
                     try:
-                        _prev = pyperclip.paste()   # 用完還原,別洗掉使用者的剪貼簿
+                        _p = pyperclip.paste()      # 用完還原,別洗掉使用者的剪貼簿
+                        # ⚠ 只在原本是「非空文字」時才還原。pyperclip 在 Windows 只讀
+                        #   CF_UNICODETEXT,剪貼簿裡是圖片/檔案/Excel 區塊時回空字串;
+                        #   拿空字串去 copy() 會先清空剪貼簿再什麼都不放 ——
+                        #   等於把使用者複製好的圖片直接清掉(跟註解說的相反)。
+                        if isinstance(_p, str) and _p:
+                            _prev = _p
                     except Exception:
                         pass
                     pyperclip.copy(text)
@@ -1868,6 +1895,10 @@ def execute_action(
                     sub_action, assets_dir, sub_i, logger, run_id,
                     _depth=_depth + 1, **_exec_ctx,
                 )
+                # 巢狀動作(ocr_get_text 等)存的變數要收回父層 —— 不收的話後面
+                # {{變數}} 找不到值,會把字面字元填進欄位(靜默錯誤)
+                if getattr(sub_res, "saved_var", None):
+                    step_variables[sub_res.saved_var[0]] = sub_res.saved_var[1]
                 if not sub_res.ok:
                     return ActionResult(False, index, atype,
                         f"if_image_found/{branch_label}[{sub_i+1}] "
@@ -1906,6 +1937,10 @@ def execute_action(
                         sub_a, assets_dir, sub_i, logger, run_id,
                         _depth=_depth + 1, **_exec_ctx,
                     )
+                    # 巢狀動作(ocr_get_text 等)存的變數要收回父層 —— 不收的話後面
+                    # {{變數}} 找不到值,會把字面字元填進欄位(靜默錯誤)
+                    if getattr(sub_res, "saved_var", None):
+                        step_variables[sub_res.saved_var[0]] = sub_res.saved_var[1]
                     if not sub_res.ok:
                         attempt_do_ok = False
                         last_fail_reason = (f"第 {attempt} 輪 do[{sub_i+1}] "
@@ -1918,6 +1953,10 @@ def execute_action(
                         until_action, assets_dir, 0, logger, run_id,
                         _depth=_depth + 1, **_exec_ctx,
                     )
+                    # 巢狀動作(ocr_get_text 等)存的變數要收回父層 —— 不收的話後面
+                    # {{變數}} 找不到值,會把字面字元填進欄位(靜默錯誤)
+                    if getattr(until_res, "saved_var", None):
+                        step_variables[until_res.saved_var[0]] = until_res.saved_var[1]
                     if until_res.ok:
                         success = True
                         msg = f"retry_until 成功於第 {attempt}/{max_attempts} 輪（{until_res.message[:80]}）"

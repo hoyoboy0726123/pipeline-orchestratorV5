@@ -150,6 +150,19 @@ class ComputerUseAction(BaseModel):
     # 跟下面 UIA 純粹型 action(uia_click/uia_send_keys)那組 control/save_as 等是兩回事 —
     # 那組是進階使用者手動透過 UIA Inspector 設定的、這組是錄製時自動抓的(無感)。
     ui: dict = {}                 # {"name", "control_type", "automation_id", "window_title", "rect"} 任一/全有
+    # ── ocr_get_text 專用欄位(螢幕 OCR 抓「標籤旁邊的值」)──
+    # ⚠ 這些欄位一定要在這裡宣告。ComputerUseAction 沒設 extra="allow",pydantic v2
+    #   預設 extra="ignore" —— 未宣告的欄位在 runner 的 model_dump() 會**靜默消失**,
+    #   面板試抓正常、YAML 存得下去,正式跑卻回「缺 label 欄位」;更糟的是 direction /
+    #   kind 掉光會降回預設值(right / amount),讀到旁邊完全不同的數字還回報成功。
+    label: str = ""              # 要找的標籤文字(例:總計金額)
+    direction: str = "right"     # right 同列右側 / below 表格欄位在下方
+    kind: str = "amount"         # amount 金額 / ident 單號統編 / any 只要含數字
+    max_gap: int = 600           # 標籤與值的最大距離(px)
+    lang_tag: str = ""           # OCR 語言標籤、留空走預設 zh-Hant-TW
+    # ── type_text 專用 ──
+    type_method: str = ""        # clipboard(預設、IME 免疫)/ keys(逐字打,某些欄位擋貼上時用)
+
     # ── UIA action 專用欄位(uia_click / uia_send_keys / uia_get_text 等用)──
     # control 識別:by Name / AutomationId / ControlType、可組合
     control: dict = {}           # {"type": "Button", "name": "儲存", "auto_id": "save-btn", "depth": 10}
