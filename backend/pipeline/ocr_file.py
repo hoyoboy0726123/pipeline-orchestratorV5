@@ -64,7 +64,14 @@ def _pages_as_bgr(path: Path) -> list[Any]:
         return [img]
 
     if ext == ".pdf":
-        import pypdfium2 as pdfium
+        try:
+            import pypdfium2 as pdfium
+        except ImportError:
+            # 給可執行的指示,不要只丟 ModuleNotFoundError ——
+            # 圖檔路徑不需要這個套件,只有 PDF 會走到這裡
+            raise RuntimeError(
+                "讀 PDF 需要 pypdfium2,目前沒安裝。圖檔(png/jpg)不受影響。"
+                " 安裝指令:pip install pypdfium2") from None
         pdf = pdfium.PdfDocument(str(path))
         try:
             out = []
