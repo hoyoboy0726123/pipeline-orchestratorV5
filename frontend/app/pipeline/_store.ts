@@ -14,6 +14,7 @@ export interface Workflow {
   edges: Edge[]
   validate: boolean
   updatedAt: number
+  serverUpdatedAt?: number   // 伺服器版本戳（秒）—— PUT 帶上，被別處改過會 409
 }
 
 /** 遷移舊節點類型：pipelineStep → scriptStep / skillStep */
@@ -58,6 +59,8 @@ function apiToWorkflow(d: WorkflowData): Workflow {
     edges: (d.canvas?.edges ?? []) as Edge[],
     validate: d.validate,
     updatedAt: d.updated_at * 1000,  // backend uses seconds, frontend uses ms
+    // 樂觀鎖用：只從伺服器回應更新（本地編輯會動 updatedAt，不能拿它當 base）
+    serverUpdatedAt: d.updated_at,
   }
 }
 
@@ -115,14 +118,48 @@ function _debouncedApiUpdate(id: string, patch: Record<string, any>) {
     _pendingUpdates.set(id, { timer: 0 as any, patch: { ...patch } })
   }
   const entry = _pendingUpdates.get(id)!
-  entry.timer = setTimeout(async () => {
+  entry.timer = setTimeout(() => {
     _pendingUpdates.delete(id)
-    try {
-      await updateWorkflowApi(id, entry.patch)
-    } catch {
-      // 靜默失敗 — 本地狀態已更新，下次 fetchWorkflows 會同步
-    }
+    void _sendUpdate(id, entry.patch)
   }, 500)
+}
+
+/** 實際送 PUT。帶樂觀鎖 base；被別處改過（409）就重載最新版並明講。 */
+async function _sendUpdate(id: string, patch: Record<string, any>, opts?: { keepalive?: boolean }) {
+  const st = useWorkflowStore.getState()
+  const base = (st.workflows.find(w => w.id === id) as any)?.serverUpdatedAt
+  try {
+    const fresh = await updateWorkflowApi(
+      id, base !== undefined ? { ...patch, base_updated_at: base } : patch, opts)
+    useWorkflowStore.setState(s => ({
+      workflows: s.workflows.map(w =>
+        w.id === id ? { ...w, serverUpdatedAt: (fresh as any).updated_at } as any : w),
+    }))
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('CONFLICT:')) {
+      // ⚠ 不能靜默重試：AI 助手或另一個分頁剛改過，硬存會整份蓋掉那些修改。
+      const { toast } = await import('sonner')
+      toast.warning(e.message.slice('CONFLICT:'.length), { duration: 9000 })
+      void useWorkflowStore.getState().fetchWorkflows()
+      return
+    }
+    // 其他失敗維持原行為：本地已更新，下次 fetchWorkflows 會同步
+  }
+}
+
+/** 立刻送出所有還在防抖等待的更新 —— 切換工作流 / 關頁前呼叫，
+ *  否則 500ms 窗口內的修改會永遠消失（Lite 實測就是這樣掉資料的）。 */
+function _flushPendingUpdates() {
+  for (const [id, entry] of _pendingUpdates) {
+    clearTimeout(entry.timer)
+    _pendingUpdates.delete(id)
+    void _sendUpdate(id, entry.patch, { keepalive: true })
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', _flushPendingUpdates)
+  window.addEventListener('beforeunload', _flushPendingUpdates)
 }
 
 export const useWorkflowStore = create<WorkflowStore>()(
@@ -181,7 +218,11 @@ export const useWorkflowStore = create<WorkflowStore>()(
       }
     },
 
-    setActive: (id) => set({ activeId: id }),
+    setActive: (id) => {
+      // 先 flush 上一條工作流還沒送出的修改再切，否則重抓會用舊資料蓋掉
+      _flushPendingUpdates()
+      set({ activeId: id })
+    },
 
     getActive: () => {
       const { workflows, activeId } = get()

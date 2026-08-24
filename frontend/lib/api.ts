@@ -944,12 +944,23 @@ export async function createWorkflowApi(name: string = '新工作流', canvas?: 
   return res.json()
 }
 
-export async function updateWorkflowApi(id: string, patch: { name?: string; canvas?: any; validate?: boolean; yaml?: string }): Promise<WorkflowData> {
+export async function updateWorkflowApi(
+  id: string,
+  patch: { name?: string; canvas?: any; validate?: boolean; yaml?: string; base_updated_at?: number },
+  // keepalive：關頁前 flush 防抖時用 —— 普通 fetch 會被瀏覽器取消
+  opts?: { keepalive?: boolean },
+): Promise<WorkflowData> {
   const res = await fetchWithRetry(`${BASE}/workflows/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
+    ...(opts?.keepalive ? { keepalive: true } : {}),
   })
+  if (res.status === 409) {
+    // 樂觀鎖衝突：工作流被別處（AI 助手 / 其他分頁）改過了
+    const detail = await res.json().then(d => d?.detail).catch(() => '')
+    throw new Error(`CONFLICT:${detail || '工作流已被別處修改'}`)
+  }
   if (!res.ok) throw new Error('更新工作流失敗')
   return res.json()
 }

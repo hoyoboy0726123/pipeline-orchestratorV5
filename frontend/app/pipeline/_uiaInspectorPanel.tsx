@@ -27,6 +27,22 @@ interface Props {
   onUpdateWindow: (w: string) => void
   onAddAction: (action: ComputerUseAction) => void
   workflowId?: string
+  /** 本節點的步驟名 —— 變數選單挑到「自己這步」的輸出時要轉成同節點語法 */
+  stepName?: string
+}
+
+/**
+ * 變數選單插入的是跨節點語法 {{ steps.X.output.Y }}，但如果 X 就是**本節點**，
+ * 那個語法執行時必炸：步驟還在跑、它的 output 還不存在（steps 命名空間只有
+ * 已完成的步驟）。同節點要用 {{Y}}（讀值動作 save_as 存進 step 變數、執行期替換）。
+ * 這個坑不該讓使用者記 —— 選到自己這步的輸出就自動轉。
+ */
+function _localizeVarPath(path: string, stepName?: string): string {
+  if (stepName) {
+    const m = path.match(/^steps\.(.+?)\.output\.(.+)$/)
+    if (m && m[1] === stepName) return m[2]   // {{總計金額}} 而不是 {{ steps.自己.output.總計金額 }}
+  }
+  return path
 }
 
 interface PickerState {
@@ -53,6 +69,16 @@ const _READABLE = ['Text', 'Document', 'StatusBar', 'Header', 'HeaderItem']
 const _mk = (ns: string[]) => new Set<string>(ns.flatMap(n => [n, n + 'Control']))
 const ACTIONABLE_TYPES = _mk(_ACTIONABLE)
 const INTERACTIVE = new Set<string>([..._mk(_ACTIONABLE), ..._mk(_READABLE)])
+
+/** 單層大括號的變數 typo。實測使用者打了 {總計金額}（單層）——
+ * 執行期替換只認 {{變數}}，單層會把字面字元填進欄位而且動作回報成功。
+ * 在加入動作的當下擋，比跑完才發現欄位裡有大括號好。 */
+function _singleBraceProblem(text: string): string | null {
+  // 先把合法的 {{...}} 挖掉，剩下還有 {xxx} 就是 typo
+  const rest = text.replace(/\{\{[^{}]*\}\}/g, '')
+  const m = rest.match(/\{([^{}]+)\}/)
+  return m ? m[1] : null
+}
 
 /** 動作序列上的人話描述:一眼看出這步「讀什麼存到哪」或「填什麼進哪」。 */
 function describeAction(
@@ -167,7 +193,7 @@ function verdictOf(s: TreeStats): { tone: 'good' | 'warn' | 'bad'; text: string 
   return { tone: 'bad', text: `可指名率僅 ${pct}% → UIA 幫助有限，建議以 CV / OCR 為主` }
 }
 
-export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddAction, workflowId }: Props) {
+export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddAction, workflowId, stepName }: Props) {
   const [tree, setTree] = useState<UiaInspectResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -695,7 +721,7 @@ export default function UiaInspectorPanel({ uiaWindow, onUpdateWindow, onAddActi
               <X className="w-3 h-3" />
             </button>
           </div>
-          <UiaActionPicker element={picker.element} onAdd={addAction} workflowId={workflowId} />
+          <UiaActionPicker element={picker.element} onAdd={addAction} workflowId={workflowId} stepName={stepName} />
         </div>
       )}
     </div>
@@ -707,10 +733,12 @@ function UiaActionPicker({
   element,
   onAdd,
   workflowId,
+  stepName,
 }: {
   element: UiaElement
   onAdd: (type: ComputerUseAction['type'], extra?: Partial<ComputerUseAction>) => void
   workflowId?: string
+  stepName?: string
 }) {
   const [textInput, setTextInput] = useState('')
   const [keysInput, setKeysInput] = useState('')
@@ -757,6 +785,53 @@ function UiaActionPicker({
         />
       </div>
 
+      {/* 讀文字(抓值)—— 升級成一級動作。原本摺在「進階動作」裡，
+          使用者選了「找補金額」卻只看得到點擊/等就緒，以為抓值要靠 OCR。
+          UIA 讀結構比 OCR 準：ValuePattern 直接拿 value，不受解析度/遮擋影響。 */}
+      <div className="bg-emerald-50/60 border border-emerald-200 rounded p-2 space-y-1">
+        <div className="text-[11px] font-semibold text-emerald-700">📖 讀文字存變數（抓值）</div>
+        <div className="flex gap-1 items-center">
+          <input
+            value={saveAsInput}
+            onChange={e => setSaveAsInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && saveAsInput.trim()) {
+                onAdd('uia_get_text', { save_as: saveAsInput.trim() })
+              }
+            }}
+            placeholder="變數名，例：找補金額"
+            className="flex-1 min-w-0 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
+          />
+          <HelpTooltip
+            title="讀文字"
+            usage="把此控制項的文字 / value 讀出來、存進變數;優先 ValuePattern.Value、退 Name"
+            scenario="抓「找補金額」「訂單編號」等欄位值 → 下一個動作用 {{變數}} 填到別處"
+            example={'save_as="找補金額"\n→ 後續 type_text text="{{找補金額}}"、或寫剪貼簿跨應用貼'}
+          >
+            <button
+              onClick={() => {
+                const v = saveAsInput.trim()
+                if (!v) { toast.error('請填變數名'); return }
+                // ⚠ 執行期的 {{變數}} 替換只認文字/數字/底線。實測有使用者把
+                //   讀到的值「40,425」當變數名 —— {{40,425}} 永遠不會被替換，
+                //   欄位裡會出現字面的大括號。當場擋下比事後查好。
+                if (!/^[\p{L}\p{N}_]+$/u.test(v)) {
+                  toast.error('變數名只能用中英文、數字、底線（這是名字，不是要讀的值）。例：找補金額')
+                  return
+                }
+                onAdd('uia_get_text', { save_as: v })
+              }}
+              className="shrink-0 whitespace-nowrap px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1 hover:bg-emerald-700 transition-colors"
+            >
+              <Eye className="w-3 h-3 shrink-0" /> 讀文字
+            </button>
+          </HelpTooltip>
+        </div>
+        <div className="text-[10px] text-emerald-700/70">
+          UIA 直接讀 GUI 結構、比 OCR 準。之後用 {`{{變數名}}`} 引用；跨節點用 {`{{ steps.步驟名.output.變數名 }}`}。
+        </div>
+      </div>
+
       {/* 關閉視窗(WindowPattern.Close、true 背景操作、不必點 X 不必前景) */}
       <BigActionBtn
         icon={X}
@@ -770,10 +845,21 @@ function UiaActionPicker({
         }}
       />
 
+      {/* 選到唯讀 Text 時要指路 —— 實測使用者選了「找補金額」的 TextControl
+          （標籤），找不到填值入口，以為系統做不到。欄位清單裡同名的
+          Edit 才是輸入框。 */}
+      {!isEditable && element.type.includes('Text') && (
+        <div className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 leading-relaxed">
+          ⚠ 這是唯讀文字（{element.type}），只能「讀」不能「填」。
+          要把值<strong>填進去</strong>，請回欄位清單選同名的 <span className="font-mono">Edit</span> 控制項
+          （例：找補金額 → <span className="font-mono">Edit amount</span>）。
+        </div>
+      )}
+
       {/* 輸入文字(只有 Edit/Combo/Document 可編輯類型才有意義、其他用送鍵盤) */}
       {isEditable && (
         <div className="bg-emerald-50/50 border border-emerald-200 rounded p-2 space-y-1">
-          <div className="text-[11px] font-semibold text-emerald-700">輸入文字到此控制項</div>
+          <div className="text-[11px] font-semibold text-emerald-700">⌨️ 填入文字（貼上一步的 {`{{變數}}`}）</div>
           <div className="flex gap-1 items-center">
             <input
               value={textInput}
@@ -783,7 +869,12 @@ function UiaActionPicker({
             />
             <VariableButton
               workflowId={workflowId}
-              onPick={(p) => setTextInput(`${textInput}{{ ${p} }}`)}
+              onPick={(p) => {
+                const local = _localizeVarPath(p, stepName)
+                setTextInput(local === p
+                  ? `${textInput}{{ ${p} }}`
+                  : `${textInput}{{${local}}}`)   // 同節點變數：{{總計金額}}
+              }}
             />
             <HelpTooltip
               title="送文字"
@@ -794,10 +885,15 @@ function UiaActionPicker({
               <button
                 onClick={() => {
                   if (!textInput.trim()) { toast.error('請填文字'); return }
+                  const bad = _singleBraceProblem(textInput)
+                  if (bad) {
+                    toast.error(`變數要用雙大括號 {{${bad}}} —— 單層 {${bad}} 不會被替換，會把字面字元填進欄位`)
+                    return
+                  }
                   onAdd('uia_send_keys', { text: textInput })
                   setTextInput('')
                 }}
-                className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1 hover:bg-emerald-700 shrink-0"
+                className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1 hover:bg-emerald-700 shrink-0 whitespace-nowrap"
               >
                 <Type className="w-3 h-3" /> 送文字
               </button>
@@ -850,7 +946,12 @@ function UiaActionPicker({
           />
           <VariableButton
             workflowId={workflowId}
-            onPick={(p) => setClipboardInput(`${clipboardInput}{{ ${p} }}`)}
+            onPick={(p) => {
+              const local = _localizeVarPath(p, stepName)
+              setClipboardInput(local === p
+                ? `${clipboardInput}{{ ${p} }}`
+                : `${clipboardInput}{{${local}}}`)
+            }}
           />
           <HelpTooltip
             title="寫剪貼簿"
@@ -861,6 +962,11 @@ function UiaActionPicker({
             <button
               onClick={() => {
                 if (!clipboardInput.trim()) { toast.error('請填內容'); return }
+                const bad = _singleBraceProblem(clipboardInput)
+                if (bad) {
+                  toast.error(`變數要用雙大括號 {{${bad}}} —— 單層 {${bad}} 不會被替換`)
+                  return
+                }
                 onAdd('uia_set_clipboard', { text: clipboardInput })
                 setClipboardInput('')
               }}
@@ -940,7 +1046,7 @@ function UiaActionPicker({
         </div>
       )}
 
-      {/* 進階區:讀文字(存變數)+ 4 種斷言 */}
+      {/* 進階區:4 種斷言（讀文字已升級成上面的一級動作卡） */}
       <div className="rounded-lg border border-gray-200 bg-gray-50/50 overflow-hidden">
         <button
           type="button"
@@ -949,35 +1055,11 @@ function UiaActionPicker({
         >
           {advancedOpen ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
           <span className="font-semibold text-gray-600 flex-1">進階動作</span>
-          <span className="text-gray-400 text-[10px]">讀文字 / 斷言狀態</span>
+          <span className="text-gray-400 text-[10px]">斷言狀態</span>
         </button>
         {advancedOpen && (
           <div className="px-2 pb-2 space-y-1.5 border-t border-gray-200">
-            <div className="pt-2 flex gap-1">
-              <input
-                value={saveAsInput}
-                onChange={e => setSaveAsInput(e.target.value)}
-                placeholder="變數名(例 user_name)"
-                className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs font-mono"
-              />
-              <HelpTooltip
-                title="讀文字"
-                usage="把此控制項的文字 / value 讀出來、存進變數;優先 ValuePattern.Value、退到 Name"
-                scenario="抓登入後「歡迎 王小明」、抓訂單編號「ORD-2024-0507」、抓 status bar 訊息"
-                example={'save_as="user"\n→ 後續 text="{{user}}" 引用、寫剪貼簿、傳給其他應用'}
-              >
-                <button
-                  onClick={() => {
-                    if (!saveAsInput.trim()) { toast.error('請填變數名'); return }
-                    onAdd('uia_get_text', { save_as: saveAsInput.trim() })
-                  }}
-                  className="px-2 py-1 bg-gray-700 text-white rounded text-xs flex items-center gap-1 hover:bg-gray-800 shrink-0"
-                >
-                  <Eye className="w-3 h-3" /> 讀文字
-                </button>
-              </HelpTooltip>
-            </div>
-            <div className="text-[10px] text-gray-500">把控制項顯示文字 / value 存進變數、後續用 {`{{變數}}`}</div>
+            {/* （讀文字已移到上面的一級動作卡） */}
 
             <div className="text-[10px] text-gray-600 font-semibold pt-1">斷言狀態(失敗 = 整步 fail):</div>
             <div className="grid grid-cols-2 gap-1">

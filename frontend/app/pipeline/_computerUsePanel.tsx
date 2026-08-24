@@ -248,8 +248,24 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   const handleLoadRecording = async () => {
     try {
       const res = await loadComputerUseRecording(defaultAssetsDir)
-      onUpdate({ actions: res.actions || [], assetsDir: defaultAssetsDir })
-      toast.success(`已載入 ${res.actions?.length ?? 0} 個動作`)
+      const rec = res.actions || []
+      const existing = actionsRef.current
+      const at = uiaInsertAtRef.current
+      // ⚠ 原本是整份取代 —— 已有動作的節點再錄製，原有動作被靜默清掉。
+      //   改成合併：沒有既有動作照舊全載；有 → 插入點優先，否則接在最後。
+      let next: ComputerUseAction[]
+      if (existing.length === 0) {
+        next = rec
+      } else if (at !== null && at <= existing.length) {
+        next = [...existing.slice(0, at), ...rec, ...existing.slice(at)]
+        setUiaInsertAt(at + rec.length)
+      } else {
+        next = [...existing, ...rec]
+      }
+      onUpdate({ actions: next, assetsDir: defaultAssetsDir })
+      toast.success(existing.length === 0
+        ? `已載入 ${rec.length} 個動作`
+        : `已${at !== null ? `插入到 #${at + 1}` : '接在最後'}：${rec.length} 個錄製動作（原有 ${existing.length} 個保留）`)
     } catch (e) {
       // 錄製尚未停好或目錄不存在是正常狀況
       console.warn('Load recording:', e)
@@ -299,6 +315,16 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   const [editingAnchor, setEditingAnchor] = useState<number | null>(null)
   // VLM 挑錨點 file picker：用 actionIndex 表示對哪一個動作開
   const [pickingVlmAnchorsAt, setPickingVlmAnchorsAt] = useState<number | null>(null)
+  // 行內編輯：點 ✎ 展開該動作的可改欄位（同步自 Atlas-Lite）
+  const [editingAction, setEditingAction] = useState<number | null>(null)
+  // 選擇器/錄製新動作的插入位置。null = 附加在最後（預設）。
+  const [uiaInsertAt, setUiaInsertAt] = useState<number | null>(null)
+  // 錄製停止是輪詢 effect 的舊 closure 呼叫進來的，直接讀 state 會過期 —— 用 ref
+  const actionsRef = useRef<ComputerUseAction[]>(data.actions || [])
+  useEffect(() => { actionsRef.current = data.actions || [] }, [data.actions])
+  const uiaInsertAtRef = useRef<number | null>(null)
+  useEffect(() => { uiaInsertAtRef.current = uiaInsertAt }, [uiaInsertAt])
+
   const applyAnchorPatch = (i: number, patch: Partial<ComputerUseAction>) => {
     const next = [...(data.actions || [])]
     next[i] = { ...next[i], ...patch }
@@ -454,10 +480,17 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
             {/* UIA 模式:走 inspector 抓元素、選元素、加動作 */}
             {data.cuMode === 'uia' && (
               <UiaInspectorPanel
+                stepName={data.name}
                 uiaWindow={data.uiaWindow || ''}
                 onUpdateWindow={(w) => onUpdate({ uiaWindow: w })}
                 onAddAction={(action) => {
-                  const next = [...(data.actions || []), action]
+                  const next = [...(data.actions || [])]
+                  if (uiaInsertAt !== null && uiaInsertAt <= next.length) {
+                    next.splice(uiaInsertAt, 0, action)
+                    setUiaInsertAt(uiaInsertAt + 1)   // 連加幾個都保持順序
+                  } else {
+                    next.push(action)
+                  }
                   onUpdate({ actions: next })
                 }}
                 workflowId={workflowId}
@@ -537,6 +570,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           <div className="flex items-center justify-between mb-2">
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
               動作序列（{data.actions?.length ?? 0}）
+              {uiaInsertAt !== null && (
+                <button type="button" onClick={() => setUiaInsertAt(null)}
+                  title="取消插入點、回到加在最後"
+                  className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 whitespace-nowrap">
+                  新動作插在 #{uiaInsertAt + 1} 前 ✕
+                </button>
+              )}
             </label>
             {data.actions && data.actions.length > 0 && (
               <button onClick={async () => {
@@ -594,22 +634,33 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               {data.actions.map((a: ComputerUseAction, i: number) => (
                 <div key={i}>
                 {/* 動作前的 ➕ 插入點 */}
-                <OcrFieldInserter
-                  index={i}
-                  isOpen={insertOpenAt === i && insertKind === 'ocr'}
-                  openMenu={() => { setInsertOpenAt(i); setInsertKind('ocr') }}
-                  closeMenu={() => setInsertOpenAt(null)}
-                  onAdd={insertActionAt}
-                />
-                <VlmCheckInserter
-                  index={i}
-                  isOpen={insertOpenAt === i && insertKind === 'vlm'}
-                  openMenu={() => { setInsertOpenAt(i); setInsertKind('vlm') }}
-                  onPick={handlePickTemplate}
-                  onSaveCustom={handleSaveCustomFromCurrent}
-                  onDeleteCustom={handleDeleteCustom}
-                  customTemplates={customTemplates}
-                />
+                <div className="flex items-center justify-center gap-2 flex-wrap">
+                  <OcrFieldInserter
+                    index={i}
+                    isOpen={insertOpenAt === i && insertKind === 'ocr'}
+                    openMenu={() => { setInsertOpenAt(i); setInsertKind('ocr') }}
+                    closeMenu={() => setInsertOpenAt(null)}
+                    onAdd={insertActionAt}
+                  />
+                  <VlmCheckInserter
+                    index={i}
+                    isOpen={insertOpenAt === i && insertKind === 'vlm'}
+                    openMenu={() => { setInsertOpenAt(i); setInsertKind('vlm') }}
+                    onPick={handlePickTemplate}
+                    onSaveCustom={handleSaveCustomFromCurrent}
+                    onDeleteCustom={handleDeleteCustom}
+                    customTemplates={customTemplates}
+                  />
+                  <button type="button"
+                    onClick={() => setUiaInsertAt(uiaInsertAt === i ? null : i)}
+                    title="把「選擇器 / 讀文字 / 填入文字 / 錄製」新增的動作插到這個位置（再點一次取消）"
+                    className={`text-[10px] px-1.5 py-0.5 rounded-full border whitespace-nowrap shrink-0 transition-colors ${
+                      uiaInsertAt === i
+                        ? 'bg-indigo-600 border-indigo-600 text-white'
+                        : 'border-dashed border-gray-300 text-gray-400 hover:text-indigo-600 hover:border-indigo-300'}`}>
+                    {uiaInsertAt === i ? '⊕ 新動作插入這裡' : '⊕ 插入點'}
+                  </button>
+                </div>
                 <div className="flex items-start gap-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
                   <span className="text-[10px] font-mono text-gray-400 pt-0.5">#{i + 1}</span>
                   <div className="flex-1 min-w-0">
@@ -736,7 +787,44 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         </button>
                       )}
                     </div>
-                    {a.description && <p className="text-xs text-gray-600 mt-0.5 truncate">{a.description}</p>}
+                    {/* uia 取值/填值的描述動態組 —— description 是加入當下冷凍的字串，
+                        改了 save_as/text 不會跟著變 */}
+                    {(() => {
+                      const dyn = a.type === 'uia_get_text' && a.save_as
+                        ? `讀「${a.control?.name || a.control?.auto_id || '控制項'}」→ {{${a.save_as}}}`
+                        : a.type === 'uia_send_keys' && a.text
+                          ? `填入「${a.control?.name || a.control?.auto_id || '控制項'}」← ${a.text}`
+                          : a.description
+                      return dyn ? <p className="text-xs text-gray-600 mt-0.5 truncate">{dyn}</p> : null
+                    })()}
+                    {/* 純 UIA + 匿名元素 = 必定找不到（同步自 Atlas-Lite 實測） */}
+                    {(() => {
+                      const ui = (a as any).ui
+                      const uiaOnly = a.use_uia !== false && a.use_cv === false && a.use_coord === false
+                      if (!uiaOnly || !ui || ui.name || ui.auto_id) return null
+                      return (
+                        <p className="text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-1 mt-1 leading-relaxed">
+                          ⛔ 錄到的 UIA 元素是<strong>匿名的</strong>（沒有 name 也沒有 auto_id，
+                          type={ui.type || '?'}）——純 UIA 模式<strong>必定找不到</strong>。
+                          請保留 CV 層（全三層或純 CV），或回 Inspector 找可指名的替代元素。
+                        </p>
+                      )
+                    })()}
+                    {/* 錄到注音按鍵的提示 */}
+                    {(a.type === 'type_text' || (a.type === 'uia_send_keys' && a.text)) &&
+                      looksLikeImeKeys(a.text || '') && (
+                      (a as any).type_method === 'keys' ? (
+                        <p className="text-[10px] text-sky-700 bg-sky-50 border border-sky-200 rounded px-1.5 py-1 mt-1 leading-relaxed">
+                          ℹ 這是<strong>注音按鍵序列</strong>，回放會逐鍵敲、由輸入法重新組字成中文。
+                          前提：回放時輸入法的中英狀態要跟錄製時一致。想更穩就按 ✎ 直接改成中文。
+                        </p>
+                      ) : (
+                        <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 mt-1 leading-relaxed">
+                          ⚠ 這串看起來是<strong>注音鍵盤的按鍵序列</strong>——錄到的是原始按鍵，
+                          回放會原樣貼進欄位。請按 ✎ 改成實際要輸入的中文。
+                        </p>
+                      )
+                    )}
                     {/* 純色錨點：比「有替身」嚴重 —— CV 對它完全無效 */}
                     {anchorRisk[i]?.flat && (
                       <p className="text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-1 mt-1 leading-snug">
@@ -979,6 +1067,15 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         />
                       </div>
                     )}
+                    {editingAction === i && (
+                      <InlineActionEditor
+                        action={a}
+                        workflowId={workflowId}
+                        stepName={data.name}
+                        onPatch={(patch) => applyAnchorPatch(i, patch)}
+                        onClose={() => setEditingAction(null)}
+                      />
+                    )}
                   </div>
                   <div className="flex flex-col shrink-0">
                     <button onClick={() => moveAction(i, -1)} className="p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" disabled={i === 0}>
@@ -988,6 +1085,11 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                       <ChevronDown className="w-3 h-3" />
                     </button>
                   </div>
+                  <button onClick={() => setEditingAction(editingAction === i ? null : i)}
+                    title="編輯這個動作的欄位（文字 / 變數名 / 視窗…）"
+                    className={`shrink-0 p-0.5 rounded ${editingAction === i ? 'text-indigo-600 bg-indigo-50' : 'text-gray-300 hover:text-indigo-500'}`}>
+                    <Pencil className="w-3 h-3" />
+                  </button>
                   <button onClick={() => deleteAction(i)} className="text-gray-300 hover:text-red-500 shrink-0">
                     <Trash2 className="w-3 h-3" />
                   </button>
@@ -1525,6 +1627,98 @@ function VlmCheckInserter({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+
+/**
+ * 注音鍵盤按鍵序列的特徵。錄製器掛鍵盤鉤子只看得到**原始按鍵**；
+ * 使用者打中文時輸入法組字後才把字送進應用程式，錄到的是「ji3g4go6」
+ * 這種按鍵串（= ㄨㄛˇ…的鍵位）。回放會把這串英數原樣貼進欄位 —— 必錯。
+ * 特徵：全小寫英數標點、且聲調鍵(3/4/6/7)緊跟在字母後（如 i3、g4、o6）。
+ * 可能誤判含數字的英文（如 test3）—— 警告是提示不是攔截，可接受。
+ */
+function looksLikeImeKeys(s: string): boolean {
+  if (!s || !/^[a-z0-9;,./\- ]+$/.test(s)) return false
+  return /[a-z;,./][3467]/.test(s)
+}
+
+// ── 行內動作編輯器 ──────────────────────────────────────────
+// 使用者反饋：設定好的步驟原本只能刪掉重加 —— 改個變數名 / 文字 / 視窗
+// 都得重選控制項重來。這裡讓常用欄位就地改；控制項本身（挑哪個元素）
+// 還是回 Inspector 重選，那個沒辦法用打字改。
+function InlineActionEditor({ action, workflowId, stepName, onPatch, onClose }: {
+  action: ComputerUseAction
+  workflowId?: string
+  stepName?: string
+  onPatch: (patch: Partial<ComputerUseAction>) => void
+  onClose: () => void
+}) {
+  const t = action.type
+  const rows: React.ReactNode[] = []
+  const input = (label: string, key: keyof ComputerUseAction, placeholder = '', mono = true) => (
+    <div key={String(key)} className="flex items-center gap-1.5">
+      <span className="text-[10px] text-gray-500 w-14 shrink-0 text-right">{label}</span>
+      <input
+        value={String((action as any)[key] ?? '')}
+        onChange={e => onPatch({ [key]: e.target.value } as any)}
+        placeholder={placeholder}
+        className={`flex-1 min-w-0 border border-indigo-200 rounded px-2 py-1 text-xs ${mono ? 'font-mono' : ''}`}
+      />
+    </div>
+  )
+
+  if (t === 'uia_get_text' || t === 'uia_get_table_rowcount') {
+    rows.push(input('變數名', 'save_as', '例：總計金額'))
+    rows.push(input('視窗', 'window', '例：*BK簽呈*（留空＝用節點視窗）'))
+  } else if (t === 'uia_send_keys') {
+    rows.push(input('填入文字', 'text', '例：{{總計金額}}'))
+    rows.push(input('視窗', 'window', '例：*OCR取值測試靶*'))
+  } else if (t === 'uia_set_clipboard' || t === 'type_text') {
+    rows.push(input('文字', 'text', '可含 {{變數}}'))
+  } else if (t === 'wait') {
+    rows.push(input('秒數', 'seconds', '例：2'))
+  } else if (t === 'ocr_get_text') {
+    rows.push(input('標籤', 'label', '例：總計金額'))
+    rows.push(input('變數名', 'save_as', '例：金額'))
+    rows.push(
+      <div key="dir" className="flex items-center gap-1.5">
+        <span className="text-[10px] text-gray-500 w-14 shrink-0 text-right">方向</span>
+        <select value={action.direction || 'right'}
+          onChange={e => onPatch({ direction: e.target.value as any })}
+          className="border border-indigo-200 rounded px-1.5 py-1 text-xs">
+          <option value="right">右側</option>
+          <option value="below">下方</option>
+        </select>
+        <span className="text-[10px] text-gray-500 shrink-0">格式</span>
+        <select value={action.kind || 'amount'}
+          onChange={e => onPatch({ kind: e.target.value as any })}
+          className="border border-indigo-200 rounded px-1.5 py-1 text-xs">
+          <option value="amount">金額</option>
+          <option value="ident">單號</option>
+          <option value="taxid">統編</option>
+          <option value="any">任意</option>
+        </select>
+      </div>,
+    )
+  } else if (t === 'assert_text' || t === 'wait_image') {
+    if ('ocr_text' in action) rows.push(input('目標文字', 'ocr_text' as any, ''))
+  }
+
+  return (
+    <div className="mt-1.5 p-2 rounded-lg border border-indigo-200 bg-indigo-50/40 space-y-1.5">
+      {rows.length > 0 ? rows : (
+        <p className="text-[10px] text-gray-500">
+          這個動作沒有可打字修改的欄位 —— 要換目標控制項請刪掉後回 Inspector 重選。
+        </p>
+      )}
+      <div className="flex justify-end">
+        <button onClick={onClose}
+          className="px-2 py-0.5 rounded text-[11px] bg-indigo-600 text-white hover:bg-indigo-700 whitespace-nowrap">
+          完成
+        </button>
+      </div>
     </div>
   )
 }

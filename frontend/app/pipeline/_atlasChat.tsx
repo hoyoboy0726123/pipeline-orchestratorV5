@@ -4,6 +4,9 @@ import { Bot, ChevronUp, ChevronDown, Send, Loader2, X, Minus, RotateCcw } from 
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
+// GFM：表格 / 刪除線。LLM 很愛用表格回答，沒這個的話 Markdown 表格
+// 會原字直出一排 | 符號（Lite 實測）。
+import remarkGfm from 'remark-gfm'
 import { useWorkflowStore } from './_store'
 import {
   pipelineChatStream,
@@ -571,7 +574,7 @@ export default function AtlasChat({ mode = 'sidebar', onYamlApply }: AtlasChatPr
                   )}
                   {msg.role === 'assistant' ? (
                     <div className="prose prose-xs max-w-none prose-p:my-0.5 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-code:break-all">
-                      <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n/g, ''))}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n/g, ''))}</ReactMarkdown>
                       {msg.streaming && (
                         <span className="inline-block w-1.5 h-3 ml-0.5 bg-indigo-500 animate-pulse align-middle" />
                       )}
@@ -1626,7 +1629,7 @@ function HeroMode({ envPaths, onYamlApply }: HeroModeProps) {
                     )}
                     {msg.role === 'assistant' ? (
                       <div className="prose prose-sm max-w-none prose-p:my-1 prose-pre:text-xs prose-pre:whitespace-pre-wrap prose-code:break-all">
-                        <ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n/g, ''))}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{cleanLatexInChat(msg.content.replace(/YAML_READY\n/g, ''))}</ReactMarkdown>
                         {msg.streaming && (
                           <span
                             className="inline-block align-middle ml-0.5 animate-pulse"

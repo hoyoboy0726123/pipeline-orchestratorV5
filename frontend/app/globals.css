@@ -54,7 +54,9 @@
 
   /* Markdown table */
   .prose table {
-    @apply w-full border-collapse text-sm;
+    /* block + overflow-x：窄容器裡渲染表格，不給水平捲動的話
+       欄位會被壓成逐字直排（Lite 實測） */
+    @apply block w-full max-w-full overflow-x-auto border-collapse text-sm;
   }
 
   .prose th {
