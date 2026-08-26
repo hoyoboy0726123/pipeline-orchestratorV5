@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_helpers'
 import OcrFieldInserter from './_ocrFieldInserter'
 import WaitDownloadInserter from './_waitDownloadInserter'
+import OcrWaitInserter from './_ocrWaitInserter'
 import AskAiButton from './_askAiButton'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
@@ -354,7 +355,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // ➕ popover 開關：用 actionIndex 表示要在哪一個 index 插入（actions.length = 在最後）
   // insertKind 區分同一個位置的兩種插入器(視覺判斷 / OCR 取值),否則會同時展開
   const [insertOpenAt, setInsertOpenAt] = useState<number | null>(null)
-  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl'>('vlm')
+  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait'>('vlm')
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => loadCustomTemplates())
   // 點外面關閉 popover
   useEffect(() => {
@@ -627,6 +628,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
+              <OcrWaitInserter
+                index={0}
+                isOpen={insertOpenAt === 0 && insertKind === 'ocrwait'}
+                openMenu={() => { setInsertOpenAt(0); setInsertKind('ocrwait') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
               <VlmCheckInserter
                 index={0}
                 isOpen={insertOpenAt === 0 && insertKind === 'vlm'}
@@ -654,6 +662,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     index={i}
                     isOpen={insertOpenAt === i && insertKind === 'dl'}
                     openMenu={() => { setInsertOpenAt(i); setInsertKind('dl') }}
+                    closeMenu={() => setInsertOpenAt(null)}
+                    onAdd={insertActionAt}
+                  />
+                  <OcrWaitInserter
+                    index={i}
+                    isOpen={insertOpenAt === i && insertKind === 'ocrwait'}
+                    openMenu={() => { setInsertOpenAt(i); setInsertKind('ocrwait') }}
                     closeMenu={() => setInsertOpenAt(null)}
                     onAdd={insertActionAt}
                   />
@@ -1135,6 +1150,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 index={data.actions.length}
                 isOpen={insertOpenAt === data.actions.length && insertKind === 'dl'}
                 openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('dl') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
+              <OcrWaitInserter
+                index={data.actions.length}
+                isOpen={insertOpenAt === data.actions.length && insertKind === 'ocrwait'}
+                openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('ocrwait') }}
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
@@ -1760,6 +1782,7 @@ function InlineActionEditor({ action, workflowId, stepName, onPatch, onClose }: 
     )
   } else if (t === 'assert_text' || t === 'wait_image') {
     if ('ocr_text' in action) rows.push(input('目標文字', 'ocr_text' as any, ''))
+    if (t === 'wait_image') rows.push(input('條件(until)', 'until' as any, 'appear / disappear(等消失)'))
   }
 
   return (
