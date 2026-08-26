@@ -6,6 +6,7 @@ import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_hel
 import OcrFieldInserter from './_ocrFieldInserter'
 import WaitDownloadInserter from './_waitDownloadInserter'
 import OcrWaitInserter from './_ocrWaitInserter'
+import ForEachInserter from './_forEachInserter'
 import AskAiButton from './_askAiButton'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
@@ -352,10 +353,15 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     onUpdate({ actions: next })
   }
 
+  /** 把目前序列的全部動作包進一個 for_each(先調通單筆、再一鍵套迴圈)。 */
+  const wrapAllIntoForEach = (fe: ComputerUseAction) => {
+    onUpdate({ actions: [{ ...fe, do: [...(data.actions || [])] }] })
+  }
+
   // ➕ popover 開關：用 actionIndex 表示要在哪一個 index 插入（actions.length = 在最後）
   // insertKind 區分同一個位置的兩種插入器(視覺判斷 / OCR 取值),否則會同時展開
   const [insertOpenAt, setInsertOpenAt] = useState<number | null>(null)
-  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait'>('vlm')
+  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait' | 'foreach'>('vlm')
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => loadCustomTemplates())
   // 點外面關閉 popover
   useEffect(() => {
@@ -635,6 +641,15 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
+              <ForEachInserter
+                index={0}
+                isOpen={insertOpenAt === 0 && insertKind === 'foreach'}
+                hasActions={(data.actions || []).length > 0}
+                openMenu={() => { setInsertOpenAt(0); setInsertKind('foreach') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onInsert={insertActionAt}
+                onWrapAll={wrapAllIntoForEach}
+              />
               <VlmCheckInserter
                 index={0}
                 isOpen={insertOpenAt === 0 && insertKind === 'vlm'}
@@ -671,6 +686,15 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     openMenu={() => { setInsertOpenAt(i); setInsertKind('ocrwait') }}
                     closeMenu={() => setInsertOpenAt(null)}
                     onAdd={insertActionAt}
+                  />
+                  <ForEachInserter
+                    index={i}
+                    isOpen={insertOpenAt === i && insertKind === 'foreach'}
+                    hasActions={(data.actions || []).length > 0}
+                    openMenu={() => { setInsertOpenAt(i); setInsertKind('foreach') }}
+                    closeMenu={() => setInsertOpenAt(null)}
+                    onInsert={insertActionAt}
+                    onWrapAll={wrapAllIntoForEach}
                   />
                   <VlmCheckInserter
                     index={i}
@@ -1161,6 +1185,15 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('ocrwait') }}
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
+              />
+              <ForEachInserter
+                index={data.actions.length}
+                isOpen={insertOpenAt === data.actions.length && insertKind === 'foreach'}
+                hasActions={(data.actions || []).length > 0}
+                openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('foreach') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onInsert={insertActionAt}
+                onWrapAll={wrapAllIntoForEach}
               />
               <VlmCheckInserter
                 index={data.actions.length}
@@ -1731,7 +1764,18 @@ function InlineActionEditor({ action, workflowId, stepName, onPatch, onClose }: 
     rows.push(input('變數名', 'save_as', '例：總計金額'))
     rows.push(input('視窗', 'window', '例：*BK簽呈*（留空＝用節點視窗）'))
   } else if (t === 'for_each') {
-    rows.push(input('清單(逗號或換行分隔)', 'items' as any, '例：UX3407%, RC71L%, GU605%'))
+    rows.push(
+      <div key="items" className="space-y-0.5">
+        <span className="text-[10px] text-gray-500">{'清單（一行一筆；也可 {{變數}}）'}</span>
+        <textarea
+          value={Array.isArray(action.items) ? action.items.join('\n') : String(action.items ?? '')}
+          onChange={e => onPatch({ items: e.target.value } as any)}
+          rows={5}
+          placeholder={'UX3407%\nRC71L%\nGU605%'}
+          className="w-full border border-indigo-200 rounded px-2 py-1 text-xs font-mono resize-y"
+        />
+      </div>,
+    )
     rows.push(input('每輪存到變數', 'save_as', '例：品規'))
   } else if (t === 'wait_text') {
     rows.push(input('文字', 'text', '例：資料處理中'))
