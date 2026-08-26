@@ -1,0 +1,59 @@
+{
+ "backend_dir": "C:\\Users\\G635LXG\\Atlas\\pipeline-orchestratorV5\\backend",
+ "workflow_id": "wf-43e856adcea2",
+ "step_num_base": 1,
+ "steps": [
+  {
+   "index": 0,
+   "code": "\nimport pandas as pd, json\nCSV = r\"C:/Users/G635LXG/Atlas/pipeline-orchestratorV5/demo_data/sales_2026Q1.csv\"\ndf = pd.read_csv(CSV, encoding=\"utf-8-sig\")\ndf[\"date\"] = pd.to_datetime(df[\"date\"], errors=\"coerce\")\nfor c in [\"qty\",\"unit_price\",\"amount\"]:\n    df[c] = pd.to_numeric(df[c], errors=\"coerce\")\ndf = df.dropna(subset=[\"date\",\"amount\"])\ndf = df[df[\"amount\"] > 0]\ndf[\"ym\"] = df[\"date\"].dt.strftime(\"%Y-%m\")\nby_month = df.groupby(\"ym\")[\"amount\"].sum()\nout = {\"by_month\": {k: int(v) for k, v in sorted(by_month.items())},\n       \"total_amount\": int(df[\"amount\"].sum()), \"total_orders\": int(len(df))}\nwith open(\"monthly_revenue.json\",\"w\",encoding=\"utf-8\") as f:\n    json.dump(out, f, ensure_ascii=False, indent=2)\nprint(\"monthly_revenue.json ok\", out[\"total_amount\"], out[\"total_orders\"])\n",
+   "output_path": "monthly_revenue.json",
+   "inputs": []
+  },
+  {
+   "index": 1,
+   "code": "\nimport pandas as pd, json\nCSV = r\"C:/Users/G635LXG/Atlas/pipeline-orchestratorV5/demo_data/sales_2026Q1.csv\"\ndf = pd.read_csv(CSV, encoding=\"utf-8-sig\")\ndf[\"date\"] = pd.to_datetime(df[\"date\"], errors=\"coerce\")\nfor c in [\"qty\",\"unit_price\",\"amount\"]:\n    df[c] = pd.to_numeric(df[c], errors=\"coerce\")\ndf = df.dropna(subset=[\"amount\"])\ndf = df[df[\"amount\"] > 0]\ntotal = float(df[\"amount\"].sum())\ndef rank(col):\n    g = df.groupby(col)[\"amount\"].sum().sort_values(ascending=False)\n    return [{col: k, \"amount\": int(v), \"pct\": round(v/total*100, 1)} for k, v in g.items()]\nout = {\"by_region\": rank(\"region\"), \"by_category\": rank(\"category\")}\nwith open(\"category_analysis.json\",\"w\",encoding=\"utf-8\") as f:\n    json.dump(out, f, ensure_ascii=False, indent=2)\nprint(\"category_analysis.json ok\")\n",
+   "output_path": "category_analysis.json",
+   "inputs": [
+    {
+     "path": "monthly_revenue.json",
+     "schema": {
+      "type": "json_obj",
+      "keys": [
+       "by_month",
+       "total_amount",
+       "total_orders"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "index": 2,
+   "code": "\nimport json\nm = json.load(open(\"monthly_revenue.json\", encoding=\"utf-8\"))\nc = json.load(open(\"category_analysis.json\", encoding=\"utf-8\"))\ndef fmt(v): return f\"{int(v):,}\"\nrm = \"\".join(f\"<tr><td>{k}</td><td>{fmt(v)}</td></tr>\" for k, v in m[\"by_month\"].items())\nrr = \"\".join(f\"<tr><td>{x['region']}</td><td>{fmt(x['amount'])}</td><td>{x['pct']}%</td></tr>\" for x in c[\"by_region\"])\nrc = \"\".join(f\"<tr><td>{x['category']}</td><td>{fmt(x['amount'])}</td><td>{x['pct']}%</td></tr>\" for x in c[\"by_category\"])\nhtml = f\"\"\"<!DOCTYPE html><html lang=\"zh-TW\"><head><meta charset=\"utf-8\"><title>2026 第一季 銷售分析報表</title>\n<style>body{{font-family:'Microsoft JhengHei',sans-serif;margin:40px;background:#f4f7f6}}h1{{text-align:center;color:#222}}\n.cards{{display:flex;gap:20px;justify-content:center;margin:24px 0}}.card{{background:#fff;padding:20px 30px;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1);text-align:center}}\n.card h3{{margin:0;color:#666;font-size:14px}}.card p{{margin:8px 0 0;font-size:26px;font-weight:bold;color:#007bff}}\ntable{{width:100%;border-collapse:collapse;margin:0 0 36px;background:#fff}}th,td{{border:1px solid #ddd;padding:11px;text-align:center}}\nth{{background:#007bff;color:#fff}}tr:nth-child(even){{background:#f9f9f9}}h2{{color:#333}}</style></head><body>\n<h1>2026 第一季 銷售分析報表</h1>\n<div class=\"cards\"><div class=\"card\"><h3>總營收</h3><p>{fmt(m['total_amount'])}</p></div>\n<div class=\"card\"><h3>總訂單數</h3><p>{fmt(m['total_orders'])}</p></div></div>\n<h2>月度營收</h2><table><tr><th>月份</th><th>營收</th></tr>{rm}</table>\n<h2>各地區營收排名</h2><table><tr><th>地區</th><th>營收</th><th>佔比%</th></tr>{rr}</table>\n<h2>各品類營收排名</h2><table><tr><th>品類</th><th>營收</th><th>佔比%</th></tr>{rc}</table>\n</body></html>\"\"\"\nwith open(\"sales_report.html\", \"w\", encoding=\"utf-8\") as f:\n    f.write(html)\nprint(\"sales_report.html ok\")\n",
+   "output_path": "sales_report.html",
+   "inputs": [
+    {
+     "path": "monthly_revenue.json",
+     "schema": {
+      "type": "json_obj",
+      "keys": [
+       "by_month",
+       "total_amount",
+       "total_orders"
+      ]
+     }
+    },
+    {
+     "path": "category_analysis.json",
+     "schema": {
+      "type": "json_obj",
+      "keys": [
+       "by_region",
+       "by_category"
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -193,6 +193,7 @@ export interface ComputerUseAction {
       | 'assert_image' | 'assert_text' | 'activate_window' | 'if_image_found' | 'retry_until' | 'vlm_check'
       | 'uia_click' | 'uia_send_keys' | 'uia_get_text' | 'uia_get_table_rowcount' | 'uia_click_cell'
       | 'uia_wait_enabled' | 'uia_assert_state' | 'uia_close_window' | 'uia_set_clipboard'
+      | 'uia_select'
       | 'ocr_get_text'
   image?: string
   image2?: string        // 次錨點（多錨點驗證）

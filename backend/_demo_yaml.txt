@@ -1,0 +1,46 @@
+name: 銷售分析報表 (AI生成) (demo)
+validate: true
+
+steps:
+  - name: 讀取與清洗銷售資料
+    skill_mode: true
+    batch: |
+      請務必使用 run_python 工具,實際撰寫並執行 Python 程式來完成下列工作;不要把結果或程式碼直接寫在回覆文字裡,一定要呼叫工具執行、把檔案實際寫出來。
+      讀取銷售資料 CSV:C:/Users/G635LXG/Atlas/pipeline-orchestratorV5/demo_data/sales_2026Q1.csv
+      (UTF-8-BOM 編碼,欄位:order_id, date, region, category, qty, unit_price, amount)。
+      用 pandas 清洗:date 轉成日期、qty/unit_price/amount 轉成數值、
+      移除任一欄位有缺值或 amount<=0 的列。
+      把清洗後的完整資料(保留所有欄位)寫出到 cleaned.csv。
+    output:
+      path: cleaned.csv
+    timeout: 300
+  - name: 計算營收分析
+    skill_mode: true
+    batch: |
+      請務必使用 run_python 工具,實際撰寫並執行 Python 程式;不要把結果或程式碼寫在回覆文字。
+      注意:analysis.json 一開始不存在,你的任務是「實際用 pandas 計算」後「建立」這個檔案,
+      絕對不可以只檢查檔案是否存在、不可以只讀檔印出檔尾、不可以跳過計算 —— 一定要真的 groupby/sum 算出數字再 json.dump 寫檔。
+      讀取上一步的 cleaned.csv。用 pandas 實際計算以下分析,組成單一 dict 後用 json.dump 寫到 analysis.json:
+        - total_amount:總營收(整數)
+        - total_orders:總訂單數(整數)
+        - by_month:每月營收物件,key 為 YYYY-MM、value 為該月營收整數,依月份由小到大排序
+        - by_region:各地區營收與佔比的陣列,每筆含 region、amount(整數)、pct(佔總營收百分比、保留一位小數),依 amount 由大到小
+        - by_category:各品類營收與佔比的陣列,每筆含 category、amount(整數)、pct,依 amount 由大到小
+      analysis.json 必須是純 JSON、不要任何說明文字。
+    output:
+      path: analysis.json
+    timeout: 300
+  - name: 產出HTML分析報表
+    skill_mode: true
+    batch: |
+      請務必使用 run_python 工具,實際撰寫並執行 Python 程式來完成下列工作;不要把結果或程式碼直接寫在回覆文字裡,一定要呼叫工具執行、把檔案實際寫出來。
+      讀取上一步的 analysis.json。產出一份繁體中文、自包含(內嵌 CSS、可直接用瀏覽器開)的 HTML 分析報表到 report.html:
+        - 大標題:2026 第一季 銷售分析報表
+        - 頂部兩張摘要卡:總營收、總訂單數
+        - 月度營收 表格(月份、營收)
+        - 各地區營收排名 表格(地區、營收、佔比%)
+        - 各品類營收排名 表格(品類、營收、佔比%)
+      所有金額用千分位逗號;版面乾淨專業、表格有框線與標題底色。
+    output:
+      path: report.html
+    timeout: 300
