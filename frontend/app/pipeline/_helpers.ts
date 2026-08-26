@@ -194,7 +194,7 @@ export interface ComputerUseAction {
       | 'uia_click' | 'uia_send_keys' | 'uia_get_text' | 'uia_get_table_rowcount' | 'uia_click_cell'
       | 'uia_wait_enabled' | 'uia_assert_state' | 'uia_close_window' | 'uia_set_clipboard'
       | 'uia_select' | 'uia_wait'
-      | 'if_element_found' | 'wait_download'
+      | 'if_element_found' | 'wait_download' | 'wait_text' | 'if_text_found'
       | 'ocr_get_text'
   image?: string
   image2?: string        // 次錨點（多錨點驗證）
