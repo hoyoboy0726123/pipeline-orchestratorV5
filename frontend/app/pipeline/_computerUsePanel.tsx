@@ -4,6 +4,7 @@ import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown, Pe
 import { toast } from 'sonner'
 import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_helpers'
 import OcrFieldInserter from './_ocrFieldInserter'
+import WaitDownloadInserter from './_waitDownloadInserter'
 import AskAiButton from './_askAiButton'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
@@ -353,7 +354,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // ➕ popover 開關：用 actionIndex 表示要在哪一個 index 插入（actions.length = 在最後）
   // insertKind 區分同一個位置的兩種插入器(視覺判斷 / OCR 取值),否則會同時展開
   const [insertOpenAt, setInsertOpenAt] = useState<number | null>(null)
-  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr'>('vlm')
+  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl'>('vlm')
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => loadCustomTemplates())
   // 點外面關閉 popover
   useEffect(() => {
@@ -619,6 +620,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
+              <WaitDownloadInserter
+                index={0}
+                isOpen={insertOpenAt === 0 && insertKind === 'dl'}
+                openMenu={() => { setInsertOpenAt(0); setInsertKind('dl') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
               <VlmCheckInserter
                 index={0}
                 isOpen={insertOpenAt === 0 && insertKind === 'vlm'}
@@ -639,6 +647,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     index={i}
                     isOpen={insertOpenAt === i && insertKind === 'ocr'}
                     openMenu={() => { setInsertOpenAt(i); setInsertKind('ocr') }}
+                    closeMenu={() => setInsertOpenAt(null)}
+                    onAdd={insertActionAt}
+                  />
+                  <WaitDownloadInserter
+                    index={i}
+                    isOpen={insertOpenAt === i && insertKind === 'dl'}
+                    openMenu={() => { setInsertOpenAt(i); setInsertKind('dl') }}
                     closeMenu={() => setInsertOpenAt(null)}
                     onAdd={insertActionAt}
                   />
@@ -1109,6 +1124,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 index={data.actions.length}
                 isOpen={insertOpenAt === data.actions.length && insertKind === 'ocr'}
                 openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('ocr') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
+              <WaitDownloadInserter
+                index={data.actions.length}
+                isOpen={insertOpenAt === data.actions.length && insertKind === 'dl'}
+                openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('dl') }}
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
