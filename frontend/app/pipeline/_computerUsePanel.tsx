@@ -7,6 +7,7 @@ import OcrFieldInserter from './_ocrFieldInserter'
 import WaitDownloadInserter from './_waitDownloadInserter'
 import OcrWaitInserter from './_ocrWaitInserter'
 import ForEachInserter from './_forEachInserter'
+import ClipboardReadInserter from './_clipboardReadInserter'
 import AskAiButton from './_askAiButton'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
@@ -361,7 +362,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // ➕ popover 開關：用 actionIndex 表示要在哪一個 index 插入（actions.length = 在最後）
   // insertKind 區分同一個位置的兩種插入器(視覺判斷 / OCR 取值),否則會同時展開
   const [insertOpenAt, setInsertOpenAt] = useState<number | null>(null)
-  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait' | 'foreach'>('vlm')
+  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait' | 'foreach' | 'clip'>('vlm')
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => loadCustomTemplates())
   // 點外面關閉 popover
   useEffect(() => {
@@ -650,6 +651,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 onInsert={insertActionAt}
                 onWrapAll={wrapAllIntoForEach}
               />
+              <ClipboardReadInserter
+                index={0}
+                isOpen={insertOpenAt === 0 && insertKind === 'clip'}
+                openMenu={() => { setInsertOpenAt(0); setInsertKind('clip') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
               <VlmCheckInserter
                 index={0}
                 isOpen={insertOpenAt === 0 && insertKind === 'vlm'}
@@ -695,6 +703,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     closeMenu={() => setInsertOpenAt(null)}
                     onInsert={insertActionAt}
                     onWrapAll={wrapAllIntoForEach}
+                  />
+                  <ClipboardReadInserter
+                    index={i}
+                    isOpen={insertOpenAt === i && insertKind === 'clip'}
+                    openMenu={() => { setInsertOpenAt(i); setInsertKind('clip') }}
+                    closeMenu={() => setInsertOpenAt(null)}
+                    onAdd={insertActionAt}
                   />
                   <VlmCheckInserter
                     index={i}
@@ -1196,6 +1211,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 closeMenu={() => setInsertOpenAt(null)}
                 onInsert={insertActionAt}
                 onWrapAll={wrapAllIntoForEach}
+              />
+              <ClipboardReadInserter
+                index={data.actions.length}
+                isOpen={insertOpenAt === data.actions.length && insertKind === 'clip'}
+                openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('clip') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
               />
               <VlmCheckInserter
                 index={data.actions.length}
