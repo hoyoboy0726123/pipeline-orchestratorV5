@@ -21,7 +21,7 @@ Pipeline YAML 設定模型。
           expect: "Excel 檔，大小大於 10KB"
         retry: 1
 """
-from typing import Optional
+from typing import Optional, Union
 import yaml
 from pydantic import field_validator, BaseModel, ConfigDict, Field
 
@@ -136,7 +136,7 @@ class ComputerUseAction(BaseModel):
     then: list[dict] = []                       # if_image_found：找到時跑的子動作清單
     else_: list[dict] = Field(default_factory=list, alias="else")  # 找不到時跑的子動作清單
     do: list[dict] = []                          # retry_until：要反覆執行的動作清單
-    until: Optional[dict] = None                 # retry_until：檢查條件（wait_image / assert_image / assert_text 之一）
+    until: Optional[Union[dict, str]] = None  # retry_until：檢查條件(dict) / uia_wait：appear、disappear、text_contains、text_equals(str)
     max_attempts: int = 3                        # retry_until：最多試幾輪
     wait_between_sec: float = 1.0                # retry_until：每輪之間等待秒數
     # ── vlm_check 專用：給 Settings 主模型（視覺）判斷的 prompt ──────
