@@ -844,7 +844,9 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     {/* uia 取值/填值的描述動態組 —— description 是加入當下冷凍的字串，
                         改了 save_as/text 不會跟著變 */}
                     {(() => {
-                      const dyn = a.type === 'uia_get_text' && a.save_as
+                      const dyn = a.type === 'uia_get_clipboard'
+                        ? `讀剪貼簿 → {{${a.save_as || '?'}}}`
+                        : a.type === 'uia_get_text' && a.save_as
                         ? `讀「${a.control?.name || a.control?.auto_id || '控制項'}」→ {{${a.save_as}}}`
                         : a.type === 'uia_select' && a.text
                         ? `選「${a.control?.name || a.control?.auto_id || '下拉'}」→ ${a.text}`
@@ -1763,6 +1765,8 @@ function InlineActionEditor({ action, workflowId, stepName, onPatch, onClose }: 
   if (t === 'uia_get_text' || t === 'uia_get_table_rowcount') {
     rows.push(input('變數名', 'save_as', '例：總計金額'))
     rows.push(input('視窗', 'window', '例：*BK簽呈*（留空＝用節點視窗）'))
+  } else if (t === 'uia_get_clipboard') {
+    rows.push(input('存到變數', 'save_as', '例：清單原文'))
   } else if (t === 'for_each') {
     rows.push(
       <div key="items" className="space-y-0.5">
