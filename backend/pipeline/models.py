@@ -167,6 +167,9 @@ class ComputerUseAction(BaseModel):
     # control 識別:by Name / AutomationId / ControlType、可組合
     control: dict = {}           # {"type": "Button", "name": "儲存", "auto_id": "save-btn", "depth": 10}
     save_as: str = ""            # uia_get_text / uia_get_table_rowcount 把值存到此變數名、後續 step 可用 {{...}}
+    # wait_download 用
+    dir: str = ""                # 下載資料夾；空 = 使用者的 Downloads
+    pattern: str = "*"           # 檔名 glob（例：PP_Component*.xlsx）
     row: int | str = 0           # uia_click_cell 用、可填字串(如 "{{row_count + 1}}")延後解析
     column: int | str = 0        # uia_click_cell 用
     check: str = ""              # uia_assert_state 用:exists / enabled / focused / checked
