@@ -9,6 +9,7 @@ import OcrWaitInserter from './_ocrWaitInserter'
 import ForEachInserter from './_forEachInserter'
 import ClipboardReadInserter from './_clipboardReadInserter'
 import WakeWindowInserter from './_wakeWindowInserter'
+import InsertHub from './_insertHub'
 import AskAiButton from './_askAiButton'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
@@ -363,6 +364,8 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // ➕ popover 開關：用 actionIndex 表示要在哪一個 index 插入（actions.length = 在最後）
   // insertKind 區分同一個位置的兩種插入器(視覺判斷 / OCR 取值),否則會同時展開
   const [insertOpenAt, setInsertOpenAt] = useState<number | null>(null)
+  // 插入選單收折:一次只展開一個間隙(7 顆全常駐太擠,使用者反饋)
+  const [gapOpenAt, setGapOpenAt] = useState<number | null>(null)
   const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait' | 'foreach' | 'clip' | 'wake'>('vlm')
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => loadCustomTemplates())
   // 點外面關閉 popover
@@ -622,6 +625,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 尚未錄製任何動作
               </p>
               {/* 沒動作時也可以手動加 vlm_check */}
+              <InsertHub expanded={gapOpenAt === 0} onExpand={() => setGapOpenAt(0)} onCollapse={() => setGapOpenAt(null)}>
               <OcrFieldInserter
                 index={0}
                 isOpen={insertOpenAt === 0 && insertKind === 'ocr'}
@@ -667,6 +671,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
+              </InsertHub>
               <VlmCheckInserter
                 index={0}
                 isOpen={insertOpenAt === 0 && insertKind === 'vlm'}
@@ -683,6 +688,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 <div key={i}>
                 {/* 動作前的 ➕ 插入點 */}
                 <div className="flex items-center justify-center gap-2 flex-wrap">
+                  <InsertHub expanded={gapOpenAt === i} onExpand={() => setGapOpenAt(i)} onCollapse={() => setGapOpenAt(null)}>
                   <OcrFieldInserter
                     index={i}
                     isOpen={insertOpenAt === i && insertKind === 'ocr'}
@@ -728,6 +734,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     closeMenu={() => setInsertOpenAt(null)}
                     onAdd={insertActionAt}
                   />
+                  </InsertHub>
                   <VlmCheckInserter
                     index={i}
                     isOpen={insertOpenAt === i && insertKind === 'vlm'}
@@ -1199,6 +1206,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 </div>
               ))}
               {/* 列表最後的 ➕ 插入點 */}
+              <InsertHub expanded={gapOpenAt === data.actions.length} onExpand={() => setGapOpenAt(data.actions.length)} onCollapse={() => setGapOpenAt(null)}>
               <OcrFieldInserter
                 index={data.actions.length}
                 isOpen={insertOpenAt === data.actions.length && insertKind === 'ocr'}
@@ -1244,6 +1252,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
+              </InsertHub>
               <VlmCheckInserter
                 index={data.actions.length}
                 isOpen={insertOpenAt === data.actions.length && insertKind === 'vlm'}
