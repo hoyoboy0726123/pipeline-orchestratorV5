@@ -8,6 +8,7 @@ import WaitDownloadInserter from './_waitDownloadInserter'
 import OcrWaitInserter from './_ocrWaitInserter'
 import ForEachInserter from './_forEachInserter'
 import ClipboardReadInserter from './_clipboardReadInserter'
+import WakeWindowInserter from './_wakeWindowInserter'
 import AskAiButton from './_askAiButton'
 
 // ── vlm_check 內建模板（6 個常見場景）─────────────────────────────
@@ -362,7 +363,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   // ➕ popover 開關：用 actionIndex 表示要在哪一個 index 插入（actions.length = 在最後）
   // insertKind 區分同一個位置的兩種插入器(視覺判斷 / OCR 取值),否則會同時展開
   const [insertOpenAt, setInsertOpenAt] = useState<number | null>(null)
-  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait' | 'foreach' | 'clip'>('vlm')
+  const [insertKind, setInsertKind] = useState<'vlm' | 'ocr' | 'dl' | 'ocrwait' | 'foreach' | 'clip' | 'wake'>('vlm')
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => loadCustomTemplates())
   // 點外面關閉 popover
   useEffect(() => {
@@ -658,6 +659,14 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
+              <WakeWindowInserter
+                index={0}
+                isOpen={insertOpenAt === 0 && insertKind === 'wake'}
+                defaultTitle={data.uiaWindow || ''}
+                openMenu={() => { setInsertOpenAt(0); setInsertKind('wake') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
               <VlmCheckInserter
                 index={0}
                 isOpen={insertOpenAt === 0 && insertKind === 'vlm'}
@@ -708,6 +717,14 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     index={i}
                     isOpen={insertOpenAt === i && insertKind === 'clip'}
                     openMenu={() => { setInsertOpenAt(i); setInsertKind('clip') }}
+                    closeMenu={() => setInsertOpenAt(null)}
+                    onAdd={insertActionAt}
+                  />
+                  <WakeWindowInserter
+                    index={i}
+                    isOpen={insertOpenAt === i && insertKind === 'wake'}
+                    defaultTitle={data.uiaWindow || ''}
+                    openMenu={() => { setInsertOpenAt(i); setInsertKind('wake') }}
                     closeMenu={() => setInsertOpenAt(null)}
                     onAdd={insertActionAt}
                   />
@@ -1216,6 +1233,14 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 index={data.actions.length}
                 isOpen={insertOpenAt === data.actions.length && insertKind === 'clip'}
                 openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('clip') }}
+                closeMenu={() => setInsertOpenAt(null)}
+                onAdd={insertActionAt}
+              />
+              <WakeWindowInserter
+                index={data.actions.length}
+                isOpen={insertOpenAt === data.actions.length && insertKind === 'wake'}
+                defaultTitle={data.uiaWindow || ''}
+                openMenu={() => { setInsertOpenAt(data.actions.length); setInsertKind('wake') }}
                 closeMenu={() => setInsertOpenAt(null)}
                 onAdd={insertActionAt}
               />
@@ -1787,6 +1812,8 @@ function InlineActionEditor({ action, workflowId, stepName, onPatch, onClose }: 
   if (t === 'uia_get_text' || t === 'uia_get_table_rowcount') {
     rows.push(input('變數名', 'save_as', '例：總計金額'))
     rows.push(input('視窗', 'window', '例：*BK簽呈*（留空＝用節點視窗）'))
+  } else if (t === 'activate_window') {
+    rows.push(input('標題關鍵字', 'title_contains' as any, '例：E-Quote測試靶'))
   } else if (t === 'uia_get_clipboard') {
     rows.push(input('存到變數', 'save_as', '例：清單原文'))
   } else if (t === 'for_each') {
