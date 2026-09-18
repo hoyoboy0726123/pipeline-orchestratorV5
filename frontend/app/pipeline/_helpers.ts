@@ -218,6 +218,7 @@ export interface ComputerUseAction {
   use_uia?: boolean     // UIA element 結構定位(預設 True)
   use_cv?: boolean      // CV 圖像比對(預設 True)
   use_coord?: boolean   // 強制座標最終 fallback(預設 True、舊欄位、語意改成「最終座標 fallback 啟用」)
+  coord_fallback?: boolean  // 純 CV 模式:CV 找不到退錄製座標(action 層級;錄製預設 true)
   hold_sec?: number     // click 長按時間（>0 時回放走 mouseDown→sleep→mouseUp）
   modifiers?: string[]  // click 時按著的修飾鍵（如 ["ctrl"]、["ctrl","shift"]）
   use_ocr?: boolean     // click_image 顯式 OCR 啟用（勾選才跑 OCR，避免 silent 填字但沒觸發）
@@ -514,6 +515,27 @@ export function newHumanConfirmData(index = 0): HumanConfirmData {
     status: 'idle',
     errorMsg: '',
   }
+}
+
+/**
+ * 視窗標題 → 穩定的關鍵字。瀏覽器標題的尾巴會變:「和其他 N 個頁面」隨分頁數變、
+ * 「- 公司 - Microsoft Edge」帶設定檔名,Edge 還藏零寬字元 —— 整串拿去比對,
+ * 多開一個分頁就找不到視窗。只留頁面本身的標題。
+ */
+export function windowKeyword(title: string): string {
+  return (title || '')
+    .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
+    .replace(/\*/g, '')
+    .replace(/\s+(?:和其他\s*\d+\s*個頁面|and \d+ more pages?)[\s\S]*$/i, '')
+    .replace(/\s+-\s+(?:[^-]+\s+-\s+)?(?:Microsoft\s*Edge|Google Chrome|Mozilla Firefox)$/i, '')
+    .replace(/\s+-\s+[^-]+\s+-\s+Microsoft(?:\s*E\w*)?$/i, '')
+    .trim()
+}
+
+/** 視窗標題 → UIA 目標視窗 pattern(頭尾萬用字元)。 */
+export function windowPatternOf(title: string): string {
+  const k = windowKeyword(title)
+  return k ? `*${k}*` : ''
 }
 
 // 防呆:新增桌面自動化節點時,確保名稱不與現有節點撞名(計數器頁面重整後會歸零、

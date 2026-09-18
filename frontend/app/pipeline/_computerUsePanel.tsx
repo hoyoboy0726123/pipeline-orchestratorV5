@@ -830,6 +830,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         // step-level cvCoordFallback (預設 False) → 純 CV 模式下『座標 fallback 是否啟用』的真正 gate
                         // 純 CV 模式下 座標 checkbox 顯示 = cvCoordFallback、點擊 → toggle cvCoordFallback (而不是 action use_coord)
                         const cvCoordFallback = data.cvCoordFallback === true
+                        const actCoordFallback = (a as any).coord_fallback === true
                         const presetBtn = (label: string, active: boolean, onClick: () => void, hint: string) => (
                           <button
                             type="button"
@@ -847,23 +848,31 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                             }`}
                           >{label}</button>
                         )
-                        // 純 CV 模式下、座標 checkbox 的特製版:狀態 = cvCoordFallback、click = toggle cvCoordFallback
+                        // 純 CV 模式下、座標 checkbox 的特製版:狀態 = 這個動作的 coord_fallback 或節點全開;
+                        // 點擊只切這個動作(節點全開時由節點設定決定、這裡鎖住)
+                        const coordFbOn = actCoordFallback || cvCoordFallback
                         const coordBoxCvOnly = (
                           <button
                             key="coord-cv-only"
                             type="button"
-                            onClick={() => onUpdate({ cvCoordFallback: !cvCoordFallback })}
-                            disabled={explicitPrimary}
-                            title={`純 CV 模式下、CV 找不到時是否退到錄製座標。狀態跟『CV 詳細設定 → CV 失敗退回錄製座標』連動(目前 ${cvCoordFallback ? '啟用' : '關閉'})`}
+                            onClick={() => {
+                              const next = [...(data.actions || [])]
+                              next[i] = { ...next[i], coord_fallback: !actCoordFallback } as any
+                              onUpdate({ actions: next })
+                            }}
+                            disabled={explicitPrimary || cvCoordFallback}
+                            title={cvCoordFallback
+                              ? '節點的『CV 詳細設定 → CV 失敗退回錄製座標』已全開,要逐個關請先關掉那個設定'
+                              : `CV 找不到時是否退到錄製座標(目前 ${actCoordFallback ? '啟用' : '關閉'})`}
                             className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
                               explicitPrimary
                                 ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
-                                : cvCoordFallback
+                                : coordFbOn
                                   ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
                                   : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400'
                             }`}
                           >
-                            <span className="font-mono mr-0.5">{cvCoordFallback ? '☑' : '☐'}</span>📍 座標 (fallback)
+                            <span className="font-mono mr-0.5">{coordFbOn ? '☑' : '☐'}</span>📍 座標 (fallback)
                           </button>
                         )
                         // 顯示哪些 checkbox 依 currentMode(避免「純 UIA / 純 CV / 純 座標」preset 還顯示無關 layer 視覺重疊)
@@ -878,7 +887,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                             {presetBtn('🪟 純 UIA', isUiaOnly, () => applyLayerPreset(i, true, false, false),
                               '純 UIA 嚴格模式:只用 UI 結構定位、找不到立即 fail(適合自家程式 + 有 AutomationId)')}
                             {a.type === 'click_image' && presetBtn('🔍 純 CV', isCvOnly, () => applyLayerPreset(i, false, true, true),
-                              '純圖像比對:UIA 跳過, CV 找不到時要不要退座標看『CV 詳細設定 → CV 失敗退回錄製座標』(下方座標 checkbox 動態反映此設定)')}
+                              '純圖像比對:UIA 跳過, CV 找不到時要不要退座標看下方「📍 座標 (fallback)」(錄製預設已勾)')}
                             {presetBtn('📍 純 座標', isCoordOnly, () => applyLayerPreset(i, false, false, true),
                               '純座標模式:直接點錄製的 x/y、不嘗試任何識別(最快、視窗位置固定才安全)')}
                             <span className="text-[10px] text-gray-300 select-none">|</span>
@@ -1926,13 +1935,25 @@ function InlineActionEditor({ action, workflowId, stepName, onPatch, onClose }: 
 
   // uia 動作的目標元素(control)欄位 —— 之前只能「刪掉重選」,萬用字元
   // name(資料處理中*)這種微調逼人重抓一次元素,直接開放改。
-  if (t.startsWith('uia_') && action.control && t !== 'uia_get_clipboard') {
+  if ((t.startsWith('uia_') || t === 'if_element_found') && action.control && t !== 'uia_get_clipboard') {
+    const oldName = String((action.control as Record<string, unknown>)?.name ?? '')
+    // 分歧的子動作是從同一個元素生出來的(點它 / 等它消失),改名要一起跟,
+    // 否則探測用 資料處理中* 命中、子動作卻還在等舊的精確名稱。
+    const renameBranch = (list: unknown, name: string) => Array.isArray(list)
+      ? list.map((s: any) => (s?.control && String(s.control.name ?? '') === oldName)
+          ? { ...s, control: { ...s.control, name } } : s)
+      : list
     rows.push(
       <div key="ctl-name" className="flex items-center gap-1.5">
         <span className="text-[10px] text-gray-500 w-14 shrink-0 text-right">目標 name</span>
         <input
-          value={String((action.control as Record<string, unknown>)?.name ?? '')}
-          onChange={e => onPatch({ control: { ...(action.control || {}), name: e.target.value } } as any)}
+          value={oldName}
+          onChange={e => onPatch({
+            control: { ...(action.control || {}), name: e.target.value },
+            ...(t === 'if_element_found'
+              ? { then: renameBranch(action.then, e.target.value), else: renameBranch((action as any).else, e.target.value) }
+              : {}),
+          } as any)}
           placeholder="支援 * 萬用字元，例：資料處理中*"
           className="flex-1 min-w-0 border border-indigo-200 rounded px-2 py-1 text-xs font-mono"
         />

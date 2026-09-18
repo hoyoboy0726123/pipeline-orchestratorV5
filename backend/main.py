@@ -1166,6 +1166,7 @@ class UiaInspectRequest(BaseModel):
     window: str = ""             # 視窗 title pattern(支援 wildcard *)、空字串 = 當前 foreground
     max_depth: int = 6           # tree 深度上限(避免某些 app 上千層)
     max_children_per_node: int = 50  # 每節點子元素上限(避免大表格 1 萬列展開)
+    max_nodes: int = 8000        # 總節點預算:深度放寬後防超大頁面卡死
 
 
 @app.post("/computer-use/uia/inspect")
@@ -1179,6 +1180,7 @@ async def uia_inspect(req: UiaInspectRequest):
         window_pattern=req.window,
         max_depth=req.max_depth,
         max_children_per_node=req.max_children_per_node,
+        max_nodes=req.max_nodes,
         logger=_log.getLogger("uia_inspect"),
     )
     if not result.get("ok"):
