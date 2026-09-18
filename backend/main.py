@@ -3582,27 +3582,30 @@ Pipeline 支援 Jinja2 變數語法、讓 workflow 從「寫死腳本」變成�
    那是整份覆蓋,而使用者一個一個挑出來的 `auto_id` 你沒看過、重寫必然生錯,
    等於把他最花時間的成果洗掉。動作序列一律走 `patch_node_actions`。
 
-## UIA 動作清單(**只有這 9 種**,不要自己發明)
+## UIA / 桌面自動化動作清單(存在性備忘,細節先 `read_help_doc('computer_use')`)
 
-| 動作 | 做什麼 | 關鍵欄位 |
-|---|---|---|
-| `uia_click` | 點控制項 | `control` |
-| `uia_send_keys` | **填文字 / 送按鍵到控制項** | `text`(可含 `{{var}}`)或 `keys` |
-| `uia_get_text` | 讀控制項的值 → 存變數 | `save_as` |
-| `uia_get_table_rowcount` | 讀表格列數 → 存變數 | `save_as` |
-| `uia_click_cell` | 點表格第 N 列第 M 欄 | `row` / `column` |
-| `uia_wait_enabled` | 等控制項出現且可用 | `timeout_sec` |
-| `uia_assert_state` | 驗狀態(失敗=整步 fail) | `check`: exists/enabled/focused/checked |
-| `uia_close_window` | 關視窗(不必拉到前景) | `window` |
-| `uia_set_clipboard` | 寫剪貼簿 | `text` |
+基本 9 種:`uia_click`(點)、`uia_send_keys`(填文字 / 送按鍵,**沒有** uia_set_text / uia_set_value)、
+`uia_get_text`(讀值 → save_as)、`uia_get_table_rowcount`、`uia_click_cell`、`uia_wait_enabled`、
+`uia_assert_state`、`uia_close_window`、`uia_set_clipboard`。
 
-⚠️ **填值用 `uia_send_keys`,沒有 `uia_set_text` / `uia_set_value` 這種東西**(實測 AI 會猜這個名字、產出跑不動的 YAML)。
-⚠️ `control` 用 `{ auto_id: "..." }` 最穩(程式內部 ID、改版多半不變);
-   只有 `name`(畫面文字)時也可以,但文案一改就失效。**這兩個值必須由使用者在
-   UIA Inspector 面板上實際挑選取得 —— 你猜不到,也不要猜**。
-⚠️ 每個動作可帶自己的 `window`,所以**同一個節點可以跨視窗**
+進階(等待 / 分歧 / 迴圈 / 交接,**都是內建動作、不要用「寫 Python 腳本自己刻」替代**):
+`uia_select`(下拉選項)、`uia_wait`(等出現 / 消失 / 文字)、`if_element_found`(元素在不在 → then / else)、
+`wait_download`(等下載完成)、`for_each`(清單逐筆迴圈,含 `split_as` 拆欄位、`continue_on_error`)、
+`uia_get_clipboard`(讀剪貼簿,Tk 等 UIA 讀不到的工具用)、`uia_click` 的 `click_method: "mouse"`
+(Tk 按鈕假接受點擊時強制滑鼠真點)、`activate_window`(喚醒視窗)、`wait_text` / `if_text_found`(OCR 版)、
+`wait_image` / `if_image_found`(CV 版)、`ocr_get_text`(讀標籤旁的值)。
+⚠ `if_element_found` 的 `timeout_sec` 是「最多探測幾秒」:元素一出現就馬上走 then;探測不到**不算失敗**、
+走 else,**else 為空就直接繼續下一個動作**(這跟 condition 節點 `on_false` 留空 = 流程結束**不一樣**,別混)。
+
+⚠ **使用者問「怎麼做 / 怎麼設定」桌面自動化的事,答之前先 `read_help_doc('computer_use')`**:
+「查詢時間不固定」「可能跳對話框」「清單逐筆查」「清單在別的工具裡」「探測 N 秒是什麼意思」
+這些都有固定的內建寫法,憑印象答會答成通用方案(實測會這樣)。日期 / 序號 / 跨節點變數
+先 `read_help_doc('variables')`。
+⚠ `control` 用 `{ auto_id: "..." }` 最穩(程式內部 ID、改版多半不變);只有 `name`(畫面文字)
+   時也可以,`name` 支援萬用字元(`資料處理中*`)。**這兩個值必須由使用者在 UIA Inspector
+   面板上實際挑選取得 —— 你猜不到,也不要猜**。
+⚠ 每個動作可帶自己的 `window`,所以**同一個節點可以跨視窗**
    (優先序:`action.window` > 步驟的 `uia_window` > 最前面的視窗)。
-   從 A 系統讀、填到 B 系統,不一定要拆成兩個節點。
 
 ## UIA save_as 跨節點傳值(很重要)
 
@@ -3660,6 +3663,11 @@ skill 節點讓 LLM 自由寫 code、輸出 JSON 時，**欄位名是 LLM 即興
      `python -c "import json; d=json.load(open('x.json')); print(len(d))"`
    - 稍複雜 / 需要多行 / 含迴圈或 `with` → **改用 skill 節點**（描述需求讓 LLM 寫 .py），
      不要硬塞多行 `python -c`。
+
+3. **`batch` 的內容是「命令列指令」,絕對不能直接寫 Python 程式碼**。
+   `import pandas as pd` / `df = ...` 這種一行一行的 Python 貼進 batch,shell 會把 `import`
+   當成不存在的命令 → 直接報錯(實測踩過)。要跑 Python 只有兩條路:單行 `python -c "..."`,
+   或改用 skill 節點讓 LLM 寫成 .py 檔再執行。
 
 ### 1b. 背景模式(`background: true`)— GUI / daemon / server
 **使用者說**:「開 GUI app」「啟動視窗」「跑一個 server」「daemon 跑著」「一直開著」「永遠不結束」、
@@ -4656,6 +4664,8 @@ System prompt 結尾若有「in-flight 子代理」digest、回應使用者時�
   send_file_to_tg、那個是 workflow 用的)
 - 使用者說「停止」「中斷」「不要跑了」 → call `read_help_doc('cancel')` 看
   cancel_subagent_task 規則(完成 / 失敗的不用 cancel)
+- 桌面自動化的等待 / 分歧 / 迴圈 / 剪貼簿交接 / 喚醒怎麼寫 → call `read_help_doc('computer_use')`
+- `{{ now.* }}` 日期、`{{變數_序號}}`、跨節點傳值 → call `read_help_doc('variables')`
 
 ## ⛔ 子代理 summary 「已傳送 / API ok / message_id」**不可字面採信**(必看)
 
@@ -4713,6 +4723,10 @@ TG 對話**沒有按鈕**、必須走 /save 命令流程。流程跟 web 端略�
 ```
 **最常見的錯誤（絕對禁止）**：使用者描述「啟動專案後接一個 computer use / RPA 操作」，你嘴上說懂、實際卻把那步寫成 script(batch) 或只給一個沒有 `computer_use: true` 的空名字 → 那會變成空白 script 節點、不是桌面自動化節點。**桌面自動化那步一定要帶 `computer_use: true`**。
 輸出後提醒：「『操作工具』這步請在畫布上點該節點、按錄製鈕錄下你的操作（我只先幫你把節點放到對的位置）。」
+
+**C. 使用者已經挑好控制項、要加流程邏輯**(等查詢完成、查無資料分歧、清單逐筆、多月份迴圈)→
+這些**不是**錄製的事,是內建動作:用 `patch_node_actions` 加 `uia_wait` / `if_element_found` /
+`for_each` / `wait_download` 等(寫法 `read_help_doc('computer_use')`),控制項沿用他已挑好的。
 
 ---
 
@@ -5169,9 +5183,21 @@ _INJECTABLE_NODE_GROUPS = [
      ["視覺驗證", "截圖驗證", "看起來對", "版面", "排版對", "畫面對不對",
       "visual_validation"]),
     ("computer_use",
-     ["桌面自動化節點", "computer_use"],
+     ["桌面自動化節點", "computer_use", "桌面自動化動作清單", "同一組操作重複"],
      ["點按", "按鈕", "操作軟體", "操作軟", "桌面", "桌面自動", "自動點", "滑鼠", "鍵盤",
-      "uia", "點視窗"]),
+      "uia", "點視窗", "computer_use", "rpa", "控制項", "抓取元素", "inspector", "錄製",
+      "探測", "分歧", "等待", "逾時", "迴圈", "for_each", "逐筆", "剪貼簿", "tk", "tkinter",
+      "下載", "對話框", "遮罩", "喚醒", "視窗", "ocr", "錨點", "查無資料", "資料處理中",
+      "匯出", "下拉", "填值", "睡眠分頁", "料號", "逐一查"]),
+    # 有裝 MCP server 才有意義;server 名稱在執行期另外加進意圖(見 _needed_nodes_or_all)
+    ("mcp",
+     ["MCP 節點"],
+     ["mcp", "mcp_server", "mcp_tool"]),
+    # web_search 工具的使用規範(2k tokens):只有研究 / 找網址 / 找套件時才需要
+    ("research",
+     ["網路搜尋"],
+     ["研究", "搜尋", "查一下", "查資料", "比較", "競品", "市場", "趨勢", "最新", "網址在哪",
+      "找網址", "rss", "endpoint", "套件", "怎麼裝", "web_search", "調查", "收料"]),
 ]
 
 
@@ -5197,7 +5223,28 @@ def _detect_needed_nodes(convo_text: str) -> set:
     for key, _titles, intents in _INJECTABLE_NODE_GROUPS:
         if any(kw.lower() in t for kw in intents):
             needed.add(key)
+    # 使用者提到已安裝的 MCP server 名稱(例「用 github 開 issue」)也算需要 MCP 段
+    if "mcp" not in needed:
+        try:
+            if any(n and n.lower() in t for n in _mcp_server_names()):
+                needed.add("mcp")
+        except Exception:
+            pass
     return needed
+
+
+def _mcp_server_names() -> list:
+    try:
+        from db import list_mcp_servers
+        return [s.get("name") or "" for s in list_mcp_servers(enabled_only=True)]
+    except Exception:
+        return []
+
+
+def _needed_nodes_or_all(convo_text: str):
+    """揭露閘門的統一入口:convo_text 空 → None(= 全留、向後相容);否則回命中的節點集合。
+    主提示詞的靜態段與執行期產生的動態段(Outlook 模板 / role 清單 / MCP)都用這個判斷。"""
+    return None if not convo_text else _detect_needed_nodes(convo_text)
 
 
 def _classify_block(title_line) -> "Optional[str]":
@@ -5273,6 +5320,10 @@ def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = ""
     # ── 漸進揭露:核心常駐、節點專屬大段依對話意圖注入(convo_text 空則全留)──
     base = _apply_progressive_disclosure(base, convo_text)
     parts = [base]
+    _needed = _needed_nodes_or_all(convo_text)
+
+    def _want(node_key: str) -> bool:
+        return _needed is None or node_key in _needed
     # ── Agent Skills 清單 ──────────────────────────────────────────────
     try:
         from skill_scanner import list_available_skills
@@ -5292,6 +5343,8 @@ def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = ""
     # ── Outlook 模板清單 ──────────────────────────────────────────────
     # 對 outlook_automation 節點來說，挑對模板比讓 LLM 自由發揮穩很多。
     try:
+        if not _want("outlook"):
+            raise StopIteration   # 沒提到信件 → 模板清單(2k tokens)不注入
         lines = ["", "## Outlook 自動化節點可用模板（outlook_template 欄位）：", ""]
         for tid, label, desc, params in _OUTLOOK_TEMPLATES_FOR_PROMPT:
             lines.append(f"- **`{tid}`** — {label}")
@@ -5337,7 +5390,7 @@ def _build_pipeline_system_prompt(channel: str = "desktop", convo_text: str = ""
     # 規範跟 BUILTIN_ROLE_IDS / 自訂 yaml 對齊,AI 助手不准用清單外的 role 名
     try:
         from pipeline.subagent_runner import load_roles, BUILTIN_ROLE_IDS
-        all_roles = load_roles()
+        all_roles = load_roles() if _want("subagent") else {}   # 沒提到代理 → 角色清單(1.9k)不注入
         if all_roles:
             lines = ["", "## 可用 Subagent role 清單(寫 `subagent_role:` 只能用這些)", ""]
             for rid in sorted(all_roles.keys(), key=lambda r: (0 if r in BUILTIN_ROLE_IDS else 1, r)):
@@ -5457,6 +5510,44 @@ def _wrote_for_sure(tname: str, targs: dict, tresult=None) -> bool:
 
 
 _CHAT_HISTORY_CAP = 30
+
+
+
+# ── 按需知識自動注入 ─────────────────────────────────────────────
+# 實測(Opus 與 gemini-3.5-flash-lite 各 3 題)提示詞寫「先 read_help_doc 再答」,
+# 兩個模型 6 次提問一次都沒去查 —— 模型覺得自己知道就不會查。所以改由系統判斷:
+# 使用者的話或綁定的工作流跟該主題有關,就把 help doc 直接附進這一輪的 system prompt。
+# 附在 workflow state 之後、主提示詞(cache prefix)不受影響;無關主題的輪次不多花 token。
+_AUTO_HELP_TOPICS = {"computer_use": ("computer_use",), "mcp": ()}   # 節點群組 → 要附的 help doc
+_VARIABLES_KEYWORDS = ("now.", "序號", "當月", "上月", "上個月", "下月", "下個月", "日期", "跨節點",
+                       "steps.", "變數", "input.", "secrets", "傳值", "save_as")
+
+
+def _auto_help_block(req: "PipelineChatRequest") -> str:
+    """依對話內容與綁定工作流,挑出要自動附上的 help doc 主題;沒有相關就回空字串。"""
+    try:
+        from help_docs import get_help_doc
+        text_parts = [str(m.get("content") or "") for m in (req.messages or [])[-3:]
+                      if m.get("role") == "user"]
+        if req.extra_system:
+            text_parts.append(req.extra_system)
+        blob = "\n".join(text_parts).lower()
+        topics: list[str] = []
+        # 跟主提示詞的漸進揭露共用同一套意圖偵測(含綁定工作流的 YAML),兩邊永遠一致
+        needed = _detect_needed_nodes(_convo_text_for_disclosure(req))
+        for node_key, docs in _AUTO_HELP_TOPICS.items():
+            if node_key in needed:
+                topics.extend(d for d in docs if d not in topics)
+        if any(k in blob for k in _VARIABLES_KEYWORDS):
+            topics.append("variables")
+        if not topics:
+            return ""
+        parts = ["", "## 相關說明(系統依主題自動附上,回答與修改請以此為準、不要憑印象)"]
+        for t in topics:
+            parts.append(get_help_doc(t).rstrip())
+        return "\n".join(parts) + "\n"
+    except Exception:
+        return ""
 
 
 def _workflow_state_block(workflow_id: str) -> str:
@@ -5834,6 +5925,7 @@ async def _chat_agent_loop(
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
         system_prompt += "\n\n" + req.extra_system
+    system_prompt += _auto_help_block(req)
 
     # ── 嘗試 bind_tools；失敗就退到舊單輪 ────────────────────────
     tools_enabled = True
@@ -5842,7 +5934,7 @@ async def _chat_agent_loop(
     _TG_ONLY_TOOLS = {
         "dispatch_subagent_async", "check_subagent_status",
         "read_subagent_file", "send_subagent_file_to_tg",
-        "cancel_subagent_task", "read_help_doc",
+        "cancel_subagent_task",   # read_help_doc 桌面也要有:節點 / RPA 知識都在 help doc 裡
     }
     _active_tools = CHAT_TOOLS if _channel == "telegram" else [
         t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS
@@ -6087,13 +6179,14 @@ async def _chat_agent_stream(req: "PipelineChatRequest"):
         system_prompt += _workflow_state_block(req.workflow_id)
     if req.extra_system:
         system_prompt += "\n\n" + req.extra_system
+    system_prompt += _auto_help_block(req)
 
     tools_enabled = True
     # stream 端點永遠 desktop、把整套 subagent admin tools 拿掉(同 _chat_agent_loop)
     _TG_ONLY_TOOLS = {
         "dispatch_subagent_async", "check_subagent_status",
         "read_subagent_file", "send_subagent_file_to_tg",
-        "cancel_subagent_task", "read_help_doc",
+        "cancel_subagent_task",   # read_help_doc 桌面也要有:節點 / RPA 知識都在 help doc 裡
     }
     _active_tools = [t for t in CHAT_TOOLS if t.name not in _TG_ONLY_TOOLS]
     _active_tools = _memory_filtered_tools(_active_tools)   # memory_enabled=False → 拿掉記憶工具
